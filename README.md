@@ -13,6 +13,8 @@ Early proof of concept. Not production ready. The double `CONNECT` data path
 works without client authentication; the CNG/TPM device key is not wired into
 the proxy yet. See [docs/compatibility.md](docs/compatibility.md).
 
+Windows 7 is experimental and unsupported; see [docs/windows7-feasibility.md](docs/windows7-feasibility.md).
+
 ## Scope
 
 - Target platform: Windows 10/11 x64.

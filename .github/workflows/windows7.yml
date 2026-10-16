@@ -1,0 +1,65 @@
+name: Windows 7 feasibility
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/windows7.yml
+      - docs/windows7-feasibility.md
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TOOLCHAIN: nightly-2026-09-15
+  TARGET: x86_64-win7-windows-msvc
+
+jobs:
+  build:
+    name: x86_64-win7-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.TOOLCHAIN }}
+          components: rust-src
+      - run: rustc +${{ env.TOOLCHAIN }} -vV
+      - name: Build
+        run: cargo +${{ env.TOOLCHAIN }} build -Z build-std=std,panic_abort --target ${{ env.TARGET }} --locked --release --bin gateinto
+      - name: List imports
+        run: |
+          $exe = "target\${{ env.TARGET }}\release\gateinto.exe"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          & $dumpbin /nologo /imports $exe | Tee-Object -FilePath imports.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Audit imports
+        run: |
+          $exe = "target\${{ env.TARGET }}\release\gateinto.exe"
+          $imports = Get-Content imports.txt
+          Write-Output '== Imported DLLs'
+          $imports | Select-String -Pattern '^\s+\S+\.dll$' | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique
+          $win8 = 'ProcessPrng|GetSystemTimePreciseAsFileTime|WaitOnAddress|WakeByAddressSingle|WakeByAddressAll|CreateFile2|GetCurrentThreadStackLimits|SetThreadDescription|GetThreadDescription|GetTempPath2W|bcryptprimitives|api-ms-win-core-synch-l1-2-0'
+          $static = $imports | Select-String -Pattern "\b($win8)\b"
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
+          $dynamic = [regex]::Matches($text, "($win8)") | ForEach-Object { $_.Value } | Sort-Object -Unique
+          Write-Output '== Names of Windows 8+ APIs present as strings in the binary (possible GetProcAddress lookups)'
+          $dynamic
+          Write-Output '== Windows 8+ APIs in the static import table'
+          $static | ForEach-Object { $_.Line.Trim() }
+          if ($static) { throw 'Static imports that do not exist on Windows 7' }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gateinto-${{ env.TARGET }}
+          path: |
+            target/${{ env.TARGET }}/release/gateinto.exe
+            imports.txt
+          if-no-files-found: warn
