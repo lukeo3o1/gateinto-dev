@@ -56,9 +56,22 @@ same build on `windows-latest` on `workflow_dispatch` and on pull requests that
 change the workflow or this document. It then runs `dumpbin /imports`, prints
 the imported DLLs, lists Windows 8+ API names found as strings in the binary
 (candidates for `GetProcAddress`), fails if a Windows 8+ API is in the static
-import table, and uploads `gateinto.exe` and `imports.txt`.
+import table, and uploads `gateinto.exe` and `imports.txt` when the build
+succeeded. If the string scan finds `ProcessPrng`, the job emits a
+`ProcessPrng found` warning annotation but does not fail: AWS-LC loads
+`ProcessPrng` at runtime and would abort on Windows 7, so a green job is not
+evidence of Windows 7 compatibility. Check the annotations, not only the job
+status.
 
-CI result: PENDING. The workflow has not run yet.
+The workflow names its variables `NIGHTLY_TOOLCHAIN` and `WIN7_TARGET` because
+Windows environment variable names are case-insensitive: a workflow-level
+`TOOLCHAIN` overrides the `toolchain` variable that `dtolnay/rust-toolchain`
+sets from its input, and the action then fails with `'toolchain' is a required
+input`.
+
+CI result: PENDING. The first run failed in the `dtolnay/rust-toolchain` step
+because of the variable name collision above, before any build; it has not run
+since the rename.
 
 ## Dependency findings
 
