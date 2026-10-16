@@ -88,3 +88,36 @@ fn proxy_rejects_zero_limits_and_ports() {
         assert!(stderr.contains(flag), "{stderr}");
     }
 }
+
+#[cfg(not(windows))]
+#[test]
+fn key_commands_require_windows() {
+    for args in [
+        &["key", "init"][..],
+        &["key", "info"],
+        &["key", "info", "--name", "other", "--spki-out", "unused.der"],
+        &[
+            "key",
+            "init",
+            "--backend",
+            "software",
+            "--no-software-fallback",
+        ],
+    ] {
+        let (success, stderr) = gateinto(args);
+        assert!(!success, "{args:?}");
+        assert!(
+            stderr.contains("device keys are only supported on Windows"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn key_commands_reject_an_empty_name() {
+    for command in ["init", "info"] {
+        let (success, stderr) = gateinto(&["key", command, "--name", ""]);
+        assert!(!success);
+        assert!(stderr.contains("key name must not be empty"), "{stderr}");
+    }
+}

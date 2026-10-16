@@ -170,7 +170,7 @@ fn rustls_signer_rejects_unsupported_schemes() {
 fn tls13_client_authenticates_with_cng_key() {
     let name = TestKeyName::new();
     let key = create_ecdsa_p256_key(SOFTWARE_KEY_STORAGE_PROVIDER, &name.0).unwrap();
-    let public_key = CngPublicKey(export_public_key(&key).unwrap());
+    let public_key = CngPublicKey(export_public_key(&key).unwrap().to_vec());
 
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::new()).unwrap();

@@ -1,8 +1,6 @@
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-mod relay;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +20,8 @@ use crate::http::{
 };
 use crate::tls;
 
+mod relay;
+
 pub const DEFAULT_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18736));
 
@@ -31,6 +31,8 @@ pub struct Limits {
     pub max_tunnels: usize,
     pub handshake_timeout: Duration,
     pub idle_timeout: Duration,
+    pub max_pending_rejects: usize,
+    pub reject_linger: Duration,
 }
 
 impl Default for Limits {
@@ -40,6 +42,8 @@ impl Default for Limits {
             max_tunnels: 64,
             handshake_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_secs(300),
+            max_pending_rejects: 64,
+            reject_linger: Duration::from_secs(1),
         }
     }
 }
@@ -94,6 +98,7 @@ struct Shared {
     server_name: ServerName<'static>,
     limits: Limits,
     tunnels: Arc<Semaphore>,
+    rejects: Arc<Semaphore>,
 }
 
 impl Proxy {
@@ -110,6 +115,12 @@ impl Proxy {
         let tunnels = Arc::new(Semaphore::new(
             config.limits.max_tunnels.min(Semaphore::MAX_PERMITS),
         ));
+        let rejects = Arc::new(Semaphore::new(
+            config
+                .limits
+                .max_pending_rejects
+                .min(Semaphore::MAX_PERMITS),
+        ));
         let shared = Shared {
             connector: TlsConnector::from(Arc::new(tls)),
             upstream_host: config.upstream.host,
@@ -117,6 +128,7 @@ impl Proxy {
             server_name: config.upstream.server_name,
             limits: config.limits,
             tunnels,
+            rejects,
         };
         Ok(Self {
             listener,
@@ -153,15 +165,23 @@ impl Proxy {
                         .instrument(span),
                     );
                 }
-                Err(_) => {
-                    tokio::spawn(
-                        async move {
-                            warn!("tunnel limit reached");
-                            reject(stream, Status::ServiceUnavailable).await;
-                        }
-                        .instrument(span),
-                    );
-                }
+                Err(_) => match self.shared.rejects.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        let linger = self.shared.limits.reject_linger;
+                        tokio::spawn(
+                            async move {
+                                warn!("tunnel limit reached");
+                                reject(stream, Status::ServiceUnavailable, linger).await;
+                                drop(permit);
+                            }
+                            .instrument(span),
+                        );
+                    }
+                    Err(_) => {
+                        span.in_scope(|| debug!("reject limit reached, closing without response"));
+                        drop(stream);
+                    }
+                },
             }
         }
     }
@@ -173,26 +193,27 @@ impl Shared {
         let limits = &self.limits;
         let request = read_head(&mut client, limits.max_header_bytes, parse_connect_request);
         let (target, client_early) = match timeout(limits.handshake_timeout, request).await {
-            Err(_) => return reject(client, Status::RequestTimeout).await,
+            Err(_) => return reject(client, Status::RequestTimeout, limits.reject_linger).await,
             Ok(Err(error)) => {
                 debug!(?error, "invalid request");
-                return reject(client, error.local_status()).await;
+                return reject(client, error.local_status(), limits.reject_linger).await;
             }
             Ok(Ok(request)) => request,
         };
+        debug!(%target, "opening tunnel");
         let opening = timeout(limits.handshake_timeout, self.open_upstream(&target));
         let (mut upstream, upstream_early) = match opening.await {
             Err(_) => {
-                warn!(%target, "upstream timed out");
-                return reject(client, Status::GatewayTimeout).await;
+                warn!("upstream timed out");
+                return reject(client, Status::GatewayTimeout, limits.reject_linger).await;
             }
             Ok(Err(error)) => {
-                warn!(%target, %error, "upstream refused tunnel");
-                return reject(client, error.local_status()).await;
+                warn!(%error, "upstream refused tunnel");
+                return reject(client, error.local_status(), limits.reject_linger).await;
             }
             Ok(Ok(opened)) => opened,
         };
-        info!(%target, "tunnel established");
+        info!("tunnel established");
         let mut response = b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
         response.extend_from_slice(&upstream_early);
         let established = async {
@@ -352,10 +373,9 @@ impl Status {
     }
 }
 
-const LINGER_TIME: Duration = Duration::from_secs(1);
 const LINGER_BYTES: usize = 64 * 1024;
 
-async fn reject(mut stream: TcpStream, status: Status) {
+async fn reject(mut stream: TcpStream, status: Status, linger: Duration) {
     debug!(?status, "rejecting");
     if stream
         .write_all(status.response().as_bytes())
@@ -377,5 +397,5 @@ async fn reject(mut stream: TcpStream, status: Status) {
             }
         }
     };
-    let _ = timeout(LINGER_TIME, drain).await;
+    let _ = timeout(linger, drain).await;
 }
