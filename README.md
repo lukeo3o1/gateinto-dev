@@ -9,10 +9,9 @@ post-quantum group `X25519MLKEM768` and falls back to `X25519`.
 
 ## Status
 
-Early proof of concept. Not production ready. The proxy itself is not
-implemented yet; the repository currently contains the project skeleton and a
-compatibility spike for rustls, aws-lc-rs and rustls-cng. See
-[docs/compatibility.md](docs/compatibility.md).
+Early proof of concept. Not production ready. The double `CONNECT` data path
+works without client authentication; the CNG/TPM device key is not wired into
+the proxy yet. See [docs/compatibility.md](docs/compatibility.md).
 
 ## Scope
 
@@ -20,20 +19,76 @@ compatibility spike for rustls, aws-lc-rs and rustls-cng. See
 - Local listener: HTTP/1.1 `CONNECT` only.
 - Upstream: TLS 1.3 with mutual authentication to an HTTPS forward proxy.
 
+## Usage
+
+```sh
+gateinto proxy --upstream-host proxy.example.com --upstream-port 443
+```
+
+The upstream endpoint has no default and must be given. Clients then use
+`http://127.0.0.1:18736` as their HTTP proxy, for example
+`curl --proxy http://127.0.0.1:18736 https://example.com/`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--listen` | `127.0.0.1:18736` | Local listen address. Must be loopback. |
+| `--unsafe-allow-non-loopback-listen` | off | Allow a non-loopback listen address. This exposes the proxy, and the upstream identity behind it, to the network. |
+| `--upstream-host` | required | Upstream HTTPS proxy host name or IP address. |
+| `--upstream-port` | required | Upstream HTTPS proxy port. |
+| `--upstream-server-name` | upstream host | Name verified against the upstream certificate. |
+| `--ca-file` | Mozilla roots | PEM bundle of CAs trusted for the upstream. Replaces the default roots. |
+| `--max-tunnels` | 64 | Concurrent connections; further connections get `503`. |
+| `--max-header-bytes` | 16384 | Limit for the request and the upstream response header block. |
+| `--connect-timeout-secs` | 10 | Limit for reading the request, and a separate limit for connecting, the TLS handshake and the upstream `CONNECT` reply together. |
+| `--idle-timeout-secs` | 300 | Close a tunnel after this long without traffic in either direction. |
+
+Logging goes to stderr and is filtered with `RUST_LOG` (default `info`). Tunnel
+payload is never logged; target `host:port` is logged at `info`.
+
+Local responses:
+
+| Situation | Status |
+| --- | --- |
+| Upstream `2xx` | `200 Connection Established`, then the tunnel |
+| Upstream `403` | `403` |
+| Upstream `407` or any other status | `502`; upstream headers and body are not forwarded |
+| Upstream connect, TLS or certificate failure, malformed reply | `502` |
+| Upstream connect, handshake or reply timeout | `504` |
+| Method other than `CONNECT` | `405` |
+| Malformed request | `400` |
+| Request header block over the limit | `431` |
+| Request not complete within the connect timeout | `408` |
+| Too many connections | `503` |
+
+The request parser accepts only `CONNECT host:port HTTP/1.1` with exactly one
+`Host` header, an LDH host name, IPv4 or bracketed IPv6 literal, and a port from
+1 to 65535. It rejects bare LF, CR inside lines, NUL, obs-fold, control
+characters in field values, `Transfer-Encoding`, and a non-zero
+`Content-Length`. Bytes sent after the request header are forwarded once the
+tunnel is up. Upstream replies must use `HTTP/1.1`.
+
+Without `--ca-file` the upstream certificate is verified against the Mozilla
+root program as bundled by `webpki-roots`. This is deterministic and identical
+on every platform; it ignores roots added to the operating system store, so a
+proxy with a private CA needs `--ca-file`.
+
 ## Security
 
-The loopback listener has no authentication of its own. Any process running on
-the same machine can connect to it and use the device identity to reach the
-remote proxy.
+The loopback listener has no authentication of its own. Any local process,
+including those of other users on the same machine, can connect to it and use
+the agent, and later its device identity, to reach the remote proxy. Do not run
+it on shared hosts you do not trust.
 
 ## Build and test
 
 ```sh
 cargo build
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 ```
+
+The minimum supported Rust version is 1.88 (required by `rcgen` and `time`).
 
 Windows CNG tests only run on Windows. They create and delete temporary keys in
 the current user's Microsoft Software Key Storage Provider.

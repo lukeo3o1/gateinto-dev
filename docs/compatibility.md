@@ -13,12 +13,23 @@ on Windows come from CI.
 | `aws-lc-sys` | 0.46.0 | AWS-LC build | Transitive. |
 | `rustls-cng` | 0.7.1 | CNG `SigningKey` | Requires `rustls ^0.23` and `windows-sys ^0.61`. Used with `default-features = false` so it does not enable `rustls/tls12`. |
 | `windows-sys` | 0.61.2 | NCrypt FFI | Same major as `rustls-cng`, so key handles are the same type. |
-| `tokio-rustls` | 0.26.6 | Async TLS | Not a dependency yet. Requires `rustls ^0.23.27`, compatible with 0.23.46. Its default features enable `rustls/tls12`; use `default-features = false, features = ["aws_lc_rs"]` when it is added. |
-| `rcgen` | 0.14.10 | Test certificates | Dev-dependency, `default-features = false, features = ["aws_lc_rs"]`. |
+| `tokio` | 1.53.3 | Async runtime | Features: `rt-multi-thread`, `net`, `io-util`, `macros`, `time`, `sync`. |
+| `tokio-rustls` | 0.26.6 | Async TLS | Requires `rustls ^0.23.27`, compatible with 0.23.46. Its default features enable `rustls/tls12`, so it is used with `default-features = false, features = ["aws_lc_rs"]`. |
+| `webpki-roots` | 1.0.9 | Default upstream roots | Mozilla root program as static data. License CDLA-Permissive-2.0. Replaced entirely by `--ca-file`. |
+| `tracing` | 0.1.44 | Logging | |
+| `tracing-subscriber` | 0.3.23 | Log output | `default-features = false, features = ["fmt", "std", "env-filter"]`. |
+| `rcgen` | 0.14.10 | Test certificates | Dev-dependency, `default-features = false, features = ["aws_lc_rs", "pem"]`. Requires Rust 1.88, which sets the crate's `rust-version`. |
 | `clap` | 4.6.7 | CLI | `derive` feature. |
 
-All of `rustls`, `rustls-cng` and (when added) `tokio-rustls` resolve to a single
-`rustls` 0.23.46 in the dependency graph.
+All of `rustls`, `rustls-cng` and `tokio-rustls` resolve to a single `rustls`
+0.23.46 in the dependency graph, and `rustls/tls12` is not enabled on any
+target.
+
+`webpki-roots` was chosen over `rustls-native-certs` for the default roots: it
+is pure data, behaves the same on every platform and in CI, and adds no
+platform certificate store code. The cost is that roots added to the Windows
+store (for example an enterprise CA) are not trusted; such deployments pass
+`--ca-file`.
 
 ## Verified
 
@@ -33,6 +44,9 @@ Locally on Linux:
 | `ClientConnection::negotiated_key_exchange_group()` returns the negotiated group. | `tests/key_exchange.rs`. |
 | A client limited to `[X25519MLKEM768, X25519]` negotiates `X25519MLKEM768` over TLS 1.3, falls back to `X25519`, and fails with `NoKxGroupsInCommon` against a `secp256r1`-only server. | `cargo test --test key_exchange`. |
 | Without `prefer-post-quantum`, the rustls `aws_lc_rs` default provider puts `X25519` before `X25519MLKEM768`, so the explicit group list is required. | Temporarily replacing the list with `default_provider().kx_groups` made two `key_exchange` tests fail. |
+| `rustls/tls12` is off with `tokio-rustls` added, and one `rustls` is used. | `cargo tree -e features -i rustls --target all` lists no `tls12`; `cargo tree -i rustls --target all -e normal`. |
+| The crate builds and all tests pass with Rust 1.88.0, the declared `rust-version`. `rcgen` and `time` declare 1.88. | `cargo +1.88 test --all-targets --all-features --locked`; `cargo metadata` `rust_version` fields. |
+| The double `CONNECT` data path, status mapping, limits, half-close and early data behave as documented in the README. | `tests/proxy.rs` against an in-process TLS 1.3 upstream proxy fixture, loopback only. |
 | Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`. | See below. |
 
 ### Windows type check from Linux
@@ -87,7 +101,8 @@ Design-only, not exercised at all:
 - "Microsoft Platform Crypto Provider" (TPM). The key functions take a provider
   name, but no TPM test exists and GitHub-hosted runners have no TPM.
 - Non-exportable key policy and UI/PIN behavior for TPM keys.
-- `tokio-rustls` integration.
+- The proxy against a real upstream HTTPS proxy, and with real clients such as
+  browsers or curl. Tests use only the in-process fixture.
 
 ## Open issues
 
