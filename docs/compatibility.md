@@ -56,26 +56,31 @@ AWS_LC_SYS_SYSTEM_DIR="$STUB" AWS_LC_SYS_SYSTEM_BINDINGS="$STUB/bindings.rs" \
 
 This checks Rust types and FFI signatures only. Nothing is linked or run.
 
+### On GitHub Actions
+
+CI run [38955641860](https://github.com/lukeo3o1/gateinto-dev/actions/runs/38955641860)
+(commit `ab46f33`) passed `cargo fmt --all -- --check`, `cargo clippy --all-targets
+--all-features --locked -- -D warnings` and `cargo test --all-targets
+--all-features --locked` on both `ubuntu-latest` and `windows-latest`. Run
+[38954849945](https://github.com/lukeo3o1/gateinto-dev/actions/runs/38954849945) (commit `5983184`) also passed on both.
+
+On `windows-latest`:
+
+| Claim | How |
+| --- | --- |
+| `aws-lc-sys` builds with only the runner's preinstalled tools. This is expected because `rustls/aws_lc_rs` enables `aws-lc-rs/prebuilt-nasm` and `aws-lc-sys` ships pre-generated `x86_64-pc-windows-msvc` bindings. | The workflow has no NASM or CMake setup step. |
+| Creating, opening, exporting and deleting an ECDSA P-256 persisted key in "Microsoft Software Key Storage Provider" works; creating an existing key fails. | `tests/windows_cng.rs`: `creating_an_existing_key_fails`, `exported_public_key_is_an_uncompressed_p256_point`, `persisted_key_can_be_reopened_and_deleted`. |
+| `NCryptSignHash` returns a 64-byte raw `r \|\| s` signature for P-256. | `tests/windows_cng.rs`: `ncrypt_signature_is_raw_r_and_s`. |
+| `rustls_cng::signer::CngSigningKey` produces a DER `ECDSA-Sig-Value` for `ECDSA_NISTP256_SHA256`, verified with `aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1`, and returns no signer when offered only `ECDSA_NISTP384_SHA384` and `RSA_PSS_SHA256`. | `tests/windows_cng.rs`: `rustls_signer_produces_der_ecdsa_p256_sha256_signature`, `rustls_signer_rejects_unsupported_schemes`. |
+| An in-process TLS 1.3 handshake succeeds in which a rustls server requires a client certificate issued by a test CA for the CNG public key and the client signs `CertificateVerify` through CNG, negotiating `X25519MLKEM768`. | `tests/windows_cng.rs`: `tls13_client_authenticates_with_cng_key`. |
+| The three `tests/key_exchange.rs` tests pass. | `tests/key_exchange.rs`: 3 passed. |
+
 ## Unverified
 
-These are expected to hold but have not been executed. CI on `windows-latest`
-is the first place they run.
+Not exercised on physical hardware:
 
-- Creating, opening, exporting and deleting an ECDSA P-256 persisted key in
-  "Microsoft Software Key Storage Provider" (`src/identity/windows_cng.rs`,
-  `tests/windows_cng.rs`).
-- `NCryptSignHash` returning a 64-byte raw `r || s` signature for P-256.
-- `rustls_cng::signer::CngSigningKey` converting that to a DER
-  `ECDSA-Sig-Value` for `ECDSA_NISTP256_SHA256`, verified with
-  `aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1`.
-- An in-process TLS 1.3 handshake in which a rustls server requires a client
-  certificate issued by a test CA for the CNG public key, and the client signs
-  `CertificateVerify` through CNG.
-- Building `aws-lc-sys` on `windows-latest`. With `rustls/aws_lc_rs` the
-  `aws-lc-rs/prebuilt-nasm` feature is enabled, so AWS-LC's `cc` builder uses
-  pre-assembled objects when NASM is absent, and pre-generated bindings exist
-  for `x86_64-pc-windows-msvc`, so neither NASM, CMake nor bindgen/libclang
-  should be needed. The MSVC toolchain on the runner is required.
+- Windows 10/11 machines. Runtime results so far come only from the
+  GitHub-hosted `windows-latest` runner image.
 
 Design-only, not exercised at all:
 
