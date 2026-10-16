@@ -4,11 +4,14 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use fixture::*;
-use gateinto::proxy::{Config, Error, Proxy};
+use gateinto::proxy::{Config, Error, Limits, Proxy};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+const ACTIVITY_EVERY: Duration = Duration::from_millis(200);
+const ACTIVE_ROUNDS: usize = 12;
 
 struct Setup {
     ca: TestCa,
@@ -67,15 +70,6 @@ async fn relays_binary_data_in_both_directions() {
             "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n"
         )]
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn payload_covers_every_byte_value() {
-    let mut seen = [false; 256];
-    for byte in payload(256) {
-        seen[usize::from(byte)] = true;
-    }
-    assert!(seen.iter().all(|&seen| seen));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -331,16 +325,57 @@ async fn rejects_tunnels_beyond_the_limit_with_503() {
     }
 }
 
+#[test]
+fn rejected_connections_linger_for_one_second_by_default() {
+    assert_eq!(Limits::default().reject_linger, Duration::from_secs(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closes_excess_connections_without_a_response_while_rejects_are_pending() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let mut config = setup.config();
+    config.limits.max_tunnels = 1;
+    config.limits.max_pending_rejects = 1;
+    config.limits.reject_linger = Duration::from_secs(3600);
+    let agent = start_agent(config).await;
+    let target = echo_server().await;
+    let _tunnel = open_tunnel(agent, target).await;
+
+    let mut lingering = tokio::net::TcpStream::connect(agent).await.unwrap();
+    assert_eq!(read_response(&mut lingering).await.status, 503);
+
+    let mut excess = tokio::net::TcpStream::connect(agent).await.unwrap();
+    assert!(
+        read_to_end_within(&mut excess, CLOSE_WITHIN)
+            .await
+            .is_empty()
+    );
+
+    drop(lingering);
+    let deadline = tokio::time::Instant::now() + CLOSE_WITHIN;
+    loop {
+        let mut stream = tokio::net::TcpStream::connect(agent).await.unwrap();
+        if read_response(&mut stream).await.status == 503 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reject permit was not released"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_tunnels_are_closed() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
-    config.limits.idle_timeout = Duration::from_millis(400);
+    config.limits.idle_timeout = IDLE_TIMEOUT;
     let agent = start_agent(config).await;
     let mut stream = open_tunnel(agent, echo_server().await).await;
 
-    for _ in 0..4 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..ACTIVE_ROUNDS {
+        tokio::time::sleep(ACTIVITY_EVERY).await;
         stream.write_all(b"ping").await.unwrap();
         let mut echoed = [0; 4];
         stream.read_exact(&mut echoed).await.unwrap();
@@ -349,26 +384,26 @@ async fn idle_tunnels_are_closed() {
     let rest = read_to_end_within(&mut stream, CLOSE_WITHIN).await;
 
     assert!(rest.is_empty());
-    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert!(started.elapsed() >= IDLE_TIMEOUT - ACTIVITY_EVERY);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn upload_only_traffic_keeps_the_tunnel_open() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
-    config.limits.idle_timeout = Duration::from_millis(400);
+    config.limits.idle_timeout = IDLE_TIMEOUT;
     let agent = start_agent(config).await;
     let mut stream = open_tunnel(agent, reply_after_eof_server().await).await;
 
-    for _ in 0..5 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..ACTIVE_ROUNDS {
+        tokio::time::sleep(ACTIVITY_EVERY).await;
         stream.write_all(b"ab").await.unwrap();
     }
     stream.shutdown().await.unwrap();
 
     assert_eq!(
         read_to_end_within(&mut stream, CLOSE_WITHIN).await,
-        b"bababababa"
+        b"ba".repeat(ACTIVE_ROUNDS)
     );
 }
 
@@ -376,14 +411,14 @@ async fn upload_only_traffic_keeps_the_tunnel_open() {
 async fn download_only_traffic_keeps_the_tunnel_open() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
-    config.limits.idle_timeout = Duration::from_millis(400);
+    config.limits.idle_timeout = IDLE_TIMEOUT;
     let agent = start_agent(config).await;
-    let target = drip_server(b"tick", 5, Duration::from_millis(200)).await;
+    let target = drip_server(b"tick", ACTIVE_ROUNDS, ACTIVITY_EVERY).await;
     let mut stream = open_tunnel(agent, target).await;
 
     assert_eq!(
         read_to_end_within(&mut stream, CLOSE_WITHIN).await,
-        b"tick".repeat(5)
+        b"tick".repeat(ACTIVE_ROUNDS)
     );
 }
 
@@ -411,8 +446,10 @@ async fn binds_non_loopback_address_with_explicit_opt_in() {
 }
 
 fn write_temp(name: &str, contents: &[u8]) -> std::path::PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("{}-{name}", std::process::id()));
+        .join(format!("{}-{n}-{name}", std::process::id()));
     std::fs::write(&path, contents).unwrap();
     path
 }
@@ -451,51 +488,101 @@ impl Drop for Child {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn proxy_command_relays_through_the_upstream() {
-    let setup = Setup::new(Behavior::Tunnel).await;
-    let ca_file = write_temp("cli-ca.pem", setup.ca.pem().as_bytes());
-    let mut child = Child(
-        std::process::Command::new(env!("CARGO_BIN_EXE_gateinto"))
-            .args([
-                "proxy",
-                "--listen",
-                "127.0.0.1:0",
-                "--upstream-host",
-                "127.0.0.1",
-            ])
-            .args(["--upstream-port", &setup.upstream.addr.port().to_string()])
-            .args(["--upstream-server-name", PROXY_NAME])
-            .arg("--ca-file")
-            .arg(&ca_file)
-            .env_remove("RUST_LOG")
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let stderr = child.0.stderr.take().unwrap();
-    let agent: SocketAddr = tokio::task::spawn_blocking(move || {
-        use std::io::BufRead;
-        let mut lines = std::io::BufReader::new(stderr).lines();
-        loop {
-            let line = lines
-                .next()
-                .expect("proxy exited before listening")
-                .unwrap();
-            if let Some((_, addr)) = line.split_once("local_addr=") {
-                return addr.split_whitespace().next().unwrap().parse().unwrap();
-            }
-        }
-    })
-    .await
-    .unwrap();
+struct Agent {
+    child: Child,
+    addr: SocketAddr,
+    stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
+}
 
-    let mut stream = open_tunnel(agent, echo_server().await).await;
+impl Agent {
+    async fn spawn(setup: &Setup, log_filter: &str) -> Self {
+        let ca_file = write_temp("cli-ca.pem", setup.ca.pem().as_bytes());
+        let mut child = Child(
+            std::process::Command::new(env!("CARGO_BIN_EXE_gateinto"))
+                .args([
+                    "proxy",
+                    "--listen",
+                    "127.0.0.1:0",
+                    "--upstream-host",
+                    "127.0.0.1",
+                ])
+                .args(["--upstream-port", &setup.upstream.addr.port().to_string()])
+                .args(["--upstream-server-name", PROXY_NAME])
+                .arg("--ca-file")
+                .arg(&ca_file)
+                .env("RUST_LOG", log_filter)
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let stderr = child.0.stderr.take().unwrap();
+        let (addr, stderr) = tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            let mut lines = std::io::BufReader::new(stderr).lines();
+            loop {
+                let line = lines
+                    .next()
+                    .expect("proxy exited before listening")
+                    .unwrap();
+                if let Some((_, addr)) = line.split_once("local_addr=") {
+                    let addr = addr.split_whitespace().next().unwrap().parse().unwrap();
+                    return (addr, lines);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        Self {
+            child,
+            addr,
+            stderr,
+        }
+    }
+
+    async fn stop(mut self) -> String {
+        let _ = self.child.0.kill();
+        let _ = self.child.0.wait();
+        tokio::task::spawn_blocking(move || {
+            self.stderr
+                .map_while(Result::ok)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .await
+        .unwrap()
+    }
+}
+
+async fn echo_through(agent: SocketAddr, target: SocketAddr) {
+    let mut stream = open_tunnel(agent, target).await;
     stream.write_all(b"through the binary").await.unwrap();
     stream.shutdown().await.unwrap();
-
     assert_eq!(
         read_to_end_within(&mut stream, CLOSE_WITHIN).await,
         b"through the binary"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_command_relays_through_the_upstream() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let agent = Agent::spawn(&setup, "info").await;
+    echo_through(agent.addr, echo_server().await).await;
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_target_is_logged_only_at_debug() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let target = echo_server().await;
+
+    let agent = Agent::spawn(&setup, "info").await;
+    echo_through(agent.addr, target).await;
+    let info = agent.stop().await;
+    assert!(!info.contains(&target.to_string()), "{info}");
+
+    let agent = Agent::spawn(&setup, "debug").await;
+    echo_through(agent.addr, target).await;
+    let debug = agent.stop().await;
+    assert!(debug.contains(&target.to_string()), "{debug}");
 }

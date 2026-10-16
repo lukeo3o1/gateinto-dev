@@ -9,7 +9,7 @@ on Windows come from CI.
 | Crate | Version | Role | Notes |
 | --- | --- | --- | --- |
 | `rustls` | 0.23.46 | TLS 1.3 client | Latest stable. `0.24.0-dev.*` exists but is a pre-release and is not used. Features: `aws_lc_rs`, `std`. `tls12` is off, so only TLS 1.3 is available. |
-| `aws-lc-rs` | 1.18.2 | Crypto provider | Pulled in by `rustls/aws_lc_rs`; also a Windows dev-dependency for signature verification in tests. |
+| `aws-lc-rs` | 1.18.2 | Crypto provider | Pulled in by `rustls/aws_lc_rs`. Also a direct dependency for SHA-256 fingerprints and the device key self-test signature check; this resolves to the same package, so `Cargo.lock` gains no new crate. |
 | `aws-lc-sys` | 0.46.0 | AWS-LC build | Transitive. |
 | `rustls-cng` | 0.7.1 | CNG `SigningKey` | Requires `rustls ^0.23` and `windows-sys ^0.61`. Used with `default-features = false` so it does not enable `rustls/tls12`. |
 | `windows-sys` | 0.61.2 | NCrypt FFI | Same major as `rustls-cng`, so key handles are the same type. |
@@ -47,7 +47,11 @@ Locally on Linux:
 | `rustls/tls12` is off with `tokio-rustls` added, and one `rustls` is used. | `cargo tree -e features -i rustls --target all` lists no `tls12`; `cargo tree -i rustls --target all -e normal`. |
 | The crate builds and all tests pass with Rust 1.88.0, the declared `rust-version`. `rcgen` and `time` declare 1.88. | `cargo +1.88 test --all-targets --all-features --locked`; `cargo metadata` `rust_version` fields. |
 | The double `CONNECT` data path, status mapping, limits, half-close and early data behave as documented in the README. | `tests/proxy.rs` against an in-process TLS 1.3 upstream proxy fixture, loopback only. |
-| Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`. | See below. |
+| Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`, including `src/identity/windows_cng.rs` and `tests/device_key_windows.rs`. | See below. |
+| The device key lifecycle rules hold: an existing `tpm` or `software` key is reused; both providers are always probed, and keys in both are an error for `key init` and a warning for `key info`; a TPM that is present but not ready during lookup is an error that creates nothing in either provider, even when a software key exists; any other open failure than "not found" or "provider unavailable" is an error and creates nothing; an unavailable TPM, a failed TPM creation or a failed TPM self-test falls back to software (deleting a half-created TPM key first); disabled fallback is an error; `--backend software` skips the TPM; `key info` never creates. | Unit tests in `src/identity/device_key.rs` against a fake key store. |
+| The DER SubjectPublicKeyInfo built from an uncompressed P-256 point equals the one AWS-LC produces; the fingerprint is lowercase hex SHA-256; the ECC public blob parser rejects a wrong magic, a wrong `cbKey` and wrong lengths with a specific error. | Unit tests in `src/identity/encoding.rs`. |
+| CNG status codes are classified as "not found" (`NTE_BAD_KEYSET`, `NTE_NOT_FOUND`, `NTE_NO_KEY`), "provider unavailable", meaning absent (`NTE_PROV_DLL_NOT_FOUND`, `NTE_BAD_PROVIDER`, `NTE_DEVICE_NOT_FOUND`, `TBS_E_TPM_NOT_FOUND`), "provider not ready", meaning present but not usable now (`NTE_DEVICE_NOT_READY`, `NTE_PROVIDER_DLL_FAIL`, `TBS_E_SERVICE_NOT_RUNNING`, `TBS_E_SERVICE_DISABLED`), or other failures. When opening a provider fails, "not found" codes also count as absent; "not ready" and other failures are passed through and stop the lookup. | Unit tests in `src/identity/cng_status.rs`. Whether Windows actually returns these codes is not verified; see Unverified. |
+| `gateinto key init` and `key info` fail with "device keys are only supported on Windows" on other platforms. | `tests/cli.rs`. |
 
 ### Windows type check from Linux
 
@@ -89,7 +93,34 @@ On `windows-latest`:
 | An in-process TLS 1.3 handshake succeeds in which a rustls server requires a client certificate issued by a test CA for the CNG public key and the client signs `CertificateVerify` through CNG, negotiating `X25519MLKEM768`. | `tests/windows_cng.rs`: `tls13_client_authenticates_with_cng_key`. |
 | The three `tests/key_exchange.rs` tests pass. | `tests/key_exchange.rs`: 3 passed. |
 
+### Device key tests on Windows
+
+`tests/device_key_windows.rs` is written for `windows-latest`, where the
+Platform Crypto Provider is expected to be unusable, so the software fallback
+runs for real: init creates once and a second init reuses the same
+fingerprint, `key info` matches `key init`, `NCRYPT_EXPORT_POLICY_PROPERTY`
+reads 0, and exporting `ECCPRIVATEBLOB` or `PKCS8_PRIVATEKEY` fails. Tests that
+depend on a TPM accept either outcome. Test keys get unique names and are
+deleted from both providers by a drop guard. **These tests have only been
+type-checked so far; they have not run on Windows yet.**
+
 ## Unverified
+
+Not exercised at all yet:
+
+- `tests/device_key_windows.rs` and the updated `tests/windows_cng.rs` on
+  Windows (pending the next CI run).
+- The Platform Crypto Provider path on a machine with a TPM. Manual steps are
+  in [tpm-verification.md](tpm-verification.md); they have not been executed.
+- Which status codes Windows returns for a missing key, a missing TPM or a TPM
+  that is present but not ready in the Platform Crypto Provider. If it returns
+  a "not ready" code or a code outside the lists above when opening the
+  provider or a key, `key init` stops with an error instead of falling back.
+  If the `windows-latest` runner reports its missing TPM that way,
+  `tests/device_key_windows.rs` tests that expect the software fallback will
+  fail and the classification has to be revisited with the observed code.
+- `keys_in_both_providers_stop_init_and_make_info_warn` returns early unless a
+  TPM key can be created, so it only checks anything on a machine with a TPM.
 
 Not exercised on physical hardware:
 
@@ -98,9 +129,7 @@ Not exercised on physical hardware:
 
 Design-only, not exercised at all:
 
-- "Microsoft Platform Crypto Provider" (TPM). The key functions take a provider
-  name, but no TPM test exists and GitHub-hosted runners have no TPM.
-- Non-exportable key policy and UI/PIN behavior for TPM keys.
+- UI/PIN behavior for TPM keys.
 - The proxy against a real upstream HTTPS proxy, and with real clients such as
   browsers or curl. Tests use only the in-process fixture.
 
@@ -116,4 +145,6 @@ Design-only, not exercised at all:
   key with a PIN or consent UI would fail instead of prompting.
 - Test keys are user-scoped and deleted by a drop guard. A test process that is
   killed before the guard runs leaves a key named `gateinto-test-<pid>-<nanos>-<n>`
-  in the user's key store.
+  or `gateinto-test-device-<pid>-<nanos>-<n>` in the user's key store.
+- A software device key is only marked non-exportable. An administrator, or
+  malware running as the user, can still copy the key files.

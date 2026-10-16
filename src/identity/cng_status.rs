@@ -1,0 +1,138 @@
+use crate::identity::device_key::StoreError;
+
+#[derive(Clone, Copy)]
+enum Class {
+    NotFound,
+    Unavailable,
+    NotReady,
+    Failed,
+}
+
+const KNOWN: &[(u32, &str, Class)] = &[
+    (0x8009_000D, "NTE_NO_KEY", Class::NotFound),
+    (0x8009_0011, "NTE_NOT_FOUND", Class::NotFound),
+    (0x8009_0016, "NTE_BAD_KEYSET", Class::NotFound),
+    (0x8009_0013, "NTE_BAD_PROVIDER", Class::Unavailable),
+    (0x8009_001D, "NTE_PROVIDER_DLL_FAIL", Class::NotReady),
+    (0x8009_001E, "NTE_PROV_DLL_NOT_FOUND", Class::Unavailable),
+    (0x8009_0030, "NTE_DEVICE_NOT_READY", Class::NotReady),
+    (0x8009_0035, "NTE_DEVICE_NOT_FOUND", Class::Unavailable),
+    (0x8028_4008, "TBS_E_SERVICE_NOT_RUNNING", Class::NotReady),
+    (0x8028_400F, "TBS_E_TPM_NOT_FOUND", Class::Unavailable),
+    (0x8028_4010, "TBS_E_SERVICE_DISABLED", Class::NotReady),
+    (0x8009_000F, "NTE_EXISTS", Class::Failed),
+    (0x8009_0010, "NTE_PERM", Class::Failed),
+    (0x8009_0029, "NTE_NOT_SUPPORTED", Class::Failed),
+];
+
+fn classify(code: u32) -> (String, Class) {
+    match KNOWN.iter().find(|(known, ..)| *known == code) {
+        Some((_, name, class)) => (format!("{name} ({code:#010x})"), *class),
+        None => (format!("{code:#010x}"), Class::Failed),
+    }
+}
+
+fn to_store_error(description: String, class: Class) -> StoreError {
+    match class {
+        Class::NotFound => StoreError::NotFound,
+        Class::Unavailable => StoreError::ProviderUnavailable(description),
+        Class::NotReady => StoreError::ProviderNotReady(description),
+        Class::Failed => StoreError::Failed(description),
+    }
+}
+
+pub fn store_error(code: u32) -> StoreError {
+    let (description, class) = classify(code);
+    to_store_error(description, class)
+}
+
+pub fn provider_error(code: u32) -> StoreError {
+    match classify(code) {
+        (description, Class::NotFound) => StoreError::ProviderUnavailable(description),
+        (description, class) => to_store_error(description, class),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_keys_are_not_found() {
+        for code in [0x8009_0016, 0x8009_0011, 0x8009_000D] {
+            assert_eq!(store_error(code), StoreError::NotFound, "{code:#x}");
+        }
+    }
+
+    const ABSENT: [u32; 4] = [0x8028_400F, 0x8009_001E, 0x8009_0013, 0x8009_0035];
+    const NOT_READY: [u32; 4] = [0x8009_0030, 0x8028_4008, 0x8028_4010, 0x8009_001D];
+
+    #[test]
+    fn missing_tpm_or_provider_is_unavailable() {
+        assert_eq!(
+            store_error(0x8028_400F),
+            StoreError::ProviderUnavailable("TBS_E_TPM_NOT_FOUND (0x8028400f)".to_owned())
+        );
+        for code in ABSENT {
+            assert!(
+                matches!(store_error(code), StoreError::ProviderUnavailable(_)),
+                "{code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn present_but_unusable_tpm_is_not_ready() {
+        assert_eq!(
+            store_error(0x8028_4008),
+            StoreError::ProviderNotReady("TBS_E_SERVICE_NOT_RUNNING (0x80284008)".to_owned())
+        );
+        for code in NOT_READY {
+            assert!(
+                matches!(store_error(code), StoreError::ProviderNotReady(_)),
+                "{code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_that_is_absent_or_names_nothing_is_unavailable() {
+        assert_eq!(
+            provider_error(0x8009_0013),
+            StoreError::ProviderUnavailable("NTE_BAD_PROVIDER (0x80090013)".to_owned())
+        );
+        for code in ABSENT.into_iter().chain([0x8009_0011, 0x8009_0016]) {
+            assert!(
+                matches!(provider_error(code), StoreError::ProviderUnavailable(_)),
+                "{code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_open_failures_other_than_absence_are_passed_through() {
+        for code in NOT_READY {
+            assert_eq!(provider_error(code), store_error(code), "{code:#x}");
+        }
+        assert_eq!(
+            provider_error(0x8009_0010),
+            StoreError::Failed("NTE_PERM (0x80090010)".to_owned())
+        );
+        assert_eq!(
+            provider_error(0x1234_5678),
+            StoreError::Failed("0x12345678".to_owned())
+        );
+    }
+
+    #[test]
+    fn other_codes_are_failures() {
+        assert_eq!(
+            store_error(0x8009_0010),
+            StoreError::Failed("NTE_PERM (0x80090010)".to_owned())
+        );
+        assert_eq!(
+            store_error(0x1234_5678),
+            StoreError::Failed("0x12345678".to_owned())
+        );
+    }
+}
