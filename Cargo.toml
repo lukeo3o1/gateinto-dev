@@ -1,0 +1,22 @@
+[package]
+name = "gateinto"
+version = "0.1.0"
+edition = "2024"
+description = "Local HTTP CONNECT proxy that relays through a remote HTTPS forward proxy over mutual TLS"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+rustls-cng = { version = "0.7.1", default-features = false }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys"] }
