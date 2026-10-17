@@ -1,5 +1,8 @@
 # Compatibility
 
+Detailed evidence. For a one-table summary of what is verified, see
+[verification.md](verification.md).
+
 Findings from the project skeleton spike, recorded on 2026-10-16 with Rust 1.97.0
 on Linux x86_64. Windows behavior is only type-checked locally; runtime results
 on Windows come from CI.
@@ -59,6 +62,8 @@ Locally on Linux:
 | The negotiated version and group are logged once per tunnel at `debug` and not at `info`, for the default and each `--tls-mode`. | `tests/proxy.rs` (spawning the binary). |
 | `check-upstream` reports TLS 1.3, the negotiated group (`X25519MLKEM768` or `X25519` per fixture and mode), a `TLS13_*` cipher suite, the server certificate subject and whether a client certificate was not requested, requested but not sent, or sent; with `--target` the upstream status line only (no headers or body). The binary prints the group for each fixture and mode and exits nonzero for `hybrid_required` against the classical fixture, an unreachable upstream, an untrusted CA, a non-`2xx` `CONNECT` reply and a malformed `--target`. | `tests/check_upstream.rs` (library calls and the binary). |
 | Configuration file: every section and key, defaults, unknown keys and sections rejected, invalid values rejected, missing or incomplete upstream is an error naming `--upstream-host`/`--upstream-port`, flags override the file key by key, relative paths resolve against the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[listen] address` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`. |
+| `key init` flags override `[device_key] software_fallback_on_first_create` in both directions (`--no-software-fallback` over `true`, `--software-fallback` over `false`), the default allows fallback, and the two flags cannot be combined. | Unit tests in `src/main.rs`. |
+| The `[default: ...]` values in `--help` match `DEFAULT_LISTEN`, the limit defaults, `DEFAULT_KEY_NAME`, the default backend, TLS mode and client certificate mode. Temporarily changing `DEFAULT_KEY_NAME` made the test fail. | `tests/cli.rs`: `help_defaults_match_the_real_defaults`. |
 | The crate, including `serde` and `toml`, builds and all tests pass with Rust 1.88.0. | `cargo +1.88 test --all-targets --all-features --locked`. |
 
 ### Windows type check from Linux
@@ -84,11 +89,10 @@ This checks Rust types and FFI signatures only. Nothing is linked or run.
 
 ### On GitHub Actions
 
-CI run [38955641860](https://github.com/lukeo3o1/gateinto-dev/actions/runs/38955641860)
-(commit `ab46f33`) passed `cargo fmt --all -- --check`, `cargo clippy --all-targets
---all-features --locked -- -D warnings` and `cargo test --all-targets
---all-features --locked` on both `ubuntu-latest` and `windows-latest`. Run
-[38954849945](https://github.com/lukeo3o1/gateinto-dev/actions/runs/38954849945) (commit `5983184`) also passed on both.
+The CI workflow ([.github/workflows/ci.yml](../.github/workflows/ci.yml))
+runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features
+--locked -- -D warnings` and `cargo test --all-targets --all-features --locked`
+in two jobs, `ubuntu-latest` and `windows-latest`.
 
 On `windows-latest`:
 
@@ -110,13 +114,14 @@ fingerprint, `key info` matches `key init`, `NCRYPT_EXPORT_POLICY_PROPERTY`
 reads 0, and exporting `ECCPRIVATEBLOB` or `PKCS8_PRIVATEKEY` fails. Tests that
 depend on a TPM require the outcome for the environment that TPM Base Services
 report (see below). Test keys get unique names and are deleted from both
-providers by a drop guard. **The first CI run failed (see below); the fixed
-tests have only been type-checked so far.**
+providers by a drop guard. The first version of these tests failed in CI
+(see below); the fixed tests run in the `windows-latest` job. Only job results
+were checked; the per-test logs were not retrieved, so which TPM branch the
+tests took is not recorded.
 
 ### Hosted runner without a TPM
 
-CI run [38963331196](https://github.com/lukeo3o1/gateinto-dev/actions/runs/38963331196)
-(commit `40469ff`) failed 10 of 13 tests in `tests/device_key_windows.rs` on
+An earlier version of the suite failed 10 of 13 tests in `tests/device_key_windows.rs` on
 `windows-latest`: opening a key in the Microsoft Platform Crypto Provider
 returned `NTE_DEVICE_NOT_READY` (`0x80090030`), which was classified as "TPM
 present but not usable", so the lookup stopped before the software path ran.
@@ -127,7 +132,8 @@ ready". `CngStore` now asks TPM Base Services (`Tbsi_GetDeviceInfo` from
 during open or create. `TBS_E_TPM_NOT_FOUND` (`0x8028400F`) makes the provider
 count as absent, so the software key is created once and reused afterwards;
 anything else keeps the "not ready" error. On the hosted runner TBS is expected
-to return `TBS_E_TPM_NOT_FOUND`; this is not confirmed until the next CI run.
+to return `TBS_E_TPM_NOT_FOUND`. The suite passes there, but the returned
+code itself has not been observed.
 
 `tests/device_key_windows.rs` calls `Tbsi_GetDeviceInfo` itself to decide which
 outcome to require. Without a TPM: opening a missing TPM key is "provider
@@ -173,6 +179,15 @@ Adaptations:
   `[listen]` are ignored there.
 - There is deliberately no key for `--unsafe-allow-non-loopback-listen`.
 
+The suites for TLS modes, `check-upstream` and the configuration file
+(`tests/tls_modes.rs`, `tests/check_upstream.rs`, `tests/config_cli.rs` and
+the unit tests in `src/config.rs`) run in both CI jobs. Their first
+`windows-latest` run failed because
+`config::tests::relative_paths_are_resolved_against_the_file` treated
+`/abs/client.pem` as absolute, which it is not on Windows. That was a bug in
+the test, fixed in the test; production code did not change. After the fix
+these suites passed in both jobs.
+
 ## Client certificate (mTLS)
 
 Design choices:
@@ -200,21 +215,15 @@ Where each check runs:
 | `optional`/`required`/`off` decision table, including unsupported platform, missing key, missing certificate, mismatched certificate and unreadable file; the key is opened, never created; a mismatched certificate is refused before the signing key is opened. | Unit tests in `src/identity/client_cert.rs` against a fake `ClientIdentityStore`. | All |
 | An upstream that requires client certificates (`WebPkiClientVerifier` with a test client CA) rejects an agent without one (`502`, never `200`); accepts the certificate bound to a software test key (tunnel works and the fixture recorded exactly that certificate); rejects a certificate from another CA (`502`). A certificate for a different key is refused locally before any connection. | `tests/mtls.rs` with a test-only software `ClientIdentityStore`. | All. Ran locally on Linux. |
 | `--client-certificate` values, `--key-name` validation; `required` fails with "device keys are only supported on Windows" off Windows, also with `--client-cert-file`; `optional` (default) logs the "mTLS is not configured" warning exactly once and relays; `off` does not warn. `key info --client-cert-file` fails off Windows. | `tests/cli.rs`, `tests/proxy.rs` (spawning the binary). The warning tests pass a key name that does not exist, so they also hold on Windows. | All; the Windows branches only in CI. |
-| A software CNG device key with a unique name gets an `rcgen` test-CA certificate for its SPKI. (a) Via `--client-cert-file` semantics the tunnel through the mTLS fixture works, signed by `CngSigningKey`, and `key info --client-cert-file` reports its thumbprint. (b) After importing it into `CurrentUser\My` (Crypt32 `CertAddEncodedCertificateToStore`), the proxy finds it by SPKI with no file, the tunnel works, and `key info` reports it with source `CurrentUser\My`. Drop guards remove the certificate and delete the key. | `tests/mtls_windows.rs`. | `windows-latest` only (Software KSP; the TPM-absent probe makes init use software there). **Type-checked only; pending a CI run.** |
+| A software CNG device key with a unique name gets an `rcgen` test-CA certificate for its SPKI. (a) Via `--client-cert-file` semantics the tunnel through the mTLS fixture works, signed by `CngSigningKey`, and `key info --client-cert-file` reports its thumbprint. (b) After importing it into `CurrentUser\My` (Crypt32 `CertAddEncodedCertificateToStore`), the proxy finds it by SPKI with no file, the tunnel works, and `key info` reports it with source `CurrentUser\My`. Drop guards remove the certificate and delete the key. | `tests/mtls_windows.rs`. | `windows-latest` only (Software KSP; the TPM-absent probe makes init use software there). Runs in the `windows-latest` CI job. |
 | TPM-backed device key signing the client authentication. | Manual steps in [tpm-verification.md](tpm-verification.md). | Not executed. |
 
 ## Unverified
 
-Not exercised at all yet:
+Not exercised:
 
 - TLS modes and `check-upstream` against a real upstream proxy or a
   TLS-terminating middlebox; only the in-process rustls fixtures were used.
-- `tests/tls_modes.rs`, `tests/check_upstream.rs` and `tests/config_cli.rs` on
-  Windows (type-checked only, pending a CI run).
-- `tests/mtls_windows.rs` and the Windows branches of `tests/cli.rs` (pending
-  the next CI run): `CngStore` as a `ClientIdentityStore`, `CertStore`
-  enumeration of `CurrentUser\My`, and adding and removing a certificate there
-  on the hosted runner.
 - mTLS with a TPM-backed key, including whether `CngSigningKey` signs with it
   silently. Manual steps are in [tpm-verification.md](tpm-verification.md).
 - The `certutil -user -addstore My` import shown in the README. The OpenSSL
@@ -222,10 +231,9 @@ Not exercised at all yet:
   and the result was parsed by `load_certificate_file`.
 - A real upstream proxy requiring client certificates.
 
-- `tests/device_key_windows.rs` and the updated `tests/windows_cng.rs` on
-  Windows with the TPM Base Services probe (pending the next CI run). That
-  `Tbsi_GetDeviceInfo` returns `TBS_E_TPM_NOT_FOUND` on `windows-latest` is
-  expected, not observed.
+- That `Tbsi_GetDeviceInfo` returns `TBS_E_TPM_NOT_FOUND` on `windows-latest`
+  is expected, not observed; `tests/device_key_windows.rs` passes there
+  either way.
 - The Platform Crypto Provider path on a machine with a TPM. Manual steps are
   in [tpm-verification.md](tpm-verification.md); they have not been executed.
 - Which status codes Windows returns for a missing key, a missing TPM or a TPM

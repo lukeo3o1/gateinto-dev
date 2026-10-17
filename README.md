@@ -1,33 +1,47 @@
 # Gateinto
 
-Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows. It listens on
-`127.0.0.1:18736`, opens a TLS 1.3 connection to a remote HTTPS forward proxy,
-and issues a second `CONNECT` there. Client authentication (mTLS) uses a
-non-exportable ECDSA P-256 device key held by Windows CNG (TPM preferred,
-software key storage as fallback) and a client certificate issued for it. Key exchange prefers the hybrid
-post-quantum group `X25519MLKEM768` and falls back to `X25519`; a TLS mode can
-require the hybrid group or use only `X25519` (see [TLS modes](#tls-modes)).
+Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows 10/11 x64. Clients on
+the same machine use it as their HTTPS proxy at `127.0.0.1:18736`; Gateinto
+opens a TLS 1.3 connection to a remote HTTPS forward proxy that you run and
+issues the `CONNECT` there. It can authenticate the device to that proxy with
+mutual TLS, using a non-exportable ECDSA P-256 key held by Windows CNG (TPM
+preferred, software key storage as fallback). Key exchange prefers the hybrid
+post-quantum group `X25519MLKEM768`.
 
 ## Status
 
-Early proof of concept. Not production ready. The double `CONNECT` data path
-works with and without client authentication. The device key can be created
-and inspected with `gateinto key`, and the proxy signs the TLS 1.3 client
-authentication with it when a client certificate for it is available. There is
-no enrollment: the certificate has to be obtained and installed by hand. The
-key exchange policy is selectable, `gateinto check-upstream` shows what an
-upstream negotiates, and settings can come from a TOML file. See
-[docs/compatibility.md](docs/compatibility.md).
+Pre-release proof of concept, not production ready, and not externally
+security reviewed. Implemented: the double `CONNECT` relay, the device key
+(`gateinto key`), mutual TLS with the device key, selectable key exchange
+modes, `gateinto check-upstream`, and a TOML configuration file. Not
+implemented: certificate enrollment (client certificates are issued and
+installed by hand), key rotation and deletion, an SBOM and code signing.
 
-Windows 7 is experimental and unsupported; see [docs/windows7-feasibility.md](docs/windows7-feasibility.md).
+Tests run in CI on GitHub-hosted Linux and Windows runners (`ubuntu-latest`
+and `windows-latest`) against in-process test proxies. TPM-backed keys, real
+third-party upstream proxies and physical machines are not verified; see
+[verification status](docs/verification.md).
 
-## Scope
+## Quickstart
 
-- Target platform: Windows 10/11 x64.
-- Local listener: HTTP/1.1 `CONNECT` only.
-- Upstream: TLS 1.3 with mutual authentication to an HTTPS forward proxy.
+Start with [docs/quickstart.md](docs/quickstart.md): it goes from a fresh
+Windows 10/11 x64 machine (no TPM needed) to a working tunnel, including the
+upstream proxy you need to bring. Release builds are a zip for Windows 10/11
+x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file.
 
-## Usage
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `gateinto proxy` | Run the local `CONNECT` proxy. |
+| `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
+| `gateinto key init` | Open the device key, creating it only if none exists. |
+| `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
+
+All commands accept `--config <file>`; flags override the file key by key.
+`gateinto <command> --help` lists every flag with its default.
+
+### Proxy
 
 ```sh
 gateinto proxy --upstream-host proxy.example.com --upstream-port 443
@@ -91,31 +105,7 @@ root program as bundled by `webpki-roots`. This is deterministic and identical
 on every platform; it ignores roots added to the operating system store, so a
 proxy with a private CA needs `--ca-file`.
 
-## TLS modes
-
-The upstream connection is always TLS 1.3 only, and the upstream certificate
-and name are always verified with WebPKI as described above. `--tls-mode` (or
-`[tls] mode`) only decides which key exchange groups are offered:
-
-| Mode | Offered groups, in order | Upstream without `X25519MLKEM768` |
-| --- | --- | --- |
-| `hybrid_preferred` (default) | `X25519MLKEM768`, `X25519` | Falls back to `X25519`. |
-| `hybrid_required` | `X25519MLKEM768` | Handshake fails; local clients get `502`. Never downgrades. |
-| `classical_only` | `X25519` | Uses `X25519` (also against hybrid-capable upstreams). |
-
-After every upstream handshake Gateinto reads the negotiated protocol version
-and key exchange group and logs them at `debug` per tunnel
-(`upstream TLS established version=Some(TLSv1_3)
-key_exchange_group=Some(X25519MLKEM768)`). It also checks that the version is
-TLS 1.3 and that the group is one the mode offers, and refuses the tunnel with
-`502` otherwise. For `hybrid_required` this is a second check behind the offered
-list: a tunnel is never relayed over anything but `X25519MLKEM768`.
-
-The hybrid group protects the confidentiality of the outer TLS session against
-later decryption by a quantum computer. Certificates and the device key still
-use classical signatures, so authentication is not post-quantum.
-
-## Checking the upstream
+### Checking the upstream
 
 ```sh
 gateinto check-upstream --upstream-host proxy.example.com --upstream-port 443
@@ -149,143 +139,7 @@ finish within the connect timeout (`[limits] connect_timeout_seconds`, default
 upstream that rejects the client certificate may only report that after the
 handshake; use `--target` to see it.
 
-## Configuration file
-
-`gateinto proxy`, `gateinto check-upstream`, `gateinto key init` and
-`gateinto key info` accept `--config <path>` with a TOML file. See
-[config.example.toml](config.example.toml).
-
-```toml
-[listen]
-address = "127.0.0.1:18736"
-
-[upstream]
-host = "proxy.example.invalid"   # required, here or with --upstream-host
-port = 443                       # required, here or with --upstream-port
-server_name = "proxy.example.invalid"
-ca_file = "upstream-ca.pem"
-
-[tls]
-mode = "hybrid_preferred"        # hybrid_preferred | hybrid_required | classical_only
-client_certificate = "optional"  # optional | required | off
-client_cert_file = "client.pem"
-
-[device_key]
-name = "gateinto-device-v1"
-preferred = "tpm"                # tpm | software
-software_fallback_on_first_create = true
-
-[limits]
-max_concurrent_tunnels = 64
-connect_timeout_seconds = 10
-idle_timeout_seconds = 300
-header_max_bytes = 16384
-```
-
-Every key is optional except the upstream `host` and `port`, which must come
-from the file or the command line; there is no default upstream. Missing keys
-take the defaults of the matching flags.
-
-| Key | Flag that overrides it |
-| --- | --- |
-| `[listen] address` | `--listen` |
-| `[upstream] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
-| `[tls] mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
-| `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
-| `[device_key] preferred` | `--backend` (`key init`) |
-| `[device_key] software_fallback_on_first_create` | `--no-software-fallback` (`key init`) |
-| `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | `--max-tunnels`, `--connect-timeout-secs`, `--idle-timeout-secs`, `--max-header-bytes` (`proxy`) |
-
-Rules:
-
-- Command line flags override the file, key by key.
-- Unknown sections and keys are errors, as are values of the wrong type, zero
-  limits, ports or timeouts, and an empty key name. Errors name the file, line
-  and key.
-- Relative `ca_file` and `client_cert_file` paths are resolved against the
-  directory of the configuration file. Relative paths on the command line are
-  resolved against the current directory.
-- A non-loopback `[listen] address` still requires the
-  `--unsafe-allow-non-loopback-listen` command line flag. There is no key for
-  it, so a configuration file alone can never expose the proxy to the network.
-- `[device_key] preferred` and `software_fallback_on_first_create` only affect
-  `key init`; the proxy only opens the key named by `[device_key] name`.
-
-## Client certificate (mTLS)
-
-The upstream connection is TLS 1.3 only, uses the key exchange of the
-selected [TLS mode](#tls-modes), and
-verifies the upstream certificate exactly as without client authentication.
-When the upstream asks for a client certificate, Gateinto sends the configured
-one and signs `CertificateVerify` with the device key through CNG
-(`rustls-cng` `CngSigningKey`, `ECDSA_NISTP256_SHA256`, DER signatures).
-
-At startup the device key named by `--key-name` is opened (TPM provider first,
-then software; it is never created here), and the certificate is taken from:
-
-1. `--client-cert-file`: the first PEM certificate is the leaf, any further
-   ones are sent as intermediates.
-2. Otherwise, on Windows, the `CurrentUser\My` certificate store: a certificate
-   whose SubjectPublicKeyInfo is byte-for-byte the device key's, that is valid
-   now, and that has the Client Authentication extended key usage or no
-   extended key usage at all. Whether Windows holds a private key for it does
-   not matter, because the device key signs. If several match, the one with
-   the latest NotAfter is used and its SHA-1 thumbprint is logged at `info`.
-
-Before a certificate is used, its public key is compared with the device key's.
-A certificate whose private key Gateinto does not hold is never sent.
-
-| Situation | `required` | `optional` (default) | `off` |
-| --- | --- | --- | --- |
-| Key and matching certificate | client auth | client auth | no client auth |
-| Device key missing or unusable | startup error | warning, no client auth | no client auth |
-| No certificate for the key | startup error | warning, no client auth | no client auth |
-| Certificate for another key, or unreadable `--client-cert-file` | startup error | warning, no client auth | no client auth |
-| Not Windows | startup error "device keys are only supported on Windows" | warning, no client auth | no client auth |
-
-Without client auth in `optional` mode the warning is logged once at startup
-and ends with "mTLS is not configured and upstream connections do not
-authenticate this device". An upstream that requires a client certificate
-then rejects the handshake, and local clients get `502`. With client auth
-enabled, the subject, thumbprint, NotAfter, source and key backend are logged at
-`info`.
-
-### Getting a test client certificate
-
-There is no enrollment yet; the certificate must be issued for the device
-key's public key by a CA the upstream trusts. For a test setup with OpenSSL 3
-and a throwaway CA (verified with OpenSSL 3.0.13; the device key itself stays
-in CNG):
-
-```sh
-gateinto key info --spki-out device.spki.der
-openssl ecparam -name prime256v1 -genkey -noout -out test-ca.key
-openssl req -x509 -new -key test-ca.key -subj "/CN=gateinto test client CA" -days 30 -out test-ca.pem
-openssl pkey -pubin -inform DER -in device.spki.der -out device.pub.pem
-printf 'basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = clientAuth\n' > client.ext
-openssl x509 -new -CA test-ca.pem -CAkey test-ca.key -force_pubkey device.pub.pem \
-  -subj "/CN=gateinto-device" -days 30 -extfile client.ext -out client.pem
-```
-
-Then either pass `--client-cert-file client.pem`, or import it into the user
-store so that the proxy finds it by its public key:
-
-```powershell
-certutil -user -addstore My client.pem
-gateinto key info
-```
-
-`key info` should then list the certificate. Remove it again with
-`certutil -user -delstore My <thumbprint>`. The import commands have not been
-run as part of the test suite, which imports through the Crypt32 API instead.
-
-The upstream only accepts the certificate if it is configured to trust
-`test-ca.pem` as a client CA. The same holds for a self-signed client
-certificate: it is only trusted by an upstream configured to trust that
-certificate. Note that tools such as `New-SelfSignedCertificate` generate a new
-key pair, so their certificates do not match the device key and are refused.
-
-## Device key
+### Device key
 
 ```sh
 gateinto key init
@@ -336,7 +190,12 @@ runners have no TPM; there the Platform Crypto Provider reports
 | `--config` | none | Read `[device_key]` from this TOML file; the flags below override it. |
 | `--name` | `gateinto-device-v1` | CNG key name. Must not be empty or contain NUL. |
 | `--backend` | `tpm` | Where to create a new key: `tpm` (falls back to software unless disabled) or `software`. An existing key is reused wherever it is. |
-| `--no-software-fallback` | off | Fail instead of creating a software key when the TPM cannot be used. |
+| `--software-fallback` | not set | Create a software key when the TPM cannot be used. Overrides `software_fallback_on_first_create = false`. |
+| `--no-software-fallback` | not set | Fail instead of creating a software key when the TPM cannot be used. Overrides `software_fallback_on_first_create = true`. |
+
+`--software-fallback` and `--no-software-fallback` cannot be combined. With
+neither flag, the software fallback is allowed unless the configuration file
+sets `software_fallback_on_first_create = false`.
 
 `key info` opens the existing key, never creates one, and prints its backend,
 algorithm (`ECDSA P-256`), the SHA-256 fingerprint of its DER
@@ -353,15 +212,196 @@ subject, SHA-1 thumbprint (`client-certificate-sha1`), NotAfter and source.
 With `--client-cert-file <pem>` it checks that file instead and fails if the
 certificate's public key is not the device key's.
 
-There is no rotate or delete command yet. Manual steps for checking a real TPM
+There is no rotate or delete command. Manual steps for checking a real TPM
 are in [docs/tpm-verification.md](docs/tpm-verification.md).
 
-## Security
+## Configuration file
+
+`gateinto proxy`, `gateinto check-upstream`, `gateinto key init` and
+`gateinto key info` accept `--config <path>` with a TOML file. See
+[config.example.toml](config.example.toml).
+
+```toml
+[listen]
+address = "127.0.0.1:18736"
+
+[upstream]
+host = "proxy.example.invalid"   # required, here or with --upstream-host
+port = 443                       # required, here or with --upstream-port
+server_name = "proxy.example.invalid"
+ca_file = "upstream-ca.pem"
+
+[tls]
+mode = "hybrid_preferred"        # hybrid_preferred | hybrid_required | classical_only
+client_certificate = "optional"  # optional | required | off
+client_cert_file = "client.pem"
+
+[device_key]
+name = "gateinto-device-v1"
+preferred = "tpm"                # tpm | software
+software_fallback_on_first_create = true
+
+[limits]
+max_concurrent_tunnels = 64
+connect_timeout_seconds = 10
+idle_timeout_seconds = 300
+header_max_bytes = 16384
+```
+
+Every key is optional except the upstream `host` and `port`, which must come
+from the file or the command line; there is no default upstream. Missing keys
+take the defaults of the matching flags.
+
+| Key | Flag that overrides it |
+| --- | --- |
+| `[listen] address` | `--listen` |
+| `[upstream] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
+| `[tls] mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
+| `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
+| `[device_key] preferred` | `--backend` (`key init`) |
+| `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
+| `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | `--max-tunnels`, `--connect-timeout-secs`, `--idle-timeout-secs`, `--max-header-bytes` (`proxy`) |
+
+Rules:
+
+- Command line flags override the file, key by key.
+- Unknown sections and keys are errors, as are values of the wrong type, zero
+  limits, ports or timeouts, and an empty key name. Errors name the file, line
+  and key.
+- Relative `ca_file` and `client_cert_file` paths are resolved against the
+  directory of the configuration file. Relative paths on the command line are
+  resolved against the current directory.
+- A non-loopback `[listen] address` still requires the
+  `--unsafe-allow-non-loopback-listen` command line flag. There is no key for
+  it, so a configuration file alone can never expose the proxy to the network.
+- `[device_key] preferred` and `software_fallback_on_first_create` only affect
+  `key init`; the proxy only opens the key named by `[device_key] name`.
+
+## TLS modes
+
+The upstream connection is always TLS 1.3 only, and the upstream certificate
+and name are always verified with WebPKI as described above. `--tls-mode` (or
+`[tls] mode`) only decides which key exchange groups are offered:
+
+| Mode | Offered groups, in order | Upstream without `X25519MLKEM768` |
+| --- | --- | --- |
+| `hybrid_preferred` (default) | `X25519MLKEM768`, `X25519` | Falls back to `X25519`. |
+| `hybrid_required` | `X25519MLKEM768` | Handshake fails; local clients get `502`. Never downgrades. |
+| `classical_only` | `X25519` | Uses `X25519` (also against hybrid-capable upstreams). |
+
+After every upstream handshake Gateinto reads the negotiated protocol version
+and key exchange group and logs them at `debug` per tunnel
+(`upstream TLS established version=Some(TLSv1_3)
+key_exchange_group=Some(X25519MLKEM768)`). It also checks that the version is
+TLS 1.3 and that the group is one the mode offers, and refuses the tunnel with
+`502` otherwise. For `hybrid_required` this is a second check behind the offered
+list: a tunnel is never relayed over anything but `X25519MLKEM768`.
+
+The hybrid group protects the confidentiality of the outer TLS session against
+later decryption by a quantum computer. Certificates and the device key still
+use classical signatures, so authentication is not post-quantum.
+
+## Client certificate (mTLS)
+
+The upstream connection is TLS 1.3 only, uses the key exchange of the
+selected [TLS mode](#tls-modes), and
+verifies the upstream certificate exactly as without client authentication.
+When the upstream asks for a client certificate, Gateinto sends the configured
+one and signs `CertificateVerify` with the device key through CNG
+(`rustls-cng` `CngSigningKey`, `ECDSA_NISTP256_SHA256`, DER signatures).
+
+At startup the device key named by `--key-name` is opened (TPM provider first,
+then software; it is never created here), and the certificate is taken from:
+
+1. `--client-cert-file`: the first PEM certificate is the leaf, any further
+   ones are sent as intermediates.
+2. Otherwise, on Windows, the `CurrentUser\My` certificate store: a certificate
+   whose SubjectPublicKeyInfo is byte-for-byte the device key's, that is valid
+   now, and that has the Client Authentication extended key usage or no
+   extended key usage at all. Whether Windows holds a private key for it does
+   not matter, because the device key signs. If several match, the one with
+   the latest NotAfter is used and its SHA-1 thumbprint is logged at `info`.
+
+Before a certificate is used, its public key is compared with the device key's.
+A certificate whose private key Gateinto does not hold is never sent.
+
+| Situation | `required` | `optional` (default) | `off` |
+| --- | --- | --- | --- |
+| Key and matching certificate | client auth | client auth | no client auth |
+| Device key missing or unusable | startup error | warning, no client auth | no client auth |
+| No certificate for the key | startup error | warning, no client auth | no client auth |
+| Certificate for another key, or unreadable `--client-cert-file` | startup error | warning, no client auth | no client auth |
+| Not Windows | startup error "device keys are only supported on Windows" | warning, no client auth | no client auth |
+
+Without client auth in `optional` mode the warning is logged once at startup
+and ends with "mTLS is not configured and upstream connections do not
+authenticate this device". An upstream that requires a client certificate
+then rejects the handshake, and local clients get `502`. With client auth
+enabled, the subject, thumbprint, NotAfter, source and key backend are logged at
+`info`.
+
+### Getting a test client certificate
+
+There is no enrollment; the certificate must be issued for the device
+key's public key by a CA the upstream trusts. For a test setup with OpenSSL 3
+and a throwaway CA (verified with OpenSSL 3.0.13; the device key itself stays
+in CNG):
+
+```sh
+gateinto key info --spki-out device.spki.der
+openssl ecparam -name prime256v1 -genkey -noout -out test-ca.key
+openssl req -x509 -new -key test-ca.key -subj "/CN=gateinto test client CA" -days 30 -out test-ca.pem
+openssl pkey -pubin -inform DER -in device.spki.der -out device.pub.pem
+printf 'basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = clientAuth\n' > client.ext
+openssl x509 -new -CA test-ca.pem -CAkey test-ca.key -force_pubkey device.pub.pem \
+  -subj "/CN=gateinto-device" -days 30 -extfile client.ext -out client.pem
+```
+
+Then either pass `--client-cert-file client.pem`, or import it into the user
+store so that the proxy finds it by its public key:
+
+```powershell
+certutil -user -addstore My client.pem
+gateinto key info
+```
+
+`key info` should then list the certificate. Remove it again with
+`certutil -user -delstore My <thumbprint>`. The import commands have not been
+run as part of the test suite, which imports through the Crypt32 API instead.
+
+The upstream only accepts the certificate if it is configured to trust
+`test-ca.pem` as a client CA. The same holds for a self-signed client
+certificate: it is only trusted by an upstream configured to trust that
+certificate. Note that tools such as `New-SelfSignedCertificate` generate a new
+key pair, so their certificates do not match the device key and are refused.
+
+## Security model
+
+[docs/security-model.md](docs/security-model.md) describes what Gateinto
+protects and how (TLS 1.3 only, certificate verification that cannot be
+disabled, no inspection of the inner TLS, non-exportable device key,
+loopback-only listener, no secrets or payload in logs) and what it does not.
+[docs/threat-model.md](docs/threat-model.md) lists assets, trust boundaries
+and residual risks.
 
 The loopback listener has no authentication of its own. Any local process,
 including those of other users on the same machine, can connect to it and use
 the agent, including its device identity, to reach the remote proxy. Do not run
 it on shared hosts you do not trust.
+
+## Verification status
+
+[docs/verification.md](docs/verification.md) lists each capability (relay,
+software and TPM keys, mTLS, hybrid key exchange, `hybrid_required`, Windows 7)
+with how it is verified, its current status and what is still needed.
+[docs/compatibility.md](docs/compatibility.md) has the detailed evidence.
+
+## Windows 7
+
+Windows 7 is not supported and there is no Windows 7 release. A build for
+`x86_64-win7-windows-msvc` links and passes a static import audit in CI, but
+it has never been run on Windows 7; see
+[docs/windows7-feasibility.md](docs/windows7-feasibility.md).
 
 ## Build and test
 
@@ -379,6 +419,13 @@ named `gateinto-test-*` in the current user's Microsoft Software Key Storage
 Provider, and in the Microsoft Platform Crypto Provider on machines with a
 usable TPM. `tests/mtls_windows.rs` also adds a temporary certificate with
 subject `CN=gateinto-test-client` to `CurrentUser\My` and removes it again.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development rules and quality
+gates, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities privately.
+Design notes: [architecture](docs/architecture.md),
+[troubleshooting](docs/troubleshooting.md).
 
 ## License
 
