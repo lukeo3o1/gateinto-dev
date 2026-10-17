@@ -344,10 +344,11 @@ pub use windows::{Server, connect};
 
 #[cfg(unix)]
 mod unix {
-    use std::fs::DirBuilder;
+    use std::fs::{DirBuilder, OpenOptions};
     use std::io;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    use std::path::PathBuf;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     use tokio::net::{UnixListener, UnixStream};
 
@@ -359,8 +360,11 @@ mod unix {
         path: PathBuf,
     }
 
-    fn private_dir(path: &std::path::Path) -> io::Result<()> {
-        let dir = path.parent().unwrap_or(path);
+    const LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
+    const LOCK_WAIT: Duration = Duration::from_secs(15);
+    const LOCK_POLL: Duration = Duration::from_millis(20);
+
+    fn private_dir(dir: &Path) -> io::Result<u32> {
         DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         let metadata = std::fs::symlink_metadata(dir)?;
         if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
@@ -372,14 +376,70 @@ mod unix {
                 ),
             ));
         }
-        Ok(())
+        Ok(metadata.uid())
+    }
+
+    struct BindLock(PathBuf);
+
+    impl BindLock {
+        fn acquire(path: &Path) -> io::Result<(Self, u32)> {
+            let mut name = path.file_name().unwrap_or_default().to_owned();
+            name.push(".lock");
+            let lock = path.with_file_name(name);
+            let deadline = Instant::now() + LOCK_WAIT;
+            loop {
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&lock)
+                {
+                    Ok(file) => return Ok((Self(lock), file.metadata()?.uid())),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let stale = std::fs::symlink_metadata(&lock)
+                            .and_then(|metadata| metadata.modified())
+                            .is_ok_and(|at| at.elapsed().unwrap_or_default() >= LOCK_STALE_AFTER);
+                        if stale {
+                            let _ = std::fs::remove_file(&lock);
+                            continue;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                format!(
+                                    "another agent kept {} for {} seconds",
+                                    lock.display(),
+                                    LOCK_WAIT.as_secs()
+                                ),
+                            ));
+                        }
+                        std::thread::sleep(LOCK_POLL);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+
+    impl Drop for BindLock {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     impl Server {
         pub fn bind(endpoint: &Endpoint) -> Result<Self, BindError> {
             let path = endpoint.path();
             let io_error = |error| BindError::Io(endpoint.clone(), error);
-            private_dir(&path).map_err(io_error)?;
+            let dir = path.parent().unwrap_or(&path);
+            let owner = private_dir(dir).map_err(io_error)?;
+            let (_lock, me) = BindLock::acquire(&path).map_err(io_error)?;
+            if owner != me {
+                return Err(io_error(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{} is owned by another user", dir.display()),
+                )));
+            }
             let listener = match UnixListener::bind(&path) {
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                     if std::os::unix::net::UnixStream::connect(&path).is_ok() {
