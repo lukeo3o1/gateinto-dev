@@ -192,7 +192,7 @@ impl Agent {
             Request::Stop => {
                 self.inner.stop.notify_one();
                 self.close_all().await;
-                Ok(Vec::new())
+                Ok(vec![ipc::agent_pid_line()])
             }
         };
         match result {

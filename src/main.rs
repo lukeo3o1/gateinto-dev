@@ -832,19 +832,43 @@ async fn agent_request(request: Request) -> Result {
     print_response(ipc::send(&endpoint, &request).await?)
 }
 
+const AGENT_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+
+async fn stop_and_wait() -> Result<Result<u32, RequestError>, String> {
+    let endpoint = Endpoint::for_current_user().map_err(|error| error.to_string())?;
+    let lines = match ipc::send(&endpoint, &Request::Stop).await {
+        Ok(Response::Ok(lines)) => lines,
+        Ok(Response::Error(message)) => return Err(message),
+        Err(error @ (RequestError::NotRunning | RequestError::Closed)) => return Ok(Err(error)),
+        Err(error) => return Err(error.to_string()),
+    };
+    let pid = ipc::agent_pid(&lines).ok_or("the agent did not report its process id")?;
+    let exited = tokio::task::spawn_blocking(move || {
+        gateinto::process::wait_for_exit(pid, AGENT_EXIT_TIMEOUT)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| format!("waiting for the agent (process {pid}) failed: {error}"))?;
+    if !exited {
+        return Err(format!(
+            "the agent (process {pid}) did not exit within {} seconds",
+            AGENT_EXIT_TIMEOUT.as_secs()
+        ));
+    }
+    Ok(Ok(pid))
+}
+
 async fn stop(args: StopArgs) -> Result {
-    if !args.remove_stale_profiles {
-        return agent_request(Request::Stop).await;
+    match stop_and_wait().await? {
+        Ok(pid) => println!("stopped the agent (process {pid})"),
+        Err(error) if !args.remove_stale_profiles => return Err(error.into()),
+        Err(_) => println!("no agent is running"),
     }
-    let endpoint = Endpoint::for_current_user()?;
-    match ipc::send(&endpoint, &Request::Stop).await {
-        Ok(response) => print_response(response)?,
-        Err(RequestError::NotRunning | RequestError::Closed) => println!("no agent is running"),
-        Err(error) => return Err(error.into()),
+    if args.remove_stale_profiles {
+        let root = browser::profiles_root()
+            .ok_or("cannot find the per-user application data directory for browser profiles")?;
+        println!("removed {} stale browser profiles", browser::sweep(&root));
     }
-    let root = browser::profiles_root()
-        .ok_or("cannot find the per-user application data directory for browser profiles")?;
-    println!("removed {} stale browser profiles", browser::sweep(&root));
     Ok(())
 }
 
@@ -970,12 +994,7 @@ async fn status(args: StatusArgs) -> Result {
 }
 
 async fn stop_agent() -> Result<(), String> {
-    let endpoint = Endpoint::for_current_user().map_err(|error| error.to_string())?;
-    match ipc::send(&endpoint, &Request::Stop).await {
-        Ok(Response::Ok(_)) | Err(RequestError::NotRunning | RequestError::Closed) => Ok(()),
-        Ok(Response::Error(message)) => Err(message),
-        Err(error) => Err(error.to_string()),
-    }
+    stop_and_wait().await.map(drop)
 }
 
 fn config_to_purge(args: &ResetArgs) -> Result<Option<PathBuf>> {

@@ -138,7 +138,15 @@ impl TestAgent {
     }
 
     async fn stop(self) {
-        assert_eq!(self.send(Request::Stop).await, Response::Ok(Vec::new()));
+        let response = self.send(Request::Stop).await;
+        assert_eq!(
+            response,
+            Response::Ok(vec![format!("agent-pid: {}", std::process::id())])
+        );
+        let Response::Ok(lines) = response else {
+            unreachable!()
+        };
+        assert_eq!(ipc::agent_pid(&lines), Some(std::process::id()));
         tokio::time::timeout(WAIT, self.serving)
             .await
             .unwrap()
