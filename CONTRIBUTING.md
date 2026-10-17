@@ -50,6 +50,12 @@ you could do.
   from a test CA with `rcgen` and trust that CA instead.
 - Tests that create Windows CNG keys must delete them, for example with a drop
   guard.
+- Fuzz targets live in `fuzz/`, a separate workspace with its own
+  `Cargo.lock`. With a nightly toolchain and `cargo install cargo-fuzz
+  --version 0.13.2 --locked`, run `cargo +nightly fuzz list` and
+  `cargo +nightly fuzz run <target> -- -max_total_time=60`. libFuzzer adds
+  new inputs to `fuzz/corpus/<target>/`; commit only small seeds, and turn a
+  crash into a unit test before fixing it.
 
 ## Releases
 
