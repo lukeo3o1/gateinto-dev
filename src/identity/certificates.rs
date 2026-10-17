@@ -100,10 +100,13 @@ const SERIAL_LEN: usize = 16;
 fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
     let len = contents.len();
     let mut out = vec![tag];
-    match len {
-        0..=0x7f => out.push(len as u8),
-        0x80..=0xff => out.extend([0x81, len as u8]),
-        _ => out.extend([0x82, (len >> 8) as u8, len as u8]),
+    if len < 0x80 {
+        out.push(len as u8);
+    } else {
+        let bytes = len.to_be_bytes();
+        let significant = &bytes[bytes.iter().take_while(|&&byte| byte == 0).count()..];
+        out.push(0x80 | significant.len() as u8);
+        out.extend_from_slice(significant);
     }
     out.extend_from_slice(contents);
     out
@@ -276,6 +279,23 @@ mod tests {
         .unwrap()
         .verify_client_cert(der, &[], now)
         .is_ok()
+    }
+
+    #[test]
+    fn tlv_encodes_lengths_in_the_shortest_der_form() {
+        let header = |len: usize| {
+            let encoded = tlv(OCTET_STRING, &vec![0; len]);
+            encoded[..encoded.len() - len].to_vec()
+        };
+
+        assert_eq!(header(0), [0x04, 0x00]);
+        assert_eq!(header(0x7f), [0x04, 0x7f]);
+        assert_eq!(header(0x80), [0x04, 0x81, 0x80]);
+        assert_eq!(header(0xff), [0x04, 0x81, 0xff]);
+        assert_eq!(header(0x100), [0x04, 0x82, 0x01, 0x00]);
+        assert_eq!(header(0xffff), [0x04, 0x82, 0xff, 0xff]);
+        assert_eq!(header(0x1_0000), [0x04, 0x83, 0x01, 0x00, 0x00]);
+        assert_eq!(header(0x0123_4567), [0x04, 0x84, 0x01, 0x23, 0x45, 0x67]);
     }
 
     #[test]
