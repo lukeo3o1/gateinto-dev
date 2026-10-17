@@ -498,3 +498,46 @@ async fn a_connection_closed_without_an_answer_is_reported_as_closed() {
     assert!(matches!(result, Err(RequestError::Closed)), "{result:?}");
     drop(accepting.await.unwrap());
 }
+
+#[cfg(unix)]
+fn private_run_dir(dir: &std::path::Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    run
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bind_lock_left_by_a_crashed_agent_is_taken_over_and_released() {
+    let run = private_run_dir(&temp_dir("lock"));
+    let lock = run.join("agent.sock.lock");
+    let stale = std::fs::File::create(&lock).unwrap();
+    stale
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(120))
+        .unwrap();
+    drop(stale);
+
+    let _server = Server::bind(&Endpoint::unix(run.join("agent.sock"))).unwrap();
+
+    assert!(!lock.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_directory_owned_by_another_user_is_refused() {
+    let run = private_run_dir(&temp_dir("owner"));
+    if std::os::unix::fs::chown(&run, Some(4242), None).is_err() {
+        return;
+    }
+
+    let result = Server::bind(&Endpoint::unix(run.join("agent.sock")));
+
+    assert!(
+        matches!(&result, Err(BindError::Io(_, error)) if error.to_string().contains("owned")),
+        "{result:?}"
+    );
+    assert!(!run.join("agent.sock").exists());
+}
