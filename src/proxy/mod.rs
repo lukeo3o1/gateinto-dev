@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
-use rustls::sign::CertifiedKey;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -19,6 +18,7 @@ use crate::http::{
     Authority, DEFAULT_MAX_HEADER_BYTES, ParseError, ParseResult, parse_connect_request,
     parse_response,
 };
+use crate::identity::client_cert::ClientCertificate;
 use crate::tls::{self, NegotiationError, TlsMode};
 
 mod relay;
@@ -63,7 +63,7 @@ pub struct Config {
     pub allow_non_loopback: bool,
     pub upstream: Upstream,
     pub tls_mode: TlsMode,
-    pub client_certificate: Option<Arc<CertifiedKey>>,
+    pub client_certificate: Option<ClientCertificate>,
     pub limits: Limits,
 }
 

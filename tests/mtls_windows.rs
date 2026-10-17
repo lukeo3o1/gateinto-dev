@@ -129,7 +129,9 @@ fn required(key: &TestKey, file: Option<&Path>) -> ClientIdentity {
     let options = ClientCertificateOptions {
         mode: ClientCertificateMode::Required,
         key_name: key.0.clone(),
-        file: file.map(Path::to_owned),
+        source: file.map_or(CertificateSource::Store, |file| {
+            CertificateSource::File(file.to_owned())
+        }),
     };
     match configure(&options, Ok(&CngStore), UnixTime::now()).unwrap() {
         ClientAuth::Enabled(identity) => identity,
@@ -148,7 +150,7 @@ async fn tunnel_through_mtls_upstream(
     )
     .await;
     let mut config = agent_config(upstream.addr, server_ca.roots(), PROXY_NAME);
-    config.client_certificate = Some(Arc::clone(&identity.certified_key));
+    config.client_certificate = Some(Arc::clone(&identity.certified_key).into());
     let agent = start_agent(config).await;
 
     let mut stream = open_tunnel(agent, echo_server().await).await;

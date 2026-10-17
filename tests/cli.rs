@@ -155,11 +155,36 @@ fn proxy_rejects_an_empty_key_name() {
     assert!(stderr.contains("key name must not be empty"), "{stderr}");
 }
 
+#[test]
+fn self_signed_client_cert_and_client_cert_file_are_exclusive_flags() {
+    for command in ["proxy", "check-upstream"] {
+        let (success, stderr) = gateinto(&[
+            command,
+            "--upstream-host",
+            "127.0.0.1",
+            "--upstream-port",
+            "9",
+            "--self-signed-client-cert",
+            "--client-cert-file",
+            "client.pem",
+        ]);
+        assert!(!success, "{command}");
+        assert!(stderr.contains("cannot be used with"), "{stderr}");
+        assert!(stderr.contains("--self-signed-client-cert"), "{stderr}");
+        assert!(stderr.contains("--client-cert-file"), "{stderr}");
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn proxy_requiring_a_client_certificate_fails_off_windows() {
     for extra in [
         &["--client-certificate", "required"][..],
+        &[
+            "--client-certificate",
+            "required",
+            "--self-signed-client-cert",
+        ],
         &[
             "--client-certificate",
             "required",

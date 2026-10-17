@@ -25,6 +25,10 @@ mode = "hybrid_preferred"
 client_certificate = "optional"
 # PEM client certificate for the device key. Defaults to searching CurrentUser\My.
 # client_cert_file = "client.pem"
+# Instead of a file or store certificate, issue a short-lived self-signed
+# certificate with the device key at startup. Cannot be combined with
+# client_cert_file. The upstream must be configured to trust it.
+# self_signed_client_cert = false
 
 [device_key]
 name = "gateinto-device-v1"

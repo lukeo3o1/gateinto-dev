@@ -8,7 +8,10 @@ use rustls::sign::{CertifiedKey, SigningKey};
 use tracing::{info, warn};
 
 use crate::identity::UnsupportedPlatform;
-use crate::identity::device_key::{self, Backend, KeyError, KeyName, KeyStore, StoreError};
+use crate::identity::certificates::{DeviceSigner, IssueError, SelfSignedCertificates};
+use crate::identity::device_key::{
+    self, Backend, DeviceKey, KeyError, KeyName, KeyStore, StoreError,
+};
 use crate::identity::encoding::sha256_fingerprint;
 use crate::identity::x509::{Certificate, X509Error, format_utc, parse_certificate};
 
@@ -55,6 +58,7 @@ impl ClientCertificateMode {
 pub enum CertificateSource {
     File(PathBuf),
     Store,
+    SelfSigned,
 }
 
 impl fmt::Display for CertificateSource {
@@ -62,6 +66,7 @@ impl fmt::Display for CertificateSource {
         match self {
             Self::File(path) => write!(f, "file {}", path.display()),
             Self::Store => f.write_str(CERTIFICATE_STORE),
+            Self::SelfSigned => f.write_str("self-signed"),
         }
     }
 }
@@ -190,6 +195,7 @@ pub enum ClientAuthError {
     },
     Signer(StoreError),
     File(String),
+    Issue(IssueError),
 }
 
 impl From<UnsupportedPlatform> for ClientAuthError {
@@ -235,6 +241,7 @@ impl fmt::Display for ClientAuthError {
                 write!(f, "the device key cannot be used for TLS signing: {error}")
             }
             Self::File(error) => f.write_str(error),
+            Self::Issue(error) => write!(f, "{error}"),
         }
     }
 }
@@ -299,6 +306,33 @@ pub struct ClientIdentity {
     pub backend: Backend,
     pub binding: Binding,
     pub certified_key: Arc<CertifiedKey>,
+    self_signed: Option<Arc<SelfSignedCertificates>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClientCertificate {
+    Fixed(Arc<CertifiedKey>),
+    SelfSigned(Arc<SelfSignedCertificates>),
+}
+
+impl From<Arc<CertifiedKey>> for ClientCertificate {
+    fn from(certified_key: Arc<CertifiedKey>) -> Self {
+        Self::Fixed(certified_key)
+    }
+}
+
+impl ClientCertificate {
+    pub fn certified_key(&self, now: UnixTime) -> Arc<CertifiedKey> {
+        match self {
+            Self::Fixed(certified_key) => certified_key.clone(),
+            Self::SelfSigned(certificates) => {
+                certificates.certified_key_at(now).unwrap_or_else(|error| {
+                    warn!("renewing the self-signed client certificate failed: {error}; sending the previous one");
+                    certificates.current()
+                })
+            }
+        }
+    }
 }
 
 impl fmt::Debug for ClientIdentity {
@@ -310,16 +344,51 @@ impl fmt::Debug for ClientIdentity {
     }
 }
 
+fn open_device_key<S: ClientIdentityStore>(
+    store: &S,
+    name: &KeyName,
+) -> Result<DeviceKey<S::Key>, ClientAuthError> {
+    let (key, duplicate) = device_key::info(store, name).map_err(ClientAuthError::Key)?;
+    if let Some(duplicate) = duplicate {
+        warn!("{duplicate}; using the tpm key");
+    }
+    Ok(key)
+}
+
+pub fn load_self_signed_identity<S: ClientIdentityStore>(
+    store: &S,
+    name: &KeyName,
+    now: UnixTime,
+) -> Result<ClientIdentity, ClientAuthError> {
+    let key = open_device_key(store, name)?;
+    let backend = key.backend;
+    let signer = store
+        .signing_key(key.key)
+        .map_err(ClientAuthError::Signer)?;
+    let certificates = SelfSignedCertificates::new(DeviceSigner::new(key.point, signer), now)
+        .map_err(ClientAuthError::Issue)?;
+    let certified_key = certificates.current();
+    let leaf = parse_certificate(&certified_key.cert[0])
+        .expect("issued self-signed certificates are well-formed");
+    Ok(ClientIdentity {
+        backend,
+        binding: Binding {
+            chain: certified_key.cert.clone(),
+            leaf,
+            source: CertificateSource::SelfSigned,
+        },
+        certified_key,
+        self_signed: Some(Arc::new(certificates)),
+    })
+}
+
 pub fn load_client_identity<S: ClientIdentityStore>(
     store: &S,
     name: &KeyName,
     file: Option<CertificateFile>,
     now: UnixTime,
 ) -> Result<ClientIdentity, ClientAuthError> {
-    let (key, duplicate) = device_key::info(store, name).map_err(ClientAuthError::Key)?;
-    if let Some(duplicate) = duplicate {
-        warn!("{duplicate}; using the tpm key");
-    }
+    let key = open_device_key(store, name)?;
     let spki = key.spki_der();
     let binding = bind_certificate(store, &spki, file, now)?.ok_or_else(|| {
         ClientAuthError::NoCertificate {
@@ -335,11 +404,12 @@ pub fn load_client_identity<S: ClientIdentityStore>(
         backend: key.backend,
         binding,
         certified_key,
+        self_signed: None,
     })
 }
 
 impl ClientAuth<ClientIdentity> {
-    pub fn into_certified_key(self) -> Option<Arc<CertifiedKey>> {
+    pub fn into_client_certificate(self) -> Option<ClientCertificate> {
         match self {
             Self::Off => {
                 info!("client certificate authentication is off");
@@ -355,7 +425,10 @@ impl ClientAuth<ClientIdentity> {
                     backend = %identity.backend,
                     "client certificate authentication enabled"
                 );
-                Some(identity.certified_key)
+                Some(match identity.self_signed {
+                    Some(certificates) => ClientCertificate::SelfSigned(certificates),
+                    None => ClientCertificate::Fixed(identity.certified_key),
+                })
             }
             Self::Unauthenticated(error) => {
                 warn!("{}", error.unauthenticated_warning());
@@ -369,7 +442,7 @@ impl ClientAuth<ClientIdentity> {
 pub struct ClientCertificateOptions {
     pub mode: ClientCertificateMode,
     pub key_name: KeyName,
-    pub file: Option<PathBuf>,
+    pub source: CertificateSource,
 }
 
 fn load_file(path: Option<&Path>) -> Result<Option<CertificateFile>, ClientAuthError> {
@@ -385,8 +458,14 @@ pub fn configure<S: ClientIdentityStore>(
 ) -> Result<ClientAuth<ClientIdentity>, ClientAuthError> {
     options.mode.resolve(|| {
         let store = store?;
-        let file = load_file(options.file.as_deref())?;
-        load_client_identity(store, &options.key_name, file, now)
+        let file = match &options.source {
+            CertificateSource::SelfSigned => {
+                return load_self_signed_identity(store, &options.key_name, now);
+            }
+            CertificateSource::File(path) => Some(path.as_path()),
+            CertificateSource::Store => None,
+        };
+        load_client_identity(store, &options.key_name, load_file(file)?, now)
     })
 }
 
@@ -412,6 +491,7 @@ mod tests {
     use rustls::pki_types::PrivatePkcs8KeyDer;
 
     use super::*;
+    use crate::identity::certificates::IssueError;
     use crate::identity::encoding::P256Point;
 
     fn now() -> UnixTime {
@@ -844,8 +924,167 @@ mod tests {
         ClientCertificateOptions {
             mode,
             key_name: KeyName::default(),
-            file,
+            source: file.map_or(CertificateSource::Store, CertificateSource::File),
         }
+    }
+
+    fn self_signed(mode: ClientCertificateMode) -> ClientCertificateOptions {
+        ClientCertificateOptions {
+            source: CertificateSource::SelfSigned,
+            ..options(mode, None)
+        }
+    }
+
+    fn enabled(auth: ClientAuth<ClientIdentity>) -> ClientIdentity {
+        match auth {
+            ClientAuth::Enabled(identity) => identity,
+            other => panic!("client auth was not enabled: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_self_signed_issues_a_certificate_for_the_device_key() {
+        let store = FakeStore::new();
+
+        let identity = enabled(
+            configure(
+                &self_signed(ClientCertificateMode::Required),
+                Ok(&store),
+                now(),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(identity.backend, Backend::Software);
+        assert_eq!(identity.binding.source, CertificateSource::SelfSigned);
+        let leaf = &identity.binding.leaf;
+        assert_eq!(leaf.subject, "CN=Gateinto device");
+        assert_eq!(leaf.spki, store.spki());
+        assert_eq!(leaf.not_after, now().as_secs() as i64 + 3600);
+        assert_eq!(identity.certified_key.cert, identity.binding.chain);
+        identity.certified_key.keys_match().unwrap();
+        assert!(!store.calls().contains(&"certificates".to_owned()));
+        assert!(!store.calls().iter().any(|call| call.starts_with("create")));
+        let Some(ClientCertificate::SelfSigned(certificates)) =
+            ClientAuth::Enabled(identity).into_client_certificate()
+        else {
+            panic!("self-signed identity did not renew its certificates");
+        };
+        assert_eq!(certificates.spki(), store.spki());
+    }
+
+    #[test]
+    fn each_self_signed_identity_gets_its_own_certificate_for_the_same_key() {
+        let store = FakeStore::new();
+        let issue = || {
+            enabled(
+                configure(
+                    &self_signed(ClientCertificateMode::Required),
+                    Ok(&store),
+                    now(),
+                )
+                .unwrap(),
+            )
+            .binding
+            .leaf
+        };
+
+        let (first, second) = (issue(), issue());
+
+        assert_eq!(first.spki, second.spki);
+        assert_ne!(first.serial, second.serial);
+        assert_ne!(first.sha1_thumbprint, second.sha1_thumbprint);
+    }
+
+    #[test]
+    fn configure_self_signed_needs_an_existing_key() {
+        let store = FakeStore {
+            missing: true,
+            ..FakeStore::new()
+        };
+
+        let error = configure(
+            &self_signed(ClientCertificateMode::Required),
+            Ok(&store),
+            now(),
+        )
+        .unwrap_err();
+        let auth = configure(
+            &self_signed(ClientCertificateMode::Optional),
+            Ok(&store),
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(error, failure());
+        assert!(matches!(auth, ClientAuth::Unauthenticated(error) if error == failure()));
+        assert!(!store.calls().iter().any(|call| call.starts_with("create")));
+    }
+
+    #[test]
+    fn configure_self_signed_on_an_unsupported_platform_fails_or_continues_unauthenticated() {
+        assert_eq!(
+            configure(
+                &self_signed(ClientCertificateMode::Required),
+                unsupported(),
+                now()
+            )
+            .unwrap_err(),
+            ClientAuthError::Unsupported
+        );
+        assert!(matches!(
+            configure(
+                &self_signed(ClientCertificateMode::Optional),
+                unsupported(),
+                now()
+            )
+            .unwrap(),
+            ClientAuth::Unauthenticated(ClientAuthError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn fixed_client_certificates_are_sent_unchanged() {
+        let store = FakeStore::new();
+        let path = write_temp("fixed.pem", client(&store.key).pem.as_bytes());
+        let identity = enabled(
+            configure(
+                &options(ClientCertificateMode::Required, Some(path)),
+                Ok(&store),
+                now(),
+            )
+            .unwrap(),
+        );
+        let certified_key = identity.certified_key.clone();
+
+        let Some(certificate) = ClientAuth::Enabled(identity).into_client_certificate() else {
+            panic!("no client certificate");
+        };
+
+        assert!(matches!(certificate, ClientCertificate::Fixed(_)));
+        assert!(Arc::ptr_eq(
+            &certificate.certified_key(now()),
+            &certified_key
+        ));
+    }
+
+    #[test]
+    fn off_and_unauthenticated_send_no_client_certificate() {
+        assert!(ClientAuth::Off.into_client_certificate().is_none());
+        assert!(
+            ClientAuth::Unauthenticated(ClientAuthError::Unsupported)
+                .into_client_certificate()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn self_signed_source_and_issue_errors_are_named() {
+        assert_eq!(CertificateSource::SelfSigned.to_string(), "self-signed");
+        assert_eq!(
+            ClientAuthError::Issue(IssueError::Verify).to_string(),
+            IssueError::Verify.to_string()
+        );
     }
 
     fn unsupported() -> Result<&'static FakeStore, UnsupportedPlatform> {
