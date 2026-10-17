@@ -16,6 +16,7 @@ pub const SUBJECT_COMMON_NAME: &str = "Gateinto device";
 pub const VALIDITY: Duration = Duration::from_secs(60 * 60);
 pub const BACKDATE: Duration = Duration::from_secs(5 * 60);
 pub const RENEW_AFTER: Duration = Duration::from_secs(VALIDITY.as_secs() / 2);
+pub const RENEW_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueError {
@@ -210,6 +211,7 @@ struct Current {
     certified_key: Arc<CertifiedKey>,
     issued_at: u64,
     not_after: u64,
+    failed_renewal: Option<(u64, IssueError)>,
 }
 
 impl SelfSignedCertificates {
@@ -227,6 +229,7 @@ impl SelfSignedCertificates {
             certified_key: Arc::new(CertifiedKey::new(vec![der], signer.key())),
             issued_at: now.as_secs(),
             not_after: now.as_secs().saturating_add(VALIDITY.as_secs()),
+            failed_renewal: None,
         })
     }
 
@@ -240,7 +243,14 @@ impl SelfSignedCertificates {
 
     pub fn certified_key_at(&self, now: UnixTime) -> Result<Arc<CertifiedKey>, ExpiredCertificate> {
         let mut current = self.lock();
-        if now.as_secs().saturating_sub(current.issued_at) >= RENEW_AFTER.as_secs() {
+        let now_secs = now.as_secs();
+        let retry_due = current
+            .failed_renewal
+            .as_ref()
+            .is_none_or(|(failed_at, _)| {
+                now_secs.saturating_sub(*failed_at) >= RENEW_RETRY_AFTER.as_secs()
+            });
+        if retry_due && now_secs.saturating_sub(current.issued_at) >= RENEW_AFTER.as_secs() {
             match Self::issue(&self.signer, now) {
                 Ok(renewed) => {
                     *current = renewed;
@@ -249,20 +259,25 @@ impl SelfSignedCertificates {
                         "renewed the self-signed client certificate"
                     );
                 }
-                Err(renewal) if now.as_secs() >= current.not_after => {
-                    return Err(ExpiredCertificate {
-                        not_after: i64::try_from(current.not_after).unwrap_or(i64::MAX),
-                        renewal,
-                    });
+                Err(error) => {
+                    if now_secs < current.not_after {
+                        warn!(
+                            "renewing the self-signed client certificate failed: {error}; \
+                             sending the previous one, valid until {}",
+                            format_utc(i64::try_from(current.not_after).unwrap_or(i64::MAX))
+                        );
+                    }
+                    current.failed_renewal = Some((now_secs, error));
                 }
-                Err(error) => warn!(
-                    "renewing the self-signed client certificate failed: {error}; sending the \
-                     previous one, valid until {}",
-                    format_utc(i64::try_from(current.not_after).unwrap_or(i64::MAX))
-                ),
             }
         }
-        Ok(current.certified_key.clone())
+        match &current.failed_renewal {
+            Some((_, renewal)) if now_secs >= current.not_after => Err(ExpiredCertificate {
+                not_after: i64::try_from(current.not_after).unwrap_or(i64::MAX),
+                renewal: renewal.clone(),
+            }),
+            _ => Ok(current.certified_key.clone()),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
@@ -500,6 +515,37 @@ mod tests {
             failing: failing.clone(),
         };
         (DeviceSigner::new(signer.point, Arc::new(key)), failing)
+    }
+
+    #[test]
+    fn a_failed_renewal_is_retried_no_sooner_than_a_minute_later() {
+        let (signer, failing) = switchable_signer();
+        let certificates = SelfSignedCertificates::new(signer, at(NOW)).unwrap();
+        let first = certificates.current();
+        failing.store(true, Ordering::Relaxed);
+        certificates.certified_key_at(at(NOW + 1800)).unwrap();
+        failing.store(false, Ordering::Relaxed);
+
+        let within_a_minute = certificates.certified_key_at(at(NOW + 1859)).unwrap();
+        let after_a_minute = certificates.certified_key_at(at(NOW + 1860)).unwrap();
+
+        assert!(Arc::ptr_eq(&within_a_minute, &first));
+        assert_ne!(after_a_minute.cert, first.cert);
+    }
+
+    #[test]
+    fn an_expired_certificate_reports_the_last_renewal_error_until_the_retry() {
+        let (signer, failing) = switchable_signer();
+        let certificates = SelfSignedCertificates::new(signer, at(NOW)).unwrap();
+        failing.store(true, Ordering::Relaxed);
+        certificates.certified_key_at(at(NOW + 3600)).unwrap_err();
+        failing.store(false, Ordering::Relaxed);
+
+        let within_a_minute = certificates.certified_key_at(at(NOW + 3659)).unwrap_err();
+        let after_a_minute = certificates.certified_key_at(at(NOW + 3660)).unwrap();
+
+        assert_eq!(within_a_minute.renewal, IssueError::NoScheme);
+        assert!(Arc::ptr_eq(&after_a_minute, &certificates.current()));
     }
 
     #[test]
