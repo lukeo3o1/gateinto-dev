@@ -20,7 +20,7 @@ webpki-roots = "1.0.9"
 
 [target.'cfg(windows)'.dependencies]
 rustls-cng = { version = "0.7.1", default-features = false }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_TpmBaseServices"] }
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }

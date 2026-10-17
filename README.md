@@ -100,7 +100,11 @@ key. It stops with an error, without creating anything, when:
   Services are stopped or disabled or the device is not ready
   (`TBS_E_SERVICE_NOT_RUNNING`, `TBS_E_SERVICE_DISABLED`,
   `NTE_DEVICE_NOT_READY`, `NTE_PROVIDER_DLL_FAIL`). An existing TPM key cannot
-  be ruled out then, so no software key is created; fix the TPM and retry;
+  be ruled out then, so no software key is created; fix the TPM and retry.
+  These codes alone do not tell a missing TPM from one that is not ready, so
+  when the Platform Crypto Provider returns one of them, TPM Base Services are
+  asked whether a TPM exists (`Tbsi_GetDeviceInfo`). Only when they answer
+  `TBS_E_TPM_NOT_FOUND` is the TPM treated as absent;
 - a provider or an existing key cannot be opened for any other reason than
   "not found" or "provider absent".
 
@@ -111,6 +115,13 @@ proving it with a test signature, and otherwise in software with a warning that
 says why. A TPM key that fails its test signature is deleted
 before falling back. The export policy is set to non-exportable before the key
 is finalized in both providers. No private key material is written anywhere.
+
+A TPM that is disabled in firmware looks exactly like no TPM to Windows, so
+`key init` then falls back to a software key. On machines known to have a TPM,
+pass `--no-software-fallback` so that a disabled or missing TPM is an error
+instead of a silently weaker software identity. GitHub-hosted `windows-latest`
+runners have no TPM; there the Platform Crypto Provider reports
+`NTE_DEVICE_NOT_READY` and the software fallback is used.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gateinto::identity::device_key::{
-    self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, StoreError,
+    self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, StoreError, TpmProblem,
 };
 use gateinto::identity::windows_cng::{
     CngKey, CngStore, PLATFORM_CRYPTO_PROVIDER, SOFTWARE_KEY_STORAGE_PROVIDER, delete_key,
@@ -15,6 +15,16 @@ use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPRIVATE_BLOB, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_PKCS8_PRIVATE_KEY_BLOB,
     NCRYPT_SILENT_FLAG, NCryptExportKey, NCryptGetProperty,
 };
+use windows_sys::Win32::System::TpmBaseServices::{TPM_DEVICE_INFO, Tbsi_GetDeviceInfo};
+
+const TBS_E_TPM_NOT_FOUND: u32 = 0x8028_400F;
+
+fn tpm_absent() -> bool {
+    let mut info = TPM_DEVICE_INFO::default();
+    let status =
+        unsafe { Tbsi_GetDeviceInfo(size_of::<TPM_DEVICE_INFO>() as u32, (&raw mut info).cast()) };
+    status == TBS_E_TPM_NOT_FOUND
+}
 
 struct TestKey(KeyName);
 
@@ -120,13 +130,14 @@ fn missing_key_is_not_found_or_unavailable_in_the_platform_provider() {
 
     let error = CngStore.open(Backend::Tpm, key.name()).unwrap_err();
 
-    assert!(
-        matches!(
-            error,
-            StoreError::NotFound | StoreError::ProviderUnavailable(_)
-        ),
-        "{error:?}"
-    );
+    if tpm_absent() {
+        assert!(
+            matches!(error, StoreError::ProviderUnavailable(_)),
+            "{error:?}"
+        );
+    } else {
+        assert_eq!(error, StoreError::NotFound);
+    }
 }
 
 #[test]
@@ -151,9 +162,11 @@ fn default_init_creates_a_working_key_with_or_without_a_tpm() {
 
     let (created, provenance) =
         device_key::init(&CngStore, key.name(), InitOptions::default()).unwrap();
-    match (&provenance, created.backend) {
-        (Provenance::Created, Backend::Tpm) => {}
-        (Provenance::CreatedAfterFallback(_), Backend::Software) => {}
+    match (&provenance, created.backend, tpm_absent()) {
+        (Provenance::Created, Backend::Tpm, false) => {}
+        (Provenance::CreatedAfterFallback(TpmProblem::Unavailable(_)), Backend::Software, true) => {
+        }
+        (Provenance::CreatedAfterFallback(_), Backend::Software, false) => {}
         other => panic!("unexpected outcome {other:?}"),
     }
     let fingerprint = created.fingerprint();
@@ -175,17 +188,42 @@ fn disabled_fallback_creates_nothing_in_software_when_the_tpm_is_unusable() {
         ..InitOptions::default()
     };
 
-    match device_key::init(&CngStore, key.name(), options) {
-        Ok((created, _)) => assert_eq!(created.backend, Backend::Tpm),
-        Err(KeyError::TpmUnusable(_)) => assert_eq!(
-            CngStore
-                .open(Backend::Software, key.name())
-                .map(drop)
-                .unwrap_err(),
-            StoreError::NotFound
-        ),
-        Err(other) => panic!("{other}"),
+    let result = device_key::init(&CngStore, key.name(), options);
+
+    if tpm_absent() {
+        let error = result.map(drop).unwrap_err();
+        assert!(
+            matches!(&error, KeyError::TpmUnusable(TpmProblem::Unavailable(_))),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("the TPM provider is unavailable: "),
+            "{error}"
+        );
+        assert!(matches!(
+            CngStore.open(Backend::Tpm, key.name()).map(drop),
+            Err(StoreError::ProviderUnavailable(_))
+        ));
+    } else {
+        match result {
+            Ok((created, provenance)) => {
+                assert_eq!(created.backend, Backend::Tpm);
+                assert_eq!(provenance, Provenance::Created);
+                return;
+            }
+            Err(KeyError::TpmUnusable(_) | KeyError::ProviderNotReady { .. }) => {}
+            Err(other) => panic!("{other}"),
+        }
     }
+    assert_eq!(
+        CngStore
+            .open(Backend::Software, key.name())
+            .map(drop)
+            .unwrap_err(),
+        StoreError::NotFound
+    );
 }
 
 #[test]
@@ -340,7 +378,10 @@ fn key_init_reports_the_software_fallback() {
 
     assert!(success, "{stderr}");
     match field(&stdout, "backend") {
-        "tpm" => assert!(stderr.is_empty(), "{stderr}"),
+        "tpm" => {
+            assert!(!tpm_absent());
+            assert!(stderr.is_empty(), "{stderr}");
+        }
         "software" => {
             assert!(stdout.contains("created software device key"), "{stdout}");
             assert!(stderr.starts_with("warning: "), "{stderr}");

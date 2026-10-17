@@ -48,9 +48,9 @@ Locally on Linux:
 | The crate builds and all tests pass with Rust 1.88.0, the declared `rust-version`. `rcgen` and `time` declare 1.88. | `cargo +1.88 test --all-targets --all-features --locked`; `cargo metadata` `rust_version` fields. |
 | The double `CONNECT` data path, status mapping, limits, half-close and early data behave as documented in the README. | `tests/proxy.rs` against an in-process TLS 1.3 upstream proxy fixture, loopback only. |
 | Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`, including `src/identity/windows_cng.rs` and `tests/device_key_windows.rs`. | See below. |
-| The device key lifecycle rules hold: an existing `tpm` or `software` key is reused; both providers are always probed, and keys in both are an error for `key init` and a warning for `key info`; a TPM that is present but not ready during lookup is an error that creates nothing in either provider, even when a software key exists; any other open failure than "not found" or "provider unavailable" is an error and creates nothing; an unavailable TPM, a failed TPM creation or a failed TPM self-test falls back to software (deleting a half-created TPM key first); disabled fallback is an error; `--backend software` skips the TPM; `key info` never creates. | Unit tests in `src/identity/device_key.rs` against a fake key store. |
+| The device key lifecycle rules hold: an existing `tpm` or `software` key is reused; both providers are always probed, and keys in both are an error for `key init` and a warning for `key info`; a TPM that is present but not ready during lookup is an error that creates nothing in either provider, even when a software key exists; any other open failure than "not found" or "provider unavailable" is an error and creates nothing; an unavailable TPM, a failed TPM creation or a failed TPM self-test falls back to software (deleting a half-created TPM key first); a TPM reported as not ready while TPM Base Services report `TBS_E_TPM_NOT_FOUND` counts as unavailable, so a software key is created on first init (or an error with fallback disabled, creating nothing) and reused afterwards, while not ready with a TPM present stops with an error and creates nothing; disabled fallback is an error; `--backend software` skips the TPM; `key info` never creates. | Unit tests in `src/identity/device_key.rs` against a fake key store. |
 | The DER SubjectPublicKeyInfo built from an uncompressed P-256 point equals the one AWS-LC produces; the fingerprint is lowercase hex SHA-256; the ECC public blob parser rejects a wrong magic, a wrong `cbKey` and wrong lengths with a specific error. | Unit tests in `src/identity/encoding.rs`. |
-| CNG status codes are classified as "not found" (`NTE_BAD_KEYSET`, `NTE_NOT_FOUND`, `NTE_NO_KEY`), "provider unavailable", meaning absent (`NTE_PROV_DLL_NOT_FOUND`, `NTE_BAD_PROVIDER`, `NTE_DEVICE_NOT_FOUND`, `TBS_E_TPM_NOT_FOUND`), "provider not ready", meaning present but not usable now (`NTE_DEVICE_NOT_READY`, `NTE_PROVIDER_DLL_FAIL`, `TBS_E_SERVICE_NOT_RUNNING`, `TBS_E_SERVICE_DISABLED`), or other failures. When opening a provider fails, "not found" codes also count as absent; "not ready" and other failures are passed through and stop the lookup. | Unit tests in `src/identity/cng_status.rs`. Whether Windows actually returns these codes is not verified; see Unverified. |
+| CNG status codes are classified as "not found" (`NTE_BAD_KEYSET`, `NTE_NOT_FOUND`, `NTE_NO_KEY`), "provider unavailable", meaning absent (`NTE_PROV_DLL_NOT_FOUND`, `NTE_BAD_PROVIDER`, `NTE_DEVICE_NOT_FOUND`, `TBS_E_TPM_NOT_FOUND`), "provider not ready", meaning present but not usable now (`NTE_DEVICE_NOT_READY`, `NTE_PROVIDER_DLL_FAIL`, `TBS_E_SERVICE_NOT_RUNNING`, `TBS_E_SERVICE_DISABLED`), or other failures. When opening a provider fails, "not found" codes also count as absent; "not ready" and other failures are passed through and stop the lookup. A "not ready" result from the Platform Crypto Provider becomes "provider unavailable" only when the TPM Base Services probe returns `TBS_E_TPM_NOT_FOUND`; a successful probe or any other probe failure keeps it "not ready", with the probe result appended to the reason; the probe runs only for "not ready". | Unit tests in `src/identity/cng_status.rs`. Whether Windows actually returns these codes is not verified; see Unverified. |
 | `gateinto key init` and `key info` fail with "device keys are only supported on Windows" on other platforms. | `tests/cli.rs`. |
 
 ### Windows type check from Linux
@@ -100,25 +100,53 @@ Platform Crypto Provider is expected to be unusable, so the software fallback
 runs for real: init creates once and a second init reuses the same
 fingerprint, `key info` matches `key init`, `NCRYPT_EXPORT_POLICY_PROPERTY`
 reads 0, and exporting `ECCPRIVATEBLOB` or `PKCS8_PRIVATEKEY` fails. Tests that
-depend on a TPM accept either outcome. Test keys get unique names and are
-deleted from both providers by a drop guard. **These tests have only been
-type-checked so far; they have not run on Windows yet.**
+depend on a TPM require the outcome for the environment that TPM Base Services
+report (see below). Test keys get unique names and are deleted from both
+providers by a drop guard. **The first CI run failed (see below); the fixed
+tests have only been type-checked so far.**
+
+### Hosted runner without a TPM
+
+CI run [38963331196](https://github.com/lukeo3o1/gateinto-dev/actions/runs/38963331196)
+(commit `40469ff`) failed 10 of 13 tests in `tests/device_key_windows.rs` on
+`windows-latest`: opening a key in the Microsoft Platform Crypto Provider
+returned `NTE_DEVICE_NOT_READY` (`0x80090030`), which was classified as "TPM
+present but not usable", so the lookup stopped before the software path ran.
+
+`NTE_DEVICE_NOT_READY` alone cannot tell "no TPM" from "TPM present but not
+ready". `CngStore` now asks TPM Base Services (`Tbsi_GetDeviceInfo` from
+`tbs.dll`) whenever the Platform Crypto Provider reports a "not ready" code
+during open or create. `TBS_E_TPM_NOT_FOUND` (`0x8028400F`) makes the provider
+count as absent, so the software key is created once and reused afterwards;
+anything else keeps the "not ready" error. On the hosted runner TBS is expected
+to return `TBS_E_TPM_NOT_FOUND`; this is not confirmed until the next CI run.
+
+`tests/device_key_windows.rs` calls `Tbsi_GetDeviceInfo` itself to decide which
+outcome to require. Without a TPM: opening a missing TPM key is "provider
+unavailable", default init falls back with `TpmProblem::Unavailable`, and init
+with fallback disabled fails with "the TPM provider is unavailable" and creates
+nothing in either provider. With a TPM: opening a missing TPM key is "not
+found", and init with fallback disabled either creates a `tpm` key or fails
+without creating a software key.
+
+A TPM disabled in firmware is indistinguishable from no TPM, so it leads to a
+software identity. Use `--no-software-fallback` on machines known to have a TPM.
 
 ## Unverified
 
 Not exercised at all yet:
 
 - `tests/device_key_windows.rs` and the updated `tests/windows_cng.rs` on
-  Windows (pending the next CI run).
+  Windows with the TPM Base Services probe (pending the next CI run). That
+  `Tbsi_GetDeviceInfo` returns `TBS_E_TPM_NOT_FOUND` on `windows-latest` is
+  expected, not observed.
 - The Platform Crypto Provider path on a machine with a TPM. Manual steps are
   in [tpm-verification.md](tpm-verification.md); they have not been executed.
 - Which status codes Windows returns for a missing key, a missing TPM or a TPM
-  that is present but not ready in the Platform Crypto Provider. If it returns
-  a "not ready" code or a code outside the lists above when opening the
-  provider or a key, `key init` stops with an error instead of falling back.
-  If the `windows-latest` runner reports its missing TPM that way,
-  `tests/device_key_windows.rs` tests that expect the software fallback will
-  fail and the classification has to be revisited with the observed code.
+  that is present but not ready in the Platform Crypto Provider, beyond the
+  `NTE_DEVICE_NOT_READY` observed on `windows-latest`. If it returns a code
+  outside the lists above when opening the provider or a key, `key init` stops
+  with an error instead of falling back.
 - `keys_in_both_providers_stop_init_and_make_info_warn` returns early unless a
   TPM key can be created, so it only checks anything on a machine with a TPM.
 
