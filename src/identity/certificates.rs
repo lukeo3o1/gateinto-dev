@@ -82,7 +82,7 @@ impl DeviceSigner {
         self.key.clone()
     }
 
-    pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, IssueError> {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, IssueError> {
         self.key
             .choose_scheme(&[SignatureScheme::ECDSA_NISTP256_SHA256])
             .ok_or(IssueError::NoScheme)?
