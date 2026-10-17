@@ -454,9 +454,11 @@ pub fn payload(len: usize) -> Vec<u8> {
 
 pub async fn read_to_end_within(stream: &mut TcpStream, limit: Duration) -> Vec<u8> {
     let mut received = Vec::new();
-    tokio::time::timeout(limit, stream.read_to_end(&mut received))
+    let result = tokio::time::timeout(limit, stream.read_to_end(&mut received))
         .await
-        .expect("connection was not closed in time")
-        .ok();
+        .unwrap_or_else(|_| panic!("connection was not closed in time, received {received:?}"));
+    if let Err(error) = result {
+        panic!("read failed after receiving {received:?}: {error}");
+    }
     received
 }
