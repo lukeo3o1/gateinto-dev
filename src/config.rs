@@ -551,10 +551,13 @@ port = 443
     fn relative_paths_are_resolved_against_the_file() {
         let dir = temp_dir("relative");
         let path = dir.join("gateinto.toml");
+        let absolute = std::env::temp_dir().join("client.pem");
+        assert!(absolute.is_absolute());
         std::fs::write(
             &path,
             format!(
-                "{MINIMAL}ca_file = \"certs/ca.pem\"\n[tls]\nclient_cert_file = \"/abs/client.pem\"\n"
+                "{MINIMAL}ca_file = \"certs/ca.pem\"\n[tls]\nclient_cert_file = '{}'\n",
+                absolute.display()
             ),
         )
         .unwrap();
@@ -562,10 +565,7 @@ port = 443
         let settings = ConfigFile::load(&path).unwrap().settings().unwrap();
 
         assert_eq!(settings.upstream.ca_file, Some(dir.join("certs/ca.pem")));
-        assert_eq!(
-            settings.client_cert_file,
-            Some(PathBuf::from("/abs/client.pem"))
-        );
+        assert_eq!(settings.client_cert_file, Some(absolute));
     }
 
     #[test]
