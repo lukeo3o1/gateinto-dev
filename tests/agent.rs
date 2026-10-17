@@ -459,3 +459,10 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
     ipc::send(&endpoint, &Request::Stop).await.unwrap();
     tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+fn the_default_pipe_is_named_after_the_user_sid() {
+    let name = Endpoint::for_current_user().unwrap().to_string();
+    assert!(name.starts_with(r"\\.\pipe\gateinto-agent-S-1-"), "{name}");
+}
