@@ -175,8 +175,9 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
 comes from an older build that linked the Microsoft C runtime dynamically and
 needed the Visual C++ Redistributable for x64. Current builds link the C
 runtime statically (`.cargo/config.toml` sets `+crt-static` for MSVC targets),
-so no redistributable is required: download a current release or rebuild from
-source. If you set `RUSTFLAGS` when building, it replaces the flags from
+so they need no redistributable: build from source or use a build made after
+this change (no release has been published yet). If you set `RUSTFLAGS` or
+`CARGO_ENCODED_RUSTFLAGS` when building, it replaces the flags from
 `.cargo/config.toml`; add `-C target-feature=+crt-static` to it.
 
 ## Windows 7

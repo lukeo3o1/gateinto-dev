@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/windows7.yml
+      - .github/scripts/assert-static-crt.ps1
+      - .cargo/config.toml
       - docs/windows7-feasibility.md
 
 permissions:
@@ -33,6 +35,8 @@ jobs:
       - name: Build
         id: build
         run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build -Z build-std=std,panic_abort --target ${{ env.WIN7_TARGET }} --locked --release --bin gateinto
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path "target\${{ env.WIN7_TARGET }}\release\gateinto.exe"
       - name: List imports
         run: |
           $exe = "target\${{ env.WIN7_TARGET }}\release\gateinto.exe"

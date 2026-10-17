@@ -37,8 +37,9 @@ third-party upstream proxies and physical machines are not verified; see
 Start with [docs/quickstart.md](docs/quickstart.md): it goes from a fresh
 Windows 10/11 x64 machine (no TPM needed) to a working tunnel, including the
 upstream proxy you need to bring. Release builds are a zip for Windows 10/11
-x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file. They link the C
-runtime statically, so no Visual C++ Redistributable is required.
+x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file. Builds link the
+C runtime statically; CI checks that `gateinto.exe` imports no Visual C++
+runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 
 ## Commands
 
@@ -641,8 +642,9 @@ cargo test --all-targets --all-features --locked
 The minimum supported Rust version is 1.88 (required by `rcgen` and `time`).
 
 `.cargo/config.toml` links the C runtime statically on Windows MSVC targets
-(`-C target-feature=+crt-static`). Setting `RUSTFLAGS` replaces those flags, so
-include `-C target-feature=+crt-static` in it when building for Windows.
+(`-C target-feature=+crt-static`). Setting `RUSTFLAGS` or
+`CARGO_ENCODED_RUSTFLAGS` replaces those flags, so include
+`-C target-feature=+crt-static` in it when building for Windows.
 
 Windows CNG tests only run on Windows. They create and delete temporary keys
 named `gateinto-test-*` in the current user's Microsoft Software Key Storage

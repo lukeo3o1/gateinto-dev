@@ -43,8 +43,10 @@ Notes:
 - The checksum only proves the download matches the file the workflow
   published next to it. `gateinto.exe` is not code signed, so SmartScreen may
   warn about it.
-- The binary links the Microsoft C runtime statically, so no Visual C++
-  Redistributable is required. Older builds needed it; see
+- Builds link the C runtime statically; CI checks that `gateinto.exe`
+  imports no Visual C++ runtime DLL (see
+  [static C runtime](compatibility.md#static-c-runtime)). Older builds needed
+  the Visual C++ Redistributable; see
   [troubleshooting](troubleshooting.md#vcruntime140dll-was-not-found).
 - No release has been published yet at the time of writing. Until one is,
   build from source.
