@@ -1,0 +1,409 @@
+use std::fmt;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
+use rustls::SignatureScheme;
+use rustls::pki_types::{CertificateDer, UnixTime};
+use rustls::sign::{CertifiedKey, SigningKey};
+
+use crate::identity::encoding::{P256Point, p256_spki_der};
+use crate::identity::x509::encode_time;
+
+pub const SUBJECT_COMMON_NAME: &str = "Gateinto device";
+pub const VALIDITY: Duration = Duration::from_secs(60 * 60);
+pub const BACKDATE: Duration = Duration::from_secs(5 * 60);
+pub const RENEW_AFTER: Duration = Duration::from_secs(VALIDITY.as_secs() / 2);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueError {
+    Random,
+    NoScheme,
+    Sign(String),
+    Verify,
+}
+
+impl fmt::Display for IssueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Random => f.write_str("generating a certificate serial number failed"),
+            Self::NoScheme => f.write_str("the device key cannot sign with ECDSA P-256 SHA-256"),
+            Self::Sign(error) => write!(
+                f,
+                "the device key failed to sign the self-signed client certificate: {error}"
+            ),
+            Self::Verify => f.write_str(
+                "the self-signed client certificate signature does not verify with the device \
+                 public key",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IssueError {}
+
+#[derive(Debug, Clone)]
+pub struct DeviceSigner {
+    point: P256Point,
+    key: Arc<dyn SigningKey>,
+}
+
+impl DeviceSigner {
+    pub fn new(point: P256Point, key: Arc<dyn SigningKey>) -> Self {
+        Self { point, key }
+    }
+
+    pub fn spki(&self) -> Vec<u8> {
+        p256_spki_der(&self.point)
+    }
+
+    pub fn key(&self) -> Arc<dyn SigningKey> {
+        self.key.clone()
+    }
+
+    pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, IssueError> {
+        self.key
+            .choose_scheme(&[SignatureScheme::ECDSA_NISTP256_SHA256])
+            .ok_or(IssueError::NoScheme)?
+            .sign(message)
+            .map_err(|error| IssueError::Sign(error.to_string()))
+    }
+
+    fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), IssueError> {
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &self.point)
+            .verify(message, signature)
+            .map_err(|_| IssueError::Verify)
+    }
+}
+
+const SEQUENCE: u8 = 0x30;
+const SET: u8 = 0x31;
+const INTEGER: u8 = 0x02;
+const BOOLEAN: u8 = 0x01;
+const BIT_STRING: u8 = 0x03;
+const OCTET_STRING: u8 = 0x04;
+const OID: u8 = 0x06;
+const UTF8_STRING: u8 = 0x0c;
+const VERSION: u8 = 0xa0;
+const EXTENSIONS: u8 = 0xa3;
+
+const ECDSA_WITH_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
+const BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
+const KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x0f];
+const EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25];
+const CLIENT_AUTH: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02];
+const SERIAL_LEN: usize = 16;
+
+fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let len = contents.len();
+    let mut out = vec![tag];
+    match len {
+        0..=0x7f => out.push(len as u8),
+        0x80..=0xff => out.extend([0x81, len as u8]),
+        _ => out.extend([0x82, (len >> 8) as u8, len as u8]),
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+fn sequence(parts: &[&[u8]]) -> Vec<u8> {
+    tlv(SEQUENCE, &parts.concat())
+}
+
+fn extension(id: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
+    let critical = if critical {
+        tlv(BOOLEAN, &[0xff])
+    } else {
+        Vec::new()
+    };
+    sequence(&[&tlv(OID, id), &critical, &tlv(OCTET_STRING, value)])
+}
+
+fn serial_number() -> Result<[u8; SERIAL_LEN], IssueError> {
+    let mut serial = [0; SERIAL_LEN];
+    SystemRandom::new()
+        .fill(&mut serial)
+        .map_err(|_| IssueError::Random)?;
+    serial[0] = serial[0] & 0x3f | 0x40;
+    Ok(serial)
+}
+
+pub fn issue(signer: &DeviceSigner, now: UnixTime) -> Result<CertificateDer<'static>, IssueError> {
+    let now = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+    let algorithm = sequence(&[&tlv(OID, ECDSA_WITH_SHA256)]);
+    let name = sequence(&[&tlv(
+        SET,
+        &sequence(&[
+            &tlv(OID, COMMON_NAME),
+            &tlv(UTF8_STRING, SUBJECT_COMMON_NAME.as_bytes()),
+        ]),
+    )]);
+    let validity = sequence(&[
+        &encode_time(now - BACKDATE.as_secs() as i64),
+        &encode_time(now + VALIDITY.as_secs() as i64),
+    ]);
+    let extensions = tlv(
+        EXTENSIONS,
+        &sequence(&[
+            &extension(BASIC_CONSTRAINTS, true, &sequence(&[])),
+            &extension(KEY_USAGE, true, &tlv(BIT_STRING, &[0x07, 0x80])),
+            &extension(
+                EXTENDED_KEY_USAGE,
+                false,
+                &sequence(&[&tlv(OID, CLIENT_AUTH)]),
+            ),
+        ]),
+    );
+    let tbs = sequence(&[
+        &tlv(VERSION, &tlv(INTEGER, &[2])),
+        &tlv(INTEGER, &serial_number()?),
+        &algorithm,
+        &name,
+        &validity,
+        &name,
+        &signer.spki(),
+        &extensions,
+    ]);
+    let signature = signer.sign(&tbs)?;
+    signer.verify(&tbs, &signature)?;
+    let certificate = sequence(&[
+        &tbs,
+        &algorithm,
+        &tlv(BIT_STRING, &[&[0][..], &signature].concat()),
+    ]);
+    Ok(CertificateDer::from(certificate))
+}
+
+#[derive(Debug)]
+pub struct SelfSignedCertificates {
+    signer: DeviceSigner,
+    current: Mutex<Current>,
+}
+
+#[derive(Debug)]
+struct Current {
+    certified_key: Arc<CertifiedKey>,
+    issued_at: u64,
+}
+
+impl SelfSignedCertificates {
+    pub fn new(signer: DeviceSigner, now: UnixTime) -> Result<Self, IssueError> {
+        let current = Self::issue(&signer, now)?;
+        Ok(Self {
+            signer,
+            current: Mutex::new(current),
+        })
+    }
+
+    fn issue(signer: &DeviceSigner, now: UnixTime) -> Result<Current, IssueError> {
+        let der = issue(signer, now)?;
+        Ok(Current {
+            certified_key: Arc::new(CertifiedKey::new(vec![der], signer.key())),
+            issued_at: now.as_secs(),
+        })
+    }
+
+    pub fn spki(&self) -> Vec<u8> {
+        self.signer.spki()
+    }
+
+    pub fn current(&self) -> Arc<CertifiedKey> {
+        self.lock().certified_key.clone()
+    }
+
+    pub fn certified_key_at(&self, now: UnixTime) -> Result<Arc<CertifiedKey>, IssueError> {
+        let mut current = self.lock();
+        if now.as_secs().saturating_sub(current.issued_at) >= RENEW_AFTER.as_secs() {
+            *current = Self::issue(&self.signer, now)?;
+        }
+        Ok(current.certified_key.clone())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aws_lc_rs::rand::SystemRandom;
+    use aws_lc_rs::signature::{
+        ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair, KeyPair,
+    };
+    use rustls::RootCertStore;
+    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::server::WebPkiClientVerifier;
+
+    use super::*;
+    use crate::identity::encoding::sha256_fingerprint;
+    use crate::identity::x509::{ExtendedKeyUsage, parse_certificate};
+
+    const NOW: u64 = 1_830_297_600;
+
+    fn at(secs: u64) -> UnixTime {
+        UnixTime::since_unix_epoch(Duration::from_secs(secs))
+    }
+
+    fn software_signer() -> DeviceSigner {
+        let pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+                .unwrap();
+        let pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref()).unwrap();
+        let point = pair.public_key().as_ref().try_into().unwrap();
+        let der = PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec()).into();
+        let key = rustls::crypto::aws_lc_rs::sign::any_ecdsa_type(&der).unwrap();
+        DeviceSigner::new(point, key)
+    }
+
+    fn webpki_accepts_as_its_own_anchor(der: &CertificateDer<'static>, now: UnixTime) -> bool {
+        let mut roots = RootCertStore::empty();
+        roots.add(der.clone()).unwrap();
+        WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .build()
+        .unwrap()
+        .verify_client_cert(der, &[], now)
+        .is_ok()
+    }
+
+    #[test]
+    fn issued_certificate_carries_the_documented_fields() {
+        let signer = software_signer();
+
+        let der = issue(&signer, at(NOW)).unwrap();
+
+        let parsed = parse_certificate(&der).unwrap();
+        assert_eq!(parsed.subject, "CN=Gateinto device");
+        assert_eq!(parsed.spki, signer.spki());
+        assert_eq!(
+            parsed.extended_key_usage,
+            ExtendedKeyUsage::Present { client_auth: true }
+        );
+        assert_eq!(parsed.not_before, NOW as i64 - 300);
+        assert_eq!(parsed.not_after, NOW as i64 + 3600);
+        assert_eq!(parsed.serial.len(), 16);
+        assert_eq!(parsed.serial[0] & 0xc0, 0x40);
+    }
+
+    #[test]
+    fn issued_certificate_is_a_critical_non_ca_digital_signature_certificate() {
+        let der = issue(&software_signer(), at(NOW)).unwrap();
+        let contains = |pattern: &[u8]| der.windows(pattern.len()).any(|w| w == pattern);
+
+        assert!(contains(&[
+            0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04, 0x02, 0x30, 0x00
+        ]));
+        assert!(contains(&[
+            0x30, 0x0e, 0x06, 0x03, 0x55, 0x1d, 0x0f, 0x01, 0x01, 0xff, 0x04, 0x04, 0x03, 0x02,
+            0x07, 0x80
+        ]));
+    }
+
+    #[test]
+    fn certificates_from_one_key_share_the_spki_and_differ_otherwise() {
+        let signer = software_signer();
+
+        let first = issue(&signer, at(NOW)).unwrap();
+        let second = issue(&signer, at(NOW)).unwrap();
+
+        let (a, b) = (
+            parse_certificate(&first).unwrap(),
+            parse_certificate(&second).unwrap(),
+        );
+        assert_eq!(a.spki, b.spki);
+        assert_ne!(first, second);
+        assert_ne!(sha256_fingerprint(&first), sha256_fingerprint(&second));
+        assert_ne!(a.serial, b.serial);
+    }
+
+    #[test]
+    fn webpki_verifies_the_self_signature_validity_and_client_auth() {
+        let der = issue(&software_signer(), at(NOW)).unwrap();
+
+        assert!(webpki_accepts_as_its_own_anchor(&der, at(NOW)));
+        assert!(webpki_accepts_as_its_own_anchor(&der, at(NOW - 300)));
+        assert!(!webpki_accepts_as_its_own_anchor(&der, at(NOW - 301)));
+        assert!(!webpki_accepts_as_its_own_anchor(&der, at(NOW + 3601)));
+    }
+
+    #[test]
+    fn signer_signs_messages_with_der_ecdsa_p256_sha256() {
+        let signer = software_signer();
+
+        let signature = signer.sign(b"message").unwrap();
+
+        aws_lc_rs::signature::UnparsedPublicKey::new(
+            &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+            &signer.point,
+        )
+        .verify(b"message", &signature)
+        .unwrap();
+    }
+
+    #[test]
+    fn a_key_that_does_not_match_the_public_key_is_refused() {
+        let signer = software_signer();
+        let mismatched = DeviceSigner::new(software_signer().point, signer.key());
+
+        assert_eq!(issue(&mismatched, at(NOW)), Err(IssueError::Verify));
+    }
+
+    #[test]
+    fn a_key_without_ecdsa_p256_sha256_is_refused() {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let der = PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec());
+        let key = rustls::crypto::aws_lc_rs::sign::any_eddsa_type(&der).unwrap();
+        let signer = DeviceSigner::new(software_signer().point, key);
+
+        assert_eq!(issue(&signer, at(NOW)), Err(IssueError::NoScheme));
+    }
+
+    #[test]
+    fn errors_explain_the_problem() {
+        assert_eq!(
+            IssueError::NoScheme.to_string(),
+            "the device key cannot sign with ECDSA P-256 SHA-256"
+        );
+        assert_eq!(
+            IssueError::Sign("denied".to_owned()).to_string(),
+            "the device key failed to sign the self-signed client certificate: denied"
+        );
+        assert_eq!(
+            IssueError::Verify.to_string(),
+            "the self-signed client certificate signature does not verify with the device \
+             public key"
+        );
+        assert_eq!(
+            IssueError::Random.to_string(),
+            "generating a certificate serial number failed"
+        );
+    }
+
+    #[test]
+    fn certificates_are_renewed_once_half_their_validity_has_passed() {
+        let certificates = SelfSignedCertificates::new(software_signer(), at(NOW)).unwrap();
+        let first = certificates.current();
+
+        let early = certificates.certified_key_at(at(NOW + 1799)).unwrap();
+        let renewed = certificates.certified_key_at(at(NOW + 1800)).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &early));
+        assert_ne!(renewed.cert, first.cert);
+        assert!(Arc::ptr_eq(&renewed, &certificates.current()));
+        let parsed = parse_certificate(&renewed.cert[0]).unwrap();
+        assert_eq!(parsed.not_before, (NOW + 1800 - 300) as i64);
+        assert_eq!(parsed.spki, certificates.spki());
+        renewed.keys_match().unwrap();
+        assert!(Arc::ptr_eq(
+            &certificates.certified_key_at(at(NOW + 1801)).unwrap(),
+            &renewed
+        ));
+    }
+}

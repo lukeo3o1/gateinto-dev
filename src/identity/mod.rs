@@ -1,3 +1,4 @@
+pub mod certificates;
 pub mod client_cert;
 pub mod cng_status;
 pub mod device_key;
