@@ -10,19 +10,28 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TARGET: x86_64-pc-windows-msvc
   WIX_VERSION: '5.0.2'
+  NASM_VERSION: '2.16.03'
 
 jobs:
   build:
-    name: Build x86_64-pc-windows-msvc
+    name: Build ${{ matrix.target }}
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            cache-key: check-windows-latest
+            msi: true
+          - target: i686-pc-windows-msvc
+            cache-key: windows-i686
+            nasm: true
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
     defaults:
       run:
         shell: pwsh
-    outputs:
-      package: ${{ steps.package.outputs.package }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -30,9 +39,14 @@ jobs:
           targets: ${{ env.RELEASE_TARGET }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: check-windows-latest
+          shared-key: ${{ matrix.cache-key }}
           save-if: false
-      - run: cargo test --all-targets --all-features --locked
+      - name: Install NASM ${{ env.NASM_VERSION }}
+        if: matrix.nasm
+        uses: ilammy/setup-nasm@v1
+        with:
+          version: ${{ env.NASM_VERSION }}
+      - run: cargo test --target $env:RELEASE_TARGET --all-targets --all-features --locked
       - run: cargo build --locked --release --target $env:RELEASE_TARGET --bin gateinto
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe"
@@ -56,11 +70,13 @@ jobs:
           Get-Content (Join-Path 'dist' "$zip.sha256")
           "package=$package" >> $env:GITHUB_OUTPUT
       - name: Install WiX ${{ env.WIX_VERSION }}
+        if: matrix.msi
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
           if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix exited with $LASTEXITCODE" }
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
       - name: Build the MSI
+        if: matrix.msi
         env:
           PACKAGE: ${{ steps.package.outputs.package }}
         run: |
@@ -87,15 +103,14 @@ jobs:
       contents: write
       actions: read
     steps:
-      - name: Download package
+      - name: Download packages
         env:
           GH_TOKEN: ${{ github.token }}
-          PACKAGE: ${{ needs.build.outputs.package }}
-        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$PACKAGE" --dir dist
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'gateinto-*' --dir dist
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          ls -l dist
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
+          ls -lR dist
+          gh release create "$TAG" dist/*/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
