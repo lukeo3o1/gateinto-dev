@@ -22,8 +22,11 @@ plain-HTTP request (asserting `405`). The upstream is the development-only
 `examples/test_upstream.rs`: a throwaway test CA, TLS 1.3 offering
 `X25519MLKEM768` and `X25519`, loopback only. No third-party proxy is
 involved; the only public host contacted is `example.com`, the quickstart's
-own target. The job was added after the results recorded here; its outcome is
-not recorded yet.
+own target. The job has run and passed: the software key was created after the
+TPM fallback and matched by `key info`; `check-upstream` reported `TLSv1_3`,
+`X25519MLKEM768`, `TLS13_AES_256_GCM_SHA384` and
+`HTTP/1.1 200 Connection established` for `example.com:443`; `curl.exe` got
+`200` and `405`; and `certutil -delkey` removed the key afterwards.
 
 Every suite listed below as "CI, both platforms" runs in both the
 `ubuntu-latest` and `windows-latest` CI jobs. An
@@ -39,7 +42,7 @@ not executed**, **not verified**.
 | Capability | How it is verified | Status | Needed to verify further |
 | --- | --- | --- | --- |
 | Relay (local `CONNECT` to upstream HTTPS proxy, status mapping, limits) | `tests/proxy.rs` against an in-process TLS 1.3 upstream fixture; parser unit tests in `src/http.rs`. CI, `ubuntu-latest` and `windows-latest`. `curl.exe` through the release binary in the `quickstart` job. | Verified in CI (fixture and local test upstream only) | A real third-party upstream proxy, browsers, and physical Windows 10/11 machines. |
-| Quickstart flow on Windows without a TPM, Software KSP key, local proxy to remote HTTPS `CONNECT` | The `quickstart` job on `windows-latest` runs the [quickstart](quickstart.md) commands against `examples/test_upstream.rs` on loopback, as described above. | In CI (local test upstream only); first outcome not recorded yet | A person following the docs by hand on a physical machine or VM, and a real third-party upstream. |
+| Quickstart flow on Windows without a TPM, Software KSP key, local proxy to remote HTTPS `CONNECT` | The `quickstart` job on `windows-latest` runs the [quickstart](quickstart.md) commands against `examples/test_upstream.rs` on loopback, as described above. | Verified in CI (local test upstream only) | A person following the docs by hand on a physical machine or VM, and a real third-party upstream. |
 | Software device key (create once, reuse, non-exportable, `key info`) | `tests/device_key_windows.rs` and `tests/windows_cng.rs` on `windows-latest`, where the TPM is absent and the software fallback runs for real; lifecycle rules in unit tests of `src/identity/device_key.rs` against a fake store. | Verified in CI (`windows-latest`) | Physical Windows 10/11 machines. Which status code the TPM probe returns on the runner is expected, not observed. |
 | TPM device key | Manual steps 1 to 8 in [tpm-verification.md](tpm-verification.md). The decision logic is unit-tested with a fake store. | Manual steps documented but not executed | A Windows 10/11 machine with a usable TPM 2.0, running those steps. |
 | mTLS with a software key | `tests/mtls.rs` (test-only software identity, all platforms) and `tests/mtls_windows.rs` (real CNG software key signing `CertificateVerify`, certificate from a file and from `CurrentUser\My`). CI, both platforms. | Verified in CI (fixture only) | A real upstream proxy that requires client certificates. |
