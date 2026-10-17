@@ -22,15 +22,7 @@ use crate::identity::cng_status;
 use crate::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
 use crate::identity::encoding::{BlobError, P256Point, parse_ecc_public_blob};
 
-pub const PLATFORM_CRYPTO_PROVIDER: &str = "Microsoft Platform Crypto Provider";
-pub const SOFTWARE_KEY_STORAGE_PROVIDER: &str = "Microsoft Software Key Storage Provider";
-
-fn provider_name(backend: Backend) -> &'static str {
-    match backend {
-        Backend::Tpm => PLATFORM_CRYPTO_PROVIDER,
-        Backend::Software => SOFTWARE_KEY_STORAGE_PROVIDER,
-    }
-}
+pub use crate::identity::device_key::{PLATFORM_CRYPTO_PROVIDER, SOFTWARE_KEY_STORAGE_PROVIDER};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PublicKeyError {
@@ -175,7 +167,7 @@ fn store_error(error: CngError) -> StoreError {
 }
 
 fn open_provider(backend: Backend) -> Result<StorageProvider, StoreError> {
-    StorageProvider::open(provider_name(backend)).map_err(|error| match error {
+    StorageProvider::open(backend.provider()).map_err(|error| match error {
         CngError::WindowsError(code) => cng_status::provider_error(code),
         other => StoreError::Failed(other.to_string()),
     })
