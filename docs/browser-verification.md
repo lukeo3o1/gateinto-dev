@@ -218,6 +218,8 @@ portal_url = "https://example.com/"
     ```html
     <a href="gateinto://connect?profile=office">office</a>
     <a href="gateinto://connect?profile=office&amp;url=https://evil.example">bad</a>
+    <a href="gateinto://connect?profile=office&amp;url=https%3A%2F%2Fevil.example%2F">offsite</a>
+    <a href="gateinto://connect?profile=newco&amp;gateway=proxy.newco.example&amp;portal=https%3A%2F%2Fexample.com%2F">new</a>
     ```
 
     Expected: clicking `office` shows the browser's confirmation for an
@@ -227,7 +229,17 @@ portal_url = "https://example.com/"
     confirming) opens no browser: `open` rejects the URI before contacting
     the agent. Record the confirmation dialogs, whether
     "always allow" is offered, and what happens on repeated clicks
-    (rate limit after 5 a minute). Clicking `office` launching a window shows
+    (rate limit after 5 a minute). Clicking `offsite` opens no browser: the
+    agent refuses a start page outside the portal's origin. Clicking `new`
+    shows the Gateinto warning dialog naming `newco`,
+    `proxy.newco.example:443` and `https://example.com`, with No selected;
+    record that No is the default, that the dialog is on top, that No (and
+    closing it) stores nothing (`gateinto gateway list`) and that clicking
+    `new` again while the dialog is open is refused. Do not answer Yes
+    unless the host is a gateway you control; then record that the gateway
+    appears as `linked` in `gateinto gateway list`, that a second click does
+    not ask again, and remove it with `gateinto gateway forget newco`.
+    Clicking `office` launching a window shows
     that the browser passed the URI in the accepted `gateinto://connect?`
     form; also add `<a href="gateinto://connect/?profile=office">slash</a>`
     and record whether it launches too, and if a link does not launch, run

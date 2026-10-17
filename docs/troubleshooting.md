@@ -144,10 +144,40 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
 
 - `invalid launch URI: ...`: the link breaks a rule of the format; the
   message names the rule. Nothing was started.
-- `unknown gateway "<name>"; configured gateways: ...`: the agent's
-  configuration file has no `[gateways.<name>]` table. The agent reads its
+- `unknown gateway "<name>": it is not set up on this device and the link
+  does not bring one; ...`: neither the agent's configuration file nor the
+  gateways added from links has `<name>`, and the link has no `gateway` and
+  `portal`. Ask the portal for a link that brings the gateway, or have an
+  administrator add `[gateways.<name>]`. The agent reads its configuration
   file once when it starts; after editing the file run `gateinto stop` so the
-  next launch starts a new agent.
+  next launch starts a new agent. Gateways added from links are read again
+  for every launch.
+- `the link's gateway or portal differs from the gateway "<name>" set up on
+  this device`: the link names a known gateway with another host, port or
+  portal. Nothing was changed. If the gateway really moved, remove the old
+  entry (`gateinto gateway forget <name>` for one added from a link, or edit
+  the configuration file) and open the link again.
+- `the link's start page is not on the origin ...` or `... has no
+  portal_url`: `url` must have exactly the scheme, host and port of the
+  gateway's portal; a gateway without a portal accepts no `url`.
+- `... its address is already set up as "<other>"; use profile=<other> in
+  the link`: the gateway in the link is known under another name.
+- `cannot ask whether to add the gateway: no desktop or terminal to ask on`:
+  `gateinto open` was started without a visible desktop or terminal, so it
+  could not ask. Click the link in a desktop session, or run `gateinto open
+  -- "<link>"` in a terminal and type `yes`.
+- `adding the gateway "<name>" was not allowed; nothing was stored`: the
+  dialog was answered No or closed, or something other than `yes` was typed.
+- `another gateway confirmation is already waiting for an answer`: answer
+  the open dialog first; an unanswered confirmation expires after 120
+  seconds.
+- `no gateway confirmation is waiting for this answer`: the dialog was
+  answered after its 120 seconds, or the agent restarted in between. Open
+  the link again.
+- `linked gateways <path>: ...`: the gateways added from links file is
+  damaged or was edited by hand with a key other than `host`, `port`,
+  `portal_url` and `approved_at`. Launches fail until it is fixed; delete it
+  to remove every gateway added from links.
 - `no agent is running`: from `session list`, `session close` or `stop`.
   `gateinto open` starts one by itself.
 - `an agent is already running for this user at ...`: only one agent per user

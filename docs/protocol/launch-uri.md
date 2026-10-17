@@ -1,59 +1,118 @@
 # Launch URI (`gateinto://`)
 
-A launch URI asks Gateinto to start a browser session for a gateway profile
-that is already configured on this machine. It is a request, not
-configuration: it can only name a local gateway. Version 1 of the format is
-described here; `src/uri.rs` implements it.
+A launch URI asks Gateinto to start a browser session for a gateway. It can
+name a gateway that is already set up on this machine, choose a start page on
+that gateway's portal, and, for a user who has no such gateway yet, bring the
+gateway and its portal so that the user can add it after an explicit
+confirmation. Version 1 of the format is described here; `src/uri.rs` parses
+it and `src/link.rs` decides what it may do.
 
 Any web page can open a custom-scheme URI, so Gateinto treats every launch URI
 as untrusted input from an arbitrary website.
 
-## Example
+## Examples
+
+Open the portal of a gateway the device already knows:
 
 ```text
-gateinto://connect?profile=office&auth=basic_tofu
+gateinto://connect?profile=office
 ```
+
+Open a page on that gateway's portal:
+
+```text
+gateinto://connect?profile=corp&url=https%3A%2F%2Fportal.corp.example%2Fapp
+```
+
+Bring the gateway and its portal, for users who do not have it yet (one line):
+
+```text
+gateinto://connect?profile=corp&gateway=proxy.corp.example%3A443&portal=https%3A%2F%2Fportal.corp.example%2F&url=https%3A%2F%2Fportal.corp.example%2Fapp
+```
+
+## For gateway operators: writing links
+
+- Percent-encode every value except letters, digits, `-`, `.`, `_` and `~`.
+  In particular `:` is `%3A`, `/` is `%2F`, `?` is `%3F`, `=` is `%3D`, `&`
+  is `%26`, `%` is `%25` and `[` `]` are `%5B` `%5D`. A raw `:` or `/` makes
+  the link invalid.
+- `profile` is the name the gateway gets on the device. Choose a stable name:
+  later links must use the same name together with the same `gateway` and
+  `portal`, or they are refused.
+- `portal` must be exactly the portal URL the device stored (or the
+  `portal_url` of the configured gateway); compare it as a string. `url` only
+  needs the same origin.
+- `gateway` and `portal` are needed only for users who may not have the
+  gateway yet. A link without them works only where the gateway is
+  configured or was added before.
+- The TLS settings of a gateway added from a link are the defaults: the
+  upstream certificate must chain to a public root (the Mozilla roots built
+  into Gateinto) and match the gateway host name; key exchange
+  `hybrid_preferred`; client certificate `optional` (see
+  [What a gateway added from a link gets](#what-a-gateway-added-from-a-link-gets)).
+  A gateway that needs a private CA, another TLS mode or a certificate file
+  must be set up in the configuration file by an administrator.
+- Keep links short. Each URL may be up to 2048 characters and the whole link
+  up to 8192 bytes, but some programs that pass links to Windows may cut
+  long ones.
 
 ## Grammar
 
 ```abnf
-launch-uri = scheme "://connect" ["/"] "?" field *("&" field)
-scheme     = "gateinto"                    ; ASCII case-insensitive
-field      = name "=" value
-name       = 1*char                        ; after decoding: profile, auth or v
-value      = 1*char
-char       = ALPHA / DIGIT / "_" / "-" / pct-allowed
-pct-allowed = "%" HEXDIG HEXDIG            ; only if it decodes to ALPHA, DIGIT, "_" or "-"
+launch-uri  = scheme "://connect" ["/"] "?" field *("&" field)
+scheme      = "gateinto"                   ; ASCII case-insensitive
+field       = name "=" value
+name        = 1*char                       ; after decoding: profile, auth, v, url, gateway or portal
+value       = 1*char
+char        = ALPHA / DIGIT / "-" / "." / "_" / "~" / pct-encoded
+pct-encoded = "%" HEXDIG HEXDIG
 ```
+
+After decoding, field names and the values of `profile`, `auth` and `v` may
+contain only `A-Z`, `a-z`, `0-9`, `_` and `-`. The values of `url`,
+`gateway` and `portal` must decode to printable ASCII without spaces, then
+pass their own checks below.
 
 Fields:
 
 | Name | Required | Value |
 | --- | --- | --- |
-| `profile` | yes | Name of a `[gateways.<name>]` table in the agent's configuration file: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
+| `profile` | yes | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
 | `auth` | no | `basic_tofu`, the only local proxy authentication a browser session uses. Default `basic_tofu`. |
 | `v` | no | `1`, the format version. Default `1`. |
+| `url` | no | Start page for this launch: an `https://` URL that passes the `portal_url` checks of the configuration file (at most 2048 characters, a host, no user information, no spaces, quotes, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) and whose host is a DNS name or an IP address (below). It must have the same origin (scheme, host, port; port 443 when omitted) as the gateway's portal. |
+| `gateway` | with `portal` | `host[:port]` of the gateway's HTTPS proxy, port 443 by default. The host is a DNS name (labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`, at most 253 characters, the last label starting with a letter, no trailing dot; stored in lowercase), an IPv4 address in dotted decimal, or an IPv6 address in brackets without a zone. The port is 1 to 65535 in decimal. No user information, path, query, fragment, wildcard or whitespace. |
+| `portal` | with `gateway` | The gateway's portal: an `https://` URL with the same rules as `url`. |
 
 Limits and rules:
 
-- At most 512 bytes in total, checked before anything else is parsed.
+- At most 8192 bytes in total, checked before anything else is parsed.
 - The host is exactly `connect` (lowercase). It may be followed by one `/`,
   because some programs add it. No user information, port, other path,
   fragment (`#`) or empty query.
-- Only the three fields above, each at most once, in any order. Unknown and
+- Only the six fields above, each at most once, in any order. Unknown and
   repeated fields, a field without `=`, an empty name or value, and empty
-  pairs (`&&`, a leading or trailing `&`) are errors.
-- Percent-encoding is decoded only where it yields one of the allowed
-  characters; `%00`, `%20`, `%22`, `%26`, `%2F`, `%2E`, `%25`, invalid hex
-  and every non-ASCII byte are errors. `+`, `.`, spaces, quotes, `;`, `\`
-  and every other character are errors.
+  pairs (`&&`, a leading or trailing `&`) are errors. There is no field for a
+  CA file, TLS mode, client certificate, server name, listen address or any
+  other setting.
+- `gateway` and `portal` come together or not at all. When the link has both
+  `portal` and `url`, they must have the same origin.
+- Percent-encoding is decoded once. In `profile`, `auth`, `v` and the field
+  names it may only yield the allowed characters, so `%00`, `%20`, `%22`,
+  `%26`, `%2F`, `%2E` and `%25` are errors there. In `url`, `gateway` and
+  `portal`, an encoded control character, space, non-ASCII byte or invalid
+  hex is an error. `+`, spaces, quotes, `;`, `\`, `:`, `/` and every other
+  unencoded character are errors.
 - Leading or trailing whitespace, quotes or line breaks are errors.
 - The forms `gateinto:connect?...` and `gateinto:///connect?...` are not
   accepted. Browsers are expected to pass the URI to Windows as written in
-  the link, so a link written as in the example should arrive in the accepted
-  form; this is not verified with Chrome or Edge yet (step 21 of
+  the link, so a link written as in the examples should arrive in the
+  accepted form; this is not verified with Chrome or Edge yet (step 21 of
   [browser-verification.md](../browser-verification.md#launch-uri-and-agent)
   records it).
+- The registered command line is at most a few hundred characters plus the
+  URI, far below the 32767 characters `CreateProcess` accepts (a unit test
+  checks the bound with 1024-character paths).
 
 Error messages say which rule was broken and never repeat the URI.
 
@@ -65,25 +124,117 @@ Error messages say which rule was broken and never repeat the URI.
    command line parser.
 2. `gateinto open` parses the URI. An invalid URI ends here, before any
    process or file is touched.
-3. It sends `launch <profile> <auth>` to the agent of the current user over a
-   local IPC endpoint, starting the agent first if none is running (see
-   [Agent and IPC](#agent-and-ipc)).
+3. It sends `launch <profile> <auth> [url=...] [gateway=...] [portal=...]` to
+   the agent of the current user over a local IPC endpoint, starting the
+   agent first if none is running (see [Agent and IPC](#agent-and-ipc)).
 4. The agent validates the request again, counts it against the launch rate
-   limit, looks the profile up in its own configuration file, starts a browser
-   session on a new ephemeral loopback port with `basic_tofu`, creates a new
-   browser profile directory and starts Chrome or Edge with that profile, that
-   session's proxy and the gateway's configured `portal_url`.
+   limit and the session cap, and resolves it against its configuration file
+   and the gateways added from links, which it reads again for every launch
+   (see [Resolution](#resolution)).
+5. For a known gateway it starts a browser session on a new ephemeral
+   loopback port with `basic_tofu`, creates a new browser profile directory
+   and starts Chrome or Edge with that profile, that session's proxy and the
+   start page.
+6. For a new gateway it starts nothing. It keeps the validated request and
+   answers `open` with a one-time confirmation token. `open`, which runs on
+   the user's desktop, asks the user (see [Confirmation](#confirmation)) and
+   sends `approve <token>` or `deny <token>`. On `approve` the agent stores
+   the gateway and continues with step 5.
+
+## Resolution
+
+The agent knows the gateways of its configuration file and those in the
+linked-gateways file. On a name collision the configuration file wins and the
+linked entry is ignored.
+
+1. **The profile is known.** If the link has `gateway` and `portal`, they
+   must equal the known gateway's host (case-insensitive, IP addresses by
+   value), port and portal URL (exact string); otherwise the link is refused
+   and nothing changes. A `url` must have the origin of the gateway's portal;
+   a gateway without a portal refuses every `url`.
+2. **The profile is unknown and the link has no `gateway`.** Refused: the
+   portal must put the gateway in its link, or an administrator must add it
+   to the configuration file.
+3. **The profile is unknown and the link has `gateway` and `portal`.** If the
+   same host and port are already known under another name, the link is
+   refused with that name. Otherwise the user is asked; on approval the
+   gateway is stored and the session starts, on refusal nothing is stored.
+   Later links with the same name, gateway and portal start sessions without
+   asking.
+4. **Start page.** The link's `url` for this launch only, otherwise the
+   gateway's portal, otherwise `about:blank`.
+
+## Confirmation
+
+- Only `gateinto open` asks; the agent never shows anything. The agent
+  applies the launch rate limit before it hands out a confirmation, and keeps
+  at most one confirmation open: while one waits (up to 120 seconds), a
+  further link that needs one is refused with `another gateway confirmation
+  is already waiting`. The token is 128 random bits, valid once, and expires
+  with the confirmation.
+- Windows, on an interactive desktop (the window station of `open` is
+  visible): a `MessageBoxW` titled `Gateinto` with Yes and No, No as the
+  default button (`MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 |
+  MB_SETFOREGROUND | MB_TOPMOST`). The text names the profile, the gateway
+  `host:port` and the portal origin, and warns that the gateway will see
+  this device's identity and the traffic of the isolated browser, so the user
+  should allow it only if they trust the organisation that runs it.
+- Otherwise, with a terminal on standard input and standard error, the same
+  text and a prompt that accepts only `yes`.
+- Without either, `open` refuses: `no desktop or terminal to ask on; nothing
+  was stored`.
+- Any answer other than Yes, and every error, sends `deny`.
+- The dialog and the prompt are covered by unit tests of their text, style
+  and answer handling; the Windows dialog itself has not been checked by hand
+  yet.
+
+## Linked gateways
+
+- Stored in `linked-gateways.toml` next to the default configuration file
+  (`%APPDATA%\Gateinto\linked-gateways.toml`; `$XDG_CONFIG_HOME/gateinto` or
+  `~/.config/gateinto` elsewhere), also when `--config` names another file.
+  The configuration file itself is never written.
+- Written to a temporary file in the same directory and renamed over the old
+  one. At most 32 entries; at most 256 KiB are read.
+- Each entry is `[gateways.<name>]` with `host`, `port`, `portal_url` and
+  `approved_at` (Unix seconds). Any other key, an invalid host or port, or a
+  portal without an `https` origin makes the file invalid, and the agent then
+  refuses launches until it is fixed or removed.
+- `gateinto gateway list` shows every gateway with its source;
+  `gateinto gateway forget <name>` removes a linked entry (sessions that are
+  open stay open until closed). `gateinto reset --purge-device-identity
+  --purge-config` deletes the file together with the configuration file.
+
+## What a gateway added from a link gets
+
+The same settings as a `[gateways.<name>]` table with only `host`, `port` and
+`portal_url`:
+
+- server name: the host;
+- trust anchors: the Mozilla roots built into Gateinto (`webpki-roots`), never
+  a CA file;
+- `tls_mode = "hybrid_preferred"`;
+- `client_certificate = "optional"`: on Windows, a certificate in
+  `CurrentUser\My` whose public key is the device key is presented when the
+  gateway asks for one, so an approved gateway learns the device key's stable
+  SPKI; `self_signed_client_cert` is off and no certificate file is used;
+- the limits of the configuration file.
+
+A link can never set a CA file, TLS mode, client certificate, server name or
+listen address. Tests run with a test-only build feature (`test-hooks`) that
+lets the integration tests add the test CA through the environment variable
+`GATEINTO_TEST_LINKED_CA_FILE`; release builds do not have the feature, and a
+test without it checks that a linked gateway signed by the test CA is refused.
 
 ## What it can never do
 
 - Carry or set a credential, key, certificate, password, token or any other
   secret. The local proxy credential is chosen in the browser's own prompt.
-- Add or change a gateway, upstream host or port, server name, CA, TLS mode,
-  client certificate or any other trust setting. `profile` is a name looked up
-  in the agent's configuration file, never a URL or a path.
-- Choose the page the browser opens. The start page is the gateway's
-  `portal_url` from the configuration file (`https://` only), or
-  `about:blank` without one.
+- Change a gateway that is configured or was added before, or add one without
+  the user's confirmation in `gateinto open`.
+- Set a CA, TLS mode, client certificate, server name or any other trust
+  setting.
+- Open a page outside the origin of the gateway's portal.
 - Choose the browser, its arguments, the profile directory or the listen
   address.
 - Run a command, a script or anything other than `gateinto open`.
@@ -126,12 +277,17 @@ Endpoint:
   environment, never from a URI.
 
 Protocol: one request per connection. The client sends one line of at most
-1024 bytes ending in `\n`; the agent answers and closes the connection. The
-agent parses every request itself and does not trust the client.
+8192 bytes ending in `\n`; the agent answers and closes the connection. The
+agent parses every request itself and does not trust the client. A launch
+line must be in the canonical form below (fields in this order, `gateway` as
+lowercase `host:port`), and its values pass the same checks as in a URI, so
+they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch <profile> basic_tofu` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>` |
+| `launch <profile> basic_tofu [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin>` |
+| `approve <token>` | as for a started `launch` |
+| `deny <token>` | none |
 | `list` | `session: <id> <device or browser> <gateway> <listen address>` per session |
 | `close <id>` | none |
 | `stop` | none; the agent closes every session, then exits |
@@ -161,8 +317,9 @@ connections before it closes its sessions.
 ## Launch policy
 
 - Rate limit: at most 5 `launch` requests in any 60 seconds, counted when the
-  request arrives, whether it then succeeds or not. Further requests get
-  `error: too many launch requests`.
+  request arrives, whether it then succeeds, asks for a confirmation or
+  fails. Further requests get `error: too many launch requests`. `approve`
+  and `deny` are not counted; they need the token of a counted `launch`.
 - At most 4 browser sessions at a time; a further launch gets
   `error: 4 browser sessions are already open`.
 - Every accepted launch creates a new, separate session: new port, new realm,
@@ -183,7 +340,7 @@ The agent starts the browser without a shell, with these arguments:
 --no-first-run
 --no-default-browser-check
 --new-window
-<portal_url or about:blank>
+<start page: the link's url, else the portal, else about:blank>
 ```
 
 - Executable: `[browser] executable` from the configuration file, or else the

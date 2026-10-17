@@ -67,12 +67,13 @@ been submitted.
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped and its profile deleted). |
 | `gateinto stop` | Close all of the agent's sessions and stop it. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
+| `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
 | `gateinto setup` | First run as the key's user: refuse service accounts, check the config, create or reuse the device key, report the `gateinto://` handler. See [docs/install.md](docs/install.md#first-run-gateinto-setup). |
 | `gateinto status` | Show the key provider and SPKI, gateways, the device session, the agent's sessions and the handler, without changing anything. |
-| `gateinto reset --purge-device-identity` | Delete the device key after the SPKI is confirmed (and with `--purge-config` the config file). Does not revoke the device at any gateway. See [docs/install.md](docs/install.md#purge-gateinto-reset---purge-device-identity). |
+| `gateinto reset --purge-device-identity` | Delete the device key after the SPKI is confirmed (and with `--purge-config` the config file and the gateways added from links). Does not revoke the device at any gateway. See [docs/install.md](docs/install.md#purge-gateinto-reset---purge-device-identity). |
 
 All commands that read the configuration accept `--config <file>`; flags
 override the file key by key. Without `--config` they read
@@ -301,28 +302,45 @@ share only the device key.
 
 ### Launching a browser session from a link
 
-`gateinto://connect?profile=<gateway>` starts a browser session for a gateway
-that is already in the configuration file, and opens Chrome or Edge on that
-gateway's `portal_url`. The format, its limits and everything it can never do
-are specified in [docs/protocol/launch-uri.md](docs/protocol/launch-uri.md).
-In short:
+`gateinto://connect?profile=<gateway>` starts a browser session for a known
+gateway and opens Chrome or Edge on that gateway's `portal_url`. A link may
+also choose a start page on the portal's origin (`url=`), and a gateway's
+website may bring its gateway and portal (`gateway=`, `portal=`) for users who
+do not have it yet; such a gateway is added only after the user confirms it.
+The format, its limits and everything it can never do are specified in
+[docs/protocol/launch-uri.md](docs/protocol/launch-uri.md). In short:
 
 - Any website can open such a link, so the URI is strictly limited: at most
-  512 bytes, only `profile` (a gateway name), `auth` (`basic_tofu`) and `v`
-  (`1`), each once, from a small character set. It never carries a
-  credential, host, CA, URL or command; `profile` is only looked up by name.
+  8192 bytes, only `profile` (a gateway name), `auth` (`basic_tofu`), `v`
+  (`1`), `url`, `gateway` and `portal`, each once, percent-encoded. It never
+  carries a credential, CA, TLS setting, certificate or command.
+- `url` must have exactly the origin (https, host, port) of the gateway's
+  portal and applies to that launch only; a gateway without a portal refuses
+  it.
+- A link whose `gateway` or `portal` differs from a known gateway of the same
+  name is refused; known gateways are never changed. For an unknown name with
+  `gateway` and `portal`, `gateinto open` asks the user first: a Windows
+  dialog naming the profile, gateway and portal origin, with No as the
+  default (a `yes` prompt on a terminal elsewhere; no desktop or terminal
+  means refusal). On approval the gateway is stored in
+  `%APPDATA%\Gateinto\linked-gateways.toml` with only its host, port and
+  portal, and later links to it do not ask again. It uses the default TLS
+  settings: public roots, `hybrid_preferred`, `client_certificate =
+  "optional"`. The configuration file is never written, and its gateways win
+  over linked ones of the same name.
 - The registered handler runs `gateinto open -- "<uri>"`, which validates the
   URI and passes the request to the user's agent (`gateinto agent`) over a
   local named pipe that only the user can open (a Unix socket on Linux, for
   development), starting the
   agent with the same `--config` if none runs. The agent validates the request
-  again.
-- The agent accepts at most 5 launches a minute and 4 browser sessions at a
-  time. Each launch is a new session with its own port, realm and
-  `basic_tofu` state, and a new browser process with its own profile
-  directory under `%LOCALAPPDATA%\Gateinto\profiles`, started with
-  `--user-data-dir`, `--proxy-server=http://127.0.0.1:<port>` and the
-  gateway's `portal_url` (or `about:blank`). The URI cannot choose the page.
+  again; it never shows a dialog itself.
+- The agent accepts at most 5 launches a minute (asking included), one open
+  confirmation and 4 browser sessions at a time. Each launch is a new session
+  with its own port, realm and `basic_tofu` state, and a new browser process
+  with its own profile directory under `%LOCALAPPDATA%\Gateinto\profiles`,
+  started with `--user-data-dir`, `--proxy-server=http://127.0.0.1:<port>` and
+  the start page: the link's `url`, else the gateway's `portal_url`, else
+  `about:blank`.
 - When the browser exits, the session is closed and its profile directory is
   deleted. `gateinto session close <id>` and `gateinto stop` do the same
   explicitly; profiles left by a crashed agent are deleted when the next one
@@ -476,7 +494,8 @@ Rules:
   combined, wherever each comes from.
 - `portal_url` must be an `https://` URL with a host and no user information,
   of at most 2048 printable ASCII characters without spaces, quotes or
-  backslashes. It is only read from the file, never from a launch URI.
+  backslashes. A launch URI cannot change it; a gateway added from a link
+  brings its own portal, checked by the same rules.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
@@ -636,11 +655,15 @@ accept only the first credential they receive, which keeps other programs out
 only if the browser is first. Do not run it on shared hosts you do not trust.
 
 Any website can open a `gateinto://` link. With the handler registered, such a
-link can at most make the agent start a browser session for a gateway already
-configured on the machine and open that gateway's own `portal_url`, at most
-5 times a minute and 4 sessions at a time; it cannot add a gateway, a trust
-setting, a credential or a start page, or run anything else. See
-[docs/security-model.md](docs/security-model.md#launch-uris-and-the-agent).
+link can at most make the agent start a browser session for a known gateway
+on a page of that gateway's portal origin, at most 5 times a minute and 4
+sessions at a time, or ask the user, in a dialog that defaults to No, to add
+the gateway it names. It cannot change a known gateway, set a trust setting or
+a credential, or run anything else. A gateway the user approves sees the
+isolated browser's connections and, if it asks for one, the device
+certificate; this deliberately relaxes the original rule that a link never
+introduces a proxy host. See
+[docs/security-model.md](docs/security-model.md#gateways-added-from-links).
 
 ## Verification status
 

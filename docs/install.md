@@ -67,7 +67,8 @@ gateinto setup --config D:\gateinto.toml --backend software
    create a key for the wrong account. When run elevated, it notes on stderr that the key still
    belongs to the current Windows user, not to the machine;
 2. reads the config file, `--config` or the default `%APPDATA%\Gateinto\gateinto.toml`, and
-   prints its path and each gateway as `gateway: <name>: <host>:<port>`. A config that does not
+   prints its path and each gateway as `gateway: <name>: <host>:<port> (config)`, then the
+   gateways added from `gateinto://` links as `... (linked)`. A config that does not
    parse stops `setup` before any key is touched;
 3. does what `gateinto key init` does. It reuses an existing key named `[device_key] name`
    (default `gateinto-device-v1`) in either provider, or creates one only when none exists. It
@@ -81,7 +82,8 @@ Output (example):
 
 ```text
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443
+gateway: office: proxy.example.com:443 (config)
+linked-gateways: none (no file at C:\Users\me\AppData\Roaming\Gateinto\linked-gateways.toml)
 key-name: gateinto-device-v1
 device-key: created
 provider: Microsoft Platform Crypto Provider
@@ -113,6 +115,13 @@ Linux for development). The installed handler and the autostart entry pass no `-
 this is where an installed Gateinto finds its gateways. The installer does not create or remove
 this file.
 
+Gateways that the user approved from a `gateinto://` link are kept separately in
+`linked-gateways.toml` in the same folder (`%APPDATA%\Gateinto\linked-gateways.toml`), also when
+`--config` names another file. Gateinto writes only that file, never the config file; on a name
+collision the config file wins. `gateinto gateway list` shows every gateway with its source and
+`gateinto gateway forget <name>` removes one added from a link. See
+[protocol/launch-uri.md](protocol/launch-uri.md#linked-gateways).
+
 ## Status: `gateinto status`
 
 ```powershell
@@ -128,7 +137,9 @@ device-key: present
 provider: Microsoft Platform Crypto Provider
 spki-sha256: 3f0c…
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443
+gateway: office: proxy.example.com:443 (config)
+linked-gateways: C:\Users\me\AppData\Roaming\Gateinto\linked-gateways.toml
+gateway: corp: proxy.corp.example:443 (linked)
 device-session: gateway office, listen 127.0.0.1:18736
 agent: running
 session: 2 browser office 127.0.0.1:50123
@@ -136,8 +147,9 @@ uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe
 ```
 
 `device-key` is `present`, `absent`, `unavailable` (not Windows) or `error: …`. Gateways show
-only name, host and port; CA files, certificate files, portal URLs and credentials are not
-printed. Sessions come from the running agent, the same lines as `gateinto session list`.
+only name, host, port and source (`config` or `linked`); CA files, certificate files, portal
+URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
+its path or query. Sessions come from the running agent, the same lines as `gateinto session list`.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.
 
 ## Uninstall
@@ -159,6 +171,7 @@ msiexec /x gateinto.msi /qn
 | Gateinto browser profiles in `%LOCALAPPDATA%\Gateinto\profiles` | deleted |
 | Device key | **kept** |
 | Config file(s), including `%APPDATA%\Gateinto\gateinto.toml` | **kept** |
+| Gateways added from links, `%APPDATA%\Gateinto\linked-gateways.toml` | **kept** |
 | The user's own Chrome and Edge profiles, other programs' keys | never touched |
 
 Before files are removed, the uninstaller runs `gateinto.exe stop --remove-stale-profiles` as
@@ -229,10 +242,13 @@ Rules:
   confirmation again and deletes that handle with `NCryptDeleteKey`. It never deletes other
   keys, never clears a key storage provider and never clears or resets the TPM. If keys with the
   name exist in both providers, it refuses and deletes neither.
-- `--purge-config` also deletes the config file: the one named with `--config`, or
-  `%APPDATA%\Gateinto\gateinto.toml`. It must be a regular file that parses as a Gateinto config.
-  Only that file is deleted, never a directory.
-- When no device key exists, `--purge-config` still deletes the config file. There is no SPKI to
+- `--purge-config` also deletes the config file, the one named with `--config` or
+  `%APPDATA%\Gateinto\gateinto.toml`, and the gateways added from links,
+  `%APPDATA%\Gateinto\linked-gateways.toml`. The config file must be a regular file that parses
+  as a Gateinto config; the linked-gateways file must be a regular file. Both are named in the
+  warning and covered by the same confirmation. Only these files are deleted, never a directory.
+  If neither exists, `reset` refuses and deletes nothing.
+- When no device key exists, `--purge-config` still deletes these files. There is no SPKI to
   confirm then, so `reset` prints that no key was deleted and asks you to type `purge`, or
   takes `--yes` instead of the prompt. `--yes` only works together with `--purge-config` and
   never replaces the SPKI confirmation of an existing key.

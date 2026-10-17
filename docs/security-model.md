@@ -69,12 +69,14 @@ item to its code, its tests and where they run.
   `gateinto proxy` and `gateinto session browser` run one session each and
   close it on Ctrl+C; the agent closes a browser session when its browser
   exits or on request, and all sessions when it stops.
-- **Gateway profiles are local.** An upstream (host, port, server name, CA
-  file, TLS mode, client certificate settings) only comes from the local
-  configuration file or the command line. Selecting a gateway by name is a
-  lookup in the loaded file; a name cannot add a host, a CA or a trust setting.
-  Browser sessions name a configured gateway with `--gateway` or with the
-  `profile` of a `gateinto://` launch URI, which is only a name.
+- **Gateway profiles are local or approved.** An upstream (host, port, server
+  name, CA file, TLS mode, client certificate settings) comes from the local
+  configuration file or the command line, or, host, port and portal only,
+  from a `gateinto://` link that the user explicitly approved (see
+  [Launch URIs and the agent](#launch-uris-and-the-agent)). Selecting a
+  gateway by name is a lookup in the loaded file and the approved entries; a
+  name cannot add a CA or a trust setting, and nothing can change a gateway
+  that is already known.
 
 ### Launch URIs and the agent
 
@@ -83,29 +85,48 @@ handler registered Windows passes it to `gateinto open` without further
 checks. Gateinto therefore treats the URI as attacker-controlled. The exact
 format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 
-What a launch URI can do, at most: make the user's agent start a new browser
-session for a gateway that is already configured, which opens Chrome or Edge
-with a new, empty profile on that gateway's configured `portal_url`.
+What a launch URI can do, at most:
+
+- make the user's agent start a new browser session for a known gateway,
+  which opens Chrome or Edge with a new, empty profile on that gateway's
+  portal or on another page of the same origin;
+- for a gateway the device does not know, after the user approves it in a
+  dialog that names it: store its host, port and portal, then do the above.
 
 How that is bounded:
 
 - **Strict parsing, twice.** `gateinto open` accepts only
-  `gateinto://connect?` with the fields `profile`, `auth` and `v`, each at
-  most once, values from `A-Z a-z 0-9 _ -` (percent-encoding only of those),
-  at most 512 bytes, no fragment, user information, port or path. The agent
-  parses the forwarded request again with the same rules and looks the
-  profile up in its own configuration file.
-- **No trust or secret in the URI.** There is no field for a host, port,
-  URL, CA, certificate, TLS mode, credential or command. The start page comes
-  from `portal_url` in the configuration file, which must be `https://`.
+  `gateinto://connect?` with the fields `profile`, `auth`, `v`, `url`,
+  `gateway` and `portal`, each at most once, raw characters only from
+  `A-Z a-z 0-9 - . _ ~` and percent-escapes, at most 8192 bytes, no fragment,
+  user information, port or path. `profile`, `auth` and `v` decode only to
+  `A-Z a-z 0-9 _ -`; `url` and `portal` must be `https://` URLs with a DNS or
+  IP host and the same origin; `gateway` must be a plain `host[:port]`. The
+  agent parses the forwarded request again with the same rules.
+- **No trust setting or secret in the URI.** There is no field for a CA,
+  certificate, TLS mode, server name, listen address, credential or command.
+  A gateway added from a link always uses the defaults: public (Mozilla)
+  roots and the host as server name, so its certificate must be publicly
+  trusted for that host name.
+- **Start page bound to the portal.** `url` is accepted only on exactly the
+  origin (scheme, host, port; 443 when omitted) of the gateway's portal, and
+  is refused for a gateway without a portal. It applies to that launch only.
+- **Known gateways cannot be changed.** A link that names a known gateway
+  with a different host, port or portal is refused; the configuration file
+  wins over approved entries and is never written; an address that is
+  already known under another name is refused with that name.
+- **New gateways need the user.** See
+  [Gateways added from links](#gateways-added-from-links).
 - **No command injection.** The handler command quotes the executable and
   passes the URI after `--`, so the URI is always one positional argument;
   a URI that would split into more arguments is refused by the command line
   parser. Neither `open` nor the agent uses a shell: the browser is started
   with an argument list, and its arguments come from the agent, not the URI.
 - **Frequency and volume.** The agent accepts at most 5 launch requests per
-  60 seconds (counted whether they succeed or not) and at most 4 open
-  browser sessions. A page that opens many links gets errors, not windows.
+  60 seconds (counted whether they succeed, ask for a confirmation or fail)
+  and at most 4 open browser sessions, and keeps at most one confirmation
+  open at a time. A page that opens many links gets errors, not windows or
+  dialogs.
 - **Per-user endpoint.** The agent listens on a named pipe named after the
   user's SID, created as the first instance, rejecting remote clients, with a
   DACL that grants access only to the user and SYSTEM. Clients refuse a pipe
@@ -127,6 +148,65 @@ How that is bounded:
   `HKCU\Software\Classes\gateinto`, with quoted absolute paths that cannot
   contain quotes or `%`, and neither registration nor removal changes a
   handler that does not run Gateinto.
+
+### Gateways added from links
+
+The original plan required that a URI never introduce a proxy host. This is
+deliberately relaxed, with the user's agreement, so that a gateway's website
+can bring its own gateway and portal to a user who has no local profile. It
+is not silent: nothing is stored or connected before the user approves.
+
+How it is bounded:
+
+- **Explicit first-time confirmation.** Only `gateinto open`, running on the
+  user's desktop, asks. On Windows it shows a top-most warning dialog with No
+  as the default button that names the profile, the gateway `host:port` and
+  the portal origin; elsewhere it needs `yes` typed on a terminal; without a
+  desktop or terminal it refuses. The agent never prompts, applies the rate
+  limit before a confirmation is handed out, keeps one open at a time, and
+  accepts the answer only with the one-time 128-bit token of that
+  confirmation within 120 seconds.
+- **Stored once, never overwritten.** An approved gateway is stored in a
+  separate file (`linked-gateways.toml`, at most 32 entries, written
+  atomically) with only host, port, portal and approval time. Later links
+  with the same values start sessions without asking; links with other
+  values for that name are refused. `gateinto gateway forget` removes an
+  entry; `gateinto gateway list` and `gateinto status` show the source of
+  every gateway.
+- **Defaults only.** Public roots, the host as server name, the default TLS
+  mode and client certificate mode. A link has no way to supply roots; the
+  integration tests inject their test CA only through a build feature that
+  release builds do not enable.
+
+What remains:
+
+- **Phishing.** A site can claim to be any organisation and ask the user to
+  approve its gateway. The dialog shows the real gateway host and portal
+  origin, but a user who approves a hostile gateway sends that isolated
+  browser's traffic through it. The browser's TLS still runs end to end to
+  each site, so the gateway cannot read HTTPS content, but it learns every
+  host the browser connects to, can block, delay or misroute connections, and
+  chooses the start page, where it can ask for credentials like any phishing
+  site. The browser profile is new and empty, so the user's normal cookies
+  and saved passwords are not exposed.
+- **Device identity.** With the default `client_certificate = "optional"`, a
+  device certificate in `CurrentUser\My` whose key is the device key is
+  presented to any gateway that requests one, so an approved gateway learns
+  the stable SPKI of the device key and can recognise the device across
+  sessions and correlate it with other gateways that see it. Self-signed
+  session certificates are off for linked gateways, so the key does not sign
+  anything else for them.
+- **Approval is permanent until forgotten.** An approved gateway stays
+  usable by later links of any site that knows its name, gateway and portal.
+
+Mitigations: the confirmation is opt-in per gateway and defaults to No; the
+link cannot weaken TLS or change a known gateway; every session is isolated
+in a fresh profile; `gateinto gateway list`/`status` make linked gateways
+visible and `gateinto gateway forget` removes them. There is no setting yet
+to turn gateways from links off; without the `gateinto://` handler no link
+reaches Gateinto at all. Manual verification of the
+dialog on Windows is not done yet; it is covered by unit tests of its text,
+style and answer handling and by integration tests of the agent's side.
 
 ### Local proxy authentication (`basic_tofu`)
 

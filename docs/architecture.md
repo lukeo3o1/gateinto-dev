@@ -125,21 +125,27 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
 ## Agent, launch URIs and browser sessions
 
 ```text
- browser click: gateinto://connect?profile=office
+ browser click: gateinto://connect?profile=office[&url=..][&gateway=..&portal=..]
         |
  Windows URL handler (HKCU\Software\Classes\gateinto)
         |  "gateinto.exe" open --config "<file>" -- "%1"
         v
  gateinto open ---- uri::LaunchRequest (strict parse; invalid URI ends here)
-        |  "launch office basic_tofu\n"
+        |  "launch office basic_tofu [url=..] [gateway=..] [portal=..]\n"
         |  named pipe \\.\pipe\gateinto-agent-<SID> (Unix socket in tests)
         |  (no agent: spawn detached `gateinto agent --config <file>`, retry)
         v
  gateinto agent ---- agent::Agent
-        |  parse again, rate limit, session cap, profile lookup in its config
+        |  parse again, rate limit, session cap
+        |  link::resolve against the config file + linked-gateways.toml
+        |    known gateway ----------------------------------------------.
+        |    new gateway: answer "confirm: <token>", keep the request     |
+        |       <- gateinto open asks the user (MessageBoxW / terminal)   |
+        |       <- "approve <token>": LinkedStore::add, then -------------|
+        |       <- "deny <token>": forget the request                     v
         |-- SessionManager::start(Browser, 127.0.0.1:0, BasicTofu)
         |-- browser::ProfileDir::create(<profiles>/<id>-<random>, marker)
-        |-- chrome.exe --user-data-dir=... --proxy-server=http://127.0.0.1:<port> ... <portal_url>
+        |-- chrome.exe --user-data-dir=... --proxy-server=http://127.0.0.1:<port> ... <start page>
         '-- watch task: browser exit or close request
                -> SessionManager::close, delete marked profile directory
 ```
@@ -148,9 +154,22 @@ The full protocol, limits and guarantees are in
 [protocol/launch-uri.md](protocol/launch-uri.md).
 
 - `uri::LaunchRequest` parses `gateinto://connect?profile=...&auth=...&v=1`
-  into a `GatewayName` and a `LaunchAuth`. `LaunchRequest::new` holds the
-  value rules and is also used by the agent to parse IPC requests, so the
-  agent applies the same rules again instead of trusting `open`.
+  with the optional `url`, `gateway` and `portal` into a `GatewayName`, a
+  `LaunchAuth`, `PortalUrl`s and a `link::GatewayAddress`.
+  `LaunchRequest::new` and `LaunchRequest::with_link` hold the value rules
+  and are also used by the agent to parse IPC requests, so the agent applies
+  the same rules again instead of trusting `open`. Its `Display` prints the
+  canonical URI.
+- `link` holds the strict `GatewayAddress` (`host[:port]`) and `Origin`
+  parsers, `resolve`, a pure function from a request, the known gateways and
+  a `Confirm` decision (approve, deny or defer) to a launch, a confirmation
+  to ask for, or an error, and `LinkedStore`, the `linked-gateways.toml` file
+  with atomic writes. `ConfigFile::with_linked` turns linked entries into
+  minimal `[gateways.<name>]` tables, so they get exactly the defaults of a
+  configured gateway with only `host`, `port` and `portal_url`.
+- `prompt` asks the user in `gateinto open`: `MessageBoxW` on an interactive
+  Windows desktop, otherwise a `yes` prompt on a terminal, otherwise it
+  refuses.
 - `ipc` holds the request and response types (`Request`, `Response`), their
   one-line text encoding with size limits, the per-user `Endpoint` (a named
   pipe named after the user's SID on Windows with a DACL for the user and
@@ -165,10 +184,13 @@ The full protocol, limits and guarantees are in
   request per connection and stops on `stop` or when its shutdown future
   (Ctrl+C) completes, closing every session before it returns. Launches are
   serialized; each is counted by a sliding-window limiter (5 per 60 s) and
-  refused beyond 4 open browser sessions. The `agent::Profiles` trait turns a
-  gateway name into the proxy configuration and `portal_url` of a browser
-  session; `main.rs` implements it with the loaded configuration file, the
-  tests with in-process fixtures. The agent forces the session to
+  refused beyond 4 open browser sessions; a launch that needs a confirmation
+  is counted too, and the agent keeps at most one pending confirmation
+  (token, request, expiry after 120 s). The `agent::Profiles` trait lists the
+  known gateways, stores an approved one and turns a gateway name into the
+  proxy configuration of a browser session; `main.rs` implements it with the
+  loaded configuration file and `LinkedStore` (read again for every launch),
+  the tests with in-process fixtures. The agent forces the session to
   `127.0.0.1:0` and `BasicTofu` whatever the profile says.
 - A browser's watch task waits for the browser process to exit or for a
   close request (`close <id>`, `stop`, Ctrl+C), kills the browser in the
@@ -192,9 +214,11 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
-| `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
-| `src/uri.rs` | Strict parser for `gateinto://` launch URIs. |
+| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
+| `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
+| `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, the confirmation text, and the linked-gateways file. |
+| `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
