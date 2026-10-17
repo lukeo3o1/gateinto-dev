@@ -255,6 +255,27 @@ async fn reports_the_self_signed_client_certificate_and_the_device_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn required_expired_self_signed_certificate_fails_the_check_without_connecting() {
+    let key = KeyPair::generate().unwrap();
+    let setup = Setup::with_groups(HYBRID_GROUPS, Behavior::Tunnel).await;
+    let mut options = setup.options(TlsMode::HybridPreferred);
+    options.client_certificate = Some(ClientCertificate::SelfSigned {
+        certificates: expired_self_signed_certificates(&key),
+        required: true,
+    });
+
+    let error = check_upstream(options).await.unwrap_err().to_string();
+
+    assert!(
+        error.starts_with("upstream check failed: ")
+            && error.contains("the self-signed client certificate expired at ")
+            && error.contains("renewing it failed: "),
+        "{error}"
+    );
+    assert_eq!(setup.upstream.accepted(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reports_no_self_signed_details_for_other_certificates() {
     let setup = Setup::with_groups(HYBRID_GROUPS, Behavior::Tunnel).await;
 

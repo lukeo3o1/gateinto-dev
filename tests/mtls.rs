@@ -284,6 +284,7 @@ async fn required_expired_self_signed_certificate_fails_locally_without_connecti
 
     assert_bad_gateway(start_agent(config).await).await;
 
+    assert_eq!(upstream.accepted(), 0);
     assert!(upstream.negotiated_groups().is_empty());
     assert!(upstream.client_certificates().is_empty());
     assert!(upstream.requests().is_empty());
@@ -311,6 +312,7 @@ async fn optional_expired_self_signed_certificate_is_not_sent() {
     .await;
 
     assert_eq!(echoed, b"self-signed");
+    assert_eq!(upstream.accepted(), 1);
     assert!(upstream.client_certificates().is_empty());
     assert_eq!(upstream.requests().len(), 1);
 }
