@@ -1,10 +1,12 @@
+pub mod client_cert;
 pub mod cng_status;
 pub mod device_key;
 pub mod encoding;
 #[cfg(windows)]
 pub mod windows_cng;
+pub mod x509;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct UnsupportedPlatform;
 
 impl std::fmt::Display for UnsupportedPlatform {
@@ -60,6 +62,22 @@ impl device_key::KeyStore for SystemStore {
     }
 
     fn sign_digest(&self, _: &Self::Key, _: &[u8]) -> Result<Vec<u8>, device_key::StoreError> {
+        match *self {}
+    }
+}
+
+#[cfg(not(windows))]
+impl client_cert::ClientIdentityStore for SystemStore {
+    fn signing_key(
+        &self,
+        _: Self::Key,
+    ) -> Result<std::sync::Arc<dyn rustls::sign::SigningKey>, device_key::StoreError> {
+        match *self {}
+    }
+
+    fn client_certificates(
+        &self,
+    ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, device_key::StoreError> {
         match *self {}
     }
 }

@@ -4,8 +4,10 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::client::ResolvesClientCert;
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::sign::CertifiedKey;
+use rustls::{ClientConfig, RootCertStore, SignatureScheme};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -61,7 +63,21 @@ pub struct Config {
     pub listen: SocketAddr,
     pub allow_non_loopback: bool,
     pub upstream: Upstream,
+    pub client_certificate: Option<Arc<CertifiedKey>>,
     pub limits: Limits,
+}
+
+#[derive(Debug)]
+struct FixedClientCertificate(Arc<CertifiedKey>);
+
+impl ResolvesClientCert for FixedClientCertificate {
+    fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
+        Some(self.0.clone())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -109,8 +125,13 @@ impl Proxy {
         let tls = ClientConfig::builder_with_provider(Arc::new(tls::crypto_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(Error::Tls)?
-            .with_root_certificates(config.upstream.roots)
-            .with_no_client_auth();
+            .with_root_certificates(config.upstream.roots);
+        let tls = match config.client_certificate {
+            Some(certified_key) => {
+                tls.with_client_cert_resolver(Arc::new(FixedClientCertificate(certified_key)))
+            }
+            None => tls.with_no_client_auth(),
+        };
         let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
         let tunnels = Arc::new(Semaphore::new(
             config.limits.max_tunnels.min(Semaphore::MAX_PERMITS),

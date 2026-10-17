@@ -5,12 +5,15 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gateinto::http::DEFAULT_MAX_HEADER_BYTES;
+use gateinto::identity::client_cert::{
+    self, ClientCertificateMode, ClientCertificateOptions, ClientIdentityStore,
+};
 use gateinto::identity::device_key::{
     self, Backend, DEFAULT_KEY_NAME, InitOptions, KeyName, KeyStore, Provenance,
 };
 use gateinto::proxy::{Config, DEFAULT_LISTEN, Limits, Proxy, Upstream};
 use gateinto::tls;
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{ServerName, UnixTime};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -61,12 +64,33 @@ struct KeyInfoArgs {
     /// Write the DER SubjectPublicKeyInfo of the public key to this file
     #[arg(long)]
     spki_out: Option<PathBuf>,
+
+    /// Check this PEM client certificate against the key instead of searching CurrentUser\My
+    #[arg(long)]
+    client_cert_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum BackendArg {
     Tpm,
     Software,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClientCertificateArg {
+    Optional,
+    Required,
+    Off,
+}
+
+impl From<ClientCertificateArg> for ClientCertificateMode {
+    fn from(mode: ClientCertificateArg) -> Self {
+        match mode {
+            ClientCertificateArg::Optional => Self::Optional,
+            ClientCertificateArg::Required => Self::Required,
+            ClientCertificateArg::Off => Self::Off,
+        }
+    }
 }
 
 impl From<BackendArg> for Backend {
@@ -103,6 +127,18 @@ struct ProxyArgs {
     /// PEM file with the CA certificates trusted for the upstream [default: Mozilla roots]
     #[arg(long)]
     ca_file: Option<PathBuf>,
+
+    /// Authenticate to the upstream with a client certificate bound to the device key
+    #[arg(long, value_enum, default_value_t = ClientCertificateArg::Optional)]
+    client_certificate: ClientCertificateArg,
+
+    /// PEM file with the client certificate and optional intermediates [default: search CurrentUser\My]
+    #[arg(long)]
+    client_cert_file: Option<PathBuf>,
+
+    /// Name of the persisted CNG device key that signs for the client certificate
+    #[arg(long, default_value = DEFAULT_KEY_NAME)]
+    key_name: KeyName,
 
     /// Maximum number of concurrent connections
     #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
@@ -165,7 +201,10 @@ fn key_init<S: KeyStore>(store: &S, args: KeyInitArgs) -> Result<(), Box<dyn std
     Ok(())
 }
 
-fn key_info<S: KeyStore>(store: &S, args: KeyInfoArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn key_info<S: ClientIdentityStore>(
+    store: &S,
+    args: KeyInfoArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (key, duplicate) = device_key::info(store, &args.name)?;
     if let Some(duplicate) = duplicate {
         eprintln!("{}", duplicate.info_warning());
@@ -175,6 +214,15 @@ fn key_info<S: KeyStore>(store: &S, args: KeyInfoArgs) -> Result<(), Box<dyn std
         std::fs::write(&path, key.spki_der())
             .map_err(|error| format!("writing {}: {error}", path.display()))?;
     }
+    print!(
+        "{}",
+        client_cert::describe_binding(
+            store,
+            &key.spki_der(),
+            args.client_cert_file.as_deref(),
+            UnixTime::now()
+        )?
+    );
     Ok(())
 }
 
@@ -196,6 +244,14 @@ async fn proxy(args: ProxyArgs) -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => tls::load_pem_roots(path)?,
         None => tls::webpki_roots(),
     };
+    let options = ClientCertificateOptions {
+        mode: args.client_certificate.into(),
+        key_name: args.key_name,
+        file: args.client_cert_file,
+    };
+    let store = gateinto::identity::system_store();
+    let client_auth =
+        client_cert::configure(&options, store.as_ref().map_err(|&e| e), UnixTime::now())?;
     let config = Config {
         listen: args.listen,
         allow_non_loopback: args.unsafe_allow_non_loopback_listen,
@@ -205,6 +261,7 @@ async fn proxy(args: ProxyArgs) -> Result<(), Box<dyn std::error::Error>> {
             server_name,
             roots,
         },
+        client_certificate: client_auth.into_certified_key(),
         limits: Limits {
             max_header_bytes: args.max_header_bytes as usize,
             max_tunnels: args.max_tunnels as usize,
