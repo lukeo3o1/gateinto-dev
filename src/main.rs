@@ -55,7 +55,7 @@ enum Command {
     /// first if none is running
     Open(OpenArgs),
     /// Stop the running agent after closing all of its sessions
-    Stop,
+    Stop(StopArgs),
     /// Register or remove the per-user gateinto:// URI handler (Windows, development use)
     #[command(subcommand)]
     Uri(UriCommand),
@@ -67,6 +67,14 @@ enum Command {
     Status(StatusArgs),
     /// Permanently delete Gateinto data that an uninstall keeps
     Reset(ResetArgs),
+}
+
+#[derive(Args)]
+struct StopArgs {
+    /// Succeed when no agent is running, then delete the Gateinto browser profiles left behind
+    /// (run by the uninstaller)
+    #[arg(long)]
+    remove_stale_profiles: bool,
 }
 
 #[derive(Args)]
@@ -398,7 +406,7 @@ async fn main() -> ExitCode {
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
         Command::Agent(args) => agent(args).await,
         Command::Open(args) => open(args).await,
-        Command::Stop => agent_request(Request::Stop).await,
+        Command::Stop(args) => stop(args).await,
         Command::Uri(command) => uri(command),
         Command::Setup(args) => setup(args),
         Command::Status(args) => status(args).await,
@@ -822,6 +830,22 @@ fn print_response(response: Response) -> Result {
 async fn agent_request(request: Request) -> Result {
     let endpoint = Endpoint::for_current_user()?;
     print_response(ipc::send(&endpoint, &request).await?)
+}
+
+async fn stop(args: StopArgs) -> Result {
+    if !args.remove_stale_profiles {
+        return agent_request(Request::Stop).await;
+    }
+    let endpoint = Endpoint::for_current_user()?;
+    match ipc::send(&endpoint, &Request::Stop).await {
+        Ok(response) => print_response(response)?,
+        Err(RequestError::NotRunning | RequestError::Closed) => println!("no agent is running"),
+        Err(error) => return Err(error.into()),
+    }
+    let root = browser::profiles_root()
+        .ok_or("cannot find the per-user application data directory for browser profiles")?;
+    println!("removed {} stale browser profiles", browser::sweep(&root));
+    Ok(())
 }
 
 fn uri(command: UriCommand) -> Result {
