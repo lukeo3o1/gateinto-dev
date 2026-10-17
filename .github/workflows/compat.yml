@@ -10,13 +10,15 @@ on:
       - src/**
       - Cargo.*
       - packaging/**
+      - .github/scripts/**
+      - .github/workflows/compat.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025]
+        os: ${{ fromJSON(github.event_name == 'push' && '["windows-2022"]' || '["windows-2022", "windows-2025"]') }}
     defaults:
       run:
         shell: pwsh
@@ -52,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025]
+        os: ${{ fromJSON(github.event_name == 'push' && '["windows-2022"]' || '["windows-2022", "windows-2025"]') }}
     defaults:
       run:
         shell: pwsh
@@ -82,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-2025]
+        os: ${{ fromJSON(github.event_name == 'push' && '["windows-2022"]' || '["windows-2022", "windows-2025"]') }}
     defaults:
       run:
         shell: pwsh
