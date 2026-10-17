@@ -14,8 +14,11 @@ use gateinto::identity::client_cert::{
     self, CertificateSource, ClientCertificate, ClientCertificateMode, ClientCertificateOptions,
     ClientIdentityStore,
 };
-use gateinto::identity::device_key::{self, Backend, InitOptions, KeyName, KeyStore, Provenance};
+use gateinto::identity::device_key::{
+    self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
+};
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
+use gateinto::lifecycle;
 use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
 use gateinto::registration;
 use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
@@ -56,6 +59,46 @@ enum Command {
     /// Register or remove the per-user gateinto:// URI handler (Windows, development use)
     #[command(subcommand)]
     Uri(UriCommand),
+    /// Prepare Gateinto for the current Windows user: check the config, create or reuse the
+    /// device key and report the gateinto:// handler
+    Setup(KeyInitArgs),
+    /// Show the device key, gateways, agent sessions and gateinto:// handler without changing
+    /// anything
+    Status(StatusArgs),
+    /// Permanently delete Gateinto data that an uninstall keeps
+    Reset(ResetArgs),
+}
+
+#[derive(Args)]
+struct StatusArgs {
+    #[command(flatten)]
+    config: ConfigArg,
+
+    /// Name of the persisted CNG key [default: gateinto-device-v1]
+    #[arg(long)]
+    name: Option<KeyName>,
+}
+
+#[derive(Args)]
+struct ResetArgs {
+    #[command(flatten)]
+    config: ConfigArg,
+
+    /// Name of the persisted CNG key [default: gateinto-device-v1]
+    #[arg(long)]
+    name: Option<KeyName>,
+
+    /// Delete the device key; the device identity becomes invalid and is not revoked remotely
+    #[arg(long, required = true)]
+    purge_device_identity: bool,
+
+    /// Also delete the configuration file named with --config
+    #[arg(long)]
+    purge_config: bool,
+
+    /// Confirm without a prompt: the first 16 or more hex digits of the key's spki-sha256
+    #[arg(long, value_name = "HEX")]
+    confirm_spki: Option<SpkiConfirmation>,
 }
 
 #[derive(Subcommand)]
@@ -338,6 +381,9 @@ async fn main() -> ExitCode {
         Command::Open(args) => open(args).await,
         Command::Stop => agent_request(Request::Stop).await,
         Command::Uri(command) => uri(command),
+        Command::Setup(args) => setup(args),
+        Command::Status(args) => status(args).await,
+        Command::Reset(args) => reset(args).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -783,6 +829,181 @@ fn uri(command: UriCommand) -> Result {
             }
         }
     }
+    Ok(())
+}
+
+fn print_config(args: &ConfigArg, file: &ConfigFile) {
+    match &args.config {
+        Some(path) => {
+            println!("config: {}", path.display());
+            for line in lifecycle::gateway_lines(file) {
+                println!("gateway: {line}");
+            }
+        }
+        None => println!("config: none (pass --config to check a configuration file)"),
+    }
+}
+
+fn print_handler() {
+    println!(
+        "uri-handler: {}",
+        lifecycle::handler_state(registration::registered_command(registration::SCHEME))
+    );
+}
+
+fn setup(args: KeyInitArgs) -> Result {
+    if let Some(note) = lifecycle::check_current_account()? {
+        eprintln!("{note}");
+    }
+    let file = args.config.load()?;
+    let settings = args.settings()?;
+    print_config(&args.config, &file);
+    let store = gateinto::identity::system_store()?;
+    let options = InitOptions {
+        backend: settings.preferred,
+        allow_software_fallback: settings.software_fallback_on_first_create,
+    };
+    let (key, provenance) = device_key::init(&store, &settings.name, options)?;
+    let state = match provenance {
+        Provenance::Reused => "reused",
+        Provenance::Created => "created",
+        Provenance::CreatedAfterFallback(problem) => {
+            eprintln!("warning: {problem}; created a software key instead");
+            "created"
+        }
+    };
+    println!("key-name: {}", settings.name);
+    println!("device-key: {state}");
+    println!("provider: {}", key.backend.provider());
+    print!("{}", key.summary());
+    print_handler();
+    Ok(())
+}
+
+async fn status(args: StatusArgs) -> Result {
+    let file = args.config.load()?;
+    let name = device_key_settings(&args.config, args.name.clone())?.name;
+    println!("key-name: {name}");
+    match gateinto::identity::system_store() {
+        Err(error) => println!("device-key: unavailable: {error}"),
+        Ok(store) => match device_key::info(&store, &name) {
+            Ok((key, duplicate)) => {
+                if let Some(duplicate) = duplicate {
+                    eprintln!("{}", duplicate.info_warning());
+                }
+                println!("device-key: present");
+                println!("provider: {}", key.backend.provider());
+                println!("spki-sha256: {}", key.fingerprint());
+            }
+            Err(KeyError::NotFound(_)) => {
+                println!("device-key: absent (run `gateinto setup` to create it)");
+            }
+            Err(error) => println!("device-key: error: {error}"),
+        },
+    }
+    print_config(&args.config, &file);
+    println!("device-session: {}", lifecycle::device_session_line(&file));
+    let agent = match Endpoint::for_current_user() {
+        Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
+        Err(error) => Err(RequestError::Io(error)),
+    };
+    match agent {
+        Ok(Response::Ok(sessions)) => {
+            println!("agent: running");
+            for session in sessions {
+                println!("{session}");
+            }
+        }
+        Ok(Response::Error(message)) => println!("agent: running, list failed: {message}"),
+        Err(RequestError::NotRunning | RequestError::Closed) => println!("agent: not running"),
+        Err(error) => println!("agent: unknown: {error}"),
+    }
+    print_handler();
+    Ok(())
+}
+
+async fn stop_agent() -> Result<(), String> {
+    let endpoint = Endpoint::for_current_user().map_err(|error| error.to_string())?;
+    match ipc::send(&endpoint, &Request::Stop).await {
+        Ok(Response::Ok(_)) | Err(RequestError::NotRunning | RequestError::Closed) => Ok(()),
+        Ok(Response::Error(message)) => Err(message),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn config_to_purge(args: &ResetArgs) -> Result<Option<PathBuf>> {
+    if !args.purge_config {
+        return Ok(None);
+    }
+    let path = args.config.config.as_deref().ok_or(
+        "--purge-config deletes only the config file named with --config; nothing was deleted",
+    )?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "{} is not a regular file; --purge-config deletes only a Gateinto config file",
+            path.display()
+        )
+        .into());
+    }
+    Ok(Some(std::path::absolute(path)?))
+}
+
+async fn reset(args: ResetArgs) -> Result {
+    use std::io::IsTerminal;
+
+    let interactive = args.confirm_spki.is_none();
+    if interactive && !std::io::stdin().is_terminal() {
+        return Err(
+            "refusing to delete the device key without confirmation: no terminal to ask \
+                    on; pass --confirm-spki with at least the first 16 hex digits of the \
+                    spki-sha256 shown by `gateinto status`"
+                .into(),
+        );
+    }
+    let config = config_to_purge(&args)?;
+    let name = device_key_settings(&args.config, args.name.clone())?.name;
+    let store = gateinto::identity::system_store()?;
+    let (backend, fingerprint) = {
+        let (key, duplicate) = device_key::info(&store, &name)?;
+        if let Some(duplicate) = duplicate {
+            return Err(KeyError::Duplicate(duplicate).into());
+        }
+        (key.backend, key.fingerprint())
+    };
+    print!(
+        "{}",
+        lifecycle::purge_warning(&name, backend, &fingerprint, config.as_deref())
+    );
+    let confirmation = match args.confirm_spki {
+        Some(confirmation) => confirmation,
+        None => {
+            use std::io::Write;
+            print!("\nType the first 16 characters of the spki-sha256 above to delete the key: ");
+            std::io::stdout().flush()?;
+            if !lifecycle::confirm_from(&mut std::io::stdin().lock(), &fingerprint) {
+                return Err("the confirmation did not match; nothing was deleted".into());
+            }
+            fingerprint[..16].parse()?
+        }
+    };
+    let purged =
+        lifecycle::purge_device_identity(&store, &name, &confirmation, stop_agent()).await?;
+    println!(
+        "deleted device key \"{name}\" from the {} (spki-sha256: {})",
+        purged.backend.provider(),
+        purged.fingerprint
+    );
+    if let Some(path) = config {
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("deleting {}: {error}", path.display()))?;
+        println!("deleted config file {}", path.display());
+    }
+    println!(
+        "The device is NOT revoked at any gateway. `gateinto setup` creates a new device key \
+         with a new identity."
+    );
     Ok(())
 }
 
