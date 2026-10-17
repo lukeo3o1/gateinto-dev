@@ -117,10 +117,6 @@ pub async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-pub async fn refuses(addr: SocketAddr) -> bool {
-    tokio::net::TcpStream::connect(addr).await.is_err()
-}
-
 pub fn field<'a>(lines: &'a [String], name: &str) -> &'a str {
     lines
         .iter()

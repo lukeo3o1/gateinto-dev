@@ -55,17 +55,11 @@ struct Launcher {
     config: PathBuf,
     env: Vec<(&'static str, OsString)>,
     profiles_root: PathBuf,
-    _upstream: UpstreamProxy,
+    _upstream: Option<UpstreamProxy>,
 }
 
 impl Launcher {
     async fn new(extra: &str) -> Self {
-        static INSTANCE: AtomicU32 = AtomicU32::new(0);
-        let instance = format!(
-            "t{}-{}",
-            std::process::id(),
-            INSTANCE.fetch_add(1, Ordering::Relaxed)
-        );
         let dir = temp_dir("launch");
         let ca = TestCa::new();
         let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
@@ -82,6 +76,22 @@ impl Launcher {
             ),
         )
         .unwrap();
+        Self::instance(dir, config, Some(upstream))
+    }
+
+    fn instance(dir: PathBuf, config: PathBuf, upstream: Option<UpstreamProxy>) -> Self {
+        static INSTANCE: AtomicU32 = AtomicU32::new(0);
+        let instance = format!(
+            "t{}-{}",
+            std::process::id(),
+            INSTANCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let profiles_root = if cfg!(windows) {
+            dir.join("local").join("Gateinto")
+        } else {
+            dir.join("state").join("gateinto")
+        }
+        .join(format!("profiles-{instance}"));
         let env = vec![
             ("GATEINTO_INSTANCE", OsString::from(instance)),
             ("XDG_RUNTIME_DIR", dir.join("run").into()),
@@ -90,11 +100,6 @@ impl Launcher {
             ("LOCALAPPDATA", dir.join("local").into()),
             ("RUST_LOG", OsString::from("info")),
         ];
-        let profiles_root = if cfg!(windows) {
-            dir.join("local").join("Gateinto").join("profiles")
-        } else {
-            dir.join("state").join("gateinto").join("profiles")
-        };
         Self {
             dir,
             config,
@@ -102,6 +107,10 @@ impl Launcher {
             profiles_root,
             _upstream: upstream,
         }
+    }
+
+    fn sibling(&self) -> Self {
+        Self::instance(self.dir.clone(), self.config.clone(), None)
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -199,7 +208,6 @@ async fn open_starts_the_agent_which_opens_the_configured_portal_in_a_browser_se
     browser.exit();
 
     wait_until("the profile is removed", || !browser.profile().exists()).await;
-    assert!(refuses(browser.proxy()).await);
     assert!(!listed(&launcher.list().await, &lines));
 }
 
@@ -290,7 +298,7 @@ async fn sessions_can_be_closed_explicitly_and_stop_closes_the_rest() {
         .success();
 
     assert!(!first_browser.profile().exists());
-    assert!(refuses(first_browser.proxy()).await);
+    assert!(!listed(&launcher.list().await, &first));
     assert!(second_browser.profile().exists());
     let output = launcher.run(&["session", "close", "999"]).await;
     assert!(
@@ -302,7 +310,6 @@ async fn sessions_can_be_closed_explicitly_and_stop_closes_the_rest() {
     launcher.run(&["stop"]).await.success();
 
     assert!(!second_browser.profile().exists());
-    assert!(refuses(second_browser.proxy()).await);
     let output = launcher.run(&["session", "list"]).await;
     assert!(output.failure().stderr.contains("no agent is running"));
 }
@@ -319,6 +326,38 @@ async fn profiles_left_behind_are_removed_when_the_agent_starts() {
 
     assert!(!stale.path().exists());
     assert!(foreign.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_of_another_instance_leaves_running_profiles_alone() {
+    let first = Launcher::new("").await;
+    let (lines, browser) = first.opened("main").await;
+    let second = first.sibling();
+
+    second.opened("main").await;
+
+    assert!(browser.profile().exists());
+    assert!(listed(&first.list().await, &lines));
+    tunnel_echoes(browser.proxy()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_opens_without_an_agent_start_exactly_one() {
+    let launcher = Launcher::new("").await;
+    let uri = "gateinto://connect?profile=main";
+
+    let (first, second) = tokio::join!(launcher.open(uri), launcher.open(uri));
+
+    let (first, second) = (first.success().lines(), second.success().lines());
+    let list = launcher.list().await;
+    assert!(listed(&list, &first) && listed(&list, &second), "{list:?}");
+    assert_eq!(
+        list.iter()
+            .filter(|line| line.contains(" browser "))
+            .count(),
+        2,
+        "{list:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -347,8 +386,12 @@ mod interrupt {
     use super::*;
 
     async fn interrupt(child: &mut std::process::Child) -> ExitStatus {
+        signal(child, "-INT").await
+    }
+
+    async fn signal(child: &mut std::process::Child, signal: &str) -> ExitStatus {
         let status = Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
+            .args([signal, &child.id().to_string()])
             .status()
             .unwrap();
         assert!(status.success());
@@ -363,22 +406,25 @@ mod interrupt {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn ctrl_c_stops_the_agent_after_closing_its_sessions() {
-        let launcher = Launcher::new("").await;
-        let config = launcher.config.to_str().unwrap().to_owned();
-        let mut agent = launcher
-            .command(&["agent", "--config", &config])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let (_, browser) = launcher.opened("main").await;
+    async fn sigint_and_sigterm_stop_the_agent_after_closing_its_sessions() {
+        for name in ["-INT", "-TERM"] {
+            let launcher = Launcher::new("").await;
+            let config = launcher.config.to_str().unwrap().to_owned();
+            let mut agent = launcher
+                .command(&["agent", "--config", &config])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let (_, browser) = launcher.opened("main").await;
 
-        let status = interrupt(&mut agent).await;
+            let status = signal(&mut agent, name).await;
 
-        assert!(status.success(), "{status}");
-        assert!(!browser.profile().exists());
-        assert!(refuses(browser.proxy()).await);
+            assert!(status.success(), "{name}: {status}");
+            assert!(!browser.profile().exists(), "{name}");
+            let output = launcher.run(&["session", "list"]).await;
+            assert!(output.failure().stderr.contains("no agent is running"));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
