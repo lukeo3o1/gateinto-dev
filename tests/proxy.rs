@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod fixture;
+mod isolated;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -514,7 +515,7 @@ impl Agent {
     async fn spawn_with(setup: &Setup, log_filter: &str, extra: &[&str]) -> Self {
         let ca_file = write_temp("cli-ca.pem", setup.ca.pem().as_bytes());
         let mut child = Child(
-            std::process::Command::new(env!("CARGO_BIN_EXE_gateinto"))
+            isolated::gateinto()
                 .args([
                     "proxy",
                     "--listen",

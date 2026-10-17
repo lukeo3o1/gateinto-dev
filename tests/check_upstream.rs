@@ -1,8 +1,8 @@
 #[allow(dead_code)]
 mod fixture;
+mod isolated;
 
 use std::net::SocketAddr;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ impl Setup {
             self.upstream.addr.port()
         ));
         std::fs::write(&ca_file, self.ca.pem()).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+        let output = isolated::gateinto()
             .args(["check-upstream", "--upstream-host", "127.0.0.1"])
             .args(["--upstream-port", &self.upstream.addr.port().to_string()])
             .args(["--upstream-server-name", PROXY_NAME])
@@ -385,7 +385,7 @@ async fn command_prints_the_connect_status_line_and_fails_on_refusal() {
 async fn command_fails_for_an_unreachable_upstream_or_untrusted_ca() {
     let unreachable = unused_port().await;
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_gateinto"))
+        isolated::gateinto()
             .args(["check-upstream", "--upstream-host", "127.0.0.1"])
             .args(["--upstream-port", &unreachable.port().to_string()])
             .args(["--client-certificate", "off"])
@@ -400,7 +400,7 @@ async fn command_fails_for_an_unreachable_upstream_or_untrusted_ca() {
     let setup = Setup::with_groups(HYBRID_GROUPS, Behavior::Tunnel).await;
     let port = setup.upstream.addr.port();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_gateinto"))
+        isolated::gateinto()
             .args(["check-upstream", "--upstream-host", "127.0.0.1"])
             .args(["--upstream-port", &port.to_string()])
             .args(["--upstream-server-name", PROXY_NAME])
@@ -417,7 +417,7 @@ async fn command_fails_for_an_unreachable_upstream_or_untrusted_ca() {
 
 #[test]
 fn command_rejects_a_malformed_target() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    let output = isolated::gateinto()
         .args(["check-upstream", "--upstream-host", "127.0.0.1"])
         .args(["--upstream-port", "9", "--target", "no-port"])
         .output()

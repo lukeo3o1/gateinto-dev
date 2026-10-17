@@ -1,10 +1,10 @@
 #![cfg(windows)]
+mod isolated;
 
 #[allow(dead_code)]
 mod fixture;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -166,7 +166,7 @@ async fn tunnel(identity: ClientIdentity, server_ca: &TestCa, upstream: &Upstrea
 }
 
 fn key_info(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    let output = isolated::gateinto()
         .args(["key", "info"])
         .args(args)
         .output()
