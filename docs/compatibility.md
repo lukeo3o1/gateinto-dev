@@ -104,8 +104,11 @@ with `curl.exe` to `https://example.com/` (`200`) and a plain-HTTP request
 example built on `tests/fixture/`: it generates a throwaway test CA, writes
 only the CA certificate, listens on loopback only, accepts TLS 1.3 with
 `X25519MLKEM768` and `X25519`, and relays one `CONNECT`. Its in-process tests
-run in both CI jobs. The job was added after the results below; its outcome is
-not recorded yet.
+run in both CI jobs. The job has run and passed: `key init` created a software
+key after the TPM fallback and `key info` matched it; `check-upstream` reported
+`TLSv1_3`, `X25519MLKEM768`, `TLS13_AES_256_GCM_SHA384` and
+`HTTP/1.1 200 Connection established` for `example.com:443`; `curl.exe` got
+`200` and `405`; and `certutil -delkey` removed the key afterwards.
 
 The release workflow
 ([.github/workflows/release.yml](../.github/workflows/release.yml)) ran once
