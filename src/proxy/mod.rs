@@ -25,6 +25,7 @@ use crate::identity::client_cert::ClientCertificate;
 use crate::tls::{self, NegotiationError, TlsMode};
 
 mod basic_tofu;
+#[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
 mod relay;
