@@ -13,9 +13,10 @@ post-quantum group `X25519MLKEM768`.
 Pre-release proof of concept, not production ready, and not externally
 security reviewed. Implemented: the double `CONNECT` relay, the device key
 (`gateinto key`), mutual TLS with the device key, selectable key exchange
-modes, `gateinto check-upstream`, and a TOML configuration file. Not
-implemented: certificate enrollment (client certificates are issued and
-installed by hand), key rotation and deletion, an SBOM and code signing.
+modes, `gateinto check-upstream`, a TOML configuration file, and short-lived
+self-signed client certificates issued with the device key. Not implemented:
+certificate enrollment (CA-issued client certificates are issued and installed
+by hand), key rotation and deletion, an SBOM and code signing.
 
 Tests run in CI on GitHub-hosted Linux and Windows runners (`ubuntu-latest`
 and `windows-latest`) against in-process test proxies. TPM-backed keys, real
@@ -64,6 +65,7 @@ in a [configuration file](#configuration-file). Clients then use
 | `--tls-mode` | `hybrid_preferred` | Key exchange policy: `hybrid_preferred`, `hybrid_required` or `classical_only`. See [TLS modes](#tls-modes). |
 | `--client-certificate` | `optional` | Client authentication to the upstream: `optional`, `required` or `off`. See [Client certificate](#client-certificate-mtls). |
 | `--client-cert-file` | search `CurrentUser\My` | PEM file with the client certificate, optionally followed by intermediates. |
+| `--self-signed-client-cert` | off | Issue a short-lived self-signed client certificate with the device key at startup instead of using a file or `CurrentUser\My`. Cannot be combined with `--client-cert-file`. See [Self-signed client certificate](#self-signed-client-certificate). |
 | `--key-name` | `gateinto-device-v1` | CNG device key that signs the client authentication. It is only opened, never created. |
 | `--max-tunnels` | 64 | Concurrent connections; further connections get `503`. |
 | `--max-header-bytes` | 16384 | Limit for the request and the upstream response header block. |
@@ -127,7 +129,10 @@ client-certificate: not requested
 ```
 
 `client-certificate` is `not requested`, `requested by the upstream, none sent`
-or `sent`. With `--target host:port` it also sends `CONNECT` for that target
+or `sent`. With `--self-signed-client-cert` three more lines follow it:
+`client-certificate-source: self-signed`, `client-certificate-sha256` (SHA-256
+of the issued certificate) and `device-key-spki-sha256` (SHA-256 of the device
+key's SubjectPublicKeyInfo, the same value as `spki-sha256` in `key info`). With `--target host:port` it also sends `CONNECT` for that target
 and prints `connect-target` and the upstream's status line as
 `connect-status`; no upstream headers or body are printed, and the tunnel is
 closed right away. No keys or other secrets are printed.
@@ -235,6 +240,7 @@ ca_file = "upstream-ca.pem"
 mode = "hybrid_preferred"        # hybrid_preferred | hybrid_required | classical_only
 client_certificate = "optional"  # optional | required | off
 client_cert_file = "client.pem"
+self_signed_client_cert = false  # true: issue a self-signed certificate instead of client_cert_file
 
 [device_key]
 name = "gateinto-device-v1"
@@ -257,6 +263,7 @@ take the defaults of the matching flags.
 | `[listen] address` | `--listen` |
 | `[upstream] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
 | `[tls] mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
+| `[tls] self_signed_client_cert` | `--self-signed-client-cert` (can only turn it on) |
 | `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
@@ -268,6 +275,8 @@ Rules:
 - Unknown sections and keys are errors, as are values of the wrong type, zero
   limits, ports or timeouts, and an empty key name. Errors name the file, line
   and key.
+- `self_signed_client_cert = true` and a `client_cert_file` cannot be
+  combined, wherever each comes from.
 - Relative `ca_file` and `client_cert_file` paths are resolved against the
   directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
@@ -313,9 +322,12 @@ one and signs `CertificateVerify` with the device key through CNG
 At startup the device key named by `--key-name` is opened (TPM provider first,
 then software; it is never created here), and the certificate is taken from:
 
-1. `--client-cert-file`: the first PEM certificate is the leaf, any further
+1. `--self-signed-client-cert`: a fresh self-signed certificate for the device
+   key, issued and signed by the device key itself; no file or store is read.
+   See [Self-signed client certificate](#self-signed-client-certificate).
+2. `--client-cert-file`: the first PEM certificate is the leaf, any further
    ones are sent as intermediates.
-2. Otherwise, on Windows, the `CurrentUser\My` certificate store: a certificate
+3. Otherwise, on Windows, the `CurrentUser\My` certificate store: a certificate
    whose SubjectPublicKeyInfo is byte-for-byte the device key's, that is valid
    now, and that has the Client Authentication extended key usage or no
    extended key usage at all. Whether Windows holds a private key for it does
@@ -329,7 +341,8 @@ A certificate whose private key Gateinto does not hold is never sent.
 | --- | --- | --- | --- |
 | Key and matching certificate | client auth | client auth | no client auth |
 | Device key missing or unusable | startup error | warning, no client auth | no client auth |
-| No certificate for the key | startup error | warning, no client auth | no client auth |
+| No certificate for the key (file or store) | startup error | warning, no client auth | no client auth |
+| Self-signed certificate cannot be issued | startup error | warning, no client auth | no client auth |
 | Certificate for another key, or unreadable `--client-cert-file` | startup error | warning, no client auth | no client auth |
 | Not Windows | startup error "device keys are only supported on Windows" | warning, no client auth | no client auth |
 
@@ -339,6 +352,28 @@ authenticate this device". An upstream that requires a client certificate
 then rejects the handshake, and local clients get `502`. With client auth
 enabled, the subject, thumbprint, NotAfter, source and key backend are logged at
 `info`.
+
+### Self-signed client certificate
+
+With `--self-signed-client-cert` (or `[tls] self_signed_client_cert = true`),
+`proxy` and `check-upstream` issue a new certificate at startup:
+`CN=Gateinto device` as subject and issuer, a random 16-byte serial number,
+valid from 5 minutes before issuance until 1 hour after it, critical basic
+constraints without CA, critical key usage `digitalSignature`, extended key
+usage `clientAuth`, and the device key's public key. The device key signs the
+certificate and the TLS `CertificateVerify` through CNG; there is no other
+private key, and the certificate is never written to disk or to a store. A
+running proxy issues a new certificate when the upstream asks for one and the
+current certificate is 30 minutes or older.
+
+Every certificate has a different serial number, DER and fingerprint, but the
+same SubjectPublicKeyInfo. The upstream therefore has to identify the device by
+its public key (`spki-sha256` from `gateinto key info`, or the DER from
+`--spki-out`), not by the certificate fingerprint, and has to be configured to
+accept a self-signed client certificate at all. Whether it does is entirely
+the upstream's policy; no real upstream proxy has been verified with it.
+[docs/protocol/client-cert.md](docs/protocol/client-cert.md) lists every field
+and what the upstream has to check.
 
 ### Getting a test client certificate
 
@@ -370,10 +405,10 @@ gateinto key info
 run as part of the test suite, which imports through the Crypt32 API instead.
 
 The upstream only accepts the certificate if it is configured to trust
-`test-ca.pem` as a client CA. The same holds for a self-signed client
-certificate: it is only trusted by an upstream configured to trust that
-certificate. Note that tools such as `New-SelfSignedCertificate` generate a new
-key pair, so their certificates do not match the device key and are refused.
+`test-ca.pem` as a client CA. Note that tools such as
+`New-SelfSignedCertificate` generate a new key pair, so their certificates do
+not match the device key and are refused; use `--self-signed-client-cert` for a
+self-signed certificate of the device key.
 
 ## Security model
 
@@ -418,7 +453,8 @@ Windows CNG tests only run on Windows. They create and delete temporary keys
 named `gateinto-test-*` in the current user's Microsoft Software Key Storage
 Provider, and in the Microsoft Platform Crypto Provider on machines with a
 usable TPM. `tests/mtls_windows.rs` also adds a temporary certificate with
-subject `CN=gateinto-test-client` to `CurrentUser\My` and removes it again.
+subject `CN=gateinto-test-client` to `CurrentUser\My` and removes it again;
+its self-signed certificate test only keeps certificates in memory.
 
 ## Contributing and security
 

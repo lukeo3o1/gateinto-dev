@@ -44,7 +44,7 @@ it; it relays bytes.
 | `src/proxy/mod.rs` | Listener, connection limit, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
-| `src/identity/` | Device key lifecycle (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
+| `src/identity/` | Device key lifecycle (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
 
 ## Local 200 only after upstream 2xx
 
@@ -108,7 +108,10 @@ default. See the README for the schema.
   is `--upstream-server-name`, defaulting to `--upstream-host`.
 - When the upstream requests a client certificate and one is configured, the
   certificate bound to the device key is sent and `CertificateVerify` is signed
-  through CNG.
+  through CNG. With `--self-signed-client-cert` that certificate is issued in
+  memory at startup and signed by the same CNG key; the resolver issues a new
+  one when the current one is 30 minutes old
+  ([protocol/client-cert.md](protocol/client-cert.md)).
 
 ## Not implemented
 
