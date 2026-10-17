@@ -1,0 +1,49 @@
+[package]
+name = "gateinto-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+gateinto = { path = ".." }
+libfuzzer-sys = "0.4.10"
+
+[[bin]]
+name = "connect-head"
+path = "fuzz_targets/connect-head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "basic-tofu"
+path = "fuzz_targets/basic-tofu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "launch-uri"
+path = "fuzz_targets/launch-uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc-line"
+path = "fuzz_targets/ipc-line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x509"
+path = "fuzz_targets/x509.rs"
+test = false
+doc = false
+bench = false
