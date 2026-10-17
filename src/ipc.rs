@@ -100,6 +100,25 @@ impl Response {
     }
 }
 
+pub fn instance_from(env: impl Fn(&str) -> Option<OsString>) -> io::Result<Option<String>> {
+    let Some(instance) = env(INSTANCE_VARIABLE) else {
+        return Ok(None);
+    };
+    let instance = instance.into_string().unwrap_or_default();
+    let valid = (1..=32).contains(&instance.len())
+        && instance
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    if valid {
+        Ok(Some(instance))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{INSTANCE_VARIABLE} must have 1 to 32 characters from A-Z, a-z, 0-9, _ and -"),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint(OsString);
 
@@ -115,26 +134,9 @@ impl Endpoint {
     }
 
     pub fn from_env_with(env: impl Fn(&str) -> Option<OsString>, user: &str) -> io::Result<Self> {
-        let suffix = match env(INSTANCE_VARIABLE) {
-            None => String::new(),
-            Some(instance) => {
-                let instance = instance.into_string().unwrap_or_default();
-                let valid = (1..=32).contains(&instance.len())
-                    && instance
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-                if !valid {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "{INSTANCE_VARIABLE} must have 1 to 32 characters from A-Z, a-z, \
-                             0-9, _ and -"
-                        ),
-                    ));
-                }
-                format!("-{instance}")
-            }
-        };
+        let suffix = instance_from(&env)?
+            .map(|instance| format!("-{instance}"))
+            .unwrap_or_default();
         Self::named(env, user, &suffix)
     }
 
