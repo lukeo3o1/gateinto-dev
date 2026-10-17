@@ -50,7 +50,7 @@ enum Command {
     Session(SessionCommand),
     /// Run the agent: the device session named by [device_session] gateway, if any, and the
     /// per-user endpoint that starts browser sessions for `gateinto open`
-    Agent(ConfigArg),
+    Agent(AgentArgs),
     /// Ask the agent to start a browser session for a gateinto:// launch URI, starting the agent
     /// first if none is running
     Open(OpenArgs),
@@ -67,6 +67,17 @@ enum Command {
     Status(StatusArgs),
     /// Permanently delete Gateinto data that an uninstall keeps
     Reset(ResetArgs),
+}
+
+#[derive(Args)]
+struct AgentArgs {
+    #[command(flatten)]
+    config: ConfigArg,
+
+    /// Start the agent as a background process without a console, wait until it accepts
+    /// requests and return (used by the logon autostart entry)
+    #[arg(long)]
+    detach: bool,
 }
 
 #[derive(Args)]
@@ -404,7 +415,8 @@ async fn main() -> ExitCode {
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
         Command::Session(SessionCommand::List) => agent_request(Request::List).await,
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
-        Command::Agent(args) => agent(args).await,
+        Command::Agent(args) if args.detach => agent_detach(args.config.config.as_deref()).await,
+        Command::Agent(args) => agent(args.config).await,
         Command::Open(args) => open(args).await,
         Command::Stop(args) => stop(args).await,
         Command::Uri(command) => uri(command),
@@ -720,6 +732,21 @@ async fn agent(args: ConfigArg) -> Result {
     }
     tracing::info!(%endpoint, "agent ready");
     agent.serve(server, shutdown).await;
+    Ok(())
+}
+
+async fn agent_detach(config: Option<&Path>) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    match ipc::send(&endpoint, &Request::List).await {
+        Ok(_) => {
+            println!("an agent is already running");
+            return Ok(());
+        }
+        Err(RequestError::NotRunning | RequestError::Closed) => {}
+        Err(error) => return Err(error.into()),
+    }
+    start_agent_and_send(&endpoint, &Request::List, config).await?;
+    println!("started the agent");
     Ok(())
 }
 
