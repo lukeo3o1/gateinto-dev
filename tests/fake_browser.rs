@@ -2,11 +2,13 @@
 //! target without a harness so that every `cargo test` run builds it. It writes
 //! into its profile, records its arguments in a fake-browser directory next to
 //! the profiles directory and runs until a file named after its process id with
-//! the extension .exit appears there. Run without --user-data-dir, as `cargo
-//! test` does, it exits at once.
+//! the extension .exit appears there, its profile disappears or ten minutes
+//! pass. Run without --user-data-dir, as `cargo test` does, it exits at once.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const LIFETIME: Duration = Duration::from_secs(600);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,7 +33,8 @@ fn main() {
     std::fs::write(&pending, args.join("\n")).unwrap();
     std::fs::rename(&pending, dir.join(format!("{pid}.args"))).unwrap();
     let exit = dir.join(format!("{pid}.exit"));
-    while !exit.exists() {
+    let deadline = Instant::now() + LIFETIME;
+    while !exit.exists() && profile.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
