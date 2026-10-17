@@ -21,10 +21,13 @@ meant to protect, against whom, and what it does not protect.
 
 ## Trust boundaries
 
-- **Local processes and the loopback listener.** The listener has no
-  authentication. Any process on the machine that can open a TCP connection to
-  `127.0.0.1`, including processes of other users, can use the proxy and the
-  device identity behind it.
+- **Local processes and the loopback listener.** The device session's
+  listener has no authentication by default. Any process on the machine that
+  can open a TCP connection to `127.0.0.1`, including processes of other
+  users, can use it and the device identity behind it. A session with
+  `basic_tofu` (every browser session) accepts only the first Basic
+  credential it receives, so it excludes other local processes only if the
+  intended client is first.
 - **Gateinto and the upstream proxy.** The upstream proxy sees the target
   `host:port` of every tunnel, the source IP address and the device
   certificate. It does not see the content of an inner TLS session between the
@@ -54,13 +57,19 @@ meant to protect, against whom, and what it does not protect.
 | An attacker on the network impersonates the upstream proxy or downgrades TLS. | TLS 1.3 only (`rustls` without `tls12`). The upstream certificate and name are verified with WebPKI against the Mozilla roots or `--ca-file`. There is no option to disable verification. |
 | Recorded traffic is decrypted later by a quantum computer. | The hybrid key exchange `X25519MLKEM768` is preferred, with `X25519` as fallback (`hybrid_preferred`). This protects the confidentiality of the outer TLS session only if the upstream also supports it. It is not a post-quantum signature: certificates and the device key use classical ECDSA or RSA, so authentication is not quantum resistant. |
 | An attacker on the network, or a misconfigured upstream, downgrades the key exchange to classical `X25519`. | `hybrid_required` offers only `X25519MLKEM768`, so the handshake fails (`502`) instead of downgrading, and every tunnel is also checked after the handshake and refused unless the negotiated group is one the mode offers. TLS 1.3 signs the handshake transcript, so an attacker without the server key cannot alter the negotiated group in the other modes either; `hybrid_preferred` still accepts `X25519` from an upstream that only offers it. `check-upstream` shows which group an upstream negotiates. |
-| Logs leak secrets or traffic. | Tunnel payload is never logged. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
+| Another local program uses a browser session's port. | `basic_tofu`: the session binds the first well-formed Basic credential and then answers `407` to any other credential, compared in constant time, with exactly one winner among concurrent first attempts. Failures beyond 10 a minute get `429`. A program that is first still wins; the user then starts a new session (new port, realm and state). |
+| Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level; the session keeps only a keyed hash of its bound credential. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
 | The device identity is silently replaced, for example by an attacker or a bug that recreates the key. | `key init` reuses an existing key in either provider and creates one only when none exists; creating a key that already exists fails instead of overwriting it; the proxy and `key info` only open the key, never create it. |
 
 ## Residual risks
 
 - Any local process, including other users' processes, can use the loopback
-  proxy. Do not run Gateinto on shared hosts you do not trust.
+  proxy of a session without local authentication. With `basic_tofu`, a local
+  process that reaches a new session before the browser binds its own
+  credential; trust on first use does not prove which process was first. It
+  can also make the session answer `429` to everyone for up to a minute by
+  sending wrong credentials. Do not run Gateinto on shared hosts you do not
+  trust.
 - Administrators and malware running as the user can use or steal the
   identity, read traffic before it enters the tunnel, or redirect Gateinto to
   another upstream.
@@ -88,6 +97,7 @@ meant to protect, against whom, and what it does not protect.
 - Inspecting, filtering or caching tunnel content.
 - Protecting against administrators, malware running as the user, or physical
   attacks on an unlocked machine.
-- Authenticating local clients of the loopback listener.
+- Authenticating local clients beyond trust on first use: proving which
+  local process or user is connecting.
 - Acting as a general-purpose HTTP proxy (only `CONNECT` is supported).
 - Post-quantum authentication.
