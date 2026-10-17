@@ -7,18 +7,20 @@ use rustls_cng::error::CngError;
 use rustls_cng::key::{NCryptKey, SignaturePadding};
 use rustls_cng::signer::CngSigningKey;
 use rustls_cng::store::{CertStore, CertStoreType};
+use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY,
     NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey,
     NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject, NCryptOpenKey,
     NCryptOpenStorageProvider, NCryptSetProperty,
 };
-use windows_sys::Win32::System::TpmBaseServices::{
-    TBS_SUCCESS, TPM_DEVICE_INFO, Tbsi_GetDeviceInfo,
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
+use windows_sys::Win32::System::TpmBaseServices::TPM_DEVICE_INFO;
 
 use crate::identity::client_cert::ClientIdentityStore;
-use crate::identity::cng_status;
+use crate::identity::cng_status::{self, TpmProbeError};
 use crate::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
 use crate::identity::encoding::{BlobError, P256Point, parse_ecc_public_blob};
 
@@ -173,13 +175,41 @@ fn open_provider(backend: Backend) -> Result<StorageProvider, StoreError> {
     })
 }
 
-fn probe_tpm() -> Result<(), u32> {
-    let mut info = TPM_DEVICE_INFO::default();
-    match unsafe { Tbsi_GetDeviceInfo(size_of::<TPM_DEVICE_INFO>() as u32, (&raw mut info).cast()) }
-    {
-        TBS_SUCCESS => Ok(()),
-        code => Err(code),
+type GetDeviceInfo = unsafe extern "system" fn(u32, *mut core::ffi::c_void) -> u32;
+
+struct SystemLibrary(HMODULE);
+
+impl SystemLibrary {
+    fn load(name: &str) -> Option<Self> {
+        let name = wide(name);
+        let handle =
+            unsafe { LoadLibraryExW(name.as_ptr(), ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        (!handle.is_null()).then_some(Self(handle))
     }
+
+    fn get_device_info(&self) -> Option<GetDeviceInfo> {
+        let function = unsafe { GetProcAddress(self.0, c"Tbsi_GetDeviceInfo".as_ptr().cast()) }?;
+        Some(unsafe {
+            mem::transmute::<unsafe extern "system" fn() -> isize, GetDeviceInfo>(function)
+        })
+    }
+}
+
+impl Drop for SystemLibrary {
+    fn drop(&mut self) {
+        unsafe { FreeLibrary(self.0) };
+    }
+}
+
+fn probe_tpm() -> Result<(), TpmProbeError> {
+    let tbs = SystemLibrary::load("tbs.dll");
+    let get_device_info = tbs.as_ref().and_then(SystemLibrary::get_device_info);
+    cng_status::probe_device_info(get_device_info.map(|get_device_info| {
+        move || {
+            let mut info = TPM_DEVICE_INFO::default();
+            unsafe { get_device_info(size_of::<TPM_DEVICE_INFO>() as u32, (&raw mut info).cast()) }
+        }
+    }))
 }
 
 fn with_provider<T>(

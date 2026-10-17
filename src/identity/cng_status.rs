@@ -8,7 +8,24 @@ enum Class {
     Failed,
 }
 
+const TBS_SUCCESS: u32 = 0;
 const TBS_E_TPM_NOT_FOUND: u32 = 0x8028_400F;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TpmProbeError {
+    Status(u32),
+    DeviceInfoUnavailable,
+}
+
+pub fn probe_device_info(
+    get_device_info: Option<impl FnOnce() -> u32>,
+) -> Result<(), TpmProbeError> {
+    let get_device_info = get_device_info.ok_or(TpmProbeError::DeviceInfoUnavailable)?;
+    match get_device_info() {
+        TBS_SUCCESS => Ok(()),
+        code => Err(TpmProbeError::Status(code)),
+    }
+}
 
 const KNOWN: &[(u32, &str, Class)] = &[
     (0x8009_000D, "NTE_NO_KEY", Class::NotFound),
@@ -61,14 +78,17 @@ pub fn provider_error(code: u32) -> StoreError {
 
 pub fn tpm_provider_error(
     error: StoreError,
-    probe_tpm: impl FnOnce() -> Result<(), u32>,
+    probe_tpm: impl FnOnce() -> Result<(), TpmProbeError>,
 ) -> StoreError {
     let StoreError::ProviderNotReady(reason) = error else {
         return error;
     };
     match probe_tpm() {
         Ok(()) => StoreError::ProviderNotReady(reason),
-        Err(code) => {
+        Err(TpmProbeError::DeviceInfoUnavailable) => StoreError::ProviderUnavailable(format!(
+            "{reason}; TPM Base Services device info unavailable (Windows 7 or earlier)"
+        )),
+        Err(TpmProbeError::Status(code)) => {
             let reason = format!("{reason}; TPM Base Services report {}", classify(code).0);
             if code == TBS_E_TPM_NOT_FOUND {
                 StoreError::ProviderUnavailable(reason)
@@ -82,6 +102,10 @@ pub fn tpm_provider_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tbs_status(code: u32) -> Result<(), TpmProbeError> {
+        Err(TpmProbeError::Status(code))
+    }
 
     #[test]
     fn missing_keys_are_not_found() {
@@ -151,9 +175,40 @@ mod tests {
     }
 
     #[test]
+    fn missing_device_info_function_is_reported_as_unavailable() {
+        assert_eq!(
+            probe_device_info(None::<fn() -> u32>),
+            Err(TpmProbeError::DeviceInfoUnavailable)
+        );
+    }
+
+    #[test]
+    fn device_info_status_is_passed_through() {
+        assert_eq!(probe_device_info(Some(|| 0)), Ok(()));
+        assert_eq!(
+            probe_device_info(Some(|| TBS_E_TPM_NOT_FOUND)),
+            Err(TpmProbeError::Status(TBS_E_TPM_NOT_FOUND))
+        );
+    }
+
+    #[test]
+    fn not_ready_tpm_provider_without_device_info_is_unavailable() {
+        assert_eq!(
+            tpm_provider_error(store_error(0x8009_0030), || Err(
+                TpmProbeError::DeviceInfoUnavailable
+            )),
+            StoreError::ProviderUnavailable(
+                "NTE_DEVICE_NOT_READY (0x80090030); TPM Base Services device info \
+                 unavailable (Windows 7 or earlier)"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
     fn not_ready_tpm_provider_without_a_tpm_is_unavailable() {
         assert_eq!(
-            tpm_provider_error(store_error(0x8009_0030), || Err(TBS_E_TPM_NOT_FOUND)),
+            tpm_provider_error(store_error(0x8009_0030), || tbs_status(TBS_E_TPM_NOT_FOUND)),
             StoreError::ProviderUnavailable(
                 "NTE_DEVICE_NOT_READY (0x80090030); TPM Base Services report \
                  TBS_E_TPM_NOT_FOUND (0x8028400f)"
@@ -163,7 +218,7 @@ mod tests {
         for code in NOT_READY {
             assert!(
                 matches!(
-                    tpm_provider_error(provider_error(code), || Err(TBS_E_TPM_NOT_FOUND)),
+                    tpm_provider_error(provider_error(code), || tbs_status(TBS_E_TPM_NOT_FOUND)),
                     StoreError::ProviderUnavailable(_)
                 ),
                 "{code:#x}"
@@ -185,7 +240,7 @@ mod tests {
     #[test]
     fn not_ready_tpm_provider_with_an_inconclusive_probe_stays_not_ready() {
         assert_eq!(
-            tpm_provider_error(store_error(0x8009_0030), || Err(0x8028_4008)),
+            tpm_provider_error(store_error(0x8009_0030), || tbs_status(0x8028_4008)),
             StoreError::ProviderNotReady(
                 "NTE_DEVICE_NOT_READY (0x80090030); TPM Base Services report \
                  TBS_E_SERVICE_NOT_RUNNING (0x80284008)"
@@ -193,7 +248,7 @@ mod tests {
             )
         );
         assert!(matches!(
-            tpm_provider_error(store_error(0x8009_0030), || Err(0x1234_5678)),
+            tpm_provider_error(store_error(0x8009_0030), || tbs_status(0x1234_5678)),
             StoreError::ProviderNotReady(_)
         ));
     }
