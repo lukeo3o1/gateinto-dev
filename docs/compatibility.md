@@ -289,6 +289,21 @@ Where each check runs:
 | The same two self-signed certificates from a real Software KSP device key, so CNG signs the certificate and `CertificateVerify`. | `tests/mtls_windows.rs`: `self_signed_certificates_are_signed_by_the_cng_device_key`. | `windows-latest` only. Not run yet. |
 | TPM-backed device key signing the client authentication. | Manual steps in [tpm-verification.md](tpm-verification.md). | Not executed. |
 
+### MSI installer
+
+Only a reduced variant of `packaging/wix/gateinto.wxs` was compiled locally:
+WiX 5.0.2 on Linux, with the `Directory` elements removed because WiX on Linux
+rejects every `Directory/@Name`, stops at binding (no `msi.dll`). The committed
+source was first built, ICE-validated and installed in the `msi` CI job on
+`windows-latest`, which passed with the Microsoft Software Key Storage
+Provider: silent per-user install, uninstall with a running agent, reinstall
+with the same SPKI, purge and a new SPKI (see
+[verification.md](verification.md)). A TPM key, interactive install and
+uninstall, the Windows 10/11 matrix, an upgrade between two versions, the
+logon autostart starting an agent at a real logon, and a `gateinto://` link
+clicked in a real browser after installing are manual and not verified. There
+is no WinGet package.
+
 ## Unverified
 
 Not exercised:
@@ -325,14 +340,6 @@ Not exercised on physical hardware:
   upstream.
 
 Design-only, not exercised at all:
-
-- The MSI (`packaging/wix`). Its WiX source compiled and linked with WiX 5.0.2
-  on Linux, which cannot bind an MSI; the first full build, ICE validation and
-  install run in the `msi` CI job on `windows-latest` with the Microsoft
-  Software Key Storage Provider only. A TPM key, interactive install and
-  uninstall, the Windows 10/11 matrix, an upgrade between two versions, the
-  logon autostart entry and a `gateinto://` link clicked in a real browser
-  after installing are manual and not verified. There is no WinGet package.
 
 - UI/PIN behavior for TPM keys.
 - Browsers with `basic_tofu`: whether Chrome and Edge show their native

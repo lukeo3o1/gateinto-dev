@@ -39,7 +39,7 @@ downgrade is refused.
 
 ## Build
 
-Requires the Rust toolchain, the .NET SDK and WiX v5:
+The MSI is not attached to releases yet; build it from a checkout. Requires the Rust toolchain, the .NET SDK and WiX v5:
 
 ```powershell
 dotnet tool install --global wix --version 5.0.2
@@ -58,7 +58,8 @@ msiexec /i gateinto.msi /qn                     # silent
 msiexec /i gateinto.msi /qn AUTOSTART=1         # silent, start the agent at logon
 ```
 
-After installing, run `gateinto setup` once as the user who will use Gateinto. It creates the
+After installing, open a new terminal (the install folder is appended to the user `PATH`) and
+run `gateinto setup` once as the user who will use Gateinto. It creates the
 device key, or reuses the existing one after a reinstall, and prints its `spki-sha256`.
 
 ## Uninstall
@@ -69,7 +70,11 @@ Before removing files, a deferred custom action runs
 `gateinto.exe stop --remove-stale-profiles` as the installing user. That closes the agent's
 listeners and sessions, ends their browsers and deletes the Gateinto browser profiles
 under `%LOCALAPPDATA%\Gateinto\profiles`. Failures are ignored, for example when no agent is
-running. The uninstall then removes the files and registry entries listed above.
+running. `stop` waits up to 15 seconds for the agent process to exit, so `gateinto.exe` is not
+in use when its file is removed. The uninstall then removes the files and registry entries
+listed above. During an interactive uninstall a console window may flash briefly for this
+step. A major upgrade runs the old version's step too, which stops the agent without starting
+it again.
 
 The uninstall keeps:
 
