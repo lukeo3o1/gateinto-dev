@@ -121,6 +121,15 @@ key after the TPM fallback and `key info` matched it; `check-upstream` reported
 `HTTP/1.1 200 Connection established` for `example.com:443`; `curl.exe` got
 `200` and `405`; and `certutil -delkey` removed the key afterwards.
 
+Every job that compiles Rust uses `Swatinem/rust-cache@v2` with its own
+`shared-key`. The CI jobs save their cache only on `master`, so pull requests
+restore the `master` cache without evicting it with their own. The release
+workflow restores the cache of the `windows-latest` CI job (`shared-key:
+check-windows-latest`, `save-if: false`): that cache holds the debug build of
+`cargo test` and the crate downloads, which speed up the release's tests, but
+no `target\<target>\release` directory, so the shipped `gateinto.exe` is
+always compiled from scratch, and a release never writes a cache.
+
 The release workflow
 ([.github/workflows/release.yml](../.github/workflows/release.yml)) ran once
 via `workflow_dispatch` on a branch and produced the `x86_64-pc-windows-msvc`

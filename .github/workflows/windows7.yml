@@ -35,6 +35,9 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: win7-nightly
       - run: rustc +${{ env.NIGHTLY_TOOLCHAIN }} -vV
       - name: Build
         id: build
