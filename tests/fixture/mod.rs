@@ -627,6 +627,10 @@ pub fn connect_with(target: &str, authorization: Option<&str>) -> Vec<u8> {
 pub fn pad_head(request: &[u8], total: usize) -> Vec<u8> {
     let mut head = request.strip_suffix(b"\r\n").unwrap().to_vec();
     head.extend_from_slice(b"X-Pad: ");
+    assert!(
+        head.len() <= total - 4,
+        "the request is too long to pad to {total} bytes"
+    );
     head.resize(total - 4, b'p');
     head.extend_from_slice(b"\r\n\r\n");
     assert_eq!(head.len(), total);
