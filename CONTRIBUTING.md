@@ -55,7 +55,10 @@ you could do.
   --version 0.13.2 --locked`, run `cargo +nightly fuzz list` and
   `cargo +nightly fuzz run <target> -- -max_total_time=60`. libFuzzer adds
   new inputs to `fuzz/corpus/<target>/`; commit only small seeds, and turn a
-  crash into a unit test before fixing it.
+  crash into a unit test before fixing it. The entry points in
+  `gateinto::proxy::fuzzing` exist only with `--cfg fuzzing`, which cargo-fuzz
+  sets; to lint the fuzz workspace directly, run
+  `RUSTFLAGS="--cfg fuzzing" cargo clippy --all-targets --locked` in `fuzz/`.
 
 ## Releases
 
