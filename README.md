@@ -53,7 +53,8 @@ the config file), reinstall with the same device identity, and the explicit
 purge. Each release attaches the MSI, built by the release workflow from the
 release's `gateinto.exe`, next to the zip; it can also be built with
 `packaging/wix/build.ps1`. There is no WinGet package; `winget install` does
-not install Gateinto.
+not install Gateinto. `packaging/winget` holds manifest templates that have not
+been submitted.
 
 ## Commands
 
