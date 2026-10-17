@@ -14,11 +14,15 @@ Pre-release proof of concept, not production ready, and not externally
 security reviewed. Implemented: the double `CONNECT` relay, the device key
 (`gateinto key`), mutual TLS with the device key, selectable key exchange
 modes, `gateinto check-upstream`, a TOML configuration file with named gateway
-profiles, the device session with per-session isolation, and short-lived
-self-signed client certificates issued with the device key. Not implemented:
-browser sessions (planned), certificate enrollment (CA-issued client
-certificates are issued and installed by hand), key rotation and deletion, an
-SBOM and code signing.
+profiles, the device session with per-session isolation, short-lived
+self-signed client certificates issued with the device key, and browser
+sessions with trust-on-first-use local proxy authentication (`basic_tofu`),
+started from the command line. Not implemented: the `gateinto://` URI handler
+and browser launch, certificate enrollment (CA-issued client certificates are
+issued and installed by hand), key rotation and deletion, an SBOM and code
+signing. Browser behavior with `basic_tofu` (the Chrome and Edge credential
+prompt, credential caching, a new session) is not verified yet; see
+[docs/browser-verification.md](docs/browser-verification.md).
 
 Tests run in CI on GitHub-hosted Linux and Windows runners (`ubuntu-latest`
 and `windows-latest`) against in-process test proxies. TPM-backed keys, real
@@ -38,6 +42,7 @@ x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file.
 | --- | --- |
 | `gateinto proxy` | Run the local `CONNECT` proxy. |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
+| `gateinto session browser` | Run one browser session with `basic_tofu` local proxy authentication on an ephemeral loopback port. |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
 
@@ -240,9 +245,17 @@ share only the device key.
 - `gateinto proxy` runs one session, the device session, for background
   programs. It listens on `[device_session] listen` (or `--listen`), relays
   through `[device_session] gateway` (or the only configured gateway, or the
-  upstream flags alone) and has no local authentication. It runs until the
-  process is stopped. Its log lines carry `session{id=1 kind=device
-  gateway=<name>}`.
+  upstream flags alone) and uses the local proxy authentication set by
+  `[device_session] auth` (`none` by default). It runs until the process is
+  stopped. Its log lines carry `session{id=1 kind=device gateway=<name>}`.
+- `gateinto session browser` runs one browser session: its own listener on
+  an ephemeral port of `127.0.0.1`, its own client certificate and upstream
+  connections, and `basic_tofu` local proxy authentication. It relays through
+  `--gateway` (or the device session's gateway, or the only configured
+  gateway) and accepts the same upstream flags as `check-upstream`. It prints
+  its id, kind, gateway, `listen` address and `realm`, never a credential,
+  and runs until Ctrl+C. Each start is a new session with a new port, realm
+  and authentication state.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or
@@ -252,21 +265,71 @@ share only the device key.
   discarded, so no new `CONNECT` can use it. Other sessions keep running. The
   device session is closed when the process ends.
 
-Browser sessions, started from a `gateinto://` URI with their own listener and
-optional local proxy authentication, are planned and not implemented. They will
-only be able to name a configured gateway, never add an upstream, a CA or
-another trust setting. See [docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
+Starting browser sessions from a `gateinto://` URI and launching the browser
+are planned and not implemented. A URI will only be able to name a configured
+gateway, never add an upstream, a CA or another trust setting. See
+[docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
+
+### Local proxy authentication
+
+Local proxy authentication controls which local programs may use a session.
+It is not authorization by the remote upstream, and it does not identify a
+user. Each session has one policy:
+
+- `none`: every local client is accepted. The device session's default.
+- `basic_tofu` (trust on first use): the first `CONNECT` without a
+  `Proxy-Authorization` header gets
+  `407 Proxy Authentication Required` with
+  `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
+  so a browser shows its own credential prompt. The first well-formed Basic
+  credential the session receives is bound to it; from then on only that exact
+  credential (user name and password, compared in constant time) is accepted,
+  and any other one gets `407` again. Browser sessions always use it; the
+  device session uses it with `[device_session] auth = "basic_tofu"`.
+
+Details of `basic_tofu`:
+
+- Credentials are chosen in the browser prompt. They are never pre-provisioned,
+  never taken from a URI, never printed and never logged, at any log level.
+  The session keeps only an HMAC-SHA-256 of the credential under a random
+  per-session key, not the credential itself. The credential is never
+  forwarded to the upstream.
+- If several clients send different first credentials at the same time,
+  exactly one is bound; the others are treated as different credentials and
+  get `407`.
+- The header must be exactly one `Proxy-Authorization` with the scheme
+  `Basic` (any case), then spaces, then canonical padded base64 of at most
+  1024 characters that decodes to `user:password` with a non-empty password
+  and no control characters (UTF-8 is accepted). A malformed `Basic`
+  credential or a repeated header gets `400` and binds nothing; another scheme
+  (for example `Bearer`) gets `407`.
+- Rate limit: wrong, malformed or other-scheme credentials count as failures.
+  After 10 failures within 60 seconds of the first one, the session answers
+  every request, even one with the bound credential, with
+  `429 Too Many Requests` and `Retry-After` until those 60 seconds are over.
+  A request without credentials is not a failure. The state is two numbers
+  per session.
+- The realm, the listen port, the bound credential and the failure count
+  belong to one session and are never shared with another session. If another
+  local program took the binding first, your browser keeps getting prompts:
+  stop the session (Ctrl+C) and start a new one, which has a new port, a new
+  realm and nothing bound.
+- Trust on first use does not prove which local program connected first. Any
+  local program that reaches the new port before the browser can bind its own
+  credential; see [docs/security-model.md](docs/security-model.md#local-proxy-authentication-basic_tofu).
 
 ## Configuration file
 
-`gateinto proxy`, `gateinto check-upstream`, `gateinto key init` and
-`gateinto key info` accept `--config <path>` with a TOML file. See
+`gateinto proxy`, `gateinto check-upstream`, `gateinto session browser`,
+`gateinto key init` and `gateinto key info` accept `--config <path>` with a
+TOML file. See
 [config.example.toml](config.example.toml).
 
 ```toml
 [device_session]
 gateway = "default"              # optional when exactly one gateway is configured
 listen = "127.0.0.1:18736"
+auth = "none"                    # none | basic_tofu
 
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
@@ -294,7 +357,8 @@ A gateway profile (`[gateways.<name>]`) holds everything about one upstream
 HTTPS proxy: its address, the name and CAs its certificate is verified
 against, the TLS mode and the client certificate settings. The device session
 (`[device_session]`, see [Sessions](#sessions)) names the gateway it relays
-through and its listen address. Without `[device_session] gateway`, the device
+through, its listen address and its
+[local proxy authentication](#local-proxy-authentication). Without `[device_session] gateway`, the device
 session uses the only configured gateway; with several gateways it must be
 set.
 
@@ -306,7 +370,8 @@ table, the flags alone describe the upstream, as an unnamed gateway
 
 | Key | Flag that overrides it |
 | --- | --- |
-| `[device_session] gateway` | `--gateway` (`check-upstream` only) |
+| `[device_session] gateway` | `--gateway` (`check-upstream`; `session browser` selects its own gateway with it) |
+| `[device_session] auth` | none |
 | `[device_session] listen` | `--listen` (`proxy`) |
 | `[gateways.<name>] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
 | `[gateways.<name>] tls_mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
@@ -478,10 +543,12 @@ loopback-only listener, no secrets or payload in logs) and what it does not.
 [docs/threat-model.md](docs/threat-model.md) lists assets, trust boundaries
 and residual risks.
 
-The loopback listener has no authentication of its own. Any local process,
-including those of other users on the same machine, can connect to it and use
-the agent, including its device identity, to reach the remote proxy. Do not run
-it on shared hosts you do not trust.
+The device session's loopback listener has no authentication by default. Any
+local process, including those of other users on the same machine, can connect
+to it and use the agent, including its device identity, to reach the remote
+proxy. Browser sessions (and a device session with `auth = "basic_tofu"`)
+accept only the first credential they receive, which keeps other programs out
+only if the browser is first. Do not run it on shared hosts you do not trust.
 
 ## Verification status
 

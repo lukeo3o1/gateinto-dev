@@ -63,15 +63,70 @@ it. Which of these mechanisms are covered by tests is in
 - **Closing a session.** Closing stops accepting at once, drops the listener so
   its port refuses connections, and aborts every tunnel the session has
   established. The session's certificate is dropped with it and is not
-  reachable from another session, so no new `CONNECT` can use it. Only
-  `gateinto proxy`'s single device session exists today; it is closed when
-  the process ends.
+  reachable from another session, so no new `CONNECT` can use it. The
+  command line runs one session per process (`gateinto proxy` or
+  `gateinto session browser`); it is closed when the process ends.
 - **Gateway profiles are local.** An upstream (host, port, server name, CA
   file, TLS mode, client certificate settings) only comes from the local
   configuration file or the command line. Selecting a gateway by name is a
   lookup in the loaded file; a name cannot add a host, a CA or a trust setting.
-  The planned browser sessions will only be able to name a configured
-  gateway.
+  Browser sessions name a configured gateway with `--gateway`; the planned
+  `gateinto://` URI will only be able to do the same.
+
+### Local proxy authentication (`basic_tofu`)
+
+Browser sessions, and the device session with
+`[device_session] auth = "basic_tofu"`, accept only one local credential:
+the first well-formed Basic credential they receive (trust on first use).
+This is local proxy access control, not authorization by the upstream, and it
+does not identify a user.
+
+Guarantees:
+
+- **One credential per session.** The first well-formed credential is bound
+  atomically. Concurrent first attempts with different credentials bind
+  exactly one; the others are rejected with `407` like any other wrong
+  credential. Afterwards only the identical user name and password are
+  accepted, compared in constant time.
+- **No stored or logged secret.** The session keeps an HMAC-SHA-256 of the
+  decoded credential under a random per-session key, never the credential.
+  The credential is never logged at any level (a test captures `trace` logs
+  and checks that neither the password nor the base64 form appear), never
+  printed, and never forwarded to the upstream. There is no way to provision
+  a credential in advance or to pass one in a URI.
+- **Strict parsing.** Exactly one `Proxy-Authorization` header, scheme
+  `Basic` (case-insensitive), canonical padded base64 of at most 1024
+  characters, decoding to `user:password` with a non-empty password and no
+  control characters. Malformed credentials get `400` and bind nothing.
+- **Bounded failures.** After 10 failed attempts within 60 seconds every
+  request to the session gets `429` until the window ends, so guessing the
+  bound credential is limited to 10 attempts a minute per session. The
+  limiter keeps a counter and a timestamp per session, nothing per client.
+- **Per-session state.** Realm (random per session), port, bound credential
+  and failure count belong to one session. Closing a session discards them;
+  a new session starts with a new port, a new realm and nothing bound.
+
+Non-guarantees:
+
+- **TOFU does not prove which local process connected first.** Any local
+  program, including another user's, that sends a credential to a new
+  session's port before the browser does gets bound instead. The browser then
+  only sees repeated prompts; the remedy is to close the session and start a
+  new one, which is again open to whoever is first. Nothing ties the binding
+  to the browser process.
+- **Not a defense against malware running as the user.** Such a program can
+  read the credential from the browser, or wait for it and race a new
+  session, or simply use the device identity directly.
+- **The rate limit can lock out the legitimate client.** A local program that
+  sends 10 wrong credentials makes the session answer `429` to everyone,
+  including the browser with the right credential, for up to 60 seconds.
+  This is accepted because a local attacker can already take the binding
+  first.
+- **Basic credentials are sent in clear on loopback.** Anything that can
+  capture loopback traffic on the machine can read them. The credential only
+  protects this one session's port.
+- **Memory.** The decoded credential and the request head are ordinary heap
+  buffers, dropped after the request is checked but not zeroized.
 
 ### The tunnel content
 
@@ -118,11 +173,13 @@ it. Which of these mechanisms are covered by tests is in
 
 ### Exposure and logs
 
-- **Loopback-only by default.** The listener defaults to `127.0.0.1:18736`. A
+- **Loopback-only by default.** The device session's listener defaults to
+  `127.0.0.1:18736`; a browser session always listens on an ephemeral port of
+  `127.0.0.1`. A
   non-loopback address is refused unless `--unsafe-allow-non-loopback-listen`
   is given on the command line; the configuration file has no key for it.
-- **No secrets or payload in logs.** Tunnel payload and private keys are never
-  logged. At `info`, logs contain each session's id, kind, gateway name and
+- **No secrets or payload in logs.** Tunnel payload, private keys and local
+  proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
   listen address, the client's local address and port for each tunnel, tunnel
   established and idle-timeout events, and the client certificate's subject,
   SHA-1 thumbprint, NotAfter, source and key backend (for self-signed
@@ -136,10 +193,12 @@ it. Which of these mechanisms are covered by tests is in
 
 ## What it does not protect
 
-- **Local users and processes.** The loopback listener has no
-  authentication (the only local authentication policy is `none`). Any local
-  process, including other users' processes, can use the tunnel and the device
-  identity behind it.
+- **Local users and processes.** The device session's loopback listener has
+  no authentication by default (`auth = "none"`). Any local process, including
+  other users' processes, can use the tunnel and the device identity behind
+  it. `basic_tofu` keeps out only programs that arrive after the first
+  credential was bound; see
+  [above](#local-proxy-authentication-basic_tofu).
 - **Administrators and malware running as the user.** They can use or steal
   the identity (a software key can be copied), read traffic before it enters
   the tunnel, change the configuration, add CAs or replace the binary.
