@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -37,6 +37,25 @@ enum Command {
     /// Manage the device key held by Windows CNG
     #[command(subcommand)]
     Key(KeyCommand),
+    /// Run a single session until interrupted
+    #[command(subcommand)]
+    Session(SessionCommand),
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Start a browser session with basic_tofu proxy authentication on an ephemeral loopback port
+    Browser(BrowserSessionArgs),
+}
+
+#[derive(Args)]
+struct BrowserSessionArgs {
+    #[command(flatten)]
+    upstream: UpstreamArgs,
+
+    /// Gateway from --config to relay through [default: the device session's gateway, or the only gateway]
+    #[arg(long)]
+    gateway: Option<GatewayName>,
 }
 
 #[derive(Subcommand)]
@@ -271,6 +290,7 @@ async fn main() -> ExitCode {
         Command::Proxy(args) => proxy(args).await,
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
+        Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -416,21 +436,11 @@ async fn proxy(args: ProxyArgs) -> Result {
         limits.idle_timeout_seconds = args.idle_timeout_secs.and_then(NonZeroU64::new);
     })?;
     init_logging("info");
-    let limits = &settings.limits;
     let config = Config {
         listen: settings.listen,
         allow_non_loopback: args.unsafe_allow_non_loopback_listen,
-        local_auth: LocalAuth::None,
-        upstream: upstream(&settings)?,
-        tls_mode: settings.gateway.tls_mode,
-        client_certificate: client_certificate(&settings)?,
-        limits: Limits {
-            max_header_bytes: limits.header_max_bytes as usize,
-            max_tunnels: limits.max_concurrent_tunnels as usize,
-            handshake_timeout: Duration::from_secs(limits.connect_timeout_seconds),
-            idle_timeout: Duration::from_secs(limits.idle_timeout_seconds),
-            ..Limits::default()
-        },
+        local_auth: settings.device_session_auth,
+        ..proxy_config(&settings)?
     };
     let mut sessions = SessionManager::new();
     sessions
@@ -440,6 +450,53 @@ async fn proxy(args: ProxyArgs) -> Result {
             proxy: config,
         })
         .await?;
+    std::future::pending().await
+}
+
+fn proxy_config(settings: &Settings) -> Result<Config> {
+    let limits = &settings.limits;
+    Ok(Config {
+        listen: settings.listen,
+        allow_non_loopback: false,
+        local_auth: LocalAuth::None,
+        upstream: upstream(settings)?,
+        tls_mode: settings.gateway.tls_mode,
+        client_certificate: client_certificate(settings)?,
+        limits: Limits {
+            max_header_bytes: limits.header_max_bytes as usize,
+            max_tunnels: limits.max_concurrent_tunnels as usize,
+            handshake_timeout: Duration::from_secs(limits.connect_timeout_seconds),
+            idle_timeout: Duration::from_secs(limits.idle_timeout_seconds),
+            ..Limits::default()
+        },
+    })
+}
+
+async fn browser_session(args: BrowserSessionArgs) -> Result {
+    let settings = args.upstream.settings(|overrides| {
+        overrides.gateway = args.gateway.clone();
+    })?;
+    init_logging("warn");
+    let config = Config {
+        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        local_auth: LocalAuth::BasicTofu,
+        ..proxy_config(&settings)?
+    };
+    let mut sessions = SessionManager::new();
+    let id = sessions
+        .start(SessionConfig {
+            kind: SessionKind::Browser,
+            gateway: settings.gateway.name,
+            proxy: config,
+        })
+        .await?;
+    let session = sessions.session(id).expect("the session just started");
+    println!("session: {id}");
+    println!("kind: {}", session.kind());
+    println!("gateway: {}", session.gateway());
+    println!("listen: {}", session.local_addr());
+    println!("realm: {}", session.realm().unwrap_or_default());
+    println!("Press Ctrl-C to close the session.");
     std::future::pending().await
 }
 

@@ -126,6 +126,9 @@ impl SessionManager {
             .map_err(SessionError::Proxy)?;
         let local_addr = proxy.local_addr();
         let realm = proxy.realm().map(str::to_owned);
+        if let Some(realm) = &realm {
+            span.in_scope(|| info!(realm, "local proxy authentication: basic_tofu"));
+        }
         let (close, closed) = oneshot::channel();
         let shutdown = async {
             let _ = closed.await;
