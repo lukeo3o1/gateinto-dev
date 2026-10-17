@@ -1,8 +1,10 @@
+pub mod agent;
 pub mod browser;
 pub mod check;
 pub mod config;
 pub mod http;
 pub mod identity;
+pub mod ipc;
 pub mod proxy;
 pub mod registration;
 #[cfg(windows)]

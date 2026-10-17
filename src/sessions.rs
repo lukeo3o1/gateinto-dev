@@ -37,6 +37,28 @@ impl fmt::Display for SessionId {
     }
 }
 
+impl std::str::FromStr for SessionId {
+    type Err = InvalidSessionId;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(InvalidSessionId);
+        }
+        text.parse().map(Self).map_err(|_| InvalidSessionId)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidSessionId;
+
+impl fmt::Display for InvalidSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a session id is a decimal number")
+    }
+}
+
+impl std::error::Error for InvalidSessionId {}
+
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub kind: SessionKind,
@@ -149,6 +171,10 @@ impl SessionManager {
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
         self.sessions.get(&id)
+    }
+
+    pub fn sessions(&self) -> impl Iterator<Item = &Session> {
+        self.sessions.values()
     }
 
     pub async fn close(&mut self, id: SessionId) -> bool {
