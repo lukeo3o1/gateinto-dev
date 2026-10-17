@@ -3,6 +3,7 @@ pub mod client_cert;
 pub mod cng_status;
 pub mod device_key;
 pub mod encoding;
+pub mod p256_signer;
 #[cfg(windows)]
 pub mod windows_cng;
 pub mod x509;

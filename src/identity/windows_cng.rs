@@ -5,7 +5,6 @@ use rustls::pki_types::CertificateDer;
 use rustls::sign::SigningKey;
 use rustls_cng::error::CngError;
 use rustls_cng::key::{NCryptKey, SignaturePadding};
-use rustls_cng::signer::CngSigningKey;
 use rustls_cng::store::{CertStore, CertStoreType};
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::Security::Cryptography::{
@@ -23,6 +22,7 @@ use crate::identity::client_cert::ClientIdentityStore;
 use crate::identity::cng_status::{self, TpmProbeError};
 use crate::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
 use crate::identity::encoding::{BlobError, P256Point, parse_ecc_public_blob};
+use crate::identity::p256_signer::{DigestSigner, P256SigningKey};
 
 pub use crate::identity::device_key::{PLATFORM_CRYPTO_PROVIDER, SOFTWARE_KEY_STORAGE_PROVIDER};
 
@@ -257,8 +257,7 @@ impl KeyStore for CngStore {
 
 impl ClientIdentityStore for CngStore {
     fn signing_key(&self, key: CngKey) -> Result<Arc<dyn SigningKey>, StoreError> {
-        let signing_key = CngSigningKey::new(key.into_ncrypt_key()).map_err(store_error)?;
-        Ok(Arc::new(signing_key))
+        Ok(Arc::new(P256SigningKey::new(key.into_ncrypt_key())))
     }
 
     fn client_certificates(&self) -> Result<Vec<CertificateDer<'static>>, StoreError> {
@@ -268,6 +267,13 @@ impl ClientIdentityStore for CngStore {
             .iter()
             .map(|certificate| CertificateDer::from(certificate.as_der().to_vec()))
             .collect())
+    }
+}
+
+impl DigestSigner for NCryptKey {
+    fn sign_digest(&self, digest: &[u8]) -> Result<Vec<u8>, String> {
+        self.sign(digest, SignaturePadding::None)
+            .map_err(|error| store_error(error).to_string())
     }
 }
 
