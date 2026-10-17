@@ -36,8 +36,32 @@ jobs:
         shell: pwsh
         run: .github/scripts/assert-static-crt.ps1 -Path target\debug\gateinto.exe
 
+  build-windows-release:
+    name: release build (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - run: cargo build --release --locked --example test_upstream
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-release
+          path: |
+            target/release/gateinto.exe
+            target/release/examples/test_upstream.exe
+          if-no-files-found: error
+          retention-days: 1
+
   quickstart:
     name: quickstart (windows-latest)
+    needs: build-windows-release
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -48,9 +72,12 @@ jobs:
       KEY_NAME: gateinto-device-v1
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked
-      - run: cargo build --release --locked --example test_upstream
+      - name: Download the binaries that build-windows-release built with the quickstart's cargo build --release --locked
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-release
+          path: target/release
+      - run: .\target\release\gateinto.exe --version
       - name: Add gateinto to PATH
         run: Join-Path $PWD 'target\release' >> $env:GITHUB_PATH
       - name: gateinto key init
@@ -172,7 +199,7 @@ jobs:
       - name: Delete the device key
         if: always()
         run: |
-          if (-not (Get-Command gateinto -ErrorAction SilentlyContinue)) { "gateinto was not built; no device key to delete"; exit 0 }
+          if (-not (Get-Command gateinto -ErrorAction SilentlyContinue)) { "gateinto was not downloaded; no device key to delete"; exit 0 }
           gateinto key info > key-delete.out 2>&1
           if ($LASTEXITCODE -ne 0) { "No device key to delete"; exit 0 }
           $provider = if (Select-String -Quiet -Pattern '^backend: tpm' key-delete.out) { 'Microsoft Platform Crypto Provider' } else { 'Microsoft Software Key Storage Provider' }
@@ -182,6 +209,7 @@ jobs:
 
   msi:
     name: msi install, uninstall and purge (windows-latest, Software KSP)
+    needs: build-windows-release
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -191,8 +219,10 @@ jobs:
       WIX_VERSION: '5.0.2'
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-release
+          path: target/release
       - name: Install WiX ${{ env.WIX_VERSION }}
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
