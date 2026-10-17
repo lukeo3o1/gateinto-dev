@@ -10,9 +10,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-const ACTIVITY_EVERY: Duration = Duration::from_millis(200);
-const ACTIVE_ROUNDS: usize = 12;
 const KEEP_OPEN_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEP_OPEN_EVERY: Duration = Duration::from_millis(500);
 const KEEP_OPEN_ROUNDS: usize = 12;
@@ -383,21 +380,21 @@ async fn closes_excess_connections_without_a_response_while_rejects_are_pending(
 async fn idle_tunnels_are_closed() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
-    config.limits.idle_timeout = IDLE_TIMEOUT;
+    config.limits.idle_timeout = KEEP_OPEN_IDLE_TIMEOUT;
     let agent = start_agent(config).await;
     let mut stream = open_tunnel(agent, echo_server().await).await;
 
-    for _ in 0..ACTIVE_ROUNDS {
-        tokio::time::sleep(ACTIVITY_EVERY).await;
+    for _ in 0..KEEP_OPEN_ROUNDS {
+        tokio::time::sleep(KEEP_OPEN_EVERY).await;
         stream.write_all(b"ping").await.unwrap();
         let mut echoed = [0; 4];
         stream.read_exact(&mut echoed).await.unwrap();
     }
     let started = tokio::time::Instant::now();
-    let rest = read_to_end_within(&mut stream, CLOSE_WITHIN).await;
+    let rest = read_to_end_within(&mut stream, KEEP_OPEN_IDLE_TIMEOUT + CLOSE_WITHIN).await;
 
     assert!(rest.is_empty());
-    assert!(started.elapsed() >= IDLE_TIMEOUT - ACTIVITY_EVERY);
+    assert!(started.elapsed() >= KEEP_OPEN_IDLE_TIMEOUT - KEEP_OPEN_EVERY);
 }
 
 #[tokio::test(flavor = "multi_thread")]
