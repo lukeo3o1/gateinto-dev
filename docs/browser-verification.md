@@ -77,6 +77,13 @@ browser launch yet, so the browser is started by hand with `--proxy-server`.
    `local proxy credential differs from the one bound to this session` and
    `local proxy authentication rate limited`, never the credential.
 
+   A request whose `Proxy-Authorization` uses another scheme (for example
+   `Negotiate` or `NTLM`) is answered with `407` and counts as a failure
+   toward the same limit. Record whether the browser sends such a scheme
+   before Basic (visible in `chrome://net-export` or a capture of the
+   loopback traffic), how many such requests it sends per tunnel, and
+   whether that alone ever leads to `429`.
+
 7. Stop the session with Ctrl+C, start a new one (step 1), and note the new
    port and realm. Both must differ from the old ones.
 
@@ -126,5 +133,6 @@ browser launch yet, so the browser is started by hand with `--proxy-server`.
 For each browser and version: whether the native prompt appeared on the first
 `407`, what it showed, whether later tunnels needed another prompt, what
 happened after a restart with the same profile, what a wrong credential and
-the rate limit looked like, and whether a new session (new port and realm)
-prompted again. Note anything that differs from the expectations above.
+the rate limit looked like, whether it sent a non-Basic scheme first, and
+whether a new session (new port and realm) prompted again. Note anything that
+differs from the expectations above.
