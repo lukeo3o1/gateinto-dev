@@ -22,5 +22,5 @@ $dependencies | ForEach-Object { "  $_" }
 
 if (-not ($dependencies -contains 'KERNEL32.dll')) { throw 'dumpbin output lists no KERNEL32.dll; cannot trust the dependency list' }
 
-$crt = @($dependencies | Where-Object { $_ -match '^(vcruntime\d.*|msvcp\d.*|ucrtbase.*|api-ms-win-crt-.*)\.dll$' })
+$crt = @($dependencies | Where-Object { $_ -match '^(vcruntime\d.*|msvcp\d.*|msvcr\d.*|concrt\d.*|vcomp\d.*|vccorlib\d.*|ucrtbase.*|api-ms-win-crt-.*)\.dll$' })
 if ($crt) { throw "$Path links the C runtime dynamically: $($crt -join ', ')" }

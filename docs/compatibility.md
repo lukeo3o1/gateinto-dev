@@ -122,11 +122,13 @@ zip artifact. No release was created and no tag was pushed.
 ### Static C runtime
 
 Builds before the static C runtime change imported `VCRUNTIME140.dll` and the
-UCRT (`api-ms-win-crt-*`), so they failed on a Windows 10 machine without the
-Visual C++ Redistributable. `.cargo/config.toml` now sets
+UCRT (`api-ms-win-crt-*`). On Windows 10 only `VCRUNTIME140.dll` was missing
+without the Visual C++ Redistributable, because the UCRT ships with Windows
+10; the UCRT only matters on Windows 7 and 8.1. `.cargo/config.toml` now sets
 `-C target-feature=+crt-static` for `cfg(all(windows, target_env = "msvc"))`,
 which covers `x86_64-pc-windows-msvc` and `x86_64-win7-windows-msvc`. No
-workflow sets `RUSTFLAGS`, which would replace these flags.
+workflow sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, which would replace
+these flags.
 
 AWS-LC's C code follows the same setting. `aws-lc-sys` 0.46.0 uses its `cc`
 builder here; it does not call `cc::Build::static_crt`, so `cc` 1.8.0 reads
@@ -139,11 +141,14 @@ environment they got `-MD`.
 
 `.github/scripts/assert-static-crt.ps1` runs `dumpbin /dependents` (found with
 `vswhere`) and fails if `gateinto.exe` depends on `VCRUNTIME*.dll`,
-`MSVCP*.dll`, `ucrtbase*.dll` or `api-ms-win-crt-*.dll`, or if the list lacks
+`MSVCP*.dll`, `MSVCR*.dll`, `CONCRT*.dll`, `VCOMP*.dll`, `VCCORLIB*.dll`,
+`ucrtbase*.dll` or `api-ms-win-crt-*.dll`, or if the list lacks
 `KERNEL32.dll`. The `windows-latest` CI job runs it on the debug binary that
-`cargo test` builds, and the release workflow on the release binary before
-packaging. Whether the binary starts on a Windows 10 machine without the
-redistributable has not been checked; only this import check verifies it.
+`cargo test` builds, the release workflow on the release binary before
+packaging, and the Windows 7 workflow on the `x86_64-win7-windows-msvc` build,
+whose import table names `kernel32.dll` in lower case; the `KERNEL32.dll` check
+is case-insensitive. Whether the binary starts on a Windows 10 machine without
+the redistributable has not been checked; only this import check verifies it.
 
 On `windows-latest`:
 
