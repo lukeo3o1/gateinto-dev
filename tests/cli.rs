@@ -573,3 +573,51 @@ fn reset_deletes_only_the_config_file_when_no_key_exists_and_yes_is_given() {
     );
     assert!(stdout.contains("deleted config file"), "{stdout}");
 }
+
+#[cfg(windows)]
+#[test]
+fn reset_with_yes_and_no_terminal_keeps_an_existing_key() {
+    use gateinto::identity::device_key::{self, Backend, InitOptions, KeyName};
+    use gateinto::identity::windows_cng::{CngStore, SOFTWARE_KEY_STORAGE_PROVIDER, delete_key};
+
+    struct TestKey(KeyName);
+
+    impl Drop for TestKey {
+        fn drop(&mut self) {
+            let _ = delete_key(SOFTWARE_KEY_STORAGE_PROVIDER, self.0.as_str());
+        }
+    }
+
+    let key = TestKey(
+        format!("gateinto-test-reset-yes-{}", std::process::id())
+            .parse()
+            .unwrap(),
+    );
+    let options = InitOptions {
+        backend: Backend::Software,
+        ..InitOptions::default()
+    };
+    let (created, _) = device_key::init(&CngStore, &key.0, options).unwrap();
+    let path = std::env::temp_dir().join(format!("gateinto-reset-yes-{}.toml", std::process::id()));
+    std::fs::write(&path, format!("[device_key]\nname = \"{}\"\n", key.0)).unwrap();
+
+    let (success, stdout, stderr) = gateinto_without_terminal(&[
+        "reset",
+        "--purge-device-identity",
+        "--purge-config",
+        "--config",
+        path.to_str().unwrap(),
+        "--yes",
+    ]);
+    let kept_config = path.exists();
+    let _ = std::fs::remove_file(&path);
+
+    assert!(!success, "{stdout}");
+    assert!(
+        stderr.contains("refusing to delete the device key without confirmation: no terminal"),
+        "{stderr}"
+    );
+    assert!(kept_config);
+    let (still, _) = device_key::info(&CngStore, &key.0).unwrap();
+    assert_eq!(still.fingerprint(), created.fingerprint());
+}
