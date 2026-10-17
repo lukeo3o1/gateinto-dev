@@ -11,7 +11,9 @@ CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) runs
 use in-process rustls fixtures on loopback; no test talks to a real upstream
 proxy. Pull requests that change only Markdown files or files under `docs/`
 skip CI, except changes to `README.md` and `docs/quickstart.md`; pushes to
-`master` always run it.
+`master` always run it. `master` has no required status checks. If required checks are ever added,
+this paths filter has to change, because a skipped workflow never reports
+its checks and the pull request would wait for them forever.
 
 A `build-windows-release` job on `windows-latest` runs the quickstart's
 `cargo build --release --locked` and builds `examples/test_upstream.rs`, checks
