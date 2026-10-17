@@ -15,19 +15,28 @@ pub fn temp_dir(name: &str) -> PathBuf {
 }
 
 pub fn fake_browser() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let path = exe
-        .parent()
-        .and_then(Path::parent)
+    let deps = std::env::current_exe()
         .unwrap()
-        .join("examples")
-        .join(format!("fake_browser{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.is_file(),
-        "{} is missing; build it with cargo test --all-targets or cargo build --examples",
-        path.display()
-    );
-    path
+        .parent()
+        .unwrap()
+        .to_owned();
+    let is_fake_browser = |name: &str| {
+        name.strip_prefix("fake_browser-")
+            .and_then(|rest| rest.strip_suffix(std::env::consts::EXE_SUFFIX))
+            .is_some_and(|hash| !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    std::fs::read_dir(&deps)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_str().is_some_and(is_fake_browser))
+        .max_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok())
+        .map(|entry| entry.path())
+        .unwrap_or_else(|| {
+            panic!(
+                "no fake_browser test executable in {}; run the tests with cargo test",
+                deps.display()
+            )
+        })
 }
 
 pub struct FakeBrowser {

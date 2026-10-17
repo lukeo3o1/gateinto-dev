@@ -1,7 +1,9 @@
-//! Stand-in for Chrome or Edge in tests. It writes into its profile, records
-//! its arguments in a fake-browser directory next to the profiles directory and
-//! runs until a file named after its process id with the extension .exit
-//! appears there. Development and tests only.
+//! Stand-in for Chrome or Edge in the agent and launch tests, built as a test
+//! target without a harness so that every `cargo test` run builds it. It writes
+//! into its profile, records its arguments in a fake-browser directory next to
+//! the profiles directory and runs until a file named after its process id with
+//! the extension .exit appears there. Run without --user-data-dir, as `cargo
+//! test` does, it exits at once.
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,8 +15,7 @@ fn main() {
         .find_map(|arg| arg.strip_prefix("--user-data-dir="))
         .map(Path::new)
     else {
-        eprintln!("no --user-data-dir argument");
-        std::process::exit(2);
+        return;
     };
     let default = profile.join("Default");
     std::fs::create_dir_all(&default).unwrap();
