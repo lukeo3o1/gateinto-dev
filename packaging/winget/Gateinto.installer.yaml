@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: <Publisher>.Gateinto
+PackageVersion: <Version>
+InstallerType: wix
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: install
+Commands:
+  - gateinto
+Protocols:
+  - gateinto
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/<Owner>/<Repository>/releases/download/v<Version>/gateinto-v<Version>-x86_64-pc-windows-msvc.msi
+    InstallerSha256: <InstallerSha256>
+    ProductCode: '<ProductCode>'
+    AppsAndFeaturesEntries:
+      - DisplayName: Gateinto
+        Publisher: Gateinto
+        ProductCode: '<ProductCode>'
+        UpgradeCode: '{2C50F196-F9CD-4535-A997-0687BEB31CDE}'
+ManifestType: installer
+ManifestVersion: 1.6.0

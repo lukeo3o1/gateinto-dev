@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: <Publisher>.Gateinto
+PackageVersion: <Version>
+PackageLocale: en-US
+Publisher: <Publisher>
+PublisherUrl: https://github.com/<Owner>
+PackageName: Gateinto
+PackageUrl: https://github.com/<Owner>/<Repository>
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/<Owner>/<Repository>/blob/v<Version>/LICENSE-MIT
+ShortDescription: Local HTTP CONNECT proxy that relays through a remote HTTPS forward proxy over mutual TLS
+Moniker: gateinto
+Tags:
+  - proxy
+  - mtls
+  - tls
+ReleaseNotesUrl: https://github.com/<Owner>/<Repository>/releases/tag/v<Version>
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
