@@ -227,8 +227,13 @@ jobs:
             Get-ItemProperty | Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Gateinto' }
           if (-not $uninstall) { throw 'no uninstall entry with DisplayName Gateinto' }
           $uninstall | Select-Object PSPath, DisplayName, DisplayVersion, UninstallString | Format-List
-          & $env:INSTALLED key info
-          if ($LASTEXITCODE -eq 0) { throw 'a device key exists right after installing; the installer must not create one' }
+          $stderrFile = "$env:RUNNER_TEMP\key-info-before-setup.err"
+          & $env:INSTALLED key info 2> $stderrFile
+          $code = $LASTEXITCODE
+          $keyInfoError = Get-Content -Raw $stderrFile
+          "key info stderr: $keyInfoError"
+          if ($code -eq 0) { throw 'a device key exists right after installing; the installer must not create one' }
+          if ($keyInfoError -notmatch 'no device key named') { throw 'key info failed for another reason than a missing device key' }
           exit 0
       - name: gateinto setup (Microsoft Software Key Storage Provider, not a TPM)
         run: |
