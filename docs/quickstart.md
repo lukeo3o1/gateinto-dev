@@ -20,13 +20,16 @@ You need:
 
 Releases are built by
 [.github/workflows/release.yml](../.github/workflows/release.yml) for
-`x86_64-pc-windows-msvc` only. Each release has two files:
+`x86_64-pc-windows-msvc` only. Each release has these files:
 
 - `gateinto-<tag>-x86_64-pc-windows-msvc.zip`, containing a folder of the same
   name with `gateinto.exe`, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md` and
   `SECURITY.md`;
 - `gateinto-<tag>-x86_64-pc-windows-msvc.zip.sha256`, one line with the
-  lowercase SHA-256 of the zip, two spaces and the zip name.
+  lowercase SHA-256 of the zip, two spaces and the zip name;
+- `gateinto-<tag>-x86_64-pc-windows-msvc.msi` and its `.msi.sha256`, the
+  per-user installer with the same `gateinto.exe` (see [install](install.md)).
+  This guide uses the zip.
 
 Download both into the same folder and verify the zip in PowerShell before
 extracting it:

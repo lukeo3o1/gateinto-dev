@@ -5,8 +5,10 @@ installs: `gateinto setup`, `gateinto status` and `gateinto reset`. The MSI is b
 [packaging/wix](../packaging/wix/README.md).
 
 No WinGet package exists. `winget install` and `winget uninstall` do not install or remove
-Gateinto. The MSI is not part of the release zip yet; build it yourself with
-`packaging/wix/build.ps1` as described in [packaging/wix](../packaging/wix/README.md#build).
+Gateinto. Each release attaches `gateinto-<tag>-x86_64-pc-windows-msvc.msi` and its `.sha256`
+next to the zip (see the [quickstart](quickstart.md#from-a-github-release)); the MSI is not inside
+the zip. To build it yourself, use `packaging/wix/build.ps1` as described in
+[packaging/wix](../packaging/wix/README.md#build).
 
 ## Install
 

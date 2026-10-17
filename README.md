@@ -49,7 +49,8 @@ runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 [packaging/wix](packaging/wix/README.md): install, first run with
 `gateinto setup`, `gateinto status`, uninstall (which keeps the device key and
 the config file), reinstall with the same device identity, and the explicit
-purge. The MSI is not in the release zip yet; build it with
+purge. Each release attaches the MSI, built by the release workflow from the
+release's `gateinto.exe`, next to the zip; it can also be built with
 `packaging/wix/build.ps1`. There is no WinGet package; `winget install` does
 not install Gateinto.
 
