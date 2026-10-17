@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use fixture::*;
 use gateinto::identity::client_cert::{
-    ClientAuth, ClientAuthError, ClientCertificateMode, ClientCertificateOptions,
-    ClientIdentityStore, configure,
+    CertificateSource, ClientAuth, ClientAuthError, ClientCertificateMode,
+    ClientCertificateOptions, ClientIdentityStore, configure,
 };
 use gateinto::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
 use gateinto::identity::encoding::P256Point;
@@ -92,7 +92,7 @@ fn identity(
     let options = ClientCertificateOptions {
         mode: ClientCertificateMode::Required,
         key_name: KeyName::default(),
-        file: Some(write_temp("client.pem", &certificate.pem)),
+        source: CertificateSource::File(write_temp("client.pem", &certificate.pem)),
     };
     match configure(&options, Ok(store), UnixTime::now())? {
         ClientAuth::Enabled(identity) => Ok(identity.certified_key),
@@ -124,7 +124,7 @@ impl Setup {
 
     async fn agent(&self, client_certificate: Option<Arc<CertifiedKey>>) -> std::net::SocketAddr {
         let mut config = agent_config(self.upstream.addr, self.server_ca.roots(), PROXY_NAME);
-        config.client_certificate = client_certificate;
+        config.client_certificate = client_certificate.map(Into::into);
         start_agent(config).await
     }
 }

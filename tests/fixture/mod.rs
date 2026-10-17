@@ -2,17 +2,24 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gateinto::identity::certificates::DeviceSigner;
+use gateinto::identity::x509::parse_certificate;
 use gateinto::proxy::{Config, Limits, Proxy, Upstream};
 use gateinto::tls::TlsMode;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PublicKeyData,
 };
+use rustls::client::danger::HandshakeSignatureValid;
 use rustls::crypto::aws_lc_rs::{self, kx_group};
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, NamedGroup, RootCertStore, ServerConfig};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName, NamedGroup,
+    RootCertStore, ServerConfig, SignatureScheme,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -81,10 +88,41 @@ impl TestCa {
         self.server_config_with_client_ca(name, Some((client_ca, false)), HYBRID_GROUPS)
     }
 
+    pub fn server_config_trusting_client_spki(
+        &self,
+        name: &str,
+        spki: Vec<u8>,
+    ) -> Arc<ServerConfig> {
+        let provider = Arc::new(aws_lc_rs::default_provider());
+        let verifier = Arc::new(SpkiClientVerifier { spki, provider });
+        self.server_config_with_verifier(name, Some(verifier), HYBRID_GROUPS)
+    }
+
     fn server_config_with_client_ca(
         &self,
         name: &str,
         client_ca: Option<(&TestCa, bool)>,
+        groups: &[&'static dyn SupportedKxGroup],
+    ) -> Arc<ServerConfig> {
+        let verifier = client_ca.map(|(client_ca, required)| {
+            let verifier = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_ca.roots()),
+                Arc::new(provider(groups)),
+            );
+            let verifier = if required {
+                verifier
+            } else {
+                verifier.allow_unauthenticated()
+            };
+            verifier.build().unwrap()
+        });
+        self.server_config_with_verifier(name, verifier, groups)
+    }
+
+    fn server_config_with_verifier(
+        &self,
+        name: &str,
+        verifier: Option<Arc<dyn ClientCertVerifier>>,
         groups: &[&'static dyn SupportedKxGroup],
     ) -> Arc<ServerConfig> {
         let key = KeyPair::generate().unwrap();
@@ -92,26 +130,11 @@ impl TestCa {
             .unwrap()
             .signed_by(&key, &self.issuer)
             .unwrap();
-        let provider = Arc::new(CryptoProvider {
-            kx_groups: groups.to_vec(),
-            ..aws_lc_rs::default_provider()
-        });
-        let builder = ServerConfig::builder_with_provider(provider.clone())
+        let builder = ServerConfig::builder_with_provider(Arc::new(provider(groups)))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap();
-        let builder = match client_ca {
-            Some((client_ca, required)) => {
-                let verifier = WebPkiClientVerifier::builder_with_provider(
-                    Arc::new(client_ca.roots()),
-                    provider,
-                );
-                let verifier = if required {
-                    verifier
-                } else {
-                    verifier.allow_unauthenticated()
-                };
-                builder.with_client_cert_verifier(verifier.build().unwrap())
-            }
+        let builder = match verifier {
+            Some(verifier) => builder.with_client_cert_verifier(verifier),
             None => builder.with_no_client_auth(),
         };
         let config = builder
@@ -144,6 +167,88 @@ impl TestCa {
             .with_no_client_auth();
         Arc::new(config)
     }
+}
+
+fn provider(groups: &[&'static dyn SupportedKxGroup]) -> CryptoProvider {
+    CryptoProvider {
+        kx_groups: groups.to_vec(),
+        ..aws_lc_rs::default_provider()
+    }
+}
+
+#[derive(Debug)]
+pub struct SpkiClientVerifier {
+    spki: Vec<u8>,
+    provider: Arc<CryptoProvider>,
+}
+
+impl ClientCertVerifier for SpkiClientVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let parsed = parse_certificate(end_entity)
+            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        if parsed.spki != self.spki {
+            return Err(rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        let mut itself = RootCertStore::empty();
+        itself.add(end_entity.clone().into_owned())?;
+        WebPkiClientVerifier::builder_with_provider(Arc::new(itself), self.provider.clone())
+            .build()
+            .map_err(|error| rustls::Error::General(error.to_string()))?
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            certificate,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            certificate,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+pub fn software_signer(key: &KeyPair) -> DeviceSigner {
+    let der = PrivatePkcs8KeyDer::from(key.serialize_der()).into();
+    DeviceSigner::new(
+        key.public_key_raw().try_into().unwrap(),
+        aws_lc_rs::sign::any_ecdsa_type(&der).unwrap(),
+    )
 }
 
 pub struct IssuedCertificate {

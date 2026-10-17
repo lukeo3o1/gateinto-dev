@@ -49,6 +49,7 @@ pub struct Tls {
     pub mode: Option<TlsMode>,
     pub client_certificate: Option<ClientCertificateMode>,
     pub client_cert_file: Option<PathBuf>,
+    pub self_signed_client_cert: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -75,6 +76,7 @@ pub struct Settings {
     pub tls_mode: TlsMode,
     pub client_certificate: ClientCertificateMode,
     pub client_cert_file: Option<PathBuf>,
+    pub self_signed_client_cert: bool,
     pub device_key: DeviceKeySettings,
     pub limits: LimitSettings,
 }
@@ -164,6 +166,10 @@ impl ConfigFile {
                     .client_certificate
                     .or(self.tls.client_certificate),
                 client_cert_file: overrides.tls.client_cert_file.or(self.tls.client_cert_file),
+                self_signed_client_cert: overrides
+                    .tls
+                    .self_signed_client_cert
+                    .or(self.tls.self_signed_client_cert),
             },
             device_key: DeviceKey {
                 name: overrides.device_key.name.or(self.device_key.name),
@@ -218,6 +224,10 @@ impl ConfigFile {
                 error.to_string(),
             ))
         })?;
+        let self_signed_client_cert = self.tls.self_signed_client_cert.unwrap_or(false);
+        if self_signed_client_cert && self.tls.client_cert_file.is_some() {
+            return Err(ConfigError::new(ErrorKind::ClientCertificateConflict));
+        }
         let defaults = LimitSettings::default();
         let limits = &self.limits;
         Ok(Settings {
@@ -231,6 +241,7 @@ impl ConfigFile {
             tls_mode: self.tls.mode.unwrap_or_default(),
             client_certificate: self.tls.client_certificate.unwrap_or_default(),
             client_cert_file: self.tls.client_cert_file.clone(),
+            self_signed_client_cert,
             device_key: self.device_key_settings(),
             limits: LimitSettings {
                 max_concurrent_tunnels: limits
@@ -262,6 +273,7 @@ enum ErrorKind {
     Parse(toml::de::Error),
     NoUpstream,
     ServerName(String, String),
+    ClientCertificateConflict,
 }
 
 impl ConfigError {
@@ -285,6 +297,11 @@ impl fmt::Display for ConfigError {
             ErrorKind::ServerName(name, error) => {
                 write!(f, "invalid upstream server name \"{name}\": {error}")
             }
+            ErrorKind::ClientCertificateConflict => f.write_str(
+                "a client certificate file and a self-signed client certificate cannot be \
+                 combined; set either client_cert_file (--client-cert-file) or \
+                 self_signed_client_cert (--self-signed-client-cert)",
+            ),
         }
     }
 }
@@ -349,6 +366,7 @@ port = 443
                 tls_mode: TlsMode::HybridRequired,
                 client_certificate: ClientCertificateMode::Required,
                 client_cert_file: Some(PathBuf::from("/etc/gateinto/client.pem")),
+                self_signed_client_cert: false,
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
                     preferred: Backend::Software,
@@ -476,6 +494,54 @@ port = 443
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains(expected), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn self_signed_client_cert_is_off_unless_enabled() {
+        assert!(!settings(MINIMAL).unwrap().self_signed_client_cert);
+        assert!(!settings(FULL).unwrap().self_signed_client_cert);
+        let text = format!("{MINIMAL}[tls]\nself_signed_client_cert = true\n");
+        assert!(settings(&text).unwrap().self_signed_client_cert);
+        let error = ConfigFile::parse("[tls]\nself_signed_client_cert = \"yes\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("self_signed_client_cert"), "{error}");
+    }
+
+    #[test]
+    fn self_signed_client_cert_and_client_cert_file_are_exclusive() {
+        let text = format!(
+            "{MINIMAL}[tls]\nself_signed_client_cert = true\nclient_cert_file = \"client.pem\"\n"
+        );
+        assert_eq!(
+            settings(&text).unwrap_err().to_string(),
+            "a client certificate file and a self-signed client certificate cannot be combined; \
+             set either client_cert_file (--client-cert-file) or self_signed_client_cert \
+             (--self-signed-client-cert)"
+        );
+        let disabled = format!(
+            "{MINIMAL}[tls]\nself_signed_client_cert = false\nclient_cert_file = \"client.pem\"\n"
+        );
+        assert!(settings(&disabled).is_ok());
+    }
+
+    #[test]
+    fn self_signed_client_cert_can_be_enabled_by_an_override() {
+        let overrides = ConfigFile {
+            tls: Tls {
+                self_signed_client_cert: Some(true),
+                ..Tls::default()
+            },
+            ..ConfigFile::default()
+        };
+        let file = ConfigFile::parse(MINIMAL).unwrap();
+
+        assert!(
+            file.merge(overrides)
+                .settings()
+                .unwrap()
+                .self_signed_client_cert
+        );
     }
 
     #[test]

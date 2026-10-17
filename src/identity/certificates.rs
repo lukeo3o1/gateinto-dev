@@ -7,8 +7,9 @@ use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
 use rustls::SignatureScheme;
 use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::sign::{CertifiedKey, SigningKey};
+use tracing::info;
 
-use crate::identity::encoding::{P256Point, p256_spki_der};
+use crate::identity::encoding::{P256Point, p256_spki_der, sha256_fingerprint};
 use crate::identity::x509::encode_time;
 
 pub const SUBJECT_COMMON_NAME: &str = "Gateinto device";
@@ -217,6 +218,10 @@ impl SelfSignedCertificates {
         let mut current = self.lock();
         if now.as_secs().saturating_sub(current.issued_at) >= RENEW_AFTER.as_secs() {
             *current = Self::issue(&self.signer, now)?;
+            info!(
+                sha256 = %sha256_fingerprint(&current.certified_key.cert[0]),
+                "renewed the self-signed client certificate"
+            );
         }
         Ok(current.certified_key.clone())
     }

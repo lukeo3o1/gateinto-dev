@@ -7,12 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fixture::*;
-use gateinto::check::{CheckOptions, ClientCertificateUse, check_upstream};
+use gateinto::check::{CheckOptions, ClientCertificateUse, SelfSignedCertificate, check_upstream};
 use gateinto::http::Authority;
+use gateinto::identity::certificates::SelfSignedCertificates;
+use gateinto::identity::client_cert::ClientCertificate;
+use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::tls::TlsMode;
 use rcgen::KeyPair;
 use rustls::crypto::SupportedKxGroup;
-use rustls::pki_types::PrivatePkcs8KeyDer;
+use rustls::pki_types::{PrivatePkcs8KeyDer, UnixTime};
 use rustls::sign::CertifiedKey;
 use rustls::{NamedGroup, ProtocolVersion, ServerConfig};
 
@@ -206,13 +209,58 @@ async fn reports_whether_a_client_certificate_was_sent() {
     let certificate = client_ca.issue_client_certificate(&key);
     let mut options = setup.options(TlsMode::HybridPreferred);
     options.target = Some(authority(target));
-    options.client_certificate = Some(certified_key(&certificate, &key));
+    options.client_certificate = Some(certified_key(&certificate, &key).into());
     let report = check_upstream(options).await.unwrap();
     assert_eq!(report.client_certificate, ClientCertificateUse::Sent);
     assert_eq!(
         setup.upstream.client_certificates(),
         [vec![certificate.der]]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reports_the_self_signed_client_certificate_and_the_device_key() {
+    let key = KeyPair::generate().unwrap();
+    let certificates =
+        Arc::new(SelfSignedCertificates::new(software_signer(&key), UnixTime::now()).unwrap());
+    let ca = TestCa::new();
+    let config = ca.server_config_trusting_client_spki(PROXY_NAME, certificates.spki());
+    let setup = Setup::start(config, ca, Behavior::Tunnel).await;
+    let mut options = setup.options(TlsMode::HybridPreferred);
+    options.target = Some(authority(echo_server().await));
+    options.client_certificate = Some(ClientCertificate::SelfSigned(certificates.clone()));
+
+    let report = check_upstream(options).await.unwrap();
+
+    let sent = certificates.current().cert[0].clone();
+    let expected = SelfSignedCertificate {
+        certificate_sha256: sha256_fingerprint(&sent),
+        device_key_spki_sha256: sha256_fingerprint(&certificates.spki()),
+    };
+    assert_eq!(report.client_certificate, ClientCertificateUse::Sent);
+    assert_eq!(report.self_signed_certificate, Some(expected.clone()));
+    assert_eq!(report.connect_status.as_ref().unwrap().0, 200);
+    assert_eq!(setup.upstream.client_certificates(), [vec![sent]]);
+    assert!(
+        report.to_string().contains(&format!(
+            "client-certificate: sent\nclient-certificate-source: self-signed\n\
+             client-certificate-sha256: {}\ndevice-key-spki-sha256: {}\n",
+            expected.certificate_sha256, expected.device_key_spki_sha256
+        )),
+        "{report}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reports_no_self_signed_details_for_other_certificates() {
+    let setup = Setup::with_groups(HYBRID_GROUPS, Behavior::Tunnel).await;
+
+    let report = check_upstream(setup.options(TlsMode::HybridPreferred))
+        .await
+        .unwrap();
+
+    assert_eq!(report.self_signed_certificate, None);
+    assert!(!report.to_string().contains("self-signed"), "{report}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

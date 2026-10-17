@@ -302,3 +302,24 @@ async fn example_config_is_accepted_up_to_the_network() {
     assert!(error.contains("connect failed"), "{error}");
     assert!(!error.contains("config file"), "{error}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn self_signed_flag_conflicts_with_a_client_cert_file_from_the_config_file() {
+    let fixture = Fixture::new().await;
+    let config = fixture.config("[tls]\nclient_cert_file = \"client.pem\"\n");
+
+    let output = run(
+        args(&["check-upstream", "--self-signed-client-cert"]),
+        config,
+    )
+    .await;
+
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains(
+            "a client certificate file and a self-signed client certificate cannot be combined"
+        ),
+        "{error}"
+    );
+}

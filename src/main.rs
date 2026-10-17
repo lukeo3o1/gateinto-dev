@@ -2,7 +2,6 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -10,13 +9,13 @@ use gateinto::check::{self, CheckOptions};
 use gateinto::config::{self, ConfigFile, DeviceKeySettings, Settings};
 use gateinto::http::Authority;
 use gateinto::identity::client_cert::{
-    self, ClientCertificateMode, ClientCertificateOptions, ClientIdentityStore,
+    self, CertificateSource, ClientCertificate, ClientCertificateMode, ClientCertificateOptions,
+    ClientIdentityStore,
 };
 use gateinto::identity::device_key::{self, Backend, InitOptions, KeyName, KeyStore, Provenance};
 use gateinto::proxy::{Config, Limits, Proxy, Upstream};
 use gateinto::tls::{self, TlsMode};
 use rustls::pki_types::{ServerName, UnixTime};
-use rustls::sign::CertifiedKey;
 use tracing_subscriber::EnvFilter;
 
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -223,6 +222,10 @@ struct UpstreamArgs {
     #[arg(long)]
     client_cert_file: Option<PathBuf>,
 
+    /// Issue a short-lived self-signed client certificate with the device key at startup
+    #[arg(long, conflicts_with = "client_cert_file")]
+    self_signed_client_cert: bool,
+
     /// Name of the persisted CNG device key that signs for the client certificate [default: gateinto-device-v1]
     #[arg(long)]
     key_name: Option<KeyName>,
@@ -238,6 +241,7 @@ impl UpstreamArgs {
         overrides.tls.mode = self.tls_mode;
         overrides.tls.client_certificate = self.client_certificate.map(Into::into);
         overrides.tls.client_cert_file = self.client_cert_file.clone();
+        overrides.tls.self_signed_client_cert = self.self_signed_client_cert.then_some(true);
         overrides.device_key.name = self.key_name.clone();
         overrides
     }
@@ -358,16 +362,20 @@ fn upstream(settings: &Settings) -> Result<Upstream> {
     })
 }
 
-fn client_certificate(settings: &Settings) -> Result<Option<Arc<CertifiedKey>>> {
+fn client_certificate(settings: &Settings) -> Result<Option<ClientCertificate>> {
     let options = ClientCertificateOptions {
         mode: settings.client_certificate,
         key_name: settings.device_key.name.clone(),
-        file: settings.client_cert_file.clone(),
+        source: match &settings.client_cert_file {
+            _ if settings.self_signed_client_cert => CertificateSource::SelfSigned,
+            Some(path) => CertificateSource::File(path.clone()),
+            None => CertificateSource::Store,
+        },
     };
     let store = gateinto::identity::system_store();
     let client_auth =
         client_cert::configure(&options, store.as_ref().map_err(|&e| e), UnixTime::now())?;
-    Ok(client_auth.into_certified_key())
+    Ok(client_auth.into_client_certificate())
 }
 
 async fn check_upstream(args: CheckUpstreamArgs) -> Result {

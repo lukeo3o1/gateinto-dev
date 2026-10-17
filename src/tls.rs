@@ -7,10 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rustls::client::{ResolvesClientCert, Resumption};
 use rustls::crypto::aws_lc_rs::{self, kx_group};
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
-use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::{self, PemObject};
+use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, NamedGroup, ProtocolVersion, RootCertStore, SignatureScheme};
+
+use crate::identity::client_cert::ClientCertificate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,15 +142,15 @@ pub fn client_config(
 
 #[derive(Debug, Default)]
 pub struct ClientCertificateResolver {
-    certified_key: Option<Arc<CertifiedKey>>,
+    certificate: Option<ClientCertificate>,
     requested: AtomicBool,
     sent: AtomicBool,
 }
 
 impl ClientCertificateResolver {
-    pub fn new(certified_key: Option<Arc<CertifiedKey>>) -> Self {
+    pub fn new(certificate: Option<ClientCertificate>) -> Self {
         Self {
-            certified_key,
+            certificate,
             ..Self::default()
         }
     }
@@ -165,16 +167,16 @@ impl ClientCertificateResolver {
 impl ResolvesClientCert for ClientCertificateResolver {
     fn resolve(&self, _: &[&[u8]], schemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
         self.requested.store(true, Ordering::Relaxed);
-        let certified_key = self.certified_key.as_ref()?;
+        let certified_key = self.certificate.as_ref()?.certified_key(UnixTime::now());
         // rustls sends an empty certificate when the key offers none of the server's schemes.
         if certified_key.key.choose_scheme(schemes).is_some() {
             self.sent.store(true, Ordering::Relaxed);
         }
-        Some(certified_key.clone())
+        Some(certified_key)
     }
 
     fn has_certs(&self) -> bool {
-        self.certified_key.is_some()
+        self.certificate.is_some()
     }
 }
 
