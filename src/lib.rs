@@ -5,3 +5,4 @@ pub mod identity;
 pub mod proxy;
 pub mod sessions;
 pub mod tls;
+pub mod uri;
