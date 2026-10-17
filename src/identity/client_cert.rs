@@ -8,7 +8,9 @@ use rustls::sign::{CertifiedKey, SigningKey};
 use tracing::{info, warn};
 
 use crate::identity::UnsupportedPlatform;
-use crate::identity::certificates::{DeviceSigner, IssueError, SelfSignedCertificates};
+use crate::identity::certificates::{
+    DeviceSigner, ExpiredCertificate, IssueError, SelfSignedCertificates,
+};
 use crate::identity::device_key::{
     self, Backend, DeviceKey, KeyError, KeyName, KeyStore, StoreError,
 };
@@ -306,13 +308,16 @@ pub struct ClientIdentity {
     pub backend: Backend,
     pub binding: Binding,
     pub certified_key: Arc<CertifiedKey>,
-    self_signed: Option<Arc<SelfSignedCertificates>>,
+    self_signed: Option<ClientCertificate>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ClientCertificate {
     Fixed(Arc<CertifiedKey>),
-    SelfSigned(Arc<SelfSignedCertificates>),
+    SelfSigned {
+        certificates: Arc<SelfSignedCertificates>,
+        required: bool,
+    },
 }
 
 impl From<Arc<CertifiedKey>> for ClientCertificate {
@@ -322,15 +327,17 @@ impl From<Arc<CertifiedKey>> for ClientCertificate {
 }
 
 impl ClientCertificate {
-    pub fn certified_key(&self, now: UnixTime) -> Arc<CertifiedKey> {
+    pub fn certified_key(&self, now: UnixTime) -> Result<Arc<CertifiedKey>, ExpiredCertificate> {
         match self {
-            Self::Fixed(certified_key) => certified_key.clone(),
-            Self::SelfSigned(certificates) => {
-                certificates.certified_key_at(now).unwrap_or_else(|error| {
-                    warn!("renewing the self-signed client certificate failed: {error}; sending the previous one");
-                    certificates.current()
-                })
-            }
+            Self::Fixed(certified_key) => Ok(certified_key.clone()),
+            Self::SelfSigned { certificates, .. } => certificates.certified_key_at(now),
+        }
+    }
+
+    pub fn check_required(&self, now: UnixTime) -> Result<(), ExpiredCertificate> {
+        match self {
+            Self::SelfSigned { required: true, .. } => self.certified_key(now).map(drop),
+            _ => Ok(()),
         }
     }
 }
@@ -358,6 +365,7 @@ fn open_device_key<S: ClientIdentityStore>(
 pub fn load_self_signed_identity<S: ClientIdentityStore>(
     store: &S,
     name: &KeyName,
+    mode: ClientCertificateMode,
     now: UnixTime,
 ) -> Result<ClientIdentity, ClientAuthError> {
     let key = open_device_key(store, name)?;
@@ -378,7 +386,10 @@ pub fn load_self_signed_identity<S: ClientIdentityStore>(
             source: CertificateSource::SelfSigned,
         },
         certified_key,
-        self_signed: Some(Arc::new(certificates)),
+        self_signed: Some(ClientCertificate::SelfSigned {
+            certificates: Arc::new(certificates),
+            required: mode == ClientCertificateMode::Required,
+        }),
     })
 }
 
@@ -425,10 +436,11 @@ impl ClientAuth<ClientIdentity> {
                     backend = %identity.backend,
                     "client certificate authentication enabled"
                 );
-                Some(match identity.self_signed {
-                    Some(certificates) => ClientCertificate::SelfSigned(certificates),
-                    None => ClientCertificate::Fixed(identity.certified_key),
-                })
+                Some(
+                    identity
+                        .self_signed
+                        .unwrap_or(ClientCertificate::Fixed(identity.certified_key)),
+                )
             }
             Self::Unauthenticated(error) => {
                 warn!("{}", error.unauthenticated_warning());
@@ -460,7 +472,7 @@ pub fn configure<S: ClientIdentityStore>(
         let store = store?;
         let file = match &options.source {
             CertificateSource::SelfSigned => {
-                return load_self_signed_identity(store, &options.key_name, now);
+                return load_self_signed_identity(store, &options.key_name, options.mode, now);
             }
             CertificateSource::File(path) => Some(path.as_path()),
             CertificateSource::Store => None,
@@ -965,8 +977,10 @@ mod tests {
         identity.certified_key.keys_match().unwrap();
         assert!(!store.calls().contains(&"certificates".to_owned()));
         assert!(!store.calls().iter().any(|call| call.starts_with("create")));
-        let Some(ClientCertificate::SelfSigned(certificates)) =
-            ClientAuth::Enabled(identity).into_client_certificate()
+        let Some(ClientCertificate::SelfSigned {
+            certificates,
+            required: true,
+        }) = ClientAuth::Enabled(identity).into_client_certificate()
         else {
             panic!("self-signed identity did not renew its certificates");
         };
@@ -1063,7 +1077,7 @@ mod tests {
 
         assert!(matches!(certificate, ClientCertificate::Fixed(_)));
         assert!(Arc::ptr_eq(
-            &certificate.certified_key(now()),
+            &certificate.certified_key(now()).unwrap(),
             &certified_key
         ));
     }

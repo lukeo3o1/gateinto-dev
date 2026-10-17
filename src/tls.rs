@@ -12,6 +12,9 @@ use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, NamedGroup, ProtocolVersion, RootCertStore, SignatureScheme};
 
+use tracing::warn;
+
+use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -159,6 +162,12 @@ impl ClientCertificateResolver {
         self.requested.load(Ordering::Relaxed)
     }
 
+    pub fn check_required(&self, now: UnixTime) -> Result<(), ExpiredCertificate> {
+        self.certificate
+            .as_ref()
+            .map_or(Ok(()), |certificate| certificate.check_required(now))
+    }
+
     pub fn sent(&self) -> bool {
         self.sent.load(Ordering::Relaxed)
     }
@@ -167,7 +176,13 @@ impl ClientCertificateResolver {
 impl ResolvesClientCert for ClientCertificateResolver {
     fn resolve(&self, _: &[&[u8]], schemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
         self.requested.store(true, Ordering::Relaxed);
-        let certified_key = self.certificate.as_ref()?.certified_key(UnixTime::now());
+        let certified_key = match self.certificate.as_ref()?.certified_key(UnixTime::now()) {
+            Ok(certified_key) => certified_key,
+            Err(error) => {
+                warn!("{error}; no client certificate is sent");
+                return None;
+            }
+        };
         // rustls sends an empty certificate when the key offers none of the server's schemes.
         if certified_key.key.choose_scheme(schemes).is_some() {
             self.sent.store(true, Ordering::Relaxed);

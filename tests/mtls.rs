@@ -267,6 +267,55 @@ async fn upstream_trusting_the_device_spki_accepts_each_self_signed_certificate(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn required_expired_self_signed_certificate_fails_locally_without_connecting() {
+    let key = KeyPair::generate().unwrap();
+    let server_ca = TestCa::new();
+    let client_ca = TestCa::new();
+    let upstream = UpstreamProxy::start(
+        server_ca.server_config_requesting_client_certificates(PROXY_NAME, &client_ca),
+        Behavior::Tunnel,
+    )
+    .await;
+    let mut config = agent_config(upstream.addr, server_ca.roots(), PROXY_NAME);
+    config.client_certificate = Some(ClientCertificate::SelfSigned {
+        certificates: expired_self_signed_certificates(&key),
+        required: true,
+    });
+
+    assert_bad_gateway(start_agent(config).await).await;
+
+    assert!(upstream.negotiated_groups().is_empty());
+    assert!(upstream.client_certificates().is_empty());
+    assert!(upstream.requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn optional_expired_self_signed_certificate_is_not_sent() {
+    let key = KeyPair::generate().unwrap();
+    let server_ca = TestCa::new();
+    let client_ca = TestCa::new();
+    let upstream = UpstreamProxy::start(
+        server_ca.server_config_requesting_client_certificates(PROXY_NAME, &client_ca),
+        Behavior::Tunnel,
+    )
+    .await;
+
+    let echoed = tunnel_with(
+        &upstream,
+        &server_ca,
+        ClientCertificate::SelfSigned {
+            certificates: expired_self_signed_certificates(&key),
+            required: false,
+        },
+    )
+    .await;
+
+    assert_eq!(echoed, b"self-signed");
+    assert!(upstream.client_certificates().is_empty());
+    assert_eq!(upstream.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn upstream_trusting_another_spki_rejects_the_self_signed_certificate() {
     let store = SoftwareStore::new();
     let other = KeyPair::generate().unwrap();

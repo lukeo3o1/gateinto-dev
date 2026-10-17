@@ -147,7 +147,7 @@ async fn check(options: CheckOptions) -> Result<Report, CheckError> {
     let upstream = format!("{}:{}", options.upstream.host, options.upstream.port);
     let server_name = options.upstream.server_name.to_str().into_owned();
     let self_signed = match &options.client_certificate {
-        Some(ClientCertificate::SelfSigned(certificates)) => Some(certificates.clone()),
+        Some(ClientCertificate::SelfSigned { certificates, .. }) => Some(certificates.clone()),
         _ => None,
     };
     let resolver = Arc::new(ClientCertificateResolver::new(options.client_certificate));
