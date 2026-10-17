@@ -367,6 +367,13 @@ fn key_info_fails_for_a_missing_key() {
     assert!(stderr.contains("no device key named"), "{stderr}");
 }
 
+fn without_elevation_note(stderr: &str) -> &str {
+    stderr
+        .strip_prefix(gateinto::lifecycle::ELEVATED_NOTE)
+        .and_then(|rest| rest.strip_prefix('\n'))
+        .unwrap_or(stderr)
+}
+
 #[test]
 fn key_init_reports_the_software_fallback() {
     let key = TestKey::new();
@@ -374,6 +381,7 @@ fn key_init_reports_the_software_fallback() {
     let (success, stdout, stderr) = gateinto(&["key", "init", "--name", key.name().as_str()]);
 
     assert!(success, "{stderr}");
+    let stderr = without_elevation_note(&stderr);
     match field(&stdout, "backend") {
         "tpm" => {
             assert!(!tpm_absent());
