@@ -35,7 +35,9 @@ Fixes:
   unavailable (Windows 7 or earlier)`. A not-ready TPM provider is then treated
   as unavailable, so `key init` falls back to the Software KSP, or fails with
   that reason when fallback is disabled. On Windows 8 and later the probe
-  behaves as before.
+  behaves as before. A unit test in `src/identity/windows_cng.rs`, run by the
+  Windows CI jobs, checks this: it asserts that the function resolves and that
+  the probe never reports it missing.
 - TLS client authentication and certificate signing no longer use
   `CngSigningKey`. Gateinto hashes with aws-lc-rs, signs the SHA-256 digest with
   `NCryptSignHash`, and encodes the signature as DER
