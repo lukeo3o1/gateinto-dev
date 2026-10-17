@@ -222,8 +222,23 @@ Non-guarantees:
   - A TPM that is present but not usable right now stops `key init` without
     creating anything, because an existing TPM key cannot be ruled out. Only a
     TPM that is reported absent leads to a software key.
-  - `proxy`, `check-upstream` and `key info` only open the key, never create
-    it.
+  - `proxy`, `check-upstream`, `key info`, `status`, `agent` and `open` only
+    open the key, never create it. Only `key init` and `gateinto setup` create
+    one.
+- **Installer separate from the key.** The MSI is per user, so it runs as the
+  installing user and never as `SYSTEM`; none of its custom actions creates or
+  opens a key. `gateinto setup` refuses to run as LocalSystem, LocalService or
+  NetworkService, and notes when it runs elevated that the key still belongs
+  to the current user. An uninstall keeps the key and the config file, so a
+  reinstall keeps the device identity.
+- **Explicit purge.** Only `gateinto reset --purge-device-identity` deletes the
+  key, never an uninstall. It shows the provider, key name and SPKI with the
+  consequences, requires at least the first 16 hex digits of the SPKI (typed
+  at a prompt, or `--confirm-spki`; without a terminal and without that flag
+  it refuses), stops the agent, and deletes only the key with the configured
+  name in the current user's scope, after checking its SPKI again, through
+  `NCryptDeleteKey`. It never clears a provider or the TPM. Deleting the key
+  does not revoke the device at any gateway; see [install.md](install.md).
 
 ### Exposure and logs
 
