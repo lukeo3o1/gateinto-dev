@@ -363,12 +363,13 @@ valid from 5 minutes before issuance until 1 hour after it, critical basic
 constraints without CA, critical key usage `digitalSignature`, extended key
 usage `clientAuth`, and the device key's public key. The device key signs the
 certificate and the TLS `CertificateVerify` through CNG; there is no other
-private key, and the certificate is never written to disk or to a store. A
-running proxy issues a new certificate when the upstream asks for one and the
-current certificate is 30 minutes or older. An expired certificate is never
-sent: if renewing fails after the current one has expired, `required` fails
-each upstream connection locally and `optional` connects without a client
-certificate.
+private key, and the certificate is never written to disk or to a store. Once
+the current certificate is 30 minutes or older, a running proxy issues a new one
+before the next upstream connection with `required`, or when the upstream next
+asks for one with `optional`. A failed renewal is retried at most once a
+minute. An expired certificate is never sent: if renewing fails after the
+current one has expired, `required` fails each upstream connection locally and
+`optional` connects without a client certificate.
 
 Every certificate has a different serial number, DER and fingerprint, but the
 same SubjectPublicKeyInfo. The upstream therefore has to identify the device by
