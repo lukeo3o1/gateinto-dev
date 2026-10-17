@@ -389,18 +389,39 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stop_as_run_by_the_uninstaller_closes_sessions_and_profiles_and_tolerates_no_agent() {
+async fn stop_for_the_uninstaller_closes_sessions_and_removes_stale_profiles() {
     let launcher = Launcher::new("").await;
     let (_, browser) = launcher.opened("main").await;
 
-    launcher.run(&["stop"]).await.success();
+    let output = launcher.run(&["stop", "--remove-stale-profiles"]).await;
 
+    assert!(
+        output
+            .success()
+            .stdout
+            .contains("removed 0 stale browser profiles")
+    );
     assert!(!browser.profile().exists());
     assert!(
         status(&launcher)
             .await
             .contains(&"agent: not running".to_owned())
     );
+    let stale = ProfileDir::create(&launcher.profiles_root, "5".parse().unwrap()).unwrap();
+    let unmarked = launcher.profiles_root.join("not-a-profile");
+    std::fs::create_dir_all(&unmarked).unwrap();
+
+    let output = launcher.run(&["stop", "--remove-stale-profiles"]).await;
+
+    assert_eq!(
+        output.success().lines(),
+        vec![
+            "no agent is running".to_owned(),
+            "removed 1 stale browser profiles".to_owned()
+        ]
+    );
+    assert!(!stale.path().exists());
+    assert!(unmarked.exists());
     let output = launcher.run(&["stop"]).await;
     assert!(
         output.failure().stderr.contains("no agent is running"),
