@@ -69,7 +69,7 @@ meant to protect, against whom, and what it does not protect.
 | A website floods the user with launches. | At most 5 launch requests per minute and 4 browser sessions at a time per agent. |
 | A launch leaks state between browser sessions or into the user's profile. | Each launch gets a new session (port, realm, `basic_tofu` state, certificate) and a new browser profile directory, deleted when the browser exits or the session is closed. |
 | Profile cleanup deletes the wrong directory. | Only directories directly in the profiles directory, with Gateinto's name pattern and marker file, are deleted; links are not followed. |
-| Another user or a remote machine controls the agent. | Per-user named pipe (named after the SID, first instance, remote clients rejected, others read-only by the default security descriptor); `0600` socket in a `0700` directory on Unix. |
+| Another user or a remote machine controls the agent. | Per-user named pipe (named after the SID, first instance, remote clients rejected, DACL granting access only to the user and SYSTEM); clients refuse a pipe served by another user's process; `0600` socket in a `0700` directory owned by the user on Unix. |
 | URI registration clobbers another application's handler or leaves a broken one. | Only `HKCU\Software\Classes\gateinto` is written; an existing non-Gateinto handler is refused; a failed first registration is rolled back; unregistration removes only a Gateinto handler. |
 | Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level; the session keeps only a keyed hash of its bound credential. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
 | The device identity is silently replaced, for example by an attacker or a bug that recreates the key. | `key init` reuses an existing key in either provider and creates one only when none exists; creating a key that already exists fails instead of overwriting it; the proxy and `key info` only open the key, never create it. |
@@ -107,11 +107,14 @@ meant to protect, against whom, and what it does not protect.
 - A browser that relaunches itself or keeps running after its windows close
   can end a session early or keep it open; the user then closes it with
   `gateinto session close`.
-- On Windows any user can read from the agent's pipe by default; requests
-  need write access, which only the owner, SYSTEM and administrators have.
-  Another user can create a pipe with the same name before the agent starts,
-  which keeps the agent from starting and lets that user receive the launch
-  requests of `gateinto open` (a gateway name) and answer them.
+- Another user can still create a pipe with the agent's name before the
+  agent starts. The agent then cannot start, and `gateinto open` refuses to
+  talk to that pipe because its server runs as another user, so launches
+  fail until the other pipe is gone (denial of service, no data reaches that
+  user). The pipe DACL and this check are exercised on `windows-latest` only
+  as the same user; the other-user cases are not tested.
+- SYSTEM and administrators can always act as or impersonate the user and
+  are outside the boundary, as for the rest of Gateinto.
 - The code has not had an external security review and has not been tested
   against a real upstream proxy or on physical Windows machines.
 

@@ -105,10 +105,12 @@ How that is bounded:
   60 seconds (counted whether they succeed or not) and at most 4 open
   browser sessions. A page that opens many links gets errors, not windows.
 - **Per-user endpoint.** The agent listens on a named pipe named after the
-  user's SID, created as the first instance and rejecting remote clients;
-  its default security descriptor lets other users read but not write. On
-  Unix the socket is `0600` in a `0700` directory. The agent answers one
-  short request per connection with size limits and a timeout.
+  user's SID, created as the first instance, rejecting remote clients, with a
+  DACL that grants access only to the user and SYSTEM. Clients refuse a pipe
+  whose server process runs as another user. On Unix the socket is `0600` in
+  a `0700` directory that must belong to the user. The agent answers one
+  short request per connection with size limits and a timeout, and clients
+  give up after 60 seconds.
 - **Isolation of each launch.** Every launch is a new session with its own
   port, realm, `basic_tofu` state and client certificate, and a new browser
   profile directory, so a launched browser does not share cookies, cache or

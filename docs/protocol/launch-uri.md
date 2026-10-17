@@ -49,8 +49,11 @@ Limits and rules:
   and every other character are errors.
 - Leading or trailing whitespace, quotes or line breaks are errors.
 - The forms `gateinto:connect?...` and `gateinto:///connect?...` are not
-  accepted. Browsers pass the URI to Windows as the user clicked it, so a link
-  written as in the example arrives in that form.
+  accepted. Browsers are expected to pass the URI to Windows as written in
+  the link, so a link written as in the example should arrive in the accepted
+  form; this is not verified with Chrome or Edge yet (step 21 of
+  [browser-verification.md](../browser-verification.md#launch-uri-and-agent)
+  records it).
 
 Error messages say which rule was broken and never repeat the URI.
 
@@ -96,17 +99,29 @@ with `an agent is already running`.
 Endpoint:
 
 - Windows: the named pipe `\\.\pipe\gateinto-agent-<user SID>`, created with
-  `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS`, with the
-  default security descriptor (full control for the owner, SYSTEM and
-  administrators, read-only for everyone else, so no other user can write a
-  request).
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS` and the
+  protected DACL `D:P(A;;GA;;;<user SID>)(A;;GA;;;SY)`: only the user and
+  SYSTEM can open it, so other users cannot read, write or hold its
+  connection slots. Before sending a request, a client checks that the
+  process serving the pipe (`GetNamedPipeServerProcessId`) runs as the same
+  user (token user SIDs compared with `EqualSid`) and refuses the pipe
+  otherwise, so a pipe that another user created first under that name is
+  not used. Whether Windows enforces these as intended is only exercised by
+  the CI runs on `windows-latest` (same user); the other-user cases are not
+  tested.
 - Unix (development and tests): the socket `agent.sock` in
   `$XDG_RUNTIME_DIR/gateinto`, or `$HOME/.local/state/gateinto` without
   `XDG_RUNTIME_DIR`. The directory must be accessible only by its owner
-  (created with mode `0700`), the socket gets mode `0600`, and a socket left
-  by a crashed agent is replaced.
+  (created with mode `0700`) and owned by the user (checked against a file the
+  agent creates there), and the socket gets mode `0600`. Probing for a
+  running agent, replacing a socket left by a crashed agent and binding happen
+  while holding the exclusive lock file `agent.sock.lock` (created with
+  `O_EXCL`); a lock file older than 10 seconds is treated as left by a crash
+  and taken over.
 - `GATEINTO_INSTANCE=<name>` (1 to 32 characters from `A-Z`, `a-z`, `0-9`,
-  `_`, `-`) appends `-<name>` to the pipe or socket name. It exists so that
+  `_`, `-`) appends `-<name>` to the pipe or socket name and makes the agent
+  use `profiles-<name>` instead of `profiles` for browser profiles, so one
+  instance never sweeps another's profiles. It exists so that
   tests and development builds can run separate agents; it is read from the
   environment, never from a URI.
 
@@ -124,17 +139,24 @@ agent parses every request itself and does not trust the client.
 An error is the single line `error: <message>`. Line breaks inside a message
 are replaced by spaces. Answers are at most 64 KiB. The agent serves at most
 8 connections at a time and drops a connection that sends no complete request
-within 10 seconds. The command line exposes the requests as `gateinto open`,
+within 10 seconds. A client gives up on an agent that does not answer within
+60 seconds; a connection that the agent closes without an answer is reported
+as such. The command line exposes the requests as `gateinto open`,
 `gateinto session list`, `gateinto session close <id>` and `gateinto stop`.
 
 `gateinto open` without a running agent starts `gateinto agent` with the same
 `--config` as a detached process (on Windows without a console and without
 inheriting the standard handles of `open`, on Unix in its own process group,
 in both cases with its output discarded) and retries the request with a backoff from
-25 ms to 1 s for up to 30 seconds. If the started agent exits first, for
-example because the configuration file is invalid, `open` says so; run
-`gateinto agent` in a console to see the reason. If two `open` commands race,
-one agent wins and the other exits; both requests reach the winner.
+25 ms to 1 s for up to 30 seconds. A missing agent, a busy pipe and a
+connection closed without an answer (an agent that is stopping) are retried
+within that time; if a started agent exits while no agent answers, `open`
+starts another, at most three in all. If they all exit, for example because
+the configuration file is invalid, `open` says so; run `gateinto agent` in a
+console to see the reason. If two `open` commands race, one agent wins and
+the other exits; both requests reach the winner (a test runs two `open`
+commands at once without an agent). On `stop` the agent stops accepting
+connections before it closes its sessions.
 
 ## Launch policy
 
@@ -174,7 +196,8 @@ The agent starts the browser without a shell, with these arguments:
   `chromium-browser` and `microsoft-edge` on `PATH`.
 - Profile directory: `%LOCALAPPDATA%\Gateinto\profiles\<session id>-<16 random hex digits>`
   (Unix: `$XDG_STATE_HOME/gateinto/profiles` or
-  `$HOME/.local/state/gateinto/profiles`), created new for each launch
+  `$HOME/.local/state/gateinto/profiles`; `profiles-<instance>` with
+  `GATEINTO_INSTANCE`), created new for each launch
   (directories mode `0700` on Unix) with a marker file `gateinto-profile`. A
   separate user data directory makes Chrome and Edge start a new browser
   process instead of handing the arguments to a browser that is already
@@ -189,8 +212,8 @@ The agent starts the browser without a shell, with these arguments:
 - When the browser process exits, the agent closes the session (listener
   dropped, tunnels and upstream TLS connections aborted, `basic_tofu` state
   and certificate discarded) and deletes the profile directory.
-- `gateinto session close <id>`, `gateinto stop` and Ctrl+C in a console
-  running `gateinto agent` kill the browser process, then do the same.
+- `gateinto session close <id>`, `gateinto stop`, and Ctrl+C, Ctrl+Break or
+  closing the console of `gateinto agent` (SIGINT or SIGTERM on Unix) kill the browser process, then do the same.
 
 Deletion only touches a directory directly inside the profiles directory
 whose name has the form above, that is a real directory (not a link) and that
