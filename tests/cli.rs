@@ -513,3 +513,63 @@ fn commands_log_which_default_config_file_they_loaded() {
         "{stderr}"
     );
 }
+
+#[test]
+fn reset_yes_only_works_together_with_purge_config() {
+    let (success, _, stderr) =
+        gateinto_without_terminal(&["reset", "--purge-device-identity", "--yes"]);
+    assert!(!success);
+    assert!(stderr.contains("--purge-config"), "{stderr}");
+}
+
+#[test]
+fn reset_help_says_which_config_file_is_deleted() {
+    let help = help(&["reset"]);
+    assert!(
+        help.contains("Also delete the config file named with --config, or else the default"),
+        "{help}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn reset_deletes_only_the_config_file_when_no_key_exists_and_yes_is_given() {
+    let path =
+        std::env::temp_dir().join(format!("gateinto-config-only-{}.toml", std::process::id()));
+    std::fs::write(
+        &path,
+        "[device_key]\nname = \"gateinto-test-missing-reset-key\"\n",
+    )
+    .unwrap();
+    let config = path.to_str().unwrap();
+
+    let (success, _, stderr) = gateinto_without_terminal(&[
+        "reset",
+        "--purge-device-identity",
+        "--purge-config",
+        "--config",
+        config,
+    ]);
+    assert!(!success);
+    assert!(path.exists(), "{stderr}");
+
+    let (success, stdout, stderr) = gateinto_without_terminal(&[
+        "reset",
+        "--purge-device-identity",
+        "--purge-config",
+        "--config",
+        config,
+        "--yes",
+    ]);
+    let kept = path.exists();
+    let _ = std::fs::remove_file(&path);
+    assert!(success, "{stdout}{stderr}");
+    assert!(!kept);
+    assert!(
+        stdout.contains(
+            "no device key named \"gateinto-test-missing-reset-key\"; no key was deleted"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("deleted config file"), "{stdout}");
+}

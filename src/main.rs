@@ -111,9 +111,15 @@ struct ResetArgs {
     #[arg(long, required = true)]
     purge_device_identity: bool,
 
-    /// Also delete the configuration file named with --config
+    /// Also delete the config file named with --config, or else the default
+    /// %APPDATA%\Gateinto\gateinto.toml
     #[arg(long)]
     purge_config: bool,
+
+    /// Confirm deleting the config file without a prompt when no device key exists; an
+    /// existing key always needs its SPKI confirmed
+    #[arg(long, requires = "purge_config")]
+    yes: bool,
 
     /// Confirm without a prompt: the first 16 or more hex digits of the key's spki-sha256
     #[arg(long, value_name = "HEX")]
@@ -1061,28 +1067,66 @@ fn config_to_purge(args: &ResetArgs) -> Result<Option<PathBuf>> {
     Ok(Some(std::path::absolute(&path)?))
 }
 
+const NO_TERMINAL: &str = "refusing to delete the device key without confirmation: no \
+                           terminal to ask on; pass --confirm-spki with at least the first 16 \
+                           hex digits of the spki-sha256 shown by `gateinto status`";
+
+fn delete_config(path: &Path) -> Result {
+    std::fs::remove_file(path).map_err(|error| format!("deleting {}: {error}", path.display()))?;
+    println!("deleted config file {}", path.display());
+    Ok(())
+}
+
+fn purge_config_only(name: &KeyName, path: &Path, yes: bool, terminal: bool) -> Result {
+    use std::io::{BufRead, Write};
+
+    println!("no device key named \"{name}\"; no key was deleted");
+    println!(
+        "This permanently deletes the Gateinto config file {}.",
+        path.display()
+    );
+    if !yes {
+        if !terminal {
+            return Err(
+                "refusing to delete the config file without confirmation: no terminal \
+                        to ask on; pass --yes"
+                    .into(),
+            );
+        }
+        print!("\nType purge to delete the config file: ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        if line.trim() != "purge" {
+            return Err("the confirmation did not match; nothing was deleted".into());
+        }
+    }
+    delete_config(path)
+}
+
 async fn reset(args: ResetArgs) -> Result {
     use std::io::IsTerminal;
 
-    let interactive = args.confirm_spki.is_none();
-    if interactive && !std::io::stdin().is_terminal() {
-        return Err(
-            "refusing to delete the device key without confirmation: no terminal to ask \
-                    on; pass --confirm-spki with at least the first 16 hex digits of the \
-                    spki-sha256 shown by `gateinto status`"
-                .into(),
-        );
+    let terminal = std::io::stdin().is_terminal();
+    if args.confirm_spki.is_none() && !args.yes && !terminal {
+        return Err(NO_TERMINAL.into());
     }
     let config = config_to_purge(&args)?;
     let name = device_key_settings(&args.config, args.name.clone())?.name;
     let store = gateinto::identity::system_store()?;
-    let (backend, fingerprint) = {
-        let (key, duplicate) = device_key::info(&store, &name)?;
-        if let Some(duplicate) = duplicate {
-            return Err(KeyError::Duplicate(duplicate).into());
-        }
-        (key.backend, key.fingerprint())
+    let found = match device_key::info(&store, &name) {
+        Ok((key, None)) => Some((key.backend, key.fingerprint())),
+        Ok((_, Some(duplicate))) => return Err(KeyError::Duplicate(duplicate).into()),
+        Err(KeyError::NotFound(_)) if config.is_some() => None,
+        Err(error) => return Err(error.into()),
     };
+    let Some((backend, fingerprint)) = found else {
+        let path = config.expect("only a config purge reaches here without a key");
+        return purge_config_only(&name, &path, args.yes, terminal);
+    };
+    if args.confirm_spki.is_none() && !terminal {
+        return Err(NO_TERMINAL.into());
+    }
     print!(
         "{}",
         lifecycle::purge_warning(&name, backend, &fingerprint, config.as_deref())
@@ -1107,9 +1151,7 @@ async fn reset(args: ResetArgs) -> Result {
         purged.fingerprint
     );
     if let Some(path) = config {
-        std::fs::remove_file(&path)
-            .map_err(|error| format!("deleting {}: {error}", path.display()))?;
-        println!("deleted config file {}", path.display());
+        delete_config(&path)?;
     }
     println!(
         "The device is NOT revoked at any gateway. `gateinto setup` creates a new device key \
