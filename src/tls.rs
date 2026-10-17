@@ -1,8 +1,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rustls::client::{ResolvesClientCert, Resumption};
 use rustls::crypto::aws_lc_rs::{self, kx_group};
@@ -147,7 +147,7 @@ pub fn client_config(
 pub struct ClientCertificateResolver {
     certificate: Option<ClientCertificate>,
     requested: AtomicBool,
-    sent: AtomicBool,
+    sent: Mutex<Option<CertificateDer<'static>>>,
 }
 
 impl ClientCertificateResolver {
@@ -169,7 +169,14 @@ impl ClientCertificateResolver {
     }
 
     pub fn sent(&self) -> bool {
-        self.sent.load(Ordering::Relaxed)
+        self.sent_certificate().is_some()
+    }
+
+    pub fn sent_certificate(&self) -> Option<CertificateDer<'static>> {
+        self.sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -185,7 +192,8 @@ impl ResolvesClientCert for ClientCertificateResolver {
         };
         // rustls sends an empty certificate when the key offers none of the server's schemes.
         if certified_key.key.choose_scheme(schemes).is_some() {
-            self.sent.store(true, Ordering::Relaxed);
+            *self.sent.lock().unwrap_or_else(PoisonError::into_inner) =
+                certified_key.cert.first().cloned();
         }
         Some(certified_key)
     }
@@ -343,5 +351,34 @@ mod tests {
         assert!(error.contains("hybrid_required"), "{error}");
         assert!(error.contains("X25519MLKEM768"), "{error}");
         assert!(error.contains("X25519"), "{error}");
+    }
+
+    fn resolver_with_ecdsa_certificate(
+        certificate: &CertificateDer<'static>,
+    ) -> ClientCertificateResolver {
+        let pkcs8 = ::aws_lc_rs::signature::EcdsaKeyPair::generate_pkcs8(
+            &::aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+            &::aws_lc_rs::rand::SystemRandom::new(),
+        )
+        .unwrap();
+        let der = rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8.as_ref().to_vec()).into();
+        let key = aws_lc_rs::sign::any_ecdsa_type(&der).unwrap();
+        let certified_key = Arc::new(CertifiedKey::new(vec![certificate.clone()], key));
+        ClientCertificateResolver::new(Some(ClientCertificate::Fixed(certified_key)))
+    }
+
+    #[test]
+    fn resolver_records_the_certificate_it_sent() {
+        let certificate = CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x01]);
+        let resolver = resolver_with_ecdsa_certificate(&certificate);
+        assert_eq!(resolver.sent_certificate(), None);
+
+        resolver.resolve(&[], &[SignatureScheme::ED25519]);
+        assert!(resolver.requested());
+        assert_eq!(resolver.sent_certificate(), None);
+
+        resolver.resolve(&[], &[SignatureScheme::ECDSA_NISTP256_SHA256]);
+        assert!(resolver.sent());
+        assert_eq!(resolver.sent_certificate(), Some(certificate));
     }
 }

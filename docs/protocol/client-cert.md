@@ -134,6 +134,8 @@ device-key-spki-sha256: <SHA-256 of the device key's SPKI DER, lowercase hex>
 The source and fingerprint lines are printed whenever a self-signed
 certificate is configured, also when the upstream did not request a client
 certificate (`client-certificate: not requested`).
+`client-certificate-sha256` is the certificate sent in the handshake, or the
+current certificate when none was sent.
 
 At startup the proxy logs at `info` the subject, the SHA-1 thumbprint, the
 NotAfter time, `source=self-signed` and the key backend.
