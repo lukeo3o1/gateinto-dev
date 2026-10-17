@@ -113,7 +113,15 @@ impl FromStr for LaunchRequest {
         if version.is_some_and(|version| version != VERSION) {
             return Err(UriError::InvalidValue("v"));
         }
-        let profile = profile.ok_or(UriError::MissingProfile)?;
+        Self::new(
+            &profile.ok_or(UriError::MissingProfile)?,
+            auth.as_deref().unwrap_or(LaunchAuth::BasicTofu.as_str()),
+        )
+    }
+}
+
+impl LaunchRequest {
+    pub fn new(profile: &str, auth: &str) -> Result<Self, UriError> {
         if profile.starts_with('-') {
             return Err(UriError::InvalidValue("profile"));
         }
@@ -121,7 +129,7 @@ impl FromStr for LaunchRequest {
             profile: profile
                 .parse()
                 .map_err(|_| UriError::InvalidValue("profile"))?,
-            auth: auth.map_or(Ok(LaunchAuth::BasicTofu), |auth| auth.parse())?,
+            auth: auth.parse()?,
         })
     }
 }
