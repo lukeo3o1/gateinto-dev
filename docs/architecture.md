@@ -33,15 +33,70 @@ The client's own TLS session with the target (for example HTTPS to
 `example.com`) runs inside the tunnel. Gateinto does not terminate or inspect
 it; it relays bytes.
 
+## Sessions and gateway profiles
+
+```text
+             one device key (CNG)
+                     |
+     +---------------+-------------------+
+     |                                   |
+ session 1 (device)                  session 2 (planned: browser)
+   listener 127.0.0.1:18736            own loopback listener
+   own TLS client config + resolver    own TLS client config + resolver
+   own client certificate              own client certificate
+   own connection limits, tunnels      own connection limits, tunnels
+     |                                   |
+ gateway profile "default"           gateway profile "office"
+     |                                   |
+ upstream HTTPS proxy                upstream HTTPS proxy
+```
+
+A gateway profile (`config::GatewayProfile`, from a `[gateways.<name>]`
+table) describes one upstream: host, port, server name, CA file, TLS mode and
+client certificate settings. `ConfigFile::gateway` looks a profile up by name
+in the loaded file and nothing else, so a caller that only has a name can
+select a configured upstream but cannot add a host, a CA or any other trust
+setting.
+
+A session (`sessions::Session`) is one local entry point bound to one gateway.
+`SessionManager::start` builds everything the session uses and shares none of
+it with other sessions: its own listener (port `0` gives an ephemeral port),
+its own `rustls` client configuration and client certificate resolver, its own
+connection and reject limits, and its own set of connection tasks. Its client
+certificate comes from the configured source through
+`ClientCertificate::for_session`: a self-signed source issues a new
+certificate with the device key for every session (and each session renews
+only its own), so two sessions never present the same self-signed
+certificate; a file or `CurrentUser\My` certificate is the same certificate in
+every session, because only one exists for the key. Each session also has a local authentication policy
+(`proxy::LocalAuth`); only `None` exists, which accepts every local client.
+
+`SessionManager::close` closes a session: the accept loop stops before it
+accepts anything else, the listener is dropped so its port refuses new
+connections, and every connection task of the session, including established
+tunnels and connections still being answered, is aborted, which closes both
+its client and its upstream socket. `close` returns once all of that is done.
+The session's TLS configuration, resolver and self-signed certificates are
+dropped with it; no other session holds them, so no later `CONNECT` can use
+that certificate. Other sessions are not affected.
+
+Kinds: `SessionKind::Device` is the long-running session for background
+programs, configured by `[device_session]` (or the command line) with no local
+authentication. `gateinto proxy` starts exactly one device session and runs
+until it is stopped (Ctrl+C ends the process). Browser sessions, started later
+by a URI with their own listener and an optional local proxy authentication,
+are planned and not implemented.
+
 ## Modules
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`proxy`, `check-upstream`, `key init`, `key info`), merging flags over the configuration file, logging setup, building `proxy::Config`. |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), flag-over-file merge, defaults, relative path resolution. |
+| `src/main.rs` | Command line (`proxy`, `check-upstream`, `key init`, `key info`), merging flags over the configuration file, logging setup, building `proxy::Config` and starting the device session. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles and their lookup by name, the device session's gateway and listen address, flag-over-file merge, defaults, relative path resolution. |
+| `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
-| `src/proxy/mod.rs` | Listener, connection limit, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
+| `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
@@ -78,20 +133,22 @@ side.
 
 | Limit | Flag | Default |
 | --- | --- | --- |
-| Concurrent connections, including those still sending their request | `--max-tunnels` / `max_concurrent_tunnels` | 64 |
+| Concurrent connections per session, including those still sending their request | `--max-tunnels` / `max_concurrent_tunnels` | 64 |
 | Request and upstream response header block | `--max-header-bytes` / `header_max_bytes` | 16384 bytes |
 | Reading the local request | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s |
 | Upstream TCP connect, TLS handshake and `CONNECT` reply together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s (separate budget) |
 | Tunnel without traffic in either direction | `--idle-timeout-secs` / `idle_timeout_seconds` | 300 s |
 
-The listen address must be loopback unless `--unsafe-allow-non-loopback-listen`
-is given on the command line. The configuration file has no key for it.
+Limits apply to each session separately. The listen address must be loopback
+unless `--unsafe-allow-non-loopback-listen` is given on the command line. The
+configuration file has no key for it.
 
 ## Configuration
 
 Settings come from command line flags, then the `--config` TOML file, then
-built-in defaults, resolved key by key. The upstream host and port have no
-default. See the README for the schema.
+built-in defaults, resolved key by key. Gateway flags apply to the gateway in
+use (the device session's, or `check-upstream --gateway`). The upstream host
+and port have no default. See the README for the schema.
 
 ## TLS
 
@@ -109,8 +166,9 @@ default. See the README for the schema.
 - When the upstream requests a client certificate and one is configured, the
   certificate bound to the device key is sent and `CertificateVerify` is signed
   through CNG. With `--self-signed-client-cert` that certificate is issued in
-  memory at startup and signed by the same CNG key; the resolver issues a new
-  one when the current one is 30 minutes old
+  memory when a session starts, separately for each session, and signed by
+  the same CNG key; the session's resolver issues a new one when the current
+  one is 30 minutes old
   ([protocol/client-cert.md](protocol/client-cert.md)).
 
 ## Not implemented
@@ -121,6 +179,12 @@ Do not rely on these; they do not exist.
   (certificate request or enrollment protocol) instead of issuing and
   installing it by hand.
 - **Key rotation and deletion.** Commands to replace or delete the device key.
+- **Browser sessions.** Sessions started by a `gateinto://` URI, with their own
+  listener and local proxy authentication. Only the device session exists;
+  `proxy::LocalAuth` has only `None`.
+- **Several sessions from the command line.** `gateinto proxy` starts one
+  device session; more sessions in one process exist only through the library
+  (`SessionManager`), as used by the tests.
 
 See also [security-model.md](security-model.md),
 [threat-model.md](threat-model.md) and [verification.md](verification.md).

@@ -244,7 +244,7 @@ Logs go to stderr:
 
 ```text
 2026-10-17T02:36:36.630936Z  WARN gateinto::identity::client_cert: no client certificate for device key "gateinto-device-v1" (spki-sha256: ...): none was given with --client-cert-file and CurrentUser\My has no currently valid certificate for this key that allows client authentication; mTLS is not configured and upstream connections do not authenticate this device
-2026-10-17T02:36:36.631175Z  INFO gateinto::proxy: listening local_addr=127.0.0.1:18736
+2026-10-17T02:36:36.631175Z  INFO session{id=1 kind=device gateway=default}: gateinto::proxy: listening local_addr=127.0.0.1:18736
 ```
 
 The warning is expected without a client certificate: the default
@@ -261,7 +261,7 @@ curl.exe -x http://127.0.0.1:18736 https://example.com
 ```
 
 This prints the HTML of `example.com`, and the proxy logs
-`INFO connection{peer=127.0.0.1:<port>}: gateinto::proxy: tunnel established`.
+`INFO session{id=1 kind=device gateway=default}:connection{peer=127.0.0.1:<port>}: gateinto::proxy: tunnel established`.
 Use `curl.exe` (not the PowerShell `curl` alias). Add `-v` to see the proxy's
 `CONNECT` status; [troubleshooting.md](troubleshooting.md#status-codes)
 explains each status.
