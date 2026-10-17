@@ -4,7 +4,9 @@ What Gateinto protects, how, and what it does not protect. Assets, trust
 boundaries and the threat table are in [threat-model.md](threat-model.md);
 this page summarizes the mechanisms and points to it rather than repeating
 it. Which of these mechanisms are covered by tests is in
-[verification.md](verification.md).
+[verification.md](verification.md), and
+[security-boundaries.md](security-boundaries.md) maps each security acceptance
+item to its code, its tests and where they run.
 
 ## What it protects
 

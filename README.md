@@ -623,7 +623,9 @@ protects and how (TLS 1.3 only, certificate verification that cannot be
 disabled, no inspection of the inner TLS, non-exportable device key,
 loopback-only listener, no secrets or payload in logs) and what it does not.
 [docs/threat-model.md](docs/threat-model.md) lists assets, trust boundaries
-and residual risks.
+and residual risks. [docs/security-boundaries.md](docs/security-boundaries.md)
+maps each security acceptance item to the code that enforces it and the tests
+that prove it.
 
 The device session's loopback listener has no authentication by default. Any
 local process, including those of other users on the same machine, can connect
