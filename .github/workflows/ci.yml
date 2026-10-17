@@ -20,6 +20,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  NASM_VERSION: '2.16.03'
 
 jobs:
   check:
@@ -45,6 +46,32 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: .github/scripts/assert-static-crt.ps1 -Path target\debug\gateinto.exe
+
+  windows-i686:
+    name: windows-latest, i686-pc-windows-msvc under WOW64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TARGET: i686-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-i686
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install NASM ${{ env.NASM_VERSION }}
+        uses: ilammy/setup-nasm@v1
+        with:
+          version: ${{ env.NASM_VERSION }}
+      - run: cargo test --target $env:TARGET --all-targets --all-features --locked
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto.exe"
 
   build-windows-release:
     name: release build (windows-latest)
