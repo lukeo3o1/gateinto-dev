@@ -340,6 +340,19 @@ impl ClientCertificate {
             _ => Ok(()),
         }
     }
+
+    pub fn for_session(&self, now: UnixTime) -> Result<Self, IssueError> {
+        match self {
+            Self::Fixed(certified_key) => Ok(Self::Fixed(certified_key.clone())),
+            Self::SelfSigned {
+                certificates,
+                required,
+            } => Ok(Self::SelfSigned {
+                certificates: Arc::new(certificates.reissue(now)?),
+                required: *required,
+            }),
+        }
+    }
 }
 
 impl fmt::Debug for ClientIdentity {
@@ -428,14 +441,24 @@ impl ClientAuth<ClientIdentity> {
             }
             Self::Enabled(identity) => {
                 let leaf = &identity.binding.leaf;
-                info!(
-                    subject = %leaf.subject,
-                    thumbprint = %leaf.sha1_thumbprint,
-                    not_after = %format_utc(leaf.not_after),
-                    source = %identity.binding.source,
-                    backend = %identity.backend,
-                    "client certificate authentication enabled"
-                );
+                if identity.self_signed.is_some() {
+                    info!(
+                        subject = %leaf.subject,
+                        spki_sha256 = %sha256_fingerprint(&leaf.spki),
+                        source = %identity.binding.source,
+                        backend = %identity.backend,
+                        "client certificate authentication enabled"
+                    );
+                } else {
+                    info!(
+                        subject = %leaf.subject,
+                        thumbprint = %leaf.sha1_thumbprint,
+                        not_after = %format_utc(leaf.not_after),
+                        source = %identity.binding.source,
+                        backend = %identity.backend,
+                        "client certificate authentication enabled"
+                    );
+                }
                 Some(
                     identity
                         .self_signed
@@ -985,6 +1008,49 @@ mod tests {
             panic!("self-signed identity did not renew its certificates");
         };
         assert_eq!(certificates.spki(), store.spki());
+    }
+
+    #[test]
+    fn a_session_gets_its_own_self_signed_certificate_but_shares_a_fixed_one() {
+        let store = FakeStore::new();
+        let source = ClientAuth::Enabled(enabled(
+            configure(
+                &self_signed(ClientCertificateMode::Optional),
+                Ok(&store),
+                now(),
+            )
+            .unwrap(),
+        ))
+        .into_client_certificate()
+        .unwrap();
+
+        let session = source.for_session(now()).unwrap();
+
+        let (
+            ClientCertificate::SelfSigned {
+                certificates: original,
+                ..
+            },
+            ClientCertificate::SelfSigned {
+                certificates: issued,
+                required: false,
+            },
+        ) = (&source, &session)
+        else {
+            panic!("a self-signed source did not give the session a self-signed certificate");
+        };
+        assert!(!Arc::ptr_eq(original, issued));
+        assert_ne!(original.current().cert, issued.current().cert);
+        assert_eq!(issued.spki(), store.spki());
+
+        let certified_key = original.current();
+        let ClientCertificate::Fixed(shared) = ClientCertificate::Fixed(certified_key.clone())
+            .for_session(now())
+            .unwrap()
+        else {
+            panic!("a fixed certificate changed its kind");
+        };
+        assert!(Arc::ptr_eq(&shared, &certified_key));
     }
 
     #[test]

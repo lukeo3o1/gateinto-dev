@@ -233,6 +233,10 @@ impl SelfSignedCertificates {
         })
     }
 
+    pub fn reissue(&self, now: UnixTime) -> Result<Self, IssueError> {
+        Self::new(self.signer.clone(), now)
+    }
+
     pub fn spki(&self) -> Vec<u8> {
         self.signer.spki()
     }
@@ -486,6 +490,24 @@ mod tests {
             &certificates.certified_key_at(at(NOW + 1801)).unwrap(),
             &renewed
         ));
+    }
+
+    #[test]
+    fn a_reissue_has_its_own_certificate_for_the_same_key() {
+        let certificates = SelfSignedCertificates::new(software_signer(), at(NOW)).unwrap();
+
+        let reissued = certificates.reissue(at(NOW + 60)).unwrap();
+
+        assert_ne!(reissued.current().cert, certificates.current().cert);
+        assert_eq!(reissued.spki(), certificates.spki());
+        let parsed = parse_certificate(&reissued.current().cert[0]).unwrap();
+        assert_eq!(parsed.not_before, (NOW + 60 - 300) as i64);
+        let renewed = certificates.certified_key_at(at(NOW + 1800)).unwrap();
+        assert!(Arc::ptr_eq(
+            &reissued.certified_key_at(at(NOW + 1800)).unwrap(),
+            &reissued.current()
+        ));
+        assert_ne!(renewed.cert, reissued.current().cert);
     }
 
     #[derive(Debug)]

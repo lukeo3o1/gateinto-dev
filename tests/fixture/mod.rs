@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gateinto::identity::certificates::{DeviceSigner, SelfSignedCertificates};
 use gateinto::identity::x509::parse_certificate;
-use gateinto::proxy::{Config, Limits, Proxy, Upstream};
+use gateinto::proxy::{Config, Limits, LocalAuth, Proxy, Upstream};
 use gateinto::tls::TlsMode;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -535,6 +535,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
     Config {
         listen: SocketAddr::from((LOOPBACK, 0)),
         allow_non_loopback: false,
+        local_auth: LocalAuth::None,
         upstream: Upstream {
             host: upstream.ip().to_string(),
             port: upstream.port(),
