@@ -474,6 +474,7 @@ async fn check_upstream(args: CheckUpstreamArgs) -> Result {
 }
 
 async fn proxy(args: ProxyArgs) -> Result {
+    let shutdown = shutdown_signal();
     let settings = args.upstream.settings(|overrides| {
         overrides.listen = args.listen;
         let limits = &mut overrides.limits;
@@ -497,7 +498,7 @@ async fn proxy(args: ProxyArgs) -> Result {
             proxy: config,
         })
         .await?;
-    shutdown_signal().await;
+    shutdown.await;
     sessions.close_all().await;
     Ok(())
 }
@@ -522,6 +523,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
 }
 
 async fn browser_session(args: BrowserSessionArgs) -> Result {
+    let shutdown = shutdown_signal();
     let settings = args.upstream.settings(|overrides| {
         overrides.gateway = args.gateway.clone();
     })?;
@@ -546,30 +548,47 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     println!("listen: {}", session.local_addr());
     println!("realm: {}", session.realm().unwrap_or_default());
     println!("Press Ctrl-C to close the session.");
-    shutdown_signal().await;
+    shutdown.await;
     sessions.close_all().await;
     Ok(())
 }
 
-async fn shutdown_signal() {
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
-    {
+    let (mut interrupt, mut terminate) = {
         use tokio::signal::unix::{SignalKind, signal};
-        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
-            return std::future::pending().await;
-        };
+        (
+            signal(SignalKind::interrupt()).ok(),
+            signal(SignalKind::terminate()).ok(),
+        )
+    };
+    #[cfg(windows)]
+    let (mut ctrl_c, mut ctrl_break, mut ctrl_close, mut ctrl_shutdown, mut ctrl_logoff) = {
+        use tokio::signal::windows;
+        (
+            windows::ctrl_c().ok(),
+            windows::ctrl_break().ok(),
+            windows::ctrl_close().ok(),
+            windows::ctrl_shutdown().ok(),
+            windows::ctrl_logoff().ok(),
+        )
+    };
+    async move {
+        #[cfg(unix)]
         tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                if result.is_err() {
-                    std::future::pending::<()>().await;
-                }
-            }
-            _ = terminate.recv() => {}
+            Some(()) = async { interrupt.as_mut()?.recv().await } => {}
+            Some(()) = async { terminate.as_mut()?.recv().await } => {}
+            else => std::future::pending().await,
         }
-    }
-    #[cfg(not(unix))]
-    if tokio::signal::ctrl_c().await.is_err() {
-        std::future::pending::<()>().await;
+        #[cfg(windows)]
+        tokio::select! {
+            Some(()) = async { ctrl_c.as_mut()?.recv().await } => {}
+            Some(()) = async { ctrl_break.as_mut()?.recv().await } => {}
+            Some(()) = async { ctrl_close.as_mut()?.recv().await } => {}
+            Some(()) = async { ctrl_shutdown.as_mut()?.recv().await } => {}
+            Some(()) = async { ctrl_logoff.as_mut()?.recv().await } => {}
+            else => std::future::pending().await,
+        }
     }
 }
 
@@ -594,6 +613,7 @@ impl Profiles for ConfigProfiles {
 }
 
 async fn agent(args: ConfigArg) -> Result {
+    let shutdown = shutdown_signal();
     let file = args.load()?;
     init_logging("info");
     let endpoint = Endpoint::for_current_user()?;
@@ -623,7 +643,7 @@ async fn agent(args: ConfigArg) -> Result {
             .await?;
     }
     tracing::info!(%endpoint, "agent ready");
-    agent.serve(server, shutdown_signal()).await;
+    agent.serve(server, shutdown).await;
     Ok(())
 }
 
