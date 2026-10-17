@@ -94,6 +94,24 @@ runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features
 --locked -- -D warnings` and `cargo test --all-targets --all-features --locked`
 in two jobs, `ubuntu-latest` and `windows-latest`.
 
+A third job, `quickstart`, runs the [quickstart](quickstart.md) commands on
+`windows-latest` with the release build: `key init` and `key info` (asserting
+the software key created after the TPM fallback, or printing the backend if a
+TPM is ever present), `check-upstream` with a configuration file derived from
+`config.example.toml` (asserting `TLSv1_3` and `X25519MLKEM768`), and `proxy`
+with `curl.exe` to `https://example.com/` (`200`) and a plain-HTTP request
+(`405`). The upstream is `examples/test_upstream.rs`, a development-only cargo
+example built on `tests/fixture/`: it generates a throwaway test CA, writes
+only the CA certificate, listens on loopback only, accepts TLS 1.3 with
+`X25519MLKEM768` and `X25519`, and relays one `CONNECT`. Its in-process tests
+run in both CI jobs. The job was added after the results below; its outcome is
+not recorded yet.
+
+The release workflow
+([.github/workflows/release.yml](../.github/workflows/release.yml)) ran once
+via `workflow_dispatch` on a branch and produced the `x86_64-pc-windows-msvc`
+zip artifact. No release was created and no tag was pushed.
+
 On `windows-latest`:
 
 | Claim | How |
@@ -248,12 +266,16 @@ Not exercised on physical hardware:
 
 - Windows 10/11 machines. Runtime results so far come only from the
   GitHub-hosted `windows-latest` runner image.
+- A person following the [quickstart](quickstart.md) on a physical machine or
+  VM. The `quickstart` CI job runs the same commands against a local test
+  upstream.
 
 Design-only, not exercised at all:
 
 - UI/PIN behavior for TPM keys.
-- The proxy against a real upstream HTTPS proxy, and with real clients such as
-  browsers or curl. Tests use only the in-process fixture.
+- The proxy against a real third-party upstream HTTPS proxy, and with
+  browsers. `curl.exe` through the proxy runs only in the `quickstart` CI job,
+  against the local test upstream `examples/test_upstream.rs`.
 
 ## Open issues
 

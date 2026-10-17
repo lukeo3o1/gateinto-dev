@@ -171,6 +171,10 @@ pub struct UpstreamProxy {
 impl UpstreamProxy {
     pub async fn start(config: Arc<ServerConfig>, behavior: Behavior) -> Self {
         let listener = TcpListener::bind((LOOPBACK, 0)).await.unwrap();
+        Self::serve(listener, config, behavior)
+    }
+
+    pub fn serve(listener: TcpListener, config: Arc<ServerConfig>, behavior: Behavior) -> Self {
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let acceptor = TlsAcceptor::from(config);

@@ -26,3 +26,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+
+[[example]]
+name = "test_upstream"
+test = true

@@ -40,6 +40,12 @@ you could do.
 
 - Tests must not use public proxies or any other service on the internet. Use
   the in-process TLS upstream fixture in `tests/fixture/` on loopback.
+- For manual checks, `cargo run --example test_upstream -- --port 18443
+  --ca-out upstream-ca.pem` runs that fixture as a standalone HTTPS `CONNECT`
+  upstream on loopback with a throwaway test CA (server name `localhost`,
+  change it with `--name`). Point `[upstream]` at `127.0.0.1:18443` with
+  `server_name = "localhost"` and `ca_file = "upstream-ca.pem"`. It is for
+  development only and is not shipped; the `quickstart` CI job uses it.
 - Tests must not disable TLS certificate verification. Issue test certificates
   from a test CA with `rcgen` and trust that CA instead.
 - Tests that create Windows CNG keys must delete them, for example with a drop
@@ -59,7 +65,8 @@ The files are `gateinto-<version>-x86_64-pc-windows-msvc.zip` and
 the tag, or the first 12 characters of the commit for a manual run. The only
 release target is Windows 10/11 x64; Windows 7 is not a release target (see
 [docs/windows7-feasibility.md](docs/windows7-feasibility.md)). The workflow has
-not been run yet.
+run once via manual dispatch on a branch and produced the zip artifact; no
+release has been created and no tag has been pushed.
 
 Not done yet: an SBOM, code signing of `gateinto.exe`, and build provenance
 attestations.
