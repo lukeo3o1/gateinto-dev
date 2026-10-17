@@ -166,6 +166,10 @@ impl std::error::Error for InvalidGatewayName {}
 pub struct Gateways(BTreeMap<GatewayName, GatewaySection>);
 
 impl Gateways {
+    pub fn iter(&self) -> impl Iterator<Item = (&GatewayName, &GatewaySection)> {
+        self.0.iter()
+    }
+
     fn names(&self) -> String {
         if self.0.is_empty() {
             return "none".to_owned();

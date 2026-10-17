@@ -493,6 +493,9 @@ pub fn owner_only_sddl(user_sid: &str) -> String {
 }
 
 #[cfg(windows)]
+pub use windows::user_sid;
+
+#[cfg(windows)]
 mod windows {
     use std::io;
     use std::os::windows::io::AsRawHandle;
