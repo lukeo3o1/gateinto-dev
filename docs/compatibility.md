@@ -108,7 +108,7 @@ What is verified:
   The tests run as 32-bit processes under WOW64 on 64-bit Windows Server,
   including the CNG Software KSP tests, the named-pipe agent tests and the
   registry tests. The job then runs the static C runtime check on the 32-bit
-  `gateinto.exe`. `dumpbin` from the `Hostx64d` toolset reads the import
+  `gateinto.exe`. `dumpbin` from the `Hostx64\x64` toolset reads the import
   table of 32-bit PE files as well, and the `KERNEL32.dll` check is
   case-insensitive.
 - The release workflow runs the same tests, builds the release binary and runs
@@ -136,9 +136,10 @@ A 32-bit process on 64-bit Windows sees a different registry and environment:
   registry with `KEY_WOW64_64KEY` (`RRF_SUBKEY_WOW6464KEY` for
   `RegGetValueW`), so 32-bit and 64-bit builds see the same keys.
   `src/registry.rs` tests this by creating a key under `HKLM\SOFTWARE` in the
-  64-bit view and reading it back; it fails without the flag only in the
-  32-bit build, and it skips outside GitHub Actions when the process is not
-  elevated.
+  64-bit view and reading it back. Without the flag it is expected to fail in
+  the 32-bit build only (both views are the same in a 64-bit process); this
+  has not been observed yet. It skips outside GitHub Actions when the
+  process is not elevated.
 - `ProgramFiles` is `C:\Program Files (x86)` in a 32-bit process. Browser
   discovery also looks under `ProgramW6432` (the 64-bit `Program Files`), so it
   finds 64-bit Chrome and Edge installed there; duplicates are dropped when
@@ -148,8 +149,8 @@ A 32-bit process on 64-bit Windows sees a different registry and environment:
   `HKCU\...\CurrentVersion\Run` are not redirected, so registration is the
   same for both builds. The handler registered by a 32-bit build points to the
   32-bit exe.
-- No code casts pointers or handles to fixed-width integers; the only `usize`
-  conversions widen `u32` values.
+- No code casts pointers or handles to integers; `usize` casts are between
+  `usize` and `u32` or `u64` and are lossless on 32-bit.
 
 ### On GitHub Actions
 
