@@ -228,6 +228,7 @@ pub enum RequestError {
     NotRunning,
     Closed,
     TimedOut,
+    UntrustedServer(String),
     Io(io::Error),
     Protocol(ProtocolError),
 }
@@ -241,6 +242,10 @@ impl fmt::Display for RequestError {
                 f,
                 "the agent did not answer within {} seconds",
                 REQUEST_TIMEOUT.as_secs()
+            ),
+            Self::UntrustedServer(reason) => write!(
+                f,
+                "refusing to talk to the agent endpoint because {reason}; another user may have                  created it"
             ),
             Self::Io(error) => write!(f, "talking to the agent failed: {error}"),
             Self::Protocol(error) => error.fmt(f),
@@ -483,51 +488,121 @@ mod unix {
     }
 }
 
+pub fn owner_only_sddl(user_sid: &str) -> String {
+    format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;SY)")
+}
+
 #[cfg(windows)]
 mod windows {
     use std::io;
+    use std::os::windows::io::AsRawHandle;
     use std::ptr::null_mut;
     use std::time::Duration;
 
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+    use tokio::net::windows::named_pipe::{
+        ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+    };
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, LocalFree,
     };
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
-    use super::{BindError, Connection, Endpoint, RequestError};
+    use super::{BindError, Connection, Endpoint, RequestError, owner_only_sddl};
 
     const BUSY_DELAY: Duration = Duration::from_millis(20);
 
     #[derive(Debug)]
+    struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    // SAFETY: the descriptor is a LocalAlloc block owned by this value and only read by Windows.
+    unsafe impl Send for SecurityDescriptor {}
+
+    impl SecurityDescriptor {
+        fn owner_only() -> io::Result<Self> {
+            let sddl: Vec<u16> = owner_only_sddl(&user_sid()?)
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let mut descriptor = null_mut();
+            // SAFETY: sddl is NUL-terminated; descriptor receives a LocalAlloc block freed in Drop.
+            let converted = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            };
+            if converted == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(descriptor))
+        }
+
+        fn create(&self, endpoint: &Endpoint, first: bool) -> io::Result<NamedPipeServer> {
+            let mut attributes = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.0,
+                bInheritHandle: 0,
+            };
+            // SAFETY: attributes and the descriptor it points to outlive the call.
+            unsafe {
+                ServerOptions::new()
+                    .first_pipe_instance(first)
+                    .reject_remote_clients(true)
+                    .create_with_security_attributes_raw(
+                        endpoint.path(),
+                        (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
+                    )
+            }
+        }
+    }
+
+    impl Drop for SecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: the block came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    #[derive(Debug)]
     pub struct Server {
         endpoint: Endpoint,
+        descriptor: SecurityDescriptor,
         next: NamedPipeServer,
     }
 
     impl Server {
         pub fn bind(endpoint: &Endpoint) -> Result<Self, BindError> {
-            let next = ServerOptions::new()
-                .first_pipe_instance(true)
-                .reject_remote_clients(true)
-                .create(endpoint.path())
+            let io_error = |error| BindError::Io(endpoint.clone(), error);
+            let descriptor = SecurityDescriptor::owner_only().map_err(io_error)?;
+            let next = descriptor
+                .create(endpoint, true)
                 .map_err(|error| match error.kind() {
                     io::ErrorKind::PermissionDenied => BindError::AlreadyRunning(endpoint.clone()),
-                    _ => BindError::Io(endpoint.clone(), error),
+                    _ => io_error(error),
                 })?;
             Ok(Self {
                 endpoint: endpoint.clone(),
+                descriptor,
                 next,
             })
         }
 
         pub async fn accept(&mut self) -> io::Result<Connection> {
             self.next.connect().await?;
-            let next = ServerOptions::new()
-                .reject_remote_clients(true)
-                .create(self.endpoint.path())?;
+            let next = self.descriptor.create(&self.endpoint, false)?;
             Ok(Box::new(std::mem::replace(&mut self.next, next)))
         }
     }
@@ -535,7 +610,10 @@ mod windows {
     pub async fn connect(endpoint: &Endpoint) -> Result<Connection, RequestError> {
         loop {
             match ClientOptions::new().open(endpoint.path()) {
-                Ok(client) => return Ok(Box::new(client)),
+                Ok(client) => {
+                    verify_server(&client)?;
+                    return Ok(Box::new(client));
+                }
                 Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                     tokio::time::sleep(BUSY_DELAY).await;
                 }
@@ -547,44 +625,87 @@ mod windows {
         }
     }
 
-    struct Token(HANDLE);
+    fn verify_server(client: &NamedPipeClient) -> Result<(), RequestError> {
+        let untrusted = |reason: String| RequestError::UntrustedServer(reason);
+        let mut pid = 0;
+        // SAFETY: the client handle is open for the duration of the call.
+        if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &mut pid) } == 0 {
+            return Err(untrusted(format!(
+                "its server process is unknown: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: OpenProcess returns an owned handle or null.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(untrusted(format!(
+                "its server process {pid} cannot be inspected: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        let process = Handle(process);
+        let server = TokenUserInfo::of(process.0)
+            .map_err(|error| untrusted(format!("the user of process {pid} is unknown: {error}")))?;
+        // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing.
+        let me = TokenUserInfo::of(unsafe { GetCurrentProcess() })?;
+        // SAFETY: both SIDs point into buffers that live until the end of this function.
+        if unsafe { EqualSid(server.sid(), me.sid()) } == 0 {
+            return Err(untrusted(format!("process {pid} runs as another user")));
+        }
+        Ok(())
+    }
 
-    impl Drop for Token {
+    struct Handle(HANDLE);
+
+    impl Drop for Handle {
         fn drop(&mut self) {
-            // SAFETY: the handle came from OpenProcessToken and is closed once.
+            // SAFETY: the handle is owned by this value and closed once.
             unsafe { CloseHandle(self.0) };
         }
     }
 
+    struct TokenUserInfo(Vec<u64>);
+
+    impl TokenUserInfo {
+        fn of(process: HANDLE) -> io::Result<Self> {
+            let mut token = null_mut();
+            // SAFETY: process is a valid process handle; token receives an owned handle.
+            if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let token = Handle(token);
+            let mut len = 0;
+            // SAFETY: a null buffer of length 0 asks for the required length.
+            unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut len) };
+            let mut buffer = vec![0u64; (len as usize).div_ceil(8)];
+            // SAFETY: buffer is 8-byte aligned and holds at least len bytes.
+            if unsafe {
+                GetTokenInformation(
+                    token.0,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    len,
+                    &mut len,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(buffer))
+        }
+
+        fn sid(&self) -> windows_sys::Win32::Security::PSID {
+            // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the aligned buffer.
+            unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        }
+    }
+
     pub fn user_sid() -> io::Result<String> {
-        let mut token = null_mut();
-        // SAFETY: GetCurrentProcess returns a pseudo handle; token receives an owned handle.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let token = Token(token);
-        let mut len = 0;
-        // SAFETY: a null buffer of length 0 asks for the required length.
-        unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut len) };
-        let mut buffer = vec![0u64; (len as usize).div_ceil(8)];
-        // SAFETY: buffer is 8-byte aligned and holds at least len bytes.
-        if unsafe {
-            GetTokenInformation(
-                token.0,
-                TokenUser,
-                buffer.as_mut_ptr().cast(),
-                len,
-                &mut len,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the aligned buffer.
-        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing.
+        let user = TokenUserInfo::of(unsafe { GetCurrentProcess() })?;
         let mut string = null_mut();
-        // SAFETY: the SID points into buffer, which outlives this call.
-        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut string) } == 0 {
+        // SAFETY: the SID points into user's buffer, which outlives this call.
+        if unsafe { ConvertSidToStringSidW(user.sid(), &mut string) } == 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: ConvertSidToStringSidW returned a NUL-terminated string that LocalFree releases.
@@ -767,6 +888,14 @@ mod tests {
         assert_eq!(
             endpoint(&[(INSTANCE_VARIABLE, "test-1")]).unwrap().path(),
             PathBuf::from(r"\\.\pipe\gateinto-agent-S-1-5-21-1-test-1")
+        );
+    }
+
+    #[test]
+    fn the_pipe_grants_access_only_to_its_user_and_system() {
+        assert_eq!(
+            owner_only_sddl("S-1-5-21-1-2-3-1001"),
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)(A;;GA;;;SY)"
         );
     }
 
