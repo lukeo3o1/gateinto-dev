@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use fixture::*;
 use gateinto::identity::client_cert::{
-    CertificateSource, ClientAuth, ClientAuthError, ClientCertificateMode,
+    CertificateSource, ClientAuth, ClientAuthError, ClientCertificate, ClientCertificateMode,
     ClientCertificateOptions, ClientIdentityStore, configure,
 };
 use gateinto::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
-use gateinto::identity::encoding::P256Point;
+use gateinto::identity::encoding::{P256Point, sha256_fingerprint};
+use gateinto::identity::x509::parse_certificate;
 use rcgen::{KeyPair, PublicKeyData};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, UnixTime};
 use rustls::sign::{CertifiedKey, SigningKey};
@@ -203,4 +204,83 @@ async fn certificate_from_an_untrusted_ca_is_rejected_by_the_upstream() {
 
     assert!(setup.upstream.requests().is_empty());
     assert!(setup.upstream.client_certificates().is_empty());
+}
+
+fn self_signed_identity(store: &SoftwareStore) -> ClientCertificate {
+    let options = ClientCertificateOptions {
+        mode: ClientCertificateMode::Required,
+        key_name: KeyName::default(),
+        source: CertificateSource::SelfSigned,
+    };
+    configure(&options, Ok(store), UnixTime::now())
+        .unwrap()
+        .into_client_certificate()
+        .unwrap()
+}
+
+async fn tunnel_with(
+    upstream: &UpstreamProxy,
+    server_ca: &TestCa,
+    certificate: ClientCertificate,
+) -> Vec<u8> {
+    let mut config = agent_config(upstream.addr, server_ca.roots(), PROXY_NAME);
+    config.client_certificate = Some(certificate);
+    let agent = start_agent(config).await;
+    let target = echo_server().await;
+    let (mut stream, response) = send(agent, &connect_request(&target.to_string())).await;
+    if response.status != 200 {
+        read_to_end_within(&mut stream, CLOSE_WITHIN).await;
+        return Vec::new();
+    }
+    stream.write_all(b"self-signed").await.unwrap();
+    stream.shutdown().await.unwrap();
+    read_to_end_within(&mut stream, CLOSE_WITHIN).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upstream_trusting_the_device_spki_accepts_each_self_signed_certificate() {
+    let store = SoftwareStore::new();
+    let spki = store.key.subject_public_key_info();
+    let server_ca = TestCa::new();
+    let upstream = UpstreamProxy::start(
+        server_ca.server_config_trusting_client_spki(PROXY_NAME, spki.clone()),
+        Behavior::Tunnel,
+    )
+    .await;
+
+    for _ in 0..2 {
+        let echoed = tunnel_with(&upstream, &server_ca, self_signed_identity(&store)).await;
+        assert_eq!(echoed, b"self-signed");
+    }
+
+    let presented = upstream.client_certificates();
+    assert_eq!(presented.len(), 2);
+    assert!(presented.iter().all(|chain| chain.len() == 1));
+    let (first, second) = (&presented[0][0], &presented[1][0]);
+    assert_ne!(sha256_fingerprint(first), sha256_fingerprint(second));
+    for certificate in [first, second] {
+        let parsed = parse_certificate(certificate).unwrap();
+        assert_eq!(parsed.spki, spki);
+        assert_eq!(parsed.subject, "CN=Gateinto device");
+    }
+    assert_eq!(upstream.requests().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upstream_trusting_another_spki_rejects_the_self_signed_certificate() {
+    let store = SoftwareStore::new();
+    let other = KeyPair::generate().unwrap();
+    let server_ca = TestCa::new();
+    let upstream = UpstreamProxy::start(
+        server_ca.server_config_trusting_client_spki(PROXY_NAME, other.subject_public_key_info()),
+        Behavior::Tunnel,
+    )
+    .await;
+
+    let echoed = tunnel_with(&upstream, &server_ca, self_signed_identity(&store)).await;
+
+    assert!(echoed.is_empty());
+    assert!(upstream.requests().is_empty());
+    assert!(upstream.client_certificates().is_empty());
+    assert_eq!(upstream.wait_for_handshake_errors(1).await.len(), 1);
 }
