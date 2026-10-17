@@ -6,6 +6,7 @@ pub mod http;
 pub mod identity;
 pub mod ipc;
 pub mod lifecycle;
+pub mod process;
 pub mod proxy;
 pub mod registration;
 #[cfg(windows)]

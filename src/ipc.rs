@@ -102,6 +102,18 @@ impl Response {
     }
 }
 
+pub const AGENT_PID: &str = "agent-pid: ";
+
+pub fn agent_pid_line() -> String {
+    format!("{AGENT_PID}{}", std::process::id())
+}
+
+pub fn agent_pid(lines: &[String]) -> Option<u32> {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(AGENT_PID)?.parse().ok())
+}
+
 pub fn instance_from(env: impl Fn(&str) -> Option<OsString>) -> io::Result<Option<String>> {
     let Some(instance) = env(INSTANCE_VARIABLE) else {
         return Ok(None);
@@ -729,6 +741,19 @@ mod tests {
 
     fn launch(profile: &str) -> Request {
         Request::Launch(LaunchRequest::new(profile, "basic_tofu").unwrap())
+    }
+
+    #[test]
+    fn the_agent_pid_is_read_from_its_line() {
+        assert_eq!(agent_pid(&["agent-pid: 42".to_owned()]), Some(42));
+        assert_eq!(
+            agent_pid(&["other".to_owned(), agent_pid_line()]),
+            Some(std::process::id())
+        );
+        for line in ["agent-pid: x", "agent-pid:42", "agent-pid: -1", ""] {
+            assert_eq!(agent_pid(&[line.to_owned()]), None, "{line}");
+        }
+        assert_eq!(agent_pid(&[]), None);
     }
 
     #[test]

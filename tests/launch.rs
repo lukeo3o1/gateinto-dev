@@ -388,6 +388,30 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
     assert_eq!(launcher.list().await.len(), 1);
 }
 
+fn stopped_pid(lines: &[String]) -> u32 {
+    lines
+        .iter()
+        .find_map(|line| {
+            line.strip_prefix("stopped the agent (process ")?
+                .strip_suffix(')')?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no stopped agent line in {lines:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_returns_only_after_the_agent_process_exited() {
+    let launcher = Launcher::new("").await;
+    let (_, browser) = launcher.opened("main").await;
+
+    let output = launcher.run(&["stop"]).await;
+
+    let pid = stopped_pid(&output.success().lines());
+    assert!(gateinto::process::wait_for_exit(pid, std::time::Duration::ZERO).unwrap());
+    assert!(!browser.profile().exists());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_for_the_uninstaller_closes_sessions_and_removes_stale_profiles() {
     let launcher = Launcher::new("").await;
@@ -395,12 +419,10 @@ async fn stop_for_the_uninstaller_closes_sessions_and_removes_stale_profiles() {
 
     let output = launcher.run(&["stop", "--remove-stale-profiles"]).await;
 
-    assert!(
-        output
-            .success()
-            .stdout
-            .contains("removed 0 stale browser profiles")
-    );
+    let lines = output.success().lines();
+    let pid = stopped_pid(&lines);
+    assert!(gateinto::process::wait_for_exit(pid, std::time::Duration::ZERO).unwrap());
+    assert_eq!(lines.last().unwrap(), "removed 0 stale browser profiles");
     assert!(!browser.profile().exists());
     assert!(
         status(&launcher)
