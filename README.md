@@ -18,10 +18,12 @@ profiles, the device session with per-session isolation, short-lived
 self-signed client certificates issued with the device key, and browser
 sessions with trust-on-first-use local proxy authentication (`basic_tofu`),
 started from the command line or from a `gateinto://` launch URI by a per-user
-agent that opens Chrome or Edge with an isolated profile. Not implemented:
-certificate enrollment (CA-issued client certificates are issued and installed
-by hand), key rotation and deletion, an installer (the URI handler is
-registered per user for development), an SBOM and code signing. Browser
+agent that opens Chrome or Edge with an isolated profile, a per-user MSI
+installer, `gateinto setup`, `gateinto status`, and deleting the device
+identity with a confirmed `gateinto reset --purge-device-identity`. Not
+implemented: certificate enrollment (CA-issued client certificates are issued
+and installed by hand), key rotation, a WinGet package, an SBOM and code
+signing. Browser
 behavior (the Chrome and Edge credential prompt, credential caching, a new
 session, a real browser launched by the agent, a `gateinto://` link clicked in
 a browser) is not verified yet; see
@@ -41,6 +43,14 @@ x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file. Builds link the
 C runtime statically; CI checks that `gateinto.exe` imports no Visual C++
 runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 
+## Install
+
+[docs/install.md](docs/install.md) covers the per-user MSI built from
+[packaging/wix](packaging/wix/README.md): install, first run with
+`gateinto setup`, `gateinto status`, uninstall (which keeps the device key and
+the config file), reinstall with the same device identity, and the explicit
+purge. There is no WinGet package; `winget install` does not install Gateinto.
+
 ## Commands
 
 | Command | Purpose |
@@ -51,13 +61,17 @@ runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 | `gateinto agent` | Run the per-user agent: the device session if `[device_session] gateway` is set, and the endpoint that starts browser sessions. |
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped and its profile deleted). |
-| `gateinto stop` | Close all of the agent's sessions and stop it. |
+| `gateinto stop` | Close all of the agent's sessions and stop it. With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
+| `gateinto setup` | First run as the key's user: refuse service accounts, check the config, create or reuse the device key, report the `gateinto://` handler. See [docs/install.md](docs/install.md#first-run-gateinto-setup). |
+| `gateinto status` | Show the key provider and SPKI, gateways, the device session, the agent's sessions and the handler, without changing anything. |
+| `gateinto reset --purge-device-identity` | Delete the device key after the SPKI is confirmed (and with `--purge-config` the config file). Does not revoke the device at any gateway. See [docs/install.md](docs/install.md#purge-gateinto-reset---purge-device-identity). |
 
 All commands that read the configuration accept `--config <file>`; flags
-override the file key by key.
+override the file key by key. Without `--config` they read
+`%APPDATA%\Gateinto\gateinto.toml` if that file exists.
 `gateinto <command> --help` lists every flag with its default.
 
 ### Proxy
@@ -242,8 +256,11 @@ subject, SHA-1 thumbprint (`client-certificate-sha1`), NotAfter and source.
 With `--client-cert-file <pem>` it checks that file instead and fails if the
 certificate's public key is not the device key's.
 
-There is no rotate or delete command. Manual steps for checking a real TPM
-are in [docs/tpm-verification.md](docs/tpm-verification.md).
+`gateinto setup` does the same as `key init` and also checks the account, the
+config and the handler. `gateinto reset --purge-device-identity` deletes the key
+after its SPKI is confirmed; see [docs/install.md](docs/install.md). There is
+no rotate command. Manual steps for checking a real TPM are in
+[docs/tpm-verification.md](docs/tpm-verification.md).
 
 ## Sessions
 
@@ -372,9 +389,11 @@ Details of `basic_tofu`:
 
 `gateinto proxy`, `gateinto check-upstream`, `gateinto session browser`,
 `gateinto agent`, `gateinto open`, `gateinto uri register`,
-`gateinto key init` and `gateinto key info` accept `--config <path>` with a
-TOML file. See
-[config.example.toml](config.example.toml).
+`gateinto key init`, `gateinto key info`, `gateinto setup`, `gateinto status`
+and `gateinto reset` accept `--config <path>` with a TOML file. Without it they
+read `%APPDATA%\Gateinto\gateinto.toml` (`$XDG_CONFIG_HOME/gateinto/gateinto.toml`
+on Linux) if it exists, which is where an installed Gateinto finds its gateways.
+See [config.example.toml](config.example.toml).
 
 ```toml
 [device_session]
@@ -654,7 +673,9 @@ subject `CN=gateinto-test-client` to `CurrentUser\My` and removes it again;
 its self-signed certificate test only keeps certificates in memory.
 `tests/uri_registration.rs` (Windows only) writes and deletes
 `HKCU\Software\Classes\gateinto-test-*` keys; it never touches
-`HKCU\Software\Classes\gateinto`. The agent and launch tests start a fake
+`HKCU\Software\Classes\gateinto`. The CLI and launch tests point
+`XDG_CONFIG_HOME` and `APPDATA` at empty temporary directories so that a real
+default config file does not change them. The agent and launch tests start a fake
 browser (`tests/fake_browser.rs`, built as a test target) instead of Chrome or
 Edge, with their own `GATEINTO_INSTANCE`, runtime and profile directories.
 

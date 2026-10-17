@@ -326,6 +326,14 @@ Not exercised on physical hardware:
 
 Design-only, not exercised at all:
 
+- The MSI (`packaging/wix`). Its WiX source compiled and linked with WiX 5.0.2
+  on Linux, which cannot bind an MSI; the first full build, ICE validation and
+  install run in the `msi` CI job on `windows-latest` with the Microsoft
+  Software Key Storage Provider only. A TPM key, interactive install and
+  uninstall, the Windows 10/11 matrix, an upgrade between two versions, the
+  logon autostart entry and a `gateinto://` link clicked in a real browser
+  after installing are manual and not verified. There is no WinGet package.
+
 - UI/PIN behavior for TPM keys.
 - Browsers with `basic_tofu`: whether Chrome and Edge show their native
   prompt for the `407`, cache the credential across tunnels and restarts, and

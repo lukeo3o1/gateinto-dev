@@ -192,7 +192,8 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `uri register`, `uri unregister`, `key init`, `key info`), merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
@@ -206,7 +207,7 @@ The full protocol, limits and guarantees are in
 | `src/proxy/basic_tofu.rs` | `basic_tofu` local proxy authentication of one session: realm, strict Basic and base64 parsing, binding the first credential as a keyed hash, constant-time comparison, failure rate limit. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
-| `src/identity/` | Device key lifecycle (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
+| `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
 
 ## Local 200 only after upstream 2xx
 
@@ -283,6 +284,23 @@ and port have no default. See the README for the schema.
   one is 30 minutes old
   ([protocol/client-cert.md](protocol/client-cert.md)).
 
+## Installation and the device identity
+
+The per-user MSI ([packaging/wix](../packaging/wix/README.md),
+[install.md](install.md)) installs `gateinto.exe` under
+`%LOCALAPPDATA%\Programs\Gateinto`, the `HKCU` `gateinto://` handler and an
+optional `HKCU` Run entry. Installing binaries is separate from creating the
+device key: no custom action touches a key, and the only uninstall custom
+action runs `gateinto stop --remove-stale-profiles` as the user. The key is
+created by `gateinto setup` (or `key init`) as the user who will use it;
+`setup` refuses the LocalSystem, LocalService and NetworkService accounts.
+Other commands only open the key. The key and the config file
+(`%APPDATA%\Gateinto\gateinto.toml` by default) are not MSI components, so an
+uninstall keeps them and a reinstall keeps the SPKI. Only
+`gateinto reset --purge-device-identity` deletes the key: it requires the SPKI
+prefix, stops the agent, reopens the named key with `NCryptOpenKey`, checks
+the SPKI again and deletes that handle with `NCryptDeleteKey`.
+
 ## Not implemented
 
 Do not rely on these; they do not exist.
@@ -290,10 +308,11 @@ Do not rely on these; they do not exist.
 - **Enrollment.** Obtaining the client certificate for the device key
   (certificate request or enrollment protocol) instead of issuing and
   installing it by hand.
-- **Key rotation and deletion.** Commands to replace or delete the device key.
-- **Installer and machine-wide URI registration.** `gateinto uri register`
-  only writes the current user's `HKCU` key, for development. There is no
-  installer, no `HKLM` registration and no code signing.
+- **Key rotation.** A command to replace the device key. Deleting it is
+  `gateinto reset --purge-device-identity`.
+- **Machine-wide install, machine service and WinGet.** The MSI is per user
+  only; there is no `HKLM` registration, no Windows service that runs without
+  a logged-on user, no WinGet package and no code signing.
 - **Detecting closed browser windows.** The agent watches the browser process
   it started, not its windows; see the limitations in
   [protocol/launch-uri.md](protocol/launch-uri.md#browser-launch).

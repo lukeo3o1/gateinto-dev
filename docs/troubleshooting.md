@@ -180,6 +180,36 @@ this change (no release has been published yet). If you set `RUSTFLAGS` or
 `CARGO_ENCODED_RUSTFLAGS` when building, it replaces the flags from
 `.cargo/config.toml`; add `-C target-feature=+crt-static` to it.
 
+## Setup, status, reset and the installer
+
+See [install.md](install.md).
+
+- `refusing to run as LocalSystem (S-1-5-18) ...`: `gateinto setup` runs as a
+  service account, for example from a scheduled task or a deployment tool.
+  Run it as the Windows user who uses Gateinto.
+- `note: running elevated ...`: only a note; the key is still created for the
+  current user.
+- `no device key named "..."; run `gateinto setup` to create it`: after a fresh
+  install or a purge. Run `gateinto setup`.
+- `config: none (no file at ...)` in `status` or `setup`: no
+  `%APPDATA%\Gateinto\gateinto.toml` exists and no `--config` was given. The
+  installed handler and the autostart entry use that file.
+- `uri-handler: another program: ...`: another application owns `gateinto://`
+  for this user; Gateinto leaves it alone. `not registered`: install the MSI
+  or run `gateinto uri register`.
+- `refusing to delete the device key without confirmation: no terminal ...`:
+  `reset` was run from a script. Pass `--confirm-spki` with the first 16 or
+  more hex digits of `spki-sha256` from `gateinto status`.
+- `the device key has spki-sha256 ..., which does not start with the
+  confirmed ...`: the prefix does not match; nothing was deleted.
+- `stopping the running agent failed: ...; nothing was deleted`: stop the
+  agent (`gateinto stop`) and retry.
+- `--purge-config found no config file ...`: there is no default config file;
+  name the file with `--config`.
+- After uninstalling, `gateinto.exe` remains in `%LOCALAPPDATA%\Programs\Gateinto`:
+  a process still had it open. Stop it and delete the file; the device key is
+  not affected.
+
 ## Windows 7
 
 Windows 7 is experimental and unsupported. See
