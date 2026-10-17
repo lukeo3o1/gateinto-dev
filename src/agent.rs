@@ -11,8 +11,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::browser::{self, ProfileDir};
-use crate::config::{GatewayName, PortalUrl};
-use crate::ipc::{self, Connection, Request, Response, Server};
+use crate::config::GatewayName;
+use crate::ipc::{self, ConfirmToken, Connection, Request, Response, Server};
+use crate::link::{self, Decision, KnownGateway, Launch, LinkedGateway, Resolution};
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionError, SessionId, SessionKind, SessionManager};
 use crate::uri::LaunchRequest;
@@ -30,6 +31,7 @@ pub struct AgentLimits {
     pub launches: usize,
     pub launch_window: Duration,
     pub max_browser_sessions: usize,
+    pub confirm_timeout: Duration,
 }
 
 impl Default for AgentLimits {
@@ -38,6 +40,7 @@ impl Default for AgentLimits {
             launches: 5,
             launch_window: Duration::from_secs(60),
             max_browser_sessions: 4,
+            confirm_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -45,11 +48,18 @@ impl Default for AgentLimits {
 #[derive(Debug, Clone)]
 pub struct BrowserSessionPlan {
     pub proxy: proxy::Config,
-    pub portal_url: Option<PortalUrl>,
 }
 
 pub trait Profiles: Send + Sync + 'static {
+    fn known(&self) -> Result<Vec<KnownGateway>, String>;
+    fn link(&self, gateway: &LinkedGateway) -> Result<(), String>;
     fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String>;
+}
+
+struct Pending {
+    token: ConfirmToken,
+    request: LaunchRequest,
+    expires: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +112,7 @@ struct Inner {
     sessions: Mutex<SessionManager>,
     browsers: Mutex<BTreeMap<SessionId, Browser>>,
     launches: std::sync::Mutex<LaunchLimiter>,
-    launching: Mutex<()>,
+    launching: Mutex<Option<Pending>>,
     stop: Notify,
 }
 
@@ -121,7 +131,7 @@ impl Agent {
                 sessions: Mutex::new(SessionManager::new()),
                 browsers: Mutex::new(BTreeMap::new()),
                 launches: std::sync::Mutex::new(limiter),
-                launching: Mutex::new(()),
+                launching: Mutex::new(None),
                 stop: Notify::new(),
             }),
         }
@@ -194,9 +204,8 @@ impl Agent {
     pub async fn handle(&self, request: Request) -> Response {
         let result = match request {
             Request::Launch(request) => self.launch(request).await,
-            Request::Approve(_) | Request::Deny(_) => {
-                Err("no gateway confirmation is waiting".to_owned())
-            }
+            Request::Approve(token) => self.approve(token).await,
+            Request::Deny(token) => self.deny(token).await.map(|()| Vec::new()),
             Request::List => Ok(self.list().await),
             Request::Close(id) => self.close(id).await.map(|()| Vec::new()),
             Request::Stop => {
@@ -212,7 +221,7 @@ impl Agent {
     }
 
     async fn launch(&self, request: LaunchRequest) -> Result<Vec<String>, String> {
-        let _launching = self.inner.launching.lock().await;
+        let mut pending = self.inner.launching.lock().await;
         let limits = &self.inner.options.limits;
         let allowed = self
             .inner
@@ -228,13 +237,103 @@ impl Agent {
                 limits.launch_window.as_secs()
             ));
         }
-        if self.inner.browsers.lock().await.len() >= limits.max_browser_sessions {
+        self.check_capacity().await?;
+        let known = self.inner.profiles.known()?;
+        let resolution = link::resolve(&request, &known, &mut Decision::Defer, unix_now())
+            .map_err(|error| error.to_string())?;
+        let confirmation = match resolution {
+            Resolution::Launch(launch) => return self.start(launch).await,
+            Resolution::Confirm(confirmation) => confirmation,
+        };
+        let now = Instant::now();
+        if pending
+            .as_ref()
+            .is_some_and(|pending| pending.expires > now)
+        {
+            warn!(gateway = %request.profile, "refused a new gateway: another confirmation is open");
+            return Err(
+                "another gateway confirmation is already waiting for an answer; answer it first"
+                    .to_owned(),
+            );
+        }
+        let token = ConfirmToken::random().map_err(|error| error.to_string())?;
+        *pending = Some(Pending {
+            token,
+            request,
+            expires: now + limits.confirm_timeout,
+        });
+        info!(
+            gateway = %confirmation.profile,
+            address = %confirmation.gateway,
+            "a link asks to add a gateway; waiting for the user's confirmation"
+        );
+        Ok(vec![
+            ipc::confirm_line(&token),
+            format!("gateway: {}", confirmation.profile),
+            format!("address: {}", confirmation.gateway),
+            format!("portal: {}", confirmation.portal_origin()),
+        ])
+    }
+
+    fn answered(pending: &mut Option<Pending>, token: ConfirmToken) -> Result<Pending, String> {
+        let waiting = pending
+            .as_ref()
+            .is_some_and(|pending| pending.token == token && pending.expires > Instant::now());
+        if !waiting {
+            return Err(
+                "no gateway confirmation is waiting for this answer; open the link again"
+                    .to_owned(),
+            );
+        }
+        Ok(pending.take().expect("checked above"))
+    }
+
+    async fn approve(&self, token: ConfirmToken) -> Result<Vec<String>, String> {
+        let mut pending = self.inner.launching.lock().await;
+        let answered = Self::answered(&mut pending, token)?;
+        self.check_capacity().await?;
+        let known = self.inner.profiles.known()?;
+        let resolution = link::resolve(
+            &answered.request,
+            &known,
+            &mut Decision::Approve,
+            unix_now(),
+        )
+        .map_err(|error| error.to_string())?;
+        let Resolution::Launch(launch) = resolution else {
+            return Err("the gateway could not be approved".to_owned());
+        };
+        if let Some(gateway) = &launch.add {
+            self.inner.profiles.link(gateway)?;
+            info!(
+                gateway = %gateway.name,
+                address = %gateway.address,
+                "the user approved a gateway from a link; stored it"
+            );
+        }
+        self.start(launch).await
+    }
+
+    async fn deny(&self, token: ConfirmToken) -> Result<(), String> {
+        let mut pending = self.inner.launching.lock().await;
+        let answered = Self::answered(&mut pending, token)?;
+        info!(gateway = %answered.request.profile, "the user did not allow a gateway from a link");
+        Ok(())
+    }
+
+    async fn check_capacity(&self) -> Result<(), String> {
+        let limit = self.inner.options.limits.max_browser_sessions;
+        if self.inner.browsers.lock().await.len() >= limit {
             return Err(format!(
-                "{} browser sessions are already open; close one first",
-                limits.max_browser_sessions
+                "{limit} browser sessions are already open; close one first"
             ));
         }
-        let plan = self.inner.profiles.browser_session(&request.profile)?;
+        Ok(())
+    }
+
+    async fn start(&self, launch: Launch) -> Result<Vec<String>, String> {
+        let profile = launch.profile;
+        let plan = self.inner.profiles.browser_session(&profile)?;
         let executable = browser::find_browser(self.inner.options.browser.as_deref())
             .map_err(|e| e.to_string())?;
         let mut proxy = plan.proxy;
@@ -245,7 +344,7 @@ impl Agent {
         let id = sessions
             .start(SessionConfig {
                 kind: SessionKind::Browser,
-                gateway: request.profile.clone(),
+                gateway: profile.clone(),
                 proxy,
             })
             .await
@@ -255,20 +354,18 @@ impl Agent {
             session.local_addr(),
             session.realm().unwrap_or_default().to_owned(),
         );
-        let span =
-            info_span!("session", %id, kind = %SessionKind::Browser, gateway = %request.profile);
-        let started =
-            ProfileDir::create(&self.inner.options.profiles_root, id).and_then(|profile| {
-                let args = browser::browser_args(profile.path(), listen, plan.portal_url.as_ref());
-                match browser::spawn(&executable, args) {
-                    Ok(child) => Ok((profile, child)),
-                    Err(error) => {
-                        let _ = profile.remove();
-                        Err(error)
-                    }
+        let span = info_span!("session", %id, kind = %SessionKind::Browser, gateway = %profile);
+        let started = ProfileDir::create(&self.inner.options.profiles_root, id).and_then(|dir| {
+            let args = browser::browser_args(dir.path(), listen, launch.start_page.as_ref());
+            match browser::spawn(&executable, args) {
+                Ok(child) => Ok((dir, child)),
+                Err(error) => {
+                    let _ = dir.remove();
+                    Err(error)
                 }
-            });
-        let (profile, child) = match started {
+            }
+        });
+        let (dir, child) = match started {
             Ok(started) => started,
             Err(error) => {
                 sessions.close(id).await;
@@ -281,22 +378,21 @@ impl Agent {
         span.in_scope(|| {
             info!(
                 browser = %executable.display(),
-                profile = %profile.path().display(),
+                profile = %dir.path().display(),
                 "started a browser for the session"
             )
         });
         let lines = vec![
             format!("session: {id}"),
-            format!("gateway: {}", request.profile),
+            format!("gateway: {profile}"),
             format!("listen: {listen}"),
             format!("realm: {realm}"),
-            format!("profile: {}", profile.path().display()),
+            format!("profile: {}", dir.path().display()),
             format!("browser: {}", executable.display()),
         ];
         let (close, closed) = oneshot::channel();
         let mut browsers = self.inner.browsers.lock().await;
-        let task =
-            tokio::spawn(watch(self.inner.clone(), id, child, profile, closed).instrument(span));
+        let task = tokio::spawn(watch(self.inner.clone(), id, child, dir, closed).instrument(span));
         browsers.insert(id, Browser { close, task });
         Ok(lines)
     }
@@ -341,6 +437,12 @@ impl Agent {
         }
         self.inner.sessions.lock().await.close_all().await;
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 async fn watch(
