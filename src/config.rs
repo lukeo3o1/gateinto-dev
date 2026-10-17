@@ -14,6 +14,7 @@ use serde::de::{self, Deserializer, MapAccess, Visitor};
 use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
+use crate::link::LinkedGateway;
 use crate::proxy::{DEFAULT_LISTEN, LocalAuth};
 use crate::tls::TlsMode;
 
@@ -417,6 +418,22 @@ impl ConfigFile {
         }
         file.path = Some(path.to_owned());
         Ok(file)
+    }
+
+    pub fn with_linked(&self, linked: &[LinkedGateway]) -> Self {
+        let mut file = self.clone();
+        for gateway in linked {
+            file.gateways
+                .0
+                .entry(gateway.name.clone())
+                .or_insert_with(|| GatewaySection {
+                    host: Some(gateway.address.host()),
+                    port: NonZeroU16::new(gateway.address.port()),
+                    portal_url: Some(gateway.portal_url.clone()),
+                    ..GatewaySection::default()
+                });
+        }
+        file
     }
 
     pub fn device_key_settings(&self) -> DeviceKeySettings {
