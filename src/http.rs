@@ -617,6 +617,26 @@ mod tests {
     }
 
     #[test]
+    fn enforces_header_size_limit_on_the_request_line() {
+        let target = format!("{}.test:65535", "a".repeat(63));
+        let head = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+        let head = head.as_bytes();
+        assert!(parse_connect_request(head, head.len()).unwrap().is_some());
+        assert_eq!(
+            parse_connect_request(head, head.len() - 1),
+            Err(ParseError::TooLarge)
+        );
+        let line = format!("CONNECT {target} HTTP/1.1");
+        let line = line.as_bytes();
+        assert_eq!(
+            parse_connect_request(line, line.len()),
+            Err(ParseError::TooLarge),
+            "an unterminated request line at the limit cannot become valid"
+        );
+        assert_eq!(parse_connect_request(line, line.len() + 1), Ok(None));
+    }
+
+    #[test]
     fn size_limit_ignores_bytes_after_the_head() {
         let mut buf = padded_request(64);
         buf.extend_from_slice(&[0; 1000]);

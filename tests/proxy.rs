@@ -290,6 +290,31 @@ async fn rejects_oversized_request_heads_with_431() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_request_head_at_the_limit_is_tunneled_and_one_byte_more_is_431() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let mut config = setup.config();
+    config.limits.max_header_bytes = 1024;
+    let agent = start_agent(config).await;
+    let target = echo_server().await;
+    let request = connect_request(&target.to_string());
+
+    let (mut stream, response) = send(agent, &pad_head(&request, 1025)).await;
+    read_to_end_within(&mut stream, CLOSE_WITHIN).await;
+    assert_eq!(response.status, 431, "{}", response.head);
+    assert!(setup.upstream.requests().is_empty());
+
+    let (mut stream, response) = send(agent, &pad_head(&request, 1024)).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    stream.write_all(b"at the limit").await.unwrap();
+    stream.shutdown().await.unwrap();
+    assert_eq!(
+        read_to_end_within(&mut stream, CLOSE_WITHIN).await,
+        b"at the limit"
+    );
+    assert_eq!(setup.upstream.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn incomplete_request_head_times_out_with_408() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
