@@ -39,7 +39,8 @@ third-party upstream proxies and physical machines are not verified; see
 Start with [docs/quickstart.md](docs/quickstart.md): it goes from a fresh
 Windows 10/11 x64 machine (no TPM needed) to a working tunnel, including the
 upstream proxy you need to bring. Release builds are a zip for Windows 10/11
-x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file. Builds link the
+x64 (`x86_64-pc-windows-msvc`) and a zip for 32-bit Windows 10
+(`i686-pc-windows-msvc`), each with a `.sha256` checksum file. Builds link the
 C runtime statically; CI checks that `gateinto.exe` imports no Visual C++
 runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 
@@ -644,6 +645,14 @@ setting, a credential or a start page, or run anything else. See
 software and TPM keys, mTLS, hybrid key exchange, `hybrid_required`, Windows 7)
 with how it is verified, its current status and what is still needed.
 [docs/compatibility.md](docs/compatibility.md) has the detailed evidence.
+
+## 32-bit Windows
+
+The `i686-pc-windows-msvc` build ships as a zip only; the MSI is x64 only. CI
+builds it and runs the full test suite as 32-bit processes under WOW64 on
+64-bit Windows, and checks that it links the C runtime statically. It has
+never run on a real 32-bit Windows 10 installation. See
+[docs/compatibility.md](docs/compatibility.md#32-bit-windows-i686).
 
 ## Windows 7
 
