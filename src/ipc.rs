@@ -248,11 +248,7 @@ pub async fn send(endpoint: &Endpoint, request: &Request) -> Result<Response, Re
     let mut stream = connect(endpoint).await?;
     stream.write_all(format!("{request}\n").as_bytes()).await?;
     stream.flush().await?;
-    let mut response = Vec::new();
-    (&mut stream)
-        .take(MAX_RESPONSE_BYTES as u64 + 1)
-        .read_to_end(&mut response)
-        .await?;
+    let response = read_to_close(&mut stream, MAX_RESPONSE_BYTES).await?;
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(RequestError::Protocol(ProtocolError(
             "the agent's response is too long",
@@ -261,6 +257,23 @@ pub async fn send(endpoint: &Endpoint, request: &Request) -> Result<Response, Re
     let response = String::from_utf8(response)
         .map_err(|_| RequestError::Protocol(ProtocolError("invalid response from the agent")))?;
     Response::decode(&response).map_err(RequestError::Protocol)
+}
+
+pub async fn read_to_close(
+    stream: &mut (impl AsyncRead + Unpin),
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    let mut received = Vec::new();
+    let mut buffer = [0; 4096];
+    while received.len() <= limit {
+        match stream.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(n) => received.extend_from_slice(&buffer[..n]),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(received)
 }
 
 pub async fn read_request(connection: &mut Connection) -> Result<Request, ProtocolError> {
@@ -575,6 +588,44 @@ mod tests {
         for text in ["", "ok", "fine\n", "error:x\n", "error: \n"] {
             assert!(Response::decode(text).is_err(), "{text:?}");
         }
+    }
+
+    struct ClosedPipe(Option<&'static [u8]>);
+
+    impl AsyncRead for ClosedPipe {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(match self.0.take() {
+                Some(data) => {
+                    buf.put_slice(data);
+                    Ok(())
+                }
+                None => Err(io::ErrorKind::BrokenPipe.into()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pipe_closed_after_the_response_ends_it() {
+        let mut pipe = ClosedPipe(Some(b"ok\nsession: 1\n"));
+        assert_eq!(
+            read_to_close(&mut pipe, MAX_RESPONSE_BYTES).await.unwrap(),
+            b"ok\nsession: 1\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_stops_past_the_limit() {
+        let mut long: &[u8] = &[b'a'; 10_000];
+        let read = read_to_close(&mut long, 100).await.unwrap();
+        assert!(
+            read.len() > 100 && read.len() <= 100 + 4096,
+            "{}",
+            read.len()
+        );
     }
 
     fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {

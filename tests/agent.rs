@@ -16,7 +16,7 @@ use gateinto::ipc::{self, BindError, Endpoint, Request, RequestError, Response, 
 use gateinto::proxy::Config;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
 struct TestProfiles(BTreeMap<GatewayName, BrowserSessionPlan>);
@@ -131,9 +131,10 @@ impl TestAgent {
     async fn raw(&self, bytes: &[u8]) -> String {
         let mut stream = ipc::connect(&self.endpoint).await.unwrap();
         let _ = stream.write_all(bytes).await;
-        let mut response = String::new();
-        let _ = stream.read_to_string(&mut response).await;
-        response
+        let response = ipc::read_to_close(&mut stream, ipc::MAX_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     async fn stop(self) {
