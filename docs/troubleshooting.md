@@ -227,14 +227,14 @@ Windows 7 is experimental and unsupported. See
 - `The procedure entry point Tbsi_GetDeviceInfo could not be located in the
   dynamic link library tbs.dll.` when starting `gateinto.exe`: you are running a
   regular release (`x86_64-pc-windows-msvc` or `i686-pc-windows-msvc`) on
-  Windows 7 or 8.0, and those releases require Windows 10 or later. Newer builds
+  Windows 7, and those releases require Windows 10 or later. Newer builds
   no longer import this function, but the regular releases still do not run
   before Windows 10. Use Windows 10 or 11. The only Windows 7 candidates are the
   experimental `gateinto-i686-win7-windows-msvc` (32-bit) and
   `gateinto-x86_64-win7-windows-msvc` artifacts of the Windows 7 workflow, which
   have not been verified on Windows 7.
 - On Windows 7 there is no TPM key storage provider, so keys are software keys.
-  `TPM Base Services device info unavailable (Windows 7 or earlier)` in a
-  warning or error means Gateinto detected this. With the default
+  `Tbsi_GetDeviceInfo unavailable (expected on Windows 7)` in a warning or
+  error means Gateinto detected this. With the default
   `software_fallback_on_first_create = true`, `setup` and `key init` create a
   software key. With fallback disabled they stop. Use `--backend software`.
