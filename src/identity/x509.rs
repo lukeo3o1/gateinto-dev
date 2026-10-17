@@ -14,6 +14,7 @@ impl ExtendedKeyUsage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Certificate {
+    pub serial: Vec<u8>,
     pub spki: Vec<u8>,
     pub subject: String,
     pub not_before: i64,
@@ -121,7 +122,7 @@ pub fn parse_certificate(der: &[u8]) -> Result<Certificate, X509Error> {
     certificate.finish()?;
 
     tbs.read_optional(VERSION)?;
-    tbs.read(INTEGER)?;
+    let serial = tbs.read(INTEGER)?;
     tbs.read(SEQUENCE)?;
     tbs.read(SEQUENCE)?;
     let mut validity = Reader(tbs.read(SEQUENCE)?);
@@ -142,6 +143,7 @@ pub fn parse_certificate(der: &[u8]) -> Result<Certificate, X509Error> {
     tbs.finish()?;
 
     Ok(Certificate {
+        serial: serial.to_vec(),
         spki: spki.to_vec(),
         subject,
         not_before,
@@ -249,6 +251,23 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, day)
+}
+
+pub(crate) fn encode_time(secs: i64) -> Vec<u8> {
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let time = secs.rem_euclid(86_400);
+    let clock = format!(
+        "{month:02}{day:02}{:02}{:02}{:02}Z",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    );
+    let (tag, text) = if (1950..2050).contains(&year) {
+        (UTC_TIME, format!("{:02}{clock}", year % 100))
+    } else {
+        (GENERALIZED_TIME, format!("{year:04}{clock}"))
+    };
+    [&[tag, text.len() as u8][..], text.as_bytes()].concat()
 }
 
 pub fn format_utc(secs: i64) -> String {
@@ -465,6 +484,26 @@ mod tests {
         assert!(parse_certificate(&der[..der.len() - 1]).is_err());
         assert!(parse_certificate(&trailing).is_err());
         assert!(parse_certificate(&[0x30, 0x80, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn reads_the_serial_number() {
+        let (der, _) = certificate(|params| {
+            params.serial_number = Some(rcgen::SerialNumber::from_slice(&[0x01, 0x02, 0x03]))
+        });
+
+        assert_eq!(parse_certificate(&der).unwrap().serial, [0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn encodes_utc_time_before_2050_and_generalized_time_from_2050() {
+        assert_eq!(encode_time(1_767_323_045), b"\x17\x0d260102030405Z");
+        assert_eq!(encode_time(946_598_400), b"\x17\x0d991231000000Z");
+        assert_eq!(encode_time(2_569_708_800), b"\x18\x0f20510607000000Z");
+        for secs in [0, 951_782_400, 1_767_323_045, 2_524_607_999, 2_524_608_000] {
+            let mut reader = Reader(&encode_time(secs));
+            assert_eq!(parse_time(&mut reader), Ok(secs));
+        }
     }
 
     #[test]
