@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
-pub const MAX_REQUEST_BYTES: usize = 1024;
+pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const INSTANCE_VARIABLE: &str = "GATEINTO_INSTANCE";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -18,9 +18,71 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Launch(LaunchRequest),
+    Approve(ConfirmToken),
+    Deny(ConfirmToken),
     List,
     Close(SessionId),
     Stop,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ConfirmToken([u8; 16]);
+
+impl ConfirmToken {
+    pub fn random() -> io::Result<Self> {
+        use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+
+        let mut bytes = [0; 16];
+        SystemRandom::new()
+            .fill(&mut bytes)
+            .map_err(|_| io::Error::other("the system random number generator failed"))?;
+        Ok(Self(bytes))
+    }
+}
+
+impl fmt::Debug for ConfirmToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConfirmToken(..)")
+    }
+}
+
+impl fmt::Display for ConfirmToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+impl FromStr for ConfirmToken {
+    type Err = ProtocolError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = ProtocolError("invalid confirmation token");
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            _ => Err(invalid.clone()),
+        };
+        if text.len() != 32 {
+            return Err(invalid);
+        }
+        let mut bytes = [0; 16];
+        for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks(2)) {
+            *byte = digit(pair[0])? << 4 | digit(pair[1])?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+pub const CONFIRM: &str = "confirm: ";
+
+pub fn confirm_line(token: &ConfirmToken) -> String {
+    format!("{CONFIRM}{token}")
+}
+
+pub fn confirm_token(lines: &[String]) -> Option<ConfirmToken> {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(CONFIRM)?.parse().ok())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +99,21 @@ impl std::error::Error for ProtocolError {}
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Launch(request) => write!(f, "launch {} {}", request.profile, request.auth),
+            Self::Launch(request) => {
+                write!(f, "launch {} {}", request.profile, request.auth)?;
+                if let Some(url) = &request.url {
+                    write!(f, " url={url}")?;
+                }
+                if let Some(gateway) = &request.gateway {
+                    write!(f, " gateway={gateway}")?;
+                }
+                if let Some(portal) = &request.portal {
+                    write!(f, " portal={portal}")?;
+                }
+                Ok(())
+            }
+            Self::Approve(token) => write!(f, "approve {token}"),
+            Self::Deny(token) => write!(f, "deny {token}"),
             Self::List => f.write_str("list"),
             Self::Close(id) => write!(f, "close {id}"),
             Self::Stop => f.write_str("stop"),
@@ -52,15 +128,40 @@ impl FromStr for Request {
         let invalid = ProtocolError("invalid request");
         let words: Vec<&str> = line.split(' ').collect();
         match words.as_slice() {
-            ["launch", profile, auth] => LaunchRequest::new(profile, auth)
-                .map(Self::Launch)
-                .map_err(|_| ProtocolError("invalid launch request")),
+            ["launch", profile, auth, link @ ..] => {
+                let request = launch(profile, auth, link)
+                    .filter(|request| request.to_string() == line)
+                    .ok_or(ProtocolError("invalid launch request"))?;
+                Ok(request)
+            }
+            ["approve", token] => token.parse().map(Self::Approve),
+            ["deny", token] => token.parse().map(Self::Deny),
             ["list"] => Ok(Self::List),
             ["close", id] => id.parse().map(Self::Close).map_err(|_| invalid),
             ["stop"] => Ok(Self::Stop),
             _ => Err(invalid),
         }
     }
+}
+
+fn launch(profile: &str, auth: &str, link: &[&str]) -> Option<Request> {
+    let mut values = [None; 3];
+    let mut next = 0;
+    for word in link {
+        let (key, value) = word.split_once('=')?;
+        let index = ["url", "gateway", "portal"]
+            .iter()
+            .position(|name| *name == key)
+            .filter(|&index| index >= next)?;
+        values[index] = Some(value);
+        next = index + 1;
+    }
+    let [url, gateway, portal] = values;
+    LaunchRequest::new(profile, auth)
+        .ok()?
+        .with_link(url, gateway, portal)
+        .ok()
+        .map(Request::Launch)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -766,6 +867,118 @@ mod tests {
         ] {
             assert_eq!(request.to_string(), line);
             assert_eq!(line.parse::<Request>(), Ok(request));
+        }
+    }
+
+    fn linked_launch() -> Request {
+        Request::Launch(
+            LaunchRequest::new("corp", "basic_tofu")
+                .unwrap()
+                .with_link(
+                    Some("https://p.example/app?a=b&c=d"),
+                    Some("Proxy.Example"),
+                    Some("https://p.example/"),
+                )
+                .unwrap(),
+        )
+    }
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn launch_link_fields_and_answers_round_trip_as_single_lines() {
+        let start = Request::Launch(
+            LaunchRequest::new("corp", "basic_tofu")
+                .unwrap()
+                .with_link(Some("https://p.example/"), None, None)
+                .unwrap(),
+        );
+        for (request, line) in [
+            (
+                linked_launch(),
+                "launch corp basic_tofu url=https://p.example/app?a=b&c=d \
+                 gateway=proxy.example:443 portal=https://p.example/",
+            ),
+            (start, "launch corp basic_tofu url=https://p.example/"),
+            (
+                Request::Approve(TOKEN.parse().unwrap()),
+                "approve 0123456789abcdef0123456789abcdef",
+            ),
+            (
+                Request::Deny(TOKEN.parse().unwrap()),
+                "deny 0123456789abcdef0123456789abcdef",
+            ),
+        ] {
+            assert_eq!(request.to_string(), line);
+            assert_eq!(line.parse::<Request>(), Ok(request));
+        }
+    }
+
+    #[test]
+    fn malformed_launch_link_fields_are_rejected() {
+        for line in [
+            "launch corp basic_tofu url=",
+            "launch corp basic_tofu url=http://p.example/",
+            "launch corp basic_tofu url=https://p.example/ x",
+            "launch corp basic_tofu url=https://p.example/  ",
+            "launch corp basic_tofu  url=https://p.example/",
+            "launch corp basic_tofu url=https://p.example/\r",
+            "launch corp basic_tofu url=https://p.example/ url=https://p.example/",
+            "launch corp basic_tofu URL=https://p.example/",
+            "launch corp basic_tofu ca_file=/tmp/ca.pem",
+            "launch corp basic_tofu url",
+            "launch corp basic_tofu gateway=proxy.example:443",
+            "launch corp basic_tofu portal=https://p.example/",
+            "launch corp basic_tofu gateway=user@proxy.example portal=https://p.example/",
+            "launch corp basic_tofu gateway=proxy.example portal=https://p.example/",
+            "launch corp basic_tofu portal=https://p.example/ gateway=proxy.example:443",
+            "launch corp basic_tofu gateway=proxy.example:443 portal=https://p.example/ \
+             url=https://p.example/",
+            "launch corp basic_tofu url=https://evil.example/ gateway=proxy.example:443 \
+             portal=https://p.example/",
+            "launch corp basic_tofu url=https://p.example/ gateway=proxy.example:443 \
+             portal=https://p.example/ extra",
+            "approve",
+            "approve 0123456789ABCDEF0123456789ABCDEF",
+            "approve 0123456789abcdef0123456789abcde",
+            "approve 0123456789abcdef0123456789abcdef0",
+            "approve 0123456789abcdef0123456789abcdeg",
+            "approve 0123456789abcdef0123456789abcdef x",
+            "deny",
+            "deny x",
+        ] {
+            assert!(line.parse::<Request>().is_err(), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_longest_launch_request_fits_the_request_limit() {
+        let path = |len: usize| "a".repeat(len - "https://p.example/".len());
+        let url = format!("https://p.example/{}", path(2048));
+        let host = format!("{}example", format!("{}.", "a".repeat(63)).repeat(3));
+        let request = Request::Launch(
+            LaunchRequest::new(&"a".repeat(64), "basic_tofu")
+                .unwrap()
+                .with_link(Some(&url), Some(&format!("{host}:65535")), Some(&url))
+                .unwrap(),
+        );
+        let line = request.to_string();
+        assert!(line.len() + 1 < MAX_REQUEST_BYTES, "{}", line.len());
+        assert_eq!(line.parse::<Request>(), Ok(request));
+    }
+
+    #[test]
+    fn confirmation_tokens_are_random_and_read_from_their_line() {
+        let (a, b) = (
+            ConfirmToken::random().unwrap(),
+            ConfirmToken::random().unwrap(),
+        );
+        assert_ne!(a, b);
+        assert_eq!(a.to_string().len(), 32);
+        let lines = vec!["other".to_owned(), confirm_line(&a)];
+        assert_eq!(confirm_token(&lines), Some(a));
+        for line in ["confirm: x", "confirm:0123456789abcdef0123456789abcdef", ""] {
+            assert_eq!(confirm_token(&[line.to_owned()]), None, "{line}");
         }
     }
 

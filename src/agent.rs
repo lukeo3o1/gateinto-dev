@@ -20,6 +20,8 @@ use crate::uri::LaunchRequest;
 const MAX_CONNECTIONS: usize = 8;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const DRAIN_REJECTED_BYTES: usize = 64 * 1024;
+const DRAIN_REJECTED_TIMEOUT: Duration = Duration::from_secs(1);
 const PROFILE_REMOVAL_ATTEMPTS: u32 = 40;
 const PROFILE_REMOVAL_DELAY: Duration = Duration::from_millis(250);
 
@@ -173,20 +175,28 @@ impl Agent {
 
     async fn respond(&self, mut connection: Connection) {
         let request = tokio::time::timeout(REQUEST_TIMEOUT, ipc::read_request(&mut connection));
-        let response = match request.await {
-            Ok(Ok(request)) => self.handle(request).await,
+        let (response, rejected) = match request.await {
+            Ok(Ok(request)) => (self.handle(request).await, false),
             Ok(Err(error)) => {
                 warn!("rejected an agent request: {error}");
-                Response::Error(error.to_string())
+                (Response::Error(error.to_string()), true)
             }
             Err(_) => return,
         };
         let _ = ipc::write_response(&mut connection, &response).await;
+        if rejected {
+            // Closing with unread input resets the connection and discards the answer.
+            let drain = ipc::read_to_close(&mut connection, DRAIN_REJECTED_BYTES);
+            let _ = tokio::time::timeout(DRAIN_REJECTED_TIMEOUT, drain).await;
+        }
     }
 
     pub async fn handle(&self, request: Request) -> Response {
         let result = match request {
             Request::Launch(request) => self.launch(request).await,
+            Request::Approve(_) | Request::Deny(_) => {
+                Err("no gateway confirmation is waiting".to_owned())
+            }
             Request::List => Ok(self.list().await),
             Request::Close(id) => self.close(id).await.map(|()| Vec::new()),
             Request::Stop => {
