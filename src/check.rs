@@ -191,7 +191,11 @@ async fn check(options: CheckOptions) -> Result<Report, CheckError> {
             (false, false) => ClientCertificateUse::NotRequested,
         },
         self_signed_certificate: self_signed.map(|certificates| SelfSignedCertificate {
-            certificate_sha256: sha256_fingerprint(&certificates.current().cert[0]),
+            certificate_sha256: sha256_fingerprint(
+                &resolver
+                    .sent_certificate()
+                    .unwrap_or_else(|| certificates.current().cert[0].clone()),
+            ),
             device_key_spki_sha256: sha256_fingerprint(&certificates.spki()),
         }),
         target: options.target,
