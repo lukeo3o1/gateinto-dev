@@ -1,11 +1,21 @@
+use std::path::PathBuf;
 use std::process::Command;
+
+fn no_config_home() -> PathBuf {
+    std::env::temp_dir().join(format!("gateinto-cli-no-config-{}", std::process::id()))
+}
+
+fn gateinto_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gateinto"));
+    command
+        .env("XDG_CONFIG_HOME", no_config_home())
+        .env("APPDATA", no_config_home());
+    command
+}
 
 #[test]
 fn prints_version() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
-        .arg("--version")
-        .output()
-        .unwrap();
+    let output = gateinto_command().arg("--version").output().unwrap();
 
     assert!(output.status.success());
     assert_eq!(
@@ -15,10 +25,7 @@ fn prints_version() {
 }
 
 fn gateinto(args: &[&str]) -> (bool, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
-        .args(args)
-        .output()
-        .unwrap();
+    let output = gateinto_command().args(args).output().unwrap();
     (
         output.status.success(),
         String::from_utf8(output.stderr).unwrap(),
@@ -228,7 +235,7 @@ fn proxy_rejects_an_unknown_tls_mode() {
 }
 
 fn help(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    let output = gateinto_command()
         .args(args)
         .arg("--help")
         .output()
@@ -309,7 +316,7 @@ fn check_upstream_gateway_needs_a_configured_gateway() {
 }
 
 fn gateinto_without_terminal(args: &[&str]) -> (bool, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    let output = gateinto_command()
         .args(args)
         .env("GATEINTO_INSTANCE", format!("cli-{}", std::process::id()))
         .stdin(std::process::Stdio::null())
@@ -363,7 +370,7 @@ fn reset_without_a_terminal_needs_confirm_spki_and_touches_nothing() {
 }
 
 #[test]
-fn reset_deletes_a_config_file_only_when_named_with_config() {
+fn reset_deletes_a_config_file_only_when_named_or_at_the_default_location() {
     let (success, _, stderr) = gateinto_without_terminal(&[
         "reset",
         "--purge-device-identity",
@@ -373,7 +380,11 @@ fn reset_deletes_a_config_file_only_when_named_with_config() {
     ]);
     assert!(!success);
     assert!(
-        stderr.contains("--purge-config deletes only the config file named with --config"),
+        stderr.contains(&format!(
+            "--purge-config found no config file named with --config or at {}; nothing was \
+             deleted",
+            default_config(&no_config_home()).display()
+        )),
         "{stderr}"
     );
 }
@@ -434,11 +445,53 @@ fn status_is_read_only_and_reports_what_it_can() {
     assert!(success, "{stdout}{stderr}");
     assert_eq!(
         stdout,
-        "key-name: gateinto-device-v1\n\
-         device-key: unavailable: device keys are only supported on Windows\n\
-         config: none (pass --config to check a configuration file)\n\
-         device-session: none\n\
-         agent: not running\n\
-         uri-handler: not supported on this platform\n"
+        format!(
+            "key-name: gateinto-device-v1\n\
+             device-key: unavailable: device keys are only supported on Windows\n\
+             config: none (no file at {}; pass --config to use another file)\n\
+             device-session: none\n\
+             agent: not running\n\
+             uri-handler: not supported on this platform\n",
+            default_config(&no_config_home()).display()
+        )
+    );
+}
+
+fn default_config(home: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        home.join("Gateinto").join("gateinto.toml")
+    } else {
+        home.join("gateinto").join("gateinto.toml")
+    }
+}
+
+#[test]
+fn status_reads_the_config_file_at_the_default_location() {
+    let home = std::env::temp_dir().join(format!("gateinto-cli-config-{}", std::process::id()));
+    let path = default_config(&home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "[gateways.main]\nhost = \"proxy.example.com\"\nport = 443\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+        .args(["status"])
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home)
+        .env("GATEINTO_INSTANCE", format!("cli-{}", std::process::id()))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "config: {} (default location)\ngateway: main: proxy.example.com:443\n",
+            path.display()
+        )),
+        "{stdout}"
     );
 }
