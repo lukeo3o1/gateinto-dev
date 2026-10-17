@@ -29,7 +29,7 @@ impl fmt::Display for SessionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SessionId(u64);
+pub struct SessionId(pub(crate) u64);
 
 impl fmt::Display for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
