@@ -182,6 +182,11 @@ mod tests {
             sign_with(FixedKey(Ok(vec![0; 64])), b"m").unwrap(),
             [0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00]
         );
+        let padded_integer = [&[0x02, 0x21, 0x00][..], &[0xff; 32]].concat();
+        assert_eq!(
+            sign_with(FixedKey(Ok(vec![0xff; 64])), b"m").unwrap(),
+            [&[0x30, 0x46][..], &padded_integer, &padded_integer].concat()
+        );
     }
 
     #[test]
