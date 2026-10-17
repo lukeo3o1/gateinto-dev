@@ -7,12 +7,23 @@ use crate::identity::encoding::{P256Point, p256_spki_der, sha256_fingerprint};
 
 pub const DEFAULT_KEY_NAME: &str = "gateinto-device-v1";
 pub const ALGORITHM: &str = "ECDSA P-256";
+pub const PLATFORM_CRYPTO_PROVIDER: &str = "Microsoft Platform Crypto Provider";
+pub const SOFTWARE_KEY_STORAGE_PROVIDER: &str = "Microsoft Software Key Storage Provider";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Tpm,
     Software,
+}
+
+impl Backend {
+    pub fn provider(self) -> &'static str {
+        match self {
+            Self::Tpm => PLATFORM_CRYPTO_PROVIDER,
+            Self::Software => SOFTWARE_KEY_STORAGE_PROVIDER,
+        }
+    }
 }
 
 impl fmt::Display for Backend {
@@ -425,6 +436,111 @@ pub fn info<S: KeyStore>(
         Found::Both { tpm, duplicate } => Ok((tpm, Some(duplicate))),
         Found::Nothing => Err(KeyError::NotFound(name.clone())),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpkiConfirmation(String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidSpkiConfirmation;
+
+impl fmt::Display for InvalidSpkiConfirmation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("expected 16 to 64 hexadecimal digits of the SPKI SHA-256 fingerprint")
+    }
+}
+
+impl std::error::Error for InvalidSpkiConfirmation {}
+
+impl FromStr for SpkiConfirmation {
+    type Err = InvalidSpkiConfirmation;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if (16..=64).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            Ok(Self(text.to_ascii_lowercase()))
+        } else {
+            Err(InvalidSpkiConfirmation)
+        }
+    }
+}
+
+impl SpkiConfirmation {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn matches(&self, fingerprint: &str) -> bool {
+        fingerprint.starts_with(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgedKey {
+    pub backend: Backend,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PurgeError {
+    Key(KeyError),
+    Mismatch {
+        fingerprint: String,
+        confirmed: String,
+    },
+    Delete {
+        backend: Backend,
+        error: StoreError,
+    },
+}
+
+impl fmt::Display for PurgeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Key(error) => write!(f, "{error}"),
+            Self::Mismatch {
+                fingerprint,
+                confirmed,
+            } => write!(
+                f,
+                "the device key has spki-sha256 {fingerprint}, which does not start with the \
+                 confirmed {confirmed}; nothing was deleted"
+            ),
+            Self::Delete { backend, error } => {
+                write!(f, "deleting the {backend} device key failed: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PurgeError {}
+
+pub fn purge<S: KeyStore>(
+    store: &S,
+    name: &KeyName,
+    confirmation: &SpkiConfirmation,
+) -> Result<PurgedKey, PurgeError> {
+    let key = match find(store, name).map_err(PurgeError::Key)? {
+        Found::One(key) => key,
+        Found::Both { duplicate, .. } => {
+            return Err(PurgeError::Key(KeyError::Duplicate(duplicate)));
+        }
+        Found::Nothing => return Err(PurgeError::Key(KeyError::NotFound(name.clone()))),
+    };
+    let fingerprint = key.fingerprint();
+    if !confirmation.matches(&fingerprint) {
+        return Err(PurgeError::Mismatch {
+            fingerprint,
+            confirmed: confirmation.as_str().to_owned(),
+        });
+    }
+    let backend = key.backend;
+    store
+        .delete(key.key)
+        .map_err(|error| PurgeError::Delete { backend, error })?;
+    Ok(PurgedKey {
+        backend,
+        fingerprint,
+    })
 }
 
 #[cfg(test)]
@@ -1143,6 +1259,182 @@ mod tests {
 
         assert_eq!(opened.fingerprint(), created.fingerprint());
         assert_eq!(opened.backend, created.backend);
+    }
+
+    fn confirm(store: &FakeStore, backend: Backend, len: usize) -> SpkiConfirmation {
+        fingerprint_of(store, backend)[..len].parse().unwrap()
+    }
+
+    #[test]
+    fn spki_confirmations_are_16_to_64_hex_digits() {
+        let digits = "0123456789abcdef".repeat(4);
+        for len in [16, 40, 64] {
+            assert_eq!(
+                digits[..len].parse::<SpkiConfirmation>().unwrap().as_str(),
+                &digits[..len]
+            );
+        }
+        assert_eq!(
+            "0123456789ABCDEF"
+                .parse::<SpkiConfirmation>()
+                .unwrap()
+                .as_str(),
+            "0123456789abcdef"
+        );
+        for text in [
+            "",
+            &digits[..15],
+            &format!("{digits}0"),
+            "0123456789abcdeg",
+            " 0123456789abcdef",
+            "0123:456789abcdef",
+        ] {
+            assert_eq!(
+                text.parse::<SpkiConfirmation>(),
+                Err(InvalidSpkiConfirmation),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spki_confirmations_match_fingerprints_by_prefix() {
+        let fingerprint = "0123456789abcdef".repeat(4);
+        let confirmation: SpkiConfirmation = fingerprint[..20].parse().unwrap();
+        assert!(confirmation.matches(&fingerprint));
+        assert!(!confirmation.matches(&"f".repeat(64)));
+        assert!(!confirmation.matches(&fingerprint[..19]));
+    }
+
+    #[test]
+    fn purge_deletes_the_confirmed_key() {
+        let store = FakeStore::default().with_key(Backend::Software);
+        let fingerprint = fingerprint_of(&store, Backend::Software);
+
+        let purged = purge(&store, &name(), &confirm(&store, Backend::Software, 16)).unwrap();
+
+        assert_eq!(
+            purged,
+            PurgedKey {
+                backend: Backend::Software,
+                fingerprint
+            }
+        );
+        assert!(store.backends().is_empty());
+        assert_eq!(
+            store.calls(),
+            vec![
+                "open tpm gateinto-device-v1",
+                "open software gateinto-device-v1",
+                "delete software"
+            ]
+        );
+    }
+
+    #[test]
+    fn purge_accepts_the_full_fingerprint() {
+        let store = FakeStore::default().with_key(Backend::Tpm);
+
+        let purged = purge(&store, &name(), &confirm(&store, Backend::Tpm, 64)).unwrap();
+
+        assert_eq!(purged.backend, Backend::Tpm);
+        assert!(store.backends().is_empty());
+    }
+
+    #[test]
+    fn purge_with_another_fingerprint_deletes_nothing() {
+        let store = FakeStore::default().with_key(Backend::Software);
+        let fingerprint = fingerprint_of(&store, Backend::Software);
+        let wrong = if fingerprint.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        }
+        .repeat(16);
+
+        let error = purge(&store, &name(), &wrong.parse().unwrap()).unwrap_err();
+
+        assert_eq!(
+            error,
+            PurgeError::Mismatch {
+                fingerprint,
+                confirmed: wrong
+            }
+        );
+        assert_eq!(store.backends(), vec![Backend::Software]);
+        assert!(!store.calls().iter().any(|call| call.starts_with("delete")));
+    }
+
+    #[test]
+    fn purge_without_a_key_deletes_nothing() {
+        let store = FakeStore::default();
+
+        let error = purge(&store, &name(), &"0".repeat(16).parse().unwrap()).unwrap_err();
+
+        assert_eq!(error, PurgeError::Key(KeyError::NotFound(name())));
+        assert!(!store.calls().iter().any(|call| call.starts_with("delete")));
+    }
+
+    #[test]
+    fn purge_refuses_to_choose_between_keys_in_both_providers() {
+        let store = FakeStore::default()
+            .with_key(Backend::Tpm)
+            .with_key(Backend::Software);
+
+        let error = purge(&store, &name(), &confirm(&store, Backend::Tpm, 64)).unwrap_err();
+
+        assert_eq!(
+            error,
+            PurgeError::Key(KeyError::Duplicate(duplicate(&store)))
+        );
+        assert_eq!(store.backends(), vec![Backend::Tpm, Backend::Software]);
+    }
+
+    #[test]
+    fn purge_reports_a_failed_delete() {
+        let failure = StoreError::Failed("NTE_PERM".to_owned());
+        let store = FakeStore {
+            delete_error: Some(failure.clone()),
+            ..FakeStore::default()
+        }
+        .with_key(Backend::Software);
+
+        let error = purge(&store, &name(), &confirm(&store, Backend::Software, 16)).unwrap_err();
+
+        assert_eq!(
+            error,
+            PurgeError::Delete {
+                backend: Backend::Software,
+                error: failure
+            }
+        );
+    }
+
+    #[test]
+    fn init_after_purge_creates_a_new_key() {
+        let store = FakeStore::default().tpm_unavailable();
+        let (first, _) = init(&store, &name(), InitOptions::default()).unwrap();
+        let (again, provenance) = init(&store, &name(), InitOptions::default()).unwrap();
+        assert_eq!(provenance, Provenance::Reused);
+        assert_eq!(again.fingerprint(), first.fingerprint());
+
+        purge(&store, &name(), &first.fingerprint().parse().unwrap()).unwrap();
+        let (second, provenance) = init(&store, &name(), InitOptions::default()).unwrap();
+
+        assert_ne!(provenance, Provenance::Reused);
+        assert_ne!(second.fingerprint(), first.fingerprint());
+    }
+
+    #[test]
+    fn providers_are_the_microsoft_cng_providers() {
+        assert_eq!(
+            Backend::Tpm.provider(),
+            "Microsoft Platform Crypto Provider"
+        );
+        assert_eq!(
+            Backend::Software.provider(),
+            "Microsoft Software Key Storage Provider"
+        );
     }
 
     #[test]

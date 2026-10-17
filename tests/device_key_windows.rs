@@ -389,3 +389,37 @@ fn key_init_reports_the_software_fallback() {
         other => panic!("unexpected backend {other}"),
     }
 }
+
+#[test]
+fn purge_deletes_only_the_confirmed_software_key() {
+    let key = TestKey::new();
+    let other = TestKey::new();
+    let (created, _) = device_key::init(&CngStore, key.name(), software()).unwrap();
+    let (kept, _) = device_key::init(&CngStore, other.name(), software()).unwrap();
+    let wrong = if created.fingerprint().starts_with('0') {
+        "1"
+    } else {
+        "0"
+    }
+    .repeat(16);
+
+    assert!(matches!(
+        device_key::purge(&CngStore, key.name(), &wrong.parse().unwrap()),
+        Err(device_key::PurgeError::Mismatch { .. })
+    ));
+    let purged = device_key::purge(
+        &CngStore,
+        key.name(),
+        &created.fingerprint().parse().unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(purged.backend, Backend::Software);
+    assert_eq!(purged.fingerprint, created.fingerprint());
+    assert_eq!(
+        device_key::info(&CngStore, key.name()).unwrap_err(),
+        KeyError::NotFound(key.name().clone())
+    );
+    let (still, _) = device_key::info(&CngStore, other.name()).unwrap();
+    assert_eq!(still.fingerprint(), kept.fingerprint());
+}
