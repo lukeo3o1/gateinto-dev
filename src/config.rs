@@ -321,7 +321,7 @@ impl ConfigFile {
                 configured: self.gateways.names(),
             })
         })?;
-        self.profile(name.clone(), section.clone())
+        self.profile(Some(name.clone()), section.clone())
     }
 
     pub fn settings(&self, overrides: &Overrides) -> Result<Settings, ConfigError> {
@@ -360,7 +360,7 @@ impl ConfigFile {
     fn select_gateway(
         &self,
         requested: Option<&GatewayName>,
-    ) -> Result<(GatewayName, GatewaySection), ConfigError> {
+    ) -> Result<(Option<GatewayName>, GatewaySection), ConfigError> {
         let named = requested.map(|name| (name, Reference::Flag)).or_else(|| {
             self.device_session
                 .gateway
@@ -375,12 +375,12 @@ impl ConfigFile {
                     configured: self.gateways.names(),
                 })
             })?;
-            return Ok((name.clone(), section.clone()));
+            return Ok((Some(name.clone()), section.clone()));
         }
         let mut gateways = self.gateways.0.iter();
         match (gateways.next(), gateways.next()) {
-            (None, _) => Ok((GatewayName::command_line(), GatewaySection::default())),
-            (Some((name, section)), None) => Ok((name.clone(), section.clone())),
+            (None, _) => Ok((None, GatewaySection::default())),
+            (Some((name, section)), None) => Ok((Some(name.clone()), section.clone())),
             (Some(_), Some(_)) => Err(self.error(ErrorKind::AmbiguousGateway {
                 count: self.gateways.0.len(),
                 configured: self.gateways.names(),
@@ -390,7 +390,7 @@ impl ConfigFile {
 
     fn profile(
         &self,
-        name: GatewayName,
+        name: Option<GatewayName>,
         section: GatewaySection,
     ) -> Result<GatewayProfile, ConfigError> {
         let invalid = |kind| {
@@ -414,7 +414,7 @@ impl ConfigFile {
             return Err(invalid(GatewayErrorKind::ClientCertificateConflict));
         }
         Ok(GatewayProfile {
-            name,
+            name: name.unwrap_or_else(GatewayName::command_line),
             upstream: UpstreamSettings {
                 host,
                 port: port.get(),
@@ -462,7 +462,7 @@ enum ErrorKind {
         configured: String,
     },
     Gateway {
-        name: GatewayName,
+        name: Option<GatewayName>,
         kind: GatewayErrorKind,
     },
 }
@@ -510,15 +510,17 @@ impl fmt::Display for ConfigError {
                 "{count} gateways are configured ({configured}) and [device_session] names none; \
                  set [device_session] gateway (check-upstream also accepts --gateway)"
             ),
-            ErrorKind::Gateway { name, kind } if *name == GatewayName::command_line() => match kind
-            {
+            ErrorKind::Gateway { name: None, kind } => match kind {
                 GatewayErrorKind::NoUpstream => f.write_str(
                     "no upstream configured; pass --upstream-host and --upstream-port, or \
                          add a [gateways.<name>] table with host and port to the --config file",
                 ),
                 kind => kind.fmt(f),
             },
-            ErrorKind::Gateway { name, kind } => {
+            ErrorKind::Gateway {
+                name: Some(name),
+                kind,
+            } => {
                 write!(f, "gateway \"{name}\": ")?;
                 match kind {
                     GatewayErrorKind::NoUpstream => write!(
@@ -697,6 +699,18 @@ port = 443
             assert!(error.contains("[gateways.main]"), "{text}: {error}");
             assert!(error.contains("--upstream-host"), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn a_gateway_named_command_line_gets_the_per_gateway_error() {
+        let error = settings("[gateways.command-line]\nport = 443\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("gateway \"command-line\": no upstream configured"),
+            "{error}"
+        );
+        assert!(error.contains("[gateways.command-line]"), "{error}");
     }
 
     #[test]
