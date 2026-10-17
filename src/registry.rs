@@ -2,8 +2,9 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::System::Registry::{
-    HKEY, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW,
+    RegOpenKeyExW, RegSetValueExW,
 };
 
 use crate::registration::RegistrationError;
@@ -145,4 +146,12 @@ pub fn delete_tree(root: HKEY, path: &str) -> Result<(), RegistrationError> {
     check("RegDeleteTreeW", unsafe {
         RegDeleteTreeW(root, path.as_ptr())
     })
+}
+
+pub fn app_path(executable: &str) -> Option<std::path::PathBuf> {
+    let path = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{executable}");
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+        .into_iter()
+        .find_map(|root| read_string(root, &path, None).ok().flatten())
+        .map(|value| std::path::PathBuf::from(value.trim_matches('"')))
 }

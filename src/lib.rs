@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod check;
 pub mod config;
 pub mod http;
