@@ -39,6 +39,17 @@ it. Which of these mechanisms are covered by tests is in
 - **No session resumption or early data.** Every upstream connection performs
   a full TLS 1.3 handshake, so a connection never reuses a session, or the
   client certificate identity, established by an earlier one.
+- **Self-signed client certificates** (`--self-signed-client-cert`). Gateinto
+  issues a short-lived certificate (1 hour, renewed after 30 minutes) whose
+  public key is the device key and which the device key itself signs through
+  CNG, as it signs `CertificateVerify`. No other private key is created, and
+  the device key is never exported. The signature is verified against the
+  device public key before the certificate is used. The certificate proves
+  nothing beyond possession of the device key: it is not issued by any CA, and
+  an upstream accepts it only if its own policy trusts that public key (for
+  example by its SPKI fingerprint). Gateinto does not and cannot make an
+  upstream trust it. Fields and trust requirements are in
+  [protocol/client-cert.md](protocol/client-cert.md).
 
 ### The tunnel content
 
@@ -118,9 +129,12 @@ it. Which of these mechanisms are covered by tests is in
   not acceptable.
 - **Post-quantum authentication.** Not provided.
 - **Plain HTTP and non-`CONNECT` traffic.** Not proxied (`405`).
-- **Certificate lifecycle.** There is no enrollment, renewal, revocation
-  checking of the client certificate, or key rotation. Gateinto does not
-  validate the client certificate's chain; the upstream does.
+- **Certificate lifecycle.** There is no enrollment, revocation checking of
+  the client certificate, or key rotation. Only self-signed certificates are
+  renewed, and only by issuing a new one for the same key; a compromised
+  device key stays valid wherever its public key is trusted until the upstream
+  stops trusting it. Gateinto does not validate the client certificate's
+  chain; the upstream does.
 
 The full list of residual risks and non-goals is in
 [threat-model.md](threat-model.md#residual-risks). Report vulnerabilities as

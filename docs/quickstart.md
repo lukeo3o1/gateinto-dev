@@ -295,6 +295,12 @@ device key's public key:
    against the key, and `check-upstream` should then print
    `client-certificate: sent`.
 
+If your upstream can instead be configured to trust the device key's public
+key directly (its `spki-sha256`), `--self-signed-client-cert` makes Gateinto
+issue and send a short-lived self-signed certificate for the device key, with
+no CA involved. Whether your upstream supports that is up to its own
+configuration; see [protocol/client-cert.md](protocol/client-cert.md).
+
 For a TPM-backed key, follow [tpm-verification.md](tpm-verification.md); that
 path has not been verified yet.
 

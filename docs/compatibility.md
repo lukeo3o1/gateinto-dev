@@ -226,6 +226,16 @@ Design choices:
   `--client-cert-file`.
 - The client certificate is only checked against the device key. Gateinto does
   not validate its chain or issuer; the upstream does.
+- Self-signed certificates are DER-encoded by hand in
+  `src/identity/certificates.rs` instead of with `rcgen`, which stays a
+  dev-dependency. `rcgen` 0.14.10 can sign with an external `SigningKey`, but
+  without its `crypto` feature its defaults differ (no default serial number,
+  and an empty subject key identifier for an explicit non-CA certificate), and
+  the dev-dependency enables that feature in test builds,
+  so tests would not cover the release behavior. The encoding is a fixed
+  template; `Cargo.lock` is unchanged. The certificate is signed through the
+  rustls `SigningKey` of the device key (`CngSigningKey` on Windows), the same
+  object that signs `CertificateVerify`.
 
 Where each check runs:
 
@@ -238,6 +248,9 @@ Where each check runs:
 | An upstream that requires client certificates (`WebPkiClientVerifier` with a test client CA) rejects an agent without one (`502`, never `200`); accepts the certificate bound to a software test key (tunnel works and the fixture recorded exactly that certificate); rejects a certificate from another CA (`502`). A certificate for a different key is refused locally before any connection. | `tests/mtls.rs` with a test-only software `ClientIdentityStore`. | All. Ran locally on Linux. |
 | `--client-certificate` values, `--key-name` validation; `required` fails with "device keys are only supported on Windows" off Windows, also with `--client-cert-file`; `optional` (default) logs the "mTLS is not configured" warning exactly once and relays; `off` does not warn. `key info --client-cert-file` fails off Windows. | `tests/cli.rs`, `tests/proxy.rs` (spawning the binary). The warning tests pass a key name that does not exist, so they also hold on Windows. | All; the Windows branches only in CI. |
 | A software CNG device key with a unique name gets an `rcgen` test-CA certificate for its SPKI. (a) Via `--client-cert-file` semantics the tunnel through the mTLS fixture works, signed by `CngSigningKey`, and `key info --client-cert-file` reports its thumbprint. (b) After importing it into `CurrentUser\My` (Crypt32 `CertAddEncodedCertificateToStore`), the proxy finds it by SPKI with no file, the tunnel works, and `key info` reports it with source `CurrentUser\My`. Drop guards remove the certificate and delete the key. | `tests/mtls_windows.rs`. | `windows-latest` only (Software KSP; the TPM-absent probe makes init use software there). Runs in the `windows-latest` CI job. |
+| Self-signed certificate fields (version, serial, `ecdsa-with-SHA256`, `CN=Gateinto device`, 5-minute backdating, 1-hour validity, critical non-CA basic constraints, critical `digitalSignature`, `clientAuth`), distinct serials and fingerprints with the same SPKI, signature accepted by `rustls-webpki` with the certificate as its own anchor (validity bounds included), refusal of a key that does not match the public key or cannot sign ECDSA P-256 SHA-256, renewal at 30 minutes. One certificate was also inspected with OpenSSL 3.0.13 (`openssl x509 -text`; `openssl verify -purpose sslclient` with itself as CA: `OK`), outside the test suite. | Unit tests in `src/identity/certificates.rs` and `src/identity/x509.rs`. | All. Ran locally on Linux. |
+| With a self-signed certificate from a software test key, two proxy starts tunnel through an upstream fixture whose test-only verifier accepts only the device SPKI and has `rustls-webpki` check the certificate with itself as anchor; the fixture recorded two different certificates with the same SPKI. A fixture trusting another SPKI rejects the handshake. `check-upstream` reports the source, the certificate SHA-256 and the device key SPKI SHA-256. `--self-signed-client-cert` and a certificate file are refused together. | `tests/mtls.rs`, `tests/check_upstream.rs`, `tests/cli.rs`, `tests/config_cli.rs`. | All. Ran locally on Linux. |
+| The same two self-signed certificates from a real Software KSP device key, so CNG signs the certificate and `CertificateVerify`. | `tests/mtls_windows.rs`: `self_signed_certificates_are_signed_by_the_cng_device_key`. | `windows-latest` only. Not run yet. |
 | TPM-backed device key signing the client authentication. | Manual steps in [tpm-verification.md](tpm-verification.md). | Not executed. |
 
 ## Unverified
