@@ -4,10 +4,9 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::client::ResolvesClientCert;
+use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
 use rustls::sign::CertifiedKey;
-use rustls::{ClientConfig, RootCertStore, SignatureScheme};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -20,7 +19,7 @@ use crate::http::{
     Authority, DEFAULT_MAX_HEADER_BYTES, ParseError, ParseResult, parse_connect_request,
     parse_response,
 };
-use crate::tls;
+use crate::tls::{self, NegotiationError, TlsMode};
 
 mod relay;
 
@@ -63,21 +62,9 @@ pub struct Config {
     pub listen: SocketAddr,
     pub allow_non_loopback: bool,
     pub upstream: Upstream,
+    pub tls_mode: TlsMode,
     pub client_certificate: Option<Arc<CertifiedKey>>,
     pub limits: Limits,
-}
-
-#[derive(Debug)]
-struct FixedClientCertificate(Arc<CertifiedKey>);
-
-impl ResolvesClientCert for FixedClientCertificate {
-    fn resolve(&self, _: &[&[u8]], _: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
-        Some(self.0.clone())
-    }
-
-    fn has_certs(&self) -> bool {
-        true
-    }
 }
 
 #[derive(Debug)]
@@ -107,11 +94,71 @@ pub struct Proxy {
     shared: Arc<Shared>,
 }
 
-struct Shared {
+pub(crate) struct Endpoint {
     connector: TlsConnector,
-    upstream_host: String,
-    upstream_port: u16,
+    host: String,
+    port: u16,
     server_name: ServerName<'static>,
+    tls_mode: TlsMode,
+}
+
+impl Endpoint {
+    pub(crate) fn new(
+        upstream: Upstream,
+        tls_mode: TlsMode,
+        client_certificate: Arc<tls::ClientCertificateResolver>,
+    ) -> Result<Self, rustls::Error> {
+        let config = tls::client_config(tls_mode, upstream.roots, client_certificate)?;
+        Ok(Self {
+            connector: TlsConnector::from(Arc::new(config)),
+            host: upstream.host,
+            port: upstream.port,
+            server_name: upstream.server_name,
+            tls_mode,
+        })
+    }
+
+    pub(crate) async fn connect(&self) -> Result<TlsStream<TcpStream>, UpstreamError> {
+        let tcp = TcpStream::connect((self.host.as_str(), self.port))
+            .await
+            .map_err(UpstreamError::Connect)?;
+        let _ = tcp.set_nodelay(true);
+        let tls = self
+            .connector
+            .connect(self.server_name.clone(), tcp)
+            .await
+            .map_err(UpstreamError::Tls)?;
+        let connection = tls.get_ref().1;
+        let version = connection.protocol_version();
+        let group = connection
+            .negotiated_key_exchange_group()
+            .map(|group| group.name());
+        debug!(?version, key_exchange_group = ?group, "upstream TLS established");
+        self.tls_mode
+            .verify_negotiated(version, group)
+            .map_err(UpstreamError::Negotiation)?;
+        Ok(tls)
+    }
+}
+
+pub(crate) async fn request_tunnel<T>(
+    tls: &mut TlsStream<TcpStream>,
+    target: &Authority,
+    max_header_bytes: usize,
+    parse: fn(&[u8], usize) -> ParseResult<T>,
+) -> Result<(T, Vec<u8>), UpstreamError> {
+    let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+    tls.write_all(request.as_bytes())
+        .await
+        .map_err(UpstreamError::Request)?;
+    tls.flush().await.map_err(UpstreamError::Request)?;
+    read_head(tls, max_header_bytes, parse)
+        .await
+        .map_err(UpstreamError::Head)
+}
+
+struct Shared {
+    endpoint: Endpoint,
     limits: Limits,
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
@@ -122,16 +169,14 @@ impl Proxy {
         if !config.listen.ip().is_loopback() && !config.allow_non_loopback {
             return Err(Error::NonLoopbackListen(config.listen));
         }
-        let tls = ClientConfig::builder_with_provider(Arc::new(tls::crypto_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(Error::Tls)?
-            .with_root_certificates(config.upstream.roots);
-        let tls = match config.client_certificate {
-            Some(certified_key) => {
-                tls.with_client_cert_resolver(Arc::new(FixedClientCertificate(certified_key)))
-            }
-            None => tls.with_no_client_auth(),
-        };
+        let endpoint = Endpoint::new(
+            config.upstream,
+            config.tls_mode,
+            Arc::new(tls::ClientCertificateResolver::new(
+                config.client_certificate,
+            )),
+        )
+        .map_err(Error::Tls)?;
         let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
         let tunnels = Arc::new(Semaphore::new(
             config.limits.max_tunnels.min(Semaphore::MAX_PERMITS),
@@ -143,10 +188,7 @@ impl Proxy {
                 .min(Semaphore::MAX_PERMITS),
         ));
         let shared = Shared {
-            connector: TlsConnector::from(Arc::new(tls)),
-            upstream_host: config.upstream.host,
-            upstream_port: config.upstream.port,
-            server_name: config.upstream.server_name,
+            endpoint,
             limits: config.limits,
             tunnels,
             rejects,
@@ -258,23 +300,14 @@ impl Shared {
         &self,
         target: &Authority,
     ) -> Result<(TlsStream<TcpStream>, Vec<u8>), UpstreamError> {
-        let tcp = TcpStream::connect((self.upstream_host.as_str(), self.upstream_port))
-            .await
-            .map_err(UpstreamError::Connect)?;
-        let _ = tcp.set_nodelay(true);
-        let mut tls = self
-            .connector
-            .connect(self.server_name.clone(), tcp)
-            .await
-            .map_err(UpstreamError::Tls)?;
-        let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
-        tls.write_all(request.as_bytes())
-            .await
-            .map_err(UpstreamError::Request)?;
-        tls.flush().await.map_err(UpstreamError::Request)?;
-        let (status, early) = read_head(&mut tls, self.limits.max_header_bytes, parse_response)
-            .await
-            .map_err(UpstreamError::Head)?;
+        let mut tls = self.endpoint.connect().await?;
+        let (status, early) = request_tunnel(
+            &mut tls,
+            target,
+            self.limits.max_header_bytes,
+            parse_response,
+        )
+        .await?;
         if (200..300).contains(&status) {
             Ok((tls, early))
         } else {
@@ -284,7 +317,7 @@ impl Shared {
 }
 
 #[derive(Debug)]
-enum HeadError {
+pub(crate) enum HeadError {
     Io(io::Error),
     Closed,
     Parse(ParseError),
@@ -333,9 +366,10 @@ where
 }
 
 #[derive(Debug)]
-enum UpstreamError {
+pub(crate) enum UpstreamError {
     Connect(io::Error),
     Tls(io::Error),
+    Negotiation(NegotiationError),
     Request(io::Error),
     Head(HeadError),
     Status(u16),
@@ -355,6 +389,7 @@ impl fmt::Display for UpstreamError {
         match self {
             Self::Connect(error) => write!(f, "connect failed: {error}"),
             Self::Tls(error) => write!(f, "TLS handshake failed: {error}"),
+            Self::Negotiation(error) => write!(f, "TLS negotiation refused: {error}"),
             Self::Request(error) => write!(f, "sending CONNECT failed: {error}"),
             Self::Head(error) => write!(f, "invalid CONNECT response: {error}"),
             Self::Status(status) => write!(f, "CONNECT answered with status {status}"),
@@ -419,4 +454,24 @@ async fn reject(mut stream: TcpStream, status: Status, linger: Duration) {
         }
     };
     let _ = timeout(linger, drain).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use rustls::NamedGroup;
+
+    use super::*;
+
+    #[test]
+    fn refused_negotiation_answers_bad_gateway() {
+        let error = UpstreamError::Negotiation(NegotiationError::KeyExchangeGroup {
+            mode: TlsMode::HybridRequired,
+            negotiated: Some(NamedGroup::X25519),
+        });
+        assert!(
+            error.local_status().response().starts_with("HTTP/1.1 502 "),
+            "{}",
+            error.local_status().response()
+        );
+    }
 }

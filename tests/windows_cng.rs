@@ -202,12 +202,13 @@ fn tls13_client_authenticates_with_cng_key() {
         vec![client_certificate.clone()],
         Arc::new(CngSigningKey::new(key).unwrap()),
     );
-    let client_config =
-        ClientConfig::builder_with_provider(Arc::new(gateinto::tls::crypto_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_root_certificates(server.roots())
-            .with_client_cert_resolver(Arc::new(FixedClientCert(Arc::new(certified_key))));
+    let client_config = ClientConfig::builder_with_provider(Arc::new(
+        gateinto::tls::TlsMode::default().crypto_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_root_certificates(server.roots())
+    .with_client_cert_resolver(Arc::new(FixedClientCert(Arc::new(certified_key))));
 
     let (client, server, result) = connect(client_config, server_config);
 

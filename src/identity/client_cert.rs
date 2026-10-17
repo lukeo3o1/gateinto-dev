@@ -19,7 +19,8 @@ pub trait ClientIdentityStore: KeyStore {
     fn client_certificates(&self) -> Result<Vec<CertificateDer<'static>>, StoreError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ClientCertificateMode {
     Off,
     #[default]

@@ -17,14 +17,20 @@ proxy's status line.
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
 | `408` | The request head was not complete within `--connect-timeout-secs`. | A client that opens the connection but does not send a request, or a very slow client. |
 | `431` | The request header block was larger than `--max-header-bytes`. | Clients that send many or large headers with `CONNECT`. |
-| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the cause. See [Private CA certificates](#private-ca-certificates). |
+| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
 | `503` | `--max-tunnels` connections are already open. | Raise `--max-tunnels`, or find the client holding connections open. |
 | `504` | The upstream TCP connect, TLS handshake and `CONNECT` reply did not finish within `--connect-timeout-secs`. | Network reachability of the upstream proxy, firewalls that drop instead of reject, or a slow upstream. |
 
 The upstream's own headers and body are never forwarded, so a `407` from the
-upstream appears as a `502` locally. Mutual TLS client authentication is
-planned but not implemented on `master`; an upstream that requires a client
-certificate will fail the handshake and Gateinto returns `502`.
+upstream appears as a `502` locally. An upstream that requires a client
+certificate rejects Gateinto when no client certificate is configured (see the
+"mTLS is not configured" warning at startup), and Gateinto returns `502`.
+
+`gateinto check-upstream` (same options as `proxy`, or `--config`) connects
+once and prints the negotiated TLS version, key exchange group, cipher suite,
+server certificate subject and whether a client certificate was sent. With
+`--target host:port` it also prints the upstream's `CONNECT` status line. It
+exits nonzero with the reason on stderr when anything fails.
 
 ## Private CA certificates
 
@@ -50,11 +56,64 @@ gateinto proxy --upstream-host proxy.example.com --upstream-port 443 --ca-file c
   certificate contains.
 - Certificate verification cannot be turned off.
 
+## hybrid_required fails
+
+With `--tls-mode hybrid_required` (or `[tls] mode = "hybrid_required"`) only
+`X25519MLKEM768` is offered. An upstream that does not support it cannot
+complete the handshake: every tunnel gets `502`, and the log shows
+
+```text
+WARN ... upstream refused tunnel error=TLS handshake failed: received fatal alert: HandshakeFailure
+```
+
+or a similar handshake error. Gateinto never falls back to `X25519` in this
+mode. Check what the upstream negotiates with the default mode:
+
+```sh
+gateinto check-upstream --upstream-host proxy.example.com --upstream-port 443 --tls-mode hybrid_preferred
+```
+
+If it prints `key-exchange-group: X25519`, the upstream (or a TLS-terminating
+middlebox in front of it) lacks the hybrid group. Either enable
+`X25519MLKEM768` there or use `hybrid_preferred`. A tunnel that somehow
+negotiated another group is also refused, with `TLS negotiation refused: TLS
+mode hybrid_required allows key exchange X25519MLKEM768 but ... was negotiated`.
+
+## Configuration file errors
+
+Errors from `--config` name the file and, for syntax and value errors, the line
+and key:
+
+```text
+error: config file gateinto.toml: TOML parse error at line 2, column 1
+  |
+2 | hostname = "x"
+  | ^^^^^^^^
+unknown field `hostname`, expected one of `host`, `port`, `server_name`, `ca_file`
+```
+
+- Unknown sections or keys are errors; check the spelling against
+  [config.example.toml](../config.example.toml).
+- `no upstream configured; pass --upstream-host and --upstream-port, or set
+  host and port in the [upstream] section of the --config file`: there is no
+  default upstream. Both host and port are needed.
+- Zero limits, ports or timeouts, an empty `[device_key] name`, and unknown
+  values for `mode`, `client_certificate` or `preferred` are rejected.
+- Relative `ca_file` and `client_cert_file` paths are relative to the
+  configuration file, not to the current directory.
+- Command line flags override the file. If a value seems ignored, check that
+  the same flag is not also given.
+- A non-loopback `[listen] address` is refused unless
+  `--unsafe-allow-non-loopback-listen` is passed on the command line; see below.
+
 ## Non-loopback listen address refused
 
 ```text
 error: refusing to listen on non-loopback address 0.0.0.0:18736; pass --unsafe-allow-non-loopback-listen to override
 ```
+
+The same error appears for a non-loopback `[listen] address` in a
+configuration file; the opt-in exists only as a command line flag.
 
 The listener has no authentication, so on a non-loopback address anyone on the
 network could use it and the identity behind it. Keep the default

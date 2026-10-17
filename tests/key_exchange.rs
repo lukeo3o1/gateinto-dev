@@ -15,11 +15,13 @@ fn server_provider(groups: &[&'static dyn rustls::crypto::SupportedKxGroup]) -> 
 }
 
 fn client_config(server: &TestServer) -> ClientConfig {
-    ClientConfig::builder_with_provider(Arc::new(gateinto::tls::crypto_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_root_certificates(server.roots())
-        .with_no_client_auth()
+    ClientConfig::builder_with_provider(Arc::new(
+        gateinto::tls::TlsMode::default().crypto_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_root_certificates(server.roots())
+    .with_no_client_auth()
 }
 
 #[test]

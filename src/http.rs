@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
 pub const DEFAULT_MAX_HEADER_BYTES: usize = 16384;
 
@@ -30,6 +31,25 @@ impl fmt::Display for Authority {
             Host::Ipv4(ip) => write!(f, "{ip}:{}", self.port),
             Host::Ipv6(ip) => write!(f, "[{ip}]:{}", self.port),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidAuthority;
+
+impl fmt::Display for InvalidAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("expected host:port with a port from 1 to 65535")
+    }
+}
+
+impl std::error::Error for InvalidAuthority {}
+
+impl FromStr for Authority {
+    type Err = InvalidAuthority;
+
+    fn from_str(target: &str) -> Result<Self, Self::Err> {
+        parse_authority(target.as_bytes()).ok_or(InvalidAuthority)
     }
 }
 
@@ -105,6 +125,16 @@ pub fn parse_response(buf: &[u8], max_header_bytes: usize) -> ParseResult<u16> {
         parse_field(line)?;
     }
     Ok(Some(Parsed { value, head_len }))
+}
+
+pub fn parse_status_line(buf: &[u8], max_header_bytes: usize) -> ParseResult<(u16, String)> {
+    Ok(parse_response(buf, max_header_bytes)?.map(|parsed| {
+        let line = lines(&buf[..parsed.head_len]).next().unwrap_or_default();
+        Parsed {
+            value: (parsed.value, String::from_utf8_lossy(line).into_owned()),
+            head_len: parsed.head_len,
+        }
+    }))
 }
 
 fn head_len(buf: &[u8], max_header_bytes: usize) -> Result<Option<usize>, ParseError> {
@@ -585,5 +615,47 @@ mod tests {
         assert!(parse_response(&head, 64).unwrap().is_some());
         assert_eq!(parse_response(&head, 63), Err(ParseError::TooLarge));
         assert_eq!(parse_response(&head[..63], 63), Err(ParseError::TooLarge));
+    }
+
+    #[test]
+    fn authority_parses_from_a_target_string() {
+        assert_eq!(
+            "example.test:443".parse::<Authority>(),
+            Ok(Authority {
+                host: Host::Name("example.test".to_owned()),
+                port: 443
+            })
+        );
+        assert_eq!(
+            "[::1]:8443".parse::<Authority>().unwrap().to_string(),
+            "[::1]:8443"
+        );
+        for invalid in ["example.test", "example.test:0", "a b:1", ""] {
+            assert_eq!(
+                invalid.parse::<Authority>(),
+                Err(InvalidAuthority),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_line_is_returned_with_the_status() {
+        let parsed = parse_status_line(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\n\r\nbody",
+            MAX,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            parsed.value,
+            (407, "HTTP/1.1 407 Proxy Authentication Required".to_owned())
+        );
+        assert_eq!(parsed.head_len, 73);
+        assert_eq!(
+            parse_status_line(b"HTTP/1.0 200 OK\r\n\r\n", MAX),
+            Err(ParseError::Malformed)
+        );
+        assert_eq!(parse_status_line(b"HTTP/1.1 200 OK\r\n", MAX), Ok(None));
     }
 }

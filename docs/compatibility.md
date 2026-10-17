@@ -20,6 +20,8 @@ on Windows come from CI.
 | `tracing-subscriber` | 0.3.23 | Log output | `default-features = false, features = ["fmt", "std", "env-filter"]`. |
 | `rcgen` | 0.14.10 | Test certificates | Dev-dependency, `default-features = false, features = ["aws_lc_rs", "pem"]`. Requires Rust 1.88, which sets the crate's `rust-version`. |
 | `clap` | 4.6.7 | CLI | `derive` feature. |
+| `serde` | 1.0.229 | Configuration file | `derive` feature. Latest stable; `rust-version` 1.56. Also pulls `serde_core` and `serde_derive` 1.0.229. |
+| `toml` | 1.1.8+spec-1.1.0 | Configuration file | `default-features = false, features = ["std", "serde", "parse"]` (no writer). Latest stable; `rust-version` 1.85. Pulls `toml_parser` 1.1.5, `toml_datetime` 1.1.2, `serde_spanned` 1.1.2 and `winnow` 1.0.4. `Cargo.lock` also lists `toml_writer`, `indexmap`, `hashbrown` and `equivalent` as entries of disabled optional features; they are not built (`cargo tree -p toml -e normal`). |
 
 All of `rustls`, `rustls-cng` and `tokio-rustls` resolve to a single `rustls`
 0.23.46 in the dependency graph, and `rustls/tls12` is not enabled on any
@@ -47,11 +49,17 @@ Locally on Linux:
 | `rustls/tls12` is off with `tokio-rustls` added, and one `rustls` is used. | `cargo tree -e features -i rustls --target all` lists no `tls12`; `cargo tree -i rustls --target all -e normal`. |
 | The crate builds and all tests pass with Rust 1.88.0, the declared `rust-version`. `rcgen` and `time` declare 1.88. | `cargo +1.88 test --all-targets --all-features --locked`; `cargo metadata` `rust_version` fields. |
 | The double `CONNECT` data path, status mapping, limits, half-close and early data behave as documented in the README. | `tests/proxy.rs` against an in-process TLS 1.3 upstream proxy fixture, loopback only. |
-| Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`, including `src/identity/windows_cng.rs`, `tests/device_key_windows.rs` and `tests/mtls_windows.rs`. | See below. |
+| Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`, including `src/identity/windows_cng.rs`, `tests/device_key_windows.rs`, `tests/mtls_windows.rs`, and (since the TLS modes and configuration file work) `src/config.rs`, `src/check.rs`, `tests/tls_modes.rs`, `tests/check_upstream.rs` and `tests/config_cli.rs`. | See below. |
 | The device key lifecycle rules hold: an existing `tpm` or `software` key is reused; both providers are always probed, and keys in both are an error for `key init` and a warning for `key info`; a TPM that is present but not ready during lookup is an error that creates nothing in either provider, even when a software key exists; any other open failure than "not found" or "provider unavailable" is an error and creates nothing; an unavailable TPM, a failed TPM creation or a failed TPM self-test falls back to software (deleting a half-created TPM key first); a TPM reported as not ready while TPM Base Services report `TBS_E_TPM_NOT_FOUND` counts as unavailable, so a software key is created on first init (or an error with fallback disabled, creating nothing) and reused afterwards, while not ready with a TPM present stops with an error and creates nothing; disabled fallback is an error; `--backend software` skips the TPM; `key info` never creates. | Unit tests in `src/identity/device_key.rs` against a fake key store. |
 | The DER SubjectPublicKeyInfo built from an uncompressed P-256 point equals the one AWS-LC produces; the fingerprint is lowercase hex SHA-256; the ECC public blob parser rejects a wrong magic, a wrong `cbKey` and wrong lengths with a specific error. | Unit tests in `src/identity/encoding.rs`. |
 | CNG status codes are classified as "not found" (`NTE_BAD_KEYSET`, `NTE_NOT_FOUND`, `NTE_NO_KEY`), "provider unavailable", meaning absent (`NTE_PROV_DLL_NOT_FOUND`, `NTE_BAD_PROVIDER`, `NTE_DEVICE_NOT_FOUND`, `TBS_E_TPM_NOT_FOUND`), "provider not ready", meaning present but not usable now (`NTE_DEVICE_NOT_READY`, `NTE_PROVIDER_DLL_FAIL`, `TBS_E_SERVICE_NOT_RUNNING`, `TBS_E_SERVICE_DISABLED`), or other failures. When opening a provider fails, "not found" codes also count as absent; "not ready" and other failures are passed through and stop the lookup. A "not ready" result from the Platform Crypto Provider becomes "provider unavailable" only when the TPM Base Services probe returns `TBS_E_TPM_NOT_FOUND`; a successful probe or any other probe failure keeps it "not ready", with the probe result appended to the reason; the probe runs only for "not ready". | Unit tests in `src/identity/cng_status.rs`. Whether Windows actually returns these codes is not verified; see Unverified. |
 | `gateinto key init` and `key info` fail with "device keys are only supported on Windows" on other platforms. | `tests/cli.rs`. |
+| TLS modes offer `[X25519MLKEM768, X25519]` (`hybrid_preferred`), `[X25519MLKEM768]` (`hybrid_required`) and `[X25519]` (`classical_only`); the post-handshake check accepts only TLS 1.3 with a group the mode offers. | Unit tests in `src/tls.rs`. |
+| Through the proxy, against in-process upstream fixtures offering `[X25519MLKEM768, X25519]` (hybrid) or `[X25519]` (classical): `hybrid_preferred` negotiates `X25519MLKEM768` with the hybrid and `X25519` with the classical upstream and both tunnels relay data; `hybrid_required` negotiates `X25519MLKEM768` with the hybrid upstream, and with the classical one the upstream handshake fails with `NoKxGroupsInCommon` and the local client gets `502`, never `200`; `classical_only` negotiates `X25519` with the hybrid upstream; every mode still rejects an untrusted CA and a name mismatch with `502`. The negotiated group is recorded on the fixture's server side. | `tests/tls_modes.rs`. |
+| The negotiated version and group are logged once per tunnel at `debug` and not at `info`, for the default and each `--tls-mode`. | `tests/proxy.rs` (spawning the binary). |
+| `check-upstream` reports TLS 1.3, the negotiated group (`X25519MLKEM768` or `X25519` per fixture and mode), a `TLS13_*` cipher suite, the server certificate subject and whether a client certificate was not requested, requested but not sent, or sent; with `--target` the upstream status line only (no headers or body). The binary prints the group for each fixture and mode and exits nonzero for `hybrid_required` against the classical fixture, an unreachable upstream, an untrusted CA, a non-`2xx` `CONNECT` reply and a malformed `--target`. | `tests/check_upstream.rs` (library calls and the binary). |
+| Configuration file: every section and key, defaults, unknown keys and sections rejected, invalid values rejected, missing or incomplete upstream is an error naming `--upstream-host`/`--upstream-port`, flags override the file key by key, relative paths resolve against the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[listen] address` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`. |
+| The crate, including `serde` and `toml`, builds and all tests pass with Rust 1.88.0. | `cargo +1.88 test --all-targets --all-features --locked`. |
 
 ### Windows type check from Linux
 
@@ -132,6 +140,39 @@ without creating a software key.
 A TPM disabled in firmware is indistinguishable from no TPM, so it leads to a
 software identity. Use `--no-software-fallback` on machines known to have a TPM.
 
+### Negotiated key exchange
+
+Evidence for which group is negotiated comes from the tests above and from
+`gateinto check-upstream`, which prints the group the client actually
+negotiated (`negotiated_key_exchange_group()`); run it against a real upstream
+to see what that upstream supports. `hybrid_required` is enforced twice: the
+client offers only `X25519MLKEM768`, so an upstream without it cannot complete
+the handshake, and after the handshake the negotiated group is checked again
+and the tunnel is refused with `502` if it is anything else. The second check
+cannot be reached through a real handshake with the restricted offer; unit
+tests cover the group check and its mapping to a local `502`, and temporarily offering both groups in every mode
+showed the `tests/tls_modes.rs` `hybrid_required` test still getting `502`
+from the post-handshake check alone (but failing on the server-side assertion
+that the handshake itself failed).
+
+### Configuration file
+
+The schema keeps the draft names (`[listen] address`, `[upstream] host`,
+`port`, `server_name`, `ca_file`, `[tls] mode`, `client_certificate`,
+`client_cert_file`, `[device_key] name`, `preferred`,
+`software_fallback_on_first_create`, `[limits] max_concurrent_tunnels`,
+`connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes`).
+Adaptations:
+
+- Relative `ca_file` and `client_cert_file` are resolved against the
+  directory of the configuration file.
+- `[device_key] preferred` and `software_fallback_on_first_create` are used by
+  `key init` only; the proxy only opens `[device_key] name`.
+- `check-upstream` uses `[limits] connect_timeout_seconds` as the limit for the
+  whole check and `header_max_bytes` for the `CONNECT` reply; other limits and
+  `[listen]` are ignored there.
+- There is deliberately no key for `--unsafe-allow-non-loopback-listen`.
+
 ## Client certificate (mTLS)
 
 Design choices:
@@ -166,6 +207,10 @@ Where each check runs:
 
 Not exercised at all yet:
 
+- TLS modes and `check-upstream` against a real upstream proxy or a
+  TLS-terminating middlebox; only the in-process rustls fixtures were used.
+- `tests/tls_modes.rs`, `tests/check_upstream.rs` and `tests/config_cli.rs` on
+  Windows (type-checked only, pending a CI run).
 - `tests/mtls_windows.rs` and the Windows branches of `tests/cli.rs` (pending
   the next CI run): `CngStore` as a `ClientIdentityStore`, `CertStore`
   enumeration of `CurrentUser\My`, and adding and removing a certificate there
