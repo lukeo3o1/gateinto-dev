@@ -49,7 +49,7 @@ struct Failures {
     count: u32,
 }
 
-enum Rejection {
+pub(super) enum Rejection {
     Scheme,
     Malformed,
 }
@@ -111,7 +111,7 @@ impl BasicTofu {
     }
 }
 
-fn parse_basic(value: &[u8]) -> Result<Vec<u8>, Rejection> {
+pub(super) fn parse_basic(value: &[u8]) -> Result<Vec<u8>, Rejection> {
     let (scheme, token) = match value.iter().position(|&b| b == b' ') {
         Some(space) => (&value[..space], value[space..].trim_ascii_start()),
         None => (value, &b""[..]),

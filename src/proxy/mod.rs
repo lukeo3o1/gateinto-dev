@@ -25,6 +25,8 @@ use crate::identity::client_cert::ClientCertificate;
 use crate::tls::{self, NegotiationError, TlsMode};
 
 mod basic_tofu;
+#[doc(hidden)]
+pub mod fuzzing;
 mod relay;
 
 pub use basic_tofu::FailureLimit;
@@ -321,27 +323,7 @@ impl Shared {
         };
         if let Some(tofu) = &self.basic_tofu {
             let authorization = request.proxy_authorization.as_deref();
-            let status = match tofu.check(authorization, Instant::now()) {
-                Verdict::Bound => {
-                    info!("bound the first local proxy credential to this session");
-                    None
-                }
-                Verdict::Accepted => None,
-                Verdict::Challenge => Some(Status::ProxyAuthenticationRequired),
-                Verdict::Rejected => {
-                    warn!("local proxy credential differs from the one bound to this session");
-                    Some(Status::ProxyAuthenticationRequired)
-                }
-                Verdict::Malformed => {
-                    warn!("malformed local proxy credential");
-                    Some(Status::BadRequest)
-                }
-                Verdict::RateLimited { retry_after } => {
-                    warn!("local proxy authentication rate limited");
-                    Some(Status::TooManyRequests { retry_after })
-                }
-            };
-            if let Some(status) = status {
+            if let Err(status) = authorize(tofu, authorization, Instant::now()) {
                 debug!(?status, "rejecting");
                 let response = status.response_in(tofu.realm());
                 return reject_with(client, &response, limits.reject_linger).await;
@@ -397,6 +379,29 @@ impl Shared {
             Ok((tls, early))
         } else {
             Err(UpstreamError::Status(status))
+        }
+    }
+}
+
+fn authorize(tofu: &BasicTofu, authorization: Option<&[u8]>, now: Instant) -> Result<bool, Status> {
+    match tofu.check(authorization, now) {
+        Verdict::Bound => {
+            info!("bound the first local proxy credential to this session");
+            Ok(true)
+        }
+        Verdict::Accepted => Ok(false),
+        Verdict::Challenge => Err(Status::ProxyAuthenticationRequired),
+        Verdict::Rejected => {
+            warn!("local proxy credential differs from the one bound to this session");
+            Err(Status::ProxyAuthenticationRequired)
+        }
+        Verdict::Malformed => {
+            warn!("malformed local proxy credential");
+            Err(Status::BadRequest)
+        }
+        Verdict::RateLimited { retry_after } => {
+            warn!("local proxy authentication rate limited");
+            Err(Status::TooManyRequests { retry_after })
         }
     }
 }
