@@ -91,6 +91,66 @@ AWS_LC_SYS_SYSTEM_DIR="$STUB" AWS_LC_SYS_SYSTEM_BINDINGS="$STUB/bindings.rs" \
 
 This checks Rust types and FFI signatures only. Nothing is linked or run.
 
+The same check passes for `i686-pc-windows-msvc` (`rustup target add
+i686-pc-windows-msvc`) with stub `cc` and `ar` scripts set as
+`CC_i686_pc_windows_msvc` and `AR_i686_pc_windows_msvc` and a `nasm` on `PATH`,
+since the `aws-lc-sys` build script assembles the x86 sources even for a type
+check.
+
+### 32-bit Windows (i686)
+
+`i686-pc-windows-msvc` is built and released as a zip next to the x64 one.
+What is verified:
+
+- CI (`windows-i686` job in [.github/workflows/ci.yml](../.github/workflows/ci.yml))
+  builds it on `windows-latest` and runs
+  `cargo test --target i686-pc-windows-msvc --all-targets --all-features --locked`.
+  The tests run as 32-bit processes under WOW64 on 64-bit Windows Server,
+  including the CNG Software KSP tests, the named-pipe agent tests and the
+  registry tests. The job then runs the static C runtime check on the 32-bit
+  `gateinto.exe`. `dumpbin` from the `Hostx64d` toolset reads the import
+  table of 32-bit PE files as well, and the `KERNEL32.dll` check is
+  case-insensitive.
+- The release workflow runs the same tests, builds the release binary and runs
+  the static C runtime check before packaging.
+- These jobs have not run yet.
+
+Not verified: running on a real 32-bit Windows 10 installation, a TPM key from a
+32-bit process, and Chrome or Edge launched by a 32-bit agent. There is no
+32-bit MSI; the MSI is x64 only.
+
+`aws-lc-sys` 0.46.0 compiles the `generated-src/win-x86/*.asm` sources with
+NASM (`-f win32`). Its prebuilt NASM objects exist only for `x86_64`
+(`use_prebuilt_nasm` requires `target_arch() == "x86_64"`), and without NASM
+the build stops with "NASM command not found! Build cannot continue."
+`aws-lc-rs` recommends installing NASM from nasm.us. The i686 jobs install
+NASM 2.16.03 with `ilammy/setup-nasm@v1`, which downloads that release from
+nasm.us; the x64 jobs do not install it, so they keep using the prebuilt
+objects. `aws-lc-sys` ships pre-generated `i686-pc-windows-msvc` bindings, so
+no `libclang` is needed.
+
+A 32-bit process on 64-bit Windows sees a different registry and environment:
+
+- Reads from `HKLM\SOFTWARE` are redirected to `WOW6432Node`, where 64-bit
+  Chrome and Edge do not register their App Paths. Gateinto reads the
+  registry with `KEY_WOW64_64KEY` (`RRF_SUBKEY_WOW6464KEY` for
+  `RegGetValueW`), so 32-bit and 64-bit builds see the same keys.
+  `src/registry.rs` tests this by creating a key under `HKLM\SOFTWARE` in the
+  64-bit view and reading it back; it fails without the flag only in the
+  32-bit build, and it skips outside GitHub Actions when the process is not
+  elevated.
+- `ProgramFiles` is `C:\Program Files (x86)` in a 32-bit process. Browser
+  discovery also looks under `ProgramW6432` (the 64-bit `Program Files`), so it
+  finds 64-bit Chrome and Edge installed there; duplicates are dropped when
+  both variables name the same folder. Unit tests in `src/browser.rs` cover
+  both environments.
+- `HKCU\Software\Classes\gateinto` (the URI handler) and
+  `HKCU\...\CurrentVersion\Run` are not redirected, so registration is the
+  same for both builds. The handler registered by a 32-bit build points to the
+  32-bit exe.
+- No code casts pointers or handles to fixed-width integers; the only `usize`
+  conversions widen `u32` values.
+
 ### On GitHub Actions
 
 The CI workflow ([.github/workflows/ci.yml](../.github/workflows/ci.yml))
@@ -149,7 +209,8 @@ UCRT (`api-ms-win-crt-*`). On Windows 10 only `VCRUNTIME140.dll` was missing
 without the Visual C++ Redistributable, because the UCRT ships with Windows
 10; the UCRT only matters on Windows 7 and 8.1. `.cargo/config.toml` now sets
 `-C target-feature=+crt-static` for `cfg(all(windows, target_env = "msvc"))`,
-which covers `x86_64-pc-windows-msvc` and `x86_64-win7-windows-msvc`. No
+which covers `x86_64-pc-windows-msvc`, `i686-pc-windows-msvc` and
+`x86_64-win7-windows-msvc`. No
 workflow sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, which would replace
 these flags.
 
@@ -169,8 +230,9 @@ environment they got `-MD`.
 `KERNEL32.dll`. The `windows-latest` CI job runs it on the debug binary that
 `cargo test` builds, the `build-windows-release` CI job on the release binary
 used by the `quickstart` and `msi` jobs, the release workflow on the release
-binary before
-packaging, and the Windows 7 workflow on the `x86_64-win7-windows-msvc` build,
+binary of each target before packaging, the `windows-i686` CI job on the
+`i686-pc-windows-msvc` debug binary, and the Windows 7 workflow on the
+`x86_64-win7-windows-msvc` build,
 whose import table names `kernel32.dll` in lower case; the `KERNEL32.dll` check
 is case-insensitive. Whether the binary starts on a Windows 10 machine without
 the redistributable has not been checked; only this import check verifies it.
@@ -179,7 +241,7 @@ On `windows-latest`:
 
 | Claim | How |
 | --- | --- |
-| `aws-lc-sys` builds with only the runner's preinstalled tools. This is expected because `rustls/aws_lc_rs` enables `aws-lc-rs/prebuilt-nasm` and `aws-lc-sys` ships pre-generated `x86_64-pc-windows-msvc` bindings. | The workflow has no NASM or CMake setup step. |
+| For `x86_64-pc-windows-msvc`, `aws-lc-sys` builds with only the runner's preinstalled tools. This is expected because `rustls/aws_lc_rs` enables `aws-lc-rs/prebuilt-nasm` and `aws-lc-sys` ships pre-generated `x86_64-pc-windows-msvc` bindings. `i686-pc-windows-msvc` needs NASM; see [32-bit Windows](#32-bit-windows-i686). | The x64 jobs have no NASM or CMake setup step. |
 | Creating, opening, exporting and deleting an ECDSA P-256 persisted key in "Microsoft Software Key Storage Provider" works; creating an existing key fails. | `tests/windows_cng.rs`: `creating_an_existing_key_fails`, `exported_public_key_is_an_uncompressed_p256_point`, `persisted_key_can_be_reopened_and_deleted`. |
 | `NCryptSignHash` returns a 64-byte raw `r \|\| s` signature for P-256. | `tests/windows_cng.rs`: `ncrypt_signature_is_raw_r_and_s`. |
 | `rustls_cng::signer::CngSigningKey` produces a DER `ECDSA-Sig-Value` for `ECDSA_NISTP256_SHA256`, verified with `aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1`, and returns no signer when offered only `ECDSA_NISTP384_SHA384` and `RSA_PSS_SHA256`. | `tests/windows_cng.rs`: `rustls_signer_produces_der_ecdsa_p256_sha256_signature`, `rustls_signer_rejects_unsupported_schemes`. |

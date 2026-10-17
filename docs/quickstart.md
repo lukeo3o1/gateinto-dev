@@ -20,7 +20,10 @@ You need:
 
 Releases are built by
 [.github/workflows/release.yml](../.github/workflows/release.yml) for
-`x86_64-pc-windows-msvc` only. Each release has these files:
+`x86_64-pc-windows-msvc` (64-bit) and `i686-pc-windows-msvc` (32-bit). On
+64-bit Windows use the `x86_64` files. Each release has these files, and the
+same zip and `.zip.sha256` for `i686-pc-windows-msvc` (there is no 32-bit
+MSI):
 
 - `gateinto-<tag>-x86_64-pc-windows-msvc.zip`, containing a folder of the same
   name with `gateinto.exe`, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md` and
