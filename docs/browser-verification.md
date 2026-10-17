@@ -7,9 +7,11 @@ README (the `407` prompt, credential caching, and what happens after a new
 session) is expected, not verified. Record the results in
 [verification.md](verification.md) and [compatibility.md](compatibility.md).
 
-The steps use `gateinto session browser`, which starts one browser session on
-an ephemeral loopback port. There is no `gateinto://` URI handler and no
-browser launch yet, so the browser is started by hand with `--proxy-server`.
+Steps 1 to 11 use `gateinto session browser`, which starts one browser
+session on an ephemeral loopback port, and start the browser by hand with
+`--proxy-server`. [Launch URI and agent](#launch-uri-and-agent) then checks
+the agent starting the browser itself and a `gateinto://` link clicked in a
+browser. None of those steps has been executed either.
 
 ## Prerequisites
 
@@ -128,11 +130,124 @@ browser launch yet, so the browser is started by hand with `--proxy-server`.
     Remove-Item -Recurse -Force "$env:TEMP\gateinto-chrome", "$env:TEMP\gateinto-edge"
     ```
 
+## Launch URI and agent
+
+These steps let the agent start Chrome or Edge itself. They use the same
+configuration file; add a start page to the gateway you use, for example:
+
+```toml
+[gateways.office]
+# ...
+portal_url = "https://example.com/"
+```
+
+12. Start the agent in a console so its log is visible, and leave it running:
+
+    ```powershell
+    $env:RUST_LOG = "info"
+    gateinto agent --config gateinto.toml
+    ```
+
+    Expected: `agent ready` with the endpoint
+    `\\.\pipe\gateinto-agent-<your SID>`. A second `gateinto agent` in another
+    console must exit with `an agent is already running`.
+
+13. In another console, launch a session for the gateway:
+
+    ```powershell
+    gateinto open --config gateinto.toml -- "gateinto://connect?profile=office"
+    ```
+
+    Expected: it prints `session`, `gateway`, `listen`, `realm`, `profile`
+    (a directory under `%LOCALAPPDATA%\Gateinto\profiles`) and `browser`
+    (Chrome if installed, else Edge). A new browser window opens on
+    `https://example.com/` with a fresh profile (no first-run page, no
+    default-browser question, none of your bookmarks or extensions) and shows
+    the proxy sign-in prompt. Record the browser, version and what the window
+    showed. If your normal Chrome was already open, record that it was not
+    affected and that the new window belongs to a separate process
+    (Task Manager).
+
+14. Sign in with a test credential as in step 3 and browse to a few HTTPS
+    sites. Expected: as in steps 3 and 4.
+
+15. Run `gateinto session list`. Expected: the device session (if
+    `[device_session] gateway` is set) and one `browser` line with the port
+    from step 13.
+
+16. Close the browser window normally (the last window of that browser
+    process). Expected: the agent logs that the browser exited and the
+    session closed; `gateinto session list` no longer shows it; the profile
+    directory from step 13 is gone; `curl.exe -x http://127.0.0.1:<port>
+    https://example.com/` cannot connect. Record how long after closing the
+    window this happened, and whether Chrome or Edge kept a background
+    process alive instead (then the session stays open; record it and close
+    it with `gateinto session close <id>`).
+
+17. Run step 13 twice in a row. Expected: two windows, two different
+    sessions, ports, realms and profile directories, each prompting
+    separately. Then run `gateinto session close <id>` for one of them.
+    Expected: that browser window disappears, its profile directory is gone,
+    and the other window keeps working.
+
+18. Run step 13 six times within a minute (closing windows in between).
+    Expected: the sixth fails with `too many launch requests`. With four
+    windows open, a fifth launch fails with `4 browser sessions are already
+    open`.
+
+19. Stop the agent with Ctrl+C in its console (or `gateinto stop`).
+    Expected: every browser window it started closes and
+    `%LOCALAPPDATA%\Gateinto\profiles` is empty.
+
+20. Close every console and run step 13 again without a running agent.
+    Expected: `open` starts the agent in the background (no console window
+    appears) and the browser opens as before. Stop it with `gateinto stop`.
+
+21. Register the handler for your user and try a link from a browser:
+
+    ```powershell
+    gateinto uri register --config "$PWD\gateinto.toml"
+    reg query HKCU\Software\Classes\gateinto\shell\open\command
+    ```
+
+    Expected: the command is
+    `"<path>\gateinto.exe" open --config "<path>\gateinto.toml" -- "%1"`.
+    Save this file as `launch.html` and open it in your normal Chrome and
+    Edge:
+
+    ```html
+    <a href="gateinto://connect?profile=office">office</a>
+    <a href="gateinto://connect?profile=office&amp;url=https://evil.example">bad</a>
+    ```
+
+    Expected: clicking `office` shows the browser's confirmation for an
+    external application, then a new isolated window as in step 13.
+    `gateinto.exe` is a console program, so a console window may appear
+    briefly while `open` runs; record whether it does. Clicking `bad` (after
+    confirming) opens no browser: `open` rejects the URI before contacting
+    the agent. Record the confirmation dialogs, whether
+    "always allow" is offered, and what happens on repeated clicks
+    (rate limit after 5 a minute).
+
+22. Remove the handler and stop the agent:
+
+    ```powershell
+    gateinto uri unregister
+    gateinto stop
+    reg query HKCU\Software\Classes\gateinto
+    ```
+
+    Expected: `reg query` reports that the key does not exist.
+
 ## What to record
 
 For each browser and version: whether the native prompt appeared on the first
 `407`, what it showed, whether later tunnels needed another prompt, what
 happened after a restart with the same profile, what a wrong credential and
 the rate limit looked like, whether it sent a non-Basic scheme first, and
-whether a new session (new port and realm) prompted again. Note anything that
-differs from the expectations above.
+whether a new session (new port and realm) prompted again. For the agent:
+which browser was found, whether its window opened on the portal with a
+fresh profile beside an already running browser, how reliably and how quickly
+closing the window closed the session and deleted the profile, and how the
+browsers handled the `gateinto://` link. Note anything that differs from the
+expectations above.

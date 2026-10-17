@@ -63,15 +63,66 @@ it. Which of these mechanisms are covered by tests is in
 - **Closing a session.** Closing stops accepting at once, drops the listener so
   its port refuses connections, and aborts every tunnel the session has
   established. The session's certificate is dropped with it and is not
-  reachable from another session, so no new `CONNECT` can use it. The
-  command line runs one session per process (`gateinto proxy` or
-  `gateinto session browser`); it is closed when the process ends.
+  reachable from another session, so no new `CONNECT` can use it.
+  `gateinto proxy` and `gateinto session browser` run one session each and
+  close it on Ctrl+C; the agent closes a browser session when its browser
+  exits or on request, and all sessions when it stops.
 - **Gateway profiles are local.** An upstream (host, port, server name, CA
   file, TLS mode, client certificate settings) only comes from the local
   configuration file or the command line. Selecting a gateway by name is a
   lookup in the loaded file; a name cannot add a host, a CA or a trust setting.
-  Browser sessions name a configured gateway with `--gateway`; the planned
-  `gateinto://` URI will only be able to do the same.
+  Browser sessions name a configured gateway with `--gateway` or with the
+  `profile` of a `gateinto://` launch URI, which is only a name.
+
+### Launch URIs and the agent
+
+Any website, e-mail or document can open a `gateinto://` link, and with the
+handler registered Windows passes it to `gateinto open` without further
+checks. Gateinto therefore treats the URI as attacker-controlled. The exact
+format is in [protocol/launch-uri.md](protocol/launch-uri.md).
+
+What a launch URI can do, at most: make the user's agent start a new browser
+session for a gateway that is already configured, which opens Chrome or Edge
+with a new, empty profile on that gateway's configured `portal_url`.
+
+How that is bounded:
+
+- **Strict parsing, twice.** `gateinto open` accepts only
+  `gateinto://connect?` with the fields `profile`, `auth` and `v`, each at
+  most once, values from `A-Z a-z 0-9 _ -` (percent-encoding only of those),
+  at most 512 bytes, no fragment, user information, port or path. The agent
+  parses the forwarded request again with the same rules and looks the
+  profile up in its own configuration file.
+- **No trust or secret in the URI.** There is no field for a host, port,
+  URL, CA, certificate, TLS mode, credential or command. The start page comes
+  from `portal_url` in the configuration file, which must be `https://`.
+- **No command injection.** The handler command quotes the executable and
+  passes the URI after `--`, so the URI is always one positional argument;
+  a URI that would split into more arguments is refused by the command line
+  parser. Neither `open` nor the agent uses a shell: the browser is started
+  with an argument list, and its arguments come from the agent, not the URI.
+- **Frequency and volume.** The agent accepts at most 5 launch requests per
+  60 seconds (counted whether they succeed or not) and at most 4 open
+  browser sessions. A page that opens many links gets errors, not windows.
+- **Per-user endpoint.** The agent listens on a named pipe named after the
+  user's SID, created as the first instance and rejecting remote clients;
+  its default security descriptor lets other users read but not write. On
+  Unix the socket is `0600` in a `0700` directory. The agent answers one
+  short request per connection with size limits and a timeout.
+- **Isolation of each launch.** Every launch is a new session with its own
+  port, realm, `basic_tofu` state and client certificate, and a new browser
+  profile directory, so a launched browser does not share cookies, cache or
+  saved credentials with the user's normal profile or with another launch.
+- **Cleanup.** When the browser exits, or on `gateinto session close`,
+  `gateinto stop` or Ctrl+C, the session's listener, tunnels, upstream TLS
+  connections, `basic_tofu` state and certificate are dropped and the profile
+  directory is deleted. Deletion is limited to directories inside the
+  profiles directory that carry Gateinto's marker file and name, does not
+  follow links, and never touches other profiles.
+- **Registration.** `gateinto uri register` writes only the current user's
+  `HKCU\Software\Classes\gateinto`, with quoted absolute paths that cannot
+  contain quotes or `%`, and neither registration nor removal changes a
+  handler that does not run Gateinto.
 
 ### Local proxy authentication (`basic_tofu`)
 
@@ -217,6 +268,21 @@ Non-guarantees:
   not acceptable.
 - **Post-quantum authentication.** Not provided.
 - **Plain HTTP and non-`CONNECT` traffic.** Not proxied (`405`).
+- **Unwanted launches within the limits.** A website can still open up to 5
+  browser windows a minute, and up to 4 at a time, on configured gateways'
+  portals, each prompting for a local proxy credential. That is a nuisance
+  and a phishing surface (a user may type a real password into the prompt),
+  not a way to change trust or reach a new upstream. The prompt is the
+  browser's own; the credential only protects the local session.
+- **The browser's own behavior.** Chrome or Edge may relaunch itself, keep
+  running in the background after its windows close, or fail to start with
+  the given profile; the agent watches only the process it started. Closing
+  the session explicitly (`gateinto session close`) is then needed. Pages
+  in the launched browser can still reach loopback addresses directly,
+  because the browser does not send loopback requests to a proxy.
+- **Other programs talking to the agent.** Any program running as the user
+  can send launch, list, close and stop requests to the agent, as it could
+  run `gateinto` itself.
 - **Certificate lifecycle.** There is no enrollment, revocation checking of
   the client certificate, or key rotation. Only self-signed certificates are
   renewed, and only by issuing a new one for the same key; a compromised

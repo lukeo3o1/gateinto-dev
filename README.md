@@ -17,11 +17,14 @@ modes, `gateinto check-upstream`, a TOML configuration file with named gateway
 profiles, the device session with per-session isolation, short-lived
 self-signed client certificates issued with the device key, and browser
 sessions with trust-on-first-use local proxy authentication (`basic_tofu`),
-started from the command line. Not implemented: the `gateinto://` URI handler
-and browser launch, certificate enrollment (CA-issued client certificates are
-issued and installed by hand), key rotation and deletion, an SBOM and code
-signing. Browser behavior with `basic_tofu` (the Chrome and Edge credential
-prompt, credential caching, a new session) is not verified yet; see
+started from the command line or from a `gateinto://` launch URI by a per-user
+agent that opens Chrome or Edge with an isolated profile. Not implemented:
+certificate enrollment (CA-issued client certificates are issued and installed
+by hand), key rotation and deletion, an installer (the URI handler is
+registered per user for development), an SBOM and code signing. Browser
+behavior (the Chrome and Edge credential prompt, credential caching, a new
+session, a real browser launched by the agent, a `gateinto://` link clicked in
+a browser) is not verified yet; see
 [docs/browser-verification.md](docs/browser-verification.md).
 
 Tests run in CI on GitHub-hosted Linux and Windows runners (`ubuntu-latest`
@@ -43,10 +46,16 @@ x64 (`x86_64-pc-windows-msvc`) with a `.sha256` checksum file.
 | `gateinto proxy` | Run the local `CONNECT` proxy. |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
 | `gateinto session browser` | Run one browser session with `basic_tofu` local proxy authentication on an ephemeral loopback port. |
+| `gateinto agent` | Run the per-user agent: the device session if `[device_session] gateway` is set, and the endpoint that starts browser sessions. |
+| `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
+| `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped and its profile deleted). |
+| `gateinto stop` | Close all of the agent's sessions and stop it. |
+| `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
 
-All commands accept `--config <file>`; flags override the file key by key.
+All commands that read the configuration accept `--config <file>`; flags
+override the file key by key.
 `gateinto <command> --help` lists every flag with its default.
 
 ### Proxy
@@ -262,13 +271,51 @@ share only the device key.
   `CurrentUser\My` certificate is the same in every session.
 - Closing a session stops it from accepting immediately: its port refuses new
   connections, its established tunnels are aborted, and its certificate is
-  discarded, so no new `CONNECT` can use it. Other sessions keep running. The
-  device session is closed when the process ends.
+  discarded, so no new `CONNECT` can use it. Other sessions keep running.
+  `gateinto proxy` and `gateinto session browser` close their session on
+  Ctrl+C (or SIGTERM on Unix) and then exit.
 
-Starting browser sessions from a `gateinto://` URI and launching the browser
-are planned and not implemented. A URI will only be able to name a configured
-gateway, never add an upstream, a CA or another trust setting. See
-[docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
+### Launching a browser session from a link
+
+`gateinto://connect?profile=<gateway>` starts a browser session for a gateway
+that is already in the configuration file, and opens Chrome or Edge on that
+gateway's `portal_url`. The format, its limits and everything it can never do
+are specified in [docs/protocol/launch-uri.md](docs/protocol/launch-uri.md).
+In short:
+
+- Any website can open such a link, so the URI is strictly limited: at most
+  512 bytes, only `profile` (a gateway name), `auth` (`basic_tofu`) and `v`
+  (`1`), each once, from a small character set. It never carries a
+  credential, host, CA, URL or command; `profile` is only looked up by name.
+- The registered handler runs `gateinto open -- "<uri>"`, which validates the
+  URI and passes the request to the user's agent (`gateinto agent`) over a
+  local named pipe (a Unix socket on Linux, for development), starting the
+  agent with the same `--config` if none runs. The agent validates the request
+  again.
+- The agent accepts at most 5 launches a minute and 4 browser sessions at a
+  time. Each launch is a new session with its own port, realm and
+  `basic_tofu` state, and a new browser process with its own profile
+  directory under `%LOCALAPPDATA%\Gateinto\profiles`, started with
+  `--user-data-dir`, `--proxy-server=http://127.0.0.1:<port>` and the
+  gateway's `portal_url` (or `about:blank`). The URI cannot choose the page.
+- When the browser exits, the session is closed and its profile directory is
+  deleted. `gateinto session close <id>` and `gateinto stop` do the same
+  explicitly; profiles left by a crashed agent are deleted when the next one
+  starts.
+
+For development on Windows, `gateinto uri register --config <file>` writes
+`HKCU\Software\Classes\gateinto` for the current user, with the command
+`"<gateinto.exe>" open --config "<file>" -- "%1"`, and `gateinto uri
+unregister` removes it again; neither touches a handler that is not
+Gateinto's. To try it without a browser link:
+
+```powershell
+gateinto open --config gateinto.toml -- "gateinto://connect?profile=office"
+gateinto session list
+gateinto stop
+```
+
+See [docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
 
 ### Local proxy authentication
 
@@ -321,6 +368,7 @@ Details of `basic_tofu`:
 ## Configuration file
 
 `gateinto proxy`, `gateinto check-upstream`, `gateinto session browser`,
+`gateinto agent`, `gateinto open`, `gateinto uri register`,
 `gateinto key init` and `gateinto key info` accept `--config <path>` with a
 TOML file. See
 [config.example.toml](config.example.toml).
@@ -340,6 +388,10 @@ tls_mode = "hybrid_preferred"    # hybrid_preferred | hybrid_required | classica
 client_certificate = "optional"  # optional | required | off
 client_cert_file = "client.pem"
 self_signed_client_cert = false  # true: issue self-signed certificates instead of client_cert_file
+portal_url = "https://portal.example.invalid/"  # start page of browser sessions; https only
+
+[browser]
+executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # default: Chrome, then Edge
 
 [device_key]
 name = "gateinto-device-v1"
@@ -379,6 +431,7 @@ table, the flags alone describe the upstream, as an unnamed gateway
 | `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
+| `[gateways.<name>] portal_url`, `[browser] executable` | none |
 | `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | `--max-tunnels`, `--connect-timeout-secs`, `--idle-timeout-secs`, `--max-header-bytes` (`proxy`) |
 
 Rules:
@@ -394,8 +447,11 @@ Rules:
   gateway is an error that lists the configured ones.
 - `self_signed_client_cert = true` and a `client_cert_file` cannot be
   combined, wherever each comes from.
-- Relative `ca_file` and `client_cert_file` paths are resolved against the
-  directory of the configuration file. Relative paths on the command line are
+- `portal_url` must be an `https://` URL with a host and no user information,
+  of at most 2048 printable ASCII characters without spaces, quotes or
+  backslashes. It is only read from the file, never from a launch URI.
+- Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
+  resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
 - A non-loopback `[device_session] listen` address still requires the
   `--unsafe-allow-non-loopback-listen` command line flag. There is no key for
@@ -550,6 +606,13 @@ proxy. Browser sessions (and a device session with `auth = "basic_tofu"`)
 accept only the first credential they receive, which keeps other programs out
 only if the browser is first. Do not run it on shared hosts you do not trust.
 
+Any website can open a `gateinto://` link. With the handler registered, such a
+link can at most make the agent start a browser session for a gateway already
+configured on the machine and open that gateway's own `portal_url`, at most
+5 times a minute and 4 sessions at a time; it cannot add a gateway, a trust
+setting, a credential or a start page, or run anything else. See
+[docs/security-model.md](docs/security-model.md#launch-uris-and-the-agent).
+
 ## Verification status
 
 [docs/verification.md](docs/verification.md) lists each capability (relay,
@@ -581,6 +644,11 @@ Provider, and in the Microsoft Platform Crypto Provider on machines with a
 usable TPM. `tests/mtls_windows.rs` also adds a temporary certificate with
 subject `CN=gateinto-test-client` to `CurrentUser\My` and removes it again;
 its self-signed certificate test only keeps certificates in memory.
+`tests/uri_registration.rs` (Windows only) writes and deletes
+`HKCU\Software\Classes\gateinto-test-*` keys; it never touches
+`HKCU\Software\Classes\gateinto`. The agent and launch tests start a fake
+browser (`tests/fake_browser.rs`, built as a test target) instead of Chrome or
+Edge, with their own `GATEINTO_INSTANCE`, runtime and profile directories.
 
 ## Contributing and security
 

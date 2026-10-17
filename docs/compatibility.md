@@ -15,8 +15,8 @@ on Windows come from CI.
 | `aws-lc-rs` | 1.18.2 | Crypto provider | Pulled in by `rustls/aws_lc_rs`. Also a direct dependency for SHA-256 fingerprints and the device key self-test signature check; this resolves to the same package, so `Cargo.lock` gains no new crate. |
 | `aws-lc-sys` | 0.46.0 | AWS-LC build | Transitive. |
 | `rustls-cng` | 0.7.1 | CNG `SigningKey`, certificate store | Requires `rustls ^0.23` and `windows-sys ^0.61`. Used with `default-features = false` so it does not enable `rustls/tls12`. `CngSigningKey` signs the TLS 1.3 client authentication; `CertStore::open(CurrentUser, "My")` and `find_all` enumerate `CurrentUser\My`. `CngSigningKey` does not implement `SigningKey::public_key`, so rustls' `CertifiedKey::keys_match` cannot be used; Gateinto compares the certificate's SPKI with the device key's itself. |
-| `windows-sys` | 0.61.2 | NCrypt FFI | Same major as `rustls-cng`, so key handles are the same type. |
-| `tokio` | 1.53.3 | Async runtime | Features: `rt-multi-thread`, `net`, `io-util`, `macros`, `time`, `sync`. |
+| `windows-sys` | 0.61.2 | NCrypt, TBS, registry, token and process FFI | Same major as `rustls-cng`, so key handles are the same type. Features `Win32_System_Registry` (URI handler registration and Chrome and Edge `App Paths`), `Win32_Security_Authorization` and `Win32_System_Threading` (the user's SID for the agent's pipe name, detached agent process flags) were added for the launch URI; features do not change `Cargo.lock`. |
+| `tokio` | 1.53.3 | Async runtime | Features: `rt-multi-thread`, `net`, `io-util`, `macros`, `time`, `sync`, `process` (starting and watching the browser), `signal` (Ctrl+C and SIGTERM). Named pipes come from `net` on Windows. `signal` adds `signal-hook-registry` 1.4.8 and `errno` 0.3.14 to `Cargo.lock`, built on Unix only. |
 | `tokio-rustls` | 0.26.6 | Async TLS | Requires `rustls ^0.23.27`, compatible with 0.23.46. Its default features enable `rustls/tls12`, so it is used with `default-features = false, features = ["aws_lc_rs"]`. |
 | `webpki-roots` | 1.0.9 | Default upstream roots | Mozilla root program as static data. License CDLA-Permissive-2.0. Replaced entirely by `--ca-file`. |
 | `tracing` | 0.1.44 | Logging | |
@@ -65,6 +65,7 @@ Locally on Linux:
 | Configuration file: every section and key, defaults, unknown keys and sections (including the earlier `[listen]`, `[upstream]` and `[tls]`) rejected, invalid values rejected, gateway names limited to 1 to 64 characters from `[A-Za-z0-9_-]` (as table keys, in `[device_session] gateway` and for `--gateway`), a missing or incomplete upstream is an error naming the gateway and `--upstream-host`/`--upstream-port`, the device session uses `[device_session] gateway` or the only gateway, several gateways without `[device_session] gateway` and a reference to an unknown gateway are errors listing the configured gateways, gateway lookup by name reads only the loaded file, flags override the selected gateway key by key and leave the others unchanged, relative paths in every gateway resolve against the file, errors name the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `proxy` relays through the device session's gateway; `check-upstream --gateway` checks the named gateway, applies flags to it and names the file and the configured gateways for an unknown one; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[device_session] listen` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`; `tests/cli.rs`. |
 | Sessions: several sessions in one process each bind their own loopback listener (ephemeral ports differ), build their own TLS client configuration and resolver, and with a self-signed source issue their own certificate, so the upstream fixture sees one fingerprint per session over several alternating tunnels, the same SPKI for all, and never the source's or the other session's certificate, on one gateway and on two gateways (each session reaching only its own upstream). Closing a session refuses new connections on its port without reaching the upstream, aborts its established tunnels, and leaves the other session's tunnels and new tunnels working with their own certificate; closing every session refuses every port. A required self-signed certificate that cannot be issued for a session fails its start; an optional one starts the session without a client certificate. A non-loopback listen address still needs the opt-in. | `tests/sessions.rs`; unit tests `a_reissue_has_its_own_certificate_for_the_same_key` in `src/identity/certificates.rs` and `a_session_gets_its_own_self_signed_certificate_but_shares_a_fixed_one` in `src/identity/client_cert.rs`. |
 | `basic_tofu`: a `CONNECT` without credentials gets `407` with `Proxy-Authenticate: Basic realm="Gateinto session <hex>", charset="UTF-8"` and reaches no upstream; the first well-formed Basic credential binds and works for many sequential and concurrent tunnels; it is not forwarded upstream; other credentials get `407` and malformed ones `400` without binding; of 32 simultaneous first `CONNECT`s with distinct credentials exactly one ever succeeds; the failure limit answers `429` with `Retry-After` even for the bound credential; a session started after closing a taken one has a new port and realm and binds afresh; a device session and two browser sessions in one process use distinct self-signed certificates and separate bindings; `trace` logs contain no password and no base64 credential. Through the binary: `session browser` listens on an ephemeral loopback port, prints `listen` and `realm`, and requires `basic_tofu`; two processes have separate ports, realms and bindings; `proxy` applies `[device_session] auth = "basic_tofu"`. | Unit tests in `src/proxy/basic_tofu.rs` and `src/http.rs`; `tests/basic_tofu.rs`; `tests/basic_tofu_logs.rs`; `tests/config_cli.rs`. |
+| Launch URIs and the agent, on Linux with a Unix socket and a fake browser: the strict URI grammar and its rejections; `open` refusing invalid URIs before any agent exists, starting a detached agent, and later calls reaching it; the agent re-validating requests, refusing unknown profiles, malformed and oversized requests, launches beyond 5 a minute (a lower limit in the test) and beyond the session cap; each launch starting a new session and a browser with its own marked profile directory, the session's proxy and the configured `portal_url` or `about:blank`; a `basic_tofu` tunnel through the launched session; the browser's exit, `session close`, `stop` and SIGINT closing the session (port refused) and deleting the profile; stale profiles swept at agent start without touching other directories; a second agent refused; the device session run by the agent. The registration command string and its recognition. | `tests/agent.rs`, `tests/launch.rs`; unit tests in `src/uri.rs`, `src/ipc.rs`, `src/agent.rs`, `src/browser.rs`, `src/registration.rs`. Linux only so far; the Windows paths (named pipe, registry, SID) are type-checked. |
 | `key init` flags override `[device_key] software_fallback_on_first_create` in both directions (`--no-software-fallback` over `true`, `--software-fallback` over `false`), the default allows fallback, and the two flags cannot be combined. | Unit tests in `src/main.rs`. |
 | The `[default: ...]` values in `--help` match `DEFAULT_LISTEN`, the limit defaults, `DEFAULT_KEY_NAME`, the default backend, TLS mode and client certificate mode. Temporarily changing `DEFAULT_KEY_NAME` made the test fail. | `tests/cli.rs`: `help_defaults_match_the_real_defaults`. |
 | The crate, including `serde` and `toml`, builds and all tests pass with Rust 1.88.0. | `cargo +1.88 test --all-targets --all-features --locked`. |
@@ -299,6 +300,12 @@ Design-only, not exercised at all:
   prompt again for a new session with a new port and realm. Manual steps are
   in [browser-verification.md](browser-verification.md); they have not been
   executed.
+- Chrome and Edge started by the agent, and a `gateinto://` link clicked in
+  them. Only a fake browser has been started; manual steps are in
+  [browser-verification.md](browser-verification.md#launch-uri-and-agent).
+- The URI handler registration and the named pipe on Windows: both are only
+  type-checked from Linux so far (`tests/uri_registration.rs`, the
+  named-pipe path of `tests/agent.rs`).
 - The proxy against a real third-party upstream HTTPS proxy, and with
   browsers. `curl.exe` through the proxy runs only in the `quickstart` CI job,
   against the local test upstream `examples/test_upstream.rs`.
@@ -313,10 +320,19 @@ Design-only, not exercised at all:
   `SigningKey`.
 - `rustls-cng::key::NCryptKey::sign` uses `NCRYPT_SILENT_FLAG` by default; a TPM
   key with a PIN or consent UI would fail instead of prompting.
-- `gateinto proxy` and `gateinto session browser` run their session until the
-  process is ended; Ctrl+C terminates the process rather than calling
-  `SessionManager::close`, so the orderly close path runs only in tests. Handling Ctrl+C in the process would
-  need the `tokio` `signal` feature.
+- Ctrl+C is handled by `gateinto proxy`, `gateinto session browser` and
+  `gateinto agent`, which close their sessions before exiting. A test checks
+  this with SIGINT on Unix only; on Windows the console control handler is
+  not exercised by a test. An agent started by `gateinto open` has no
+  console and is stopped with `gateinto stop`.
+- The agent's named pipe uses the default security descriptor (other users
+  may read, not write). An explicit DACL that also denies reading to other
+  users would need `Win32_Security` descriptor code and is not implemented.
+- `tests/agent.rs` and `tests/launch.rs` find the fake browser next to their
+  own executable in `target/<profile>/deps` (`fake_browser-<hash>`), because
+  `cargo test` builds examples as test harnesses and only exposes binaries,
+  not test targets, through `CARGO_BIN_EXE_*`. Running one of those test
+  files alone with `--test` needs `--test fake_browser` too.
 - Self-signed certificates are now issued per session. `gateinto proxy` with
   `--self-signed-client-cert` therefore signs twice at startup with the device
   key: once to check the key while configuring client authentication, and
