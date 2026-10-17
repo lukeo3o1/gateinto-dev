@@ -624,6 +624,15 @@ pub fn connect_with(target: &str, authorization: Option<&str>) -> Vec<u8> {
     request.into_bytes()
 }
 
+pub fn pad_head(request: &[u8], total: usize) -> Vec<u8> {
+    let mut head = request.strip_suffix(b"\r\n").unwrap().to_vec();
+    head.extend_from_slice(b"X-Pad: ");
+    head.resize(total - 4, b'p');
+    head.extend_from_slice(b"\r\n\r\n");
+    assert_eq!(head.len(), total);
+    head
+}
+
 pub fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();

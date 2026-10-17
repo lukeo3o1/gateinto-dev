@@ -209,6 +209,37 @@ async fn malformed_credentials_are_bad_requests_and_bind_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_credential_in_a_head_one_byte_past_the_limit_is_431_and_binds_nothing() {
+    const LIMIT: usize = 512;
+    let setup = Setup::start().await;
+    let mut config = setup.config(LocalAuth::BasicTofu);
+    config.limits.max_header_bytes = LIMIT;
+    let mut sessions = SessionManager::new();
+    let id = sessions
+        .start(session(SessionKind::Browser, config))
+        .await
+        .unwrap();
+    let agent = addr(&sessions, id);
+    let first = setup.connect(Some(&basic("first", "pw")));
+    let second = setup.connect(Some(&basic("second", "pw")));
+
+    assert_eq!(status(agent, &pad_head(&first, LIMIT + 1)).await, 431);
+    assert_eq!(
+        status(agent, &pad_head(&setup.connect(None), LIMIT + 1)).await,
+        431
+    );
+    assert_eq!(setup.upstream.accepted(), 0);
+
+    echo_through(agent, &pad_head(&second, LIMIT), b"at the limit").await;
+    assert_eq!(status(agent, &first).await, 407);
+    assert_eq!(
+        status(agent, &pad_head(&setup.connect(None), LIMIT)).await,
+        407
+    );
+    echo_through(agent, &second, b"bound").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_first_credentials_bind_exactly_one() {
     const CLIENTS: usize = 32;
     let setup = Setup::start().await;
