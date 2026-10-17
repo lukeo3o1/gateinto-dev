@@ -191,7 +191,10 @@ key after the TPM fallback and `key info` matched it; `check-upstream` reported
 
 Every job that compiles Rust uses `Swatinem/rust-cache@v2` with its own
 `shared-key`. The CI jobs save their cache only on `master`, so pull requests
-restore the `master` cache without evicting it with their own. The release
+restore the `master` cache without evicting it with their own. The Windows 7
+workflow saves its cache only when it is started by hand (`workflow_dispatch`),
+so a run started from `master` fills the cache that its pull request runs
+restore. The release
 workflow only restores caches (`save-if: false`): the x64 build restores the
 `windows-latest` CI job's cache (`shared-key: check-windows-latest`) and runs
 the same `cargo test --all-targets --all-features --locked` without `--target`
