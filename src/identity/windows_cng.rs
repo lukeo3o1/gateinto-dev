@@ -300,3 +300,16 @@ pub fn export_public_key(key: &NCryptKey) -> Result<P256Point, PublicKeyError> {
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain([0]).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tbs_device_info_resolves_at_runtime_on_windows_8_and_later() {
+        let tbs = SystemLibrary::load("tbs.dll").expect("tbs.dll loads from System32");
+
+        assert!(tbs.get_device_info().is_some());
+        assert_ne!(probe_tpm(), Err(TpmProbeError::DeviceInfoUnavailable));
+    }
+}
