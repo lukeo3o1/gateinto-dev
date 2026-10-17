@@ -1,17 +1,7 @@
+mod isolated;
 use std::path::PathBuf;
-use std::process::Command;
 
-fn no_config_home() -> PathBuf {
-    std::env::temp_dir().join(format!("gateinto-cli-no-config-{}", std::process::id()))
-}
-
-fn gateinto_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_gateinto"));
-    command
-        .env("XDG_CONFIG_HOME", no_config_home())
-        .env("APPDATA", no_config_home());
-    command
-}
+use isolated::{gateinto as gateinto_command, no_config_home};
 
 #[test]
 fn prints_version() {
@@ -476,7 +466,7 @@ fn status_reads_the_config_file_at_the_default_location() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    let output = isolated::gateinto()
         .args(["status"])
         .env("XDG_CONFIG_HOME", &home)
         .env("APPDATA", &home)

@@ -1,6 +1,6 @@
 #![cfg(windows)]
+mod isolated;
 
-use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -298,10 +298,7 @@ fn initialized_key_is_not_exportable_on_any_backend() {
 }
 
 fn gateinto(args: &[&str]) -> (bool, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
-        .args(args)
-        .output()
-        .unwrap();
+    let output = isolated::gateinto().args(args).output().unwrap();
     (
         output.status.success(),
         String::from_utf8(output.stdout).unwrap(),

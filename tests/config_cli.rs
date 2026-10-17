@@ -1,10 +1,11 @@
 #[allow(dead_code)]
 mod fixture;
+mod isolated;
 
 use std::io::BufRead;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use fixture::*;
 use tokio::io::AsyncWriteExt;
@@ -25,7 +26,7 @@ fn write_config(dir: &Path, text: &str) -> PathBuf {
 }
 
 fn gateinto(args: &[&str], config: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    isolated::gateinto()
         .args(args)
         .arg("--config")
         .arg(config)
@@ -224,7 +225,7 @@ async fn spawn_proxy(config: PathBuf, extra: &[&str]) -> (Child, SocketAddr) {
     let extra = args(extra);
     tokio::task::spawn_blocking(move || {
         let mut child = Child(
-            Command::new(env!("CARGO_BIN_EXE_gateinto"))
+            isolated::gateinto()
                 .arg("proxy")
                 .arg("--config")
                 .arg(&config)
@@ -296,7 +297,7 @@ async fn non_loopback_listen_from_the_config_file_still_needs_the_flag() {
 async fn example_config_is_accepted_up_to_the_network() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
     let closed = unused_port().await;
-    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+    let output = isolated::gateinto()
         .args(["check-upstream", "--client-certificate", "off"])
         .args(["--upstream-host", &closed.ip().to_string()])
         .args(["--upstream-port", &closed.port().to_string()])
@@ -479,7 +480,7 @@ async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSessio
     let extra = args(extra);
     tokio::task::spawn_blocking(move || {
         let mut child = Child(
-            Command::new(env!("CARGO_BIN_EXE_gateinto"))
+            isolated::gateinto()
                 .args(["session", "browser", "--config"])
                 .arg(&config)
                 .args(&extra)
