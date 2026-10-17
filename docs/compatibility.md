@@ -119,6 +119,32 @@ The release workflow
 via `workflow_dispatch` on a branch and produced the `x86_64-pc-windows-msvc`
 zip artifact. No release was created and no tag was pushed.
 
+### Static C runtime
+
+Builds before the static C runtime change imported `VCRUNTIME140.dll` and the
+UCRT (`api-ms-win-crt-*`), so they failed on a Windows 10 machine without the
+Visual C++ Redistributable. `.cargo/config.toml` now sets
+`-C target-feature=+crt-static` for `cfg(all(windows, target_env = "msvc"))`,
+which covers `x86_64-pc-windows-msvc` and `x86_64-win7-windows-msvc`. No
+workflow sets `RUSTFLAGS`, which would replace these flags.
+
+AWS-LC's C code follows the same setting. `aws-lc-sys` 0.46.0 uses its `cc`
+builder here; it does not call `cc::Build::static_crt`, so `cc` 1.8.0 reads
+`CARGO_CFG_TARGET_FEATURE` and passes `-MT` instead of `-MD` when it contains
+`crt-static`. The CMake builder checks the same variable (`is_crt_static` in
+`builder/main.rs`) and sets `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`. In a
+Linux cross build for `x86_64-pc-windows-msvc` with a logging stub compiler,
+all 257 AWS-LC compiler invocations got `-MT`; with `RUSTFLAGS` set in the
+environment they got `-MD`.
+
+`.github/scripts/assert-static-crt.ps1` runs `dumpbin /dependents` (found with
+`vswhere`) and fails if `gateinto.exe` depends on `VCRUNTIME*.dll`,
+`MSVCP*.dll`, `ucrtbase*.dll` or `api-ms-win-crt-*.dll`, or if the list lacks
+`KERNEL32.dll`. The `windows-latest` CI job runs it on the debug binary that
+`cargo test` builds, and the release workflow on the release binary before
+packaging. Whether the binary starts on a Windows 10 machine without the
+redistributable has not been checked; only this import check verifies it.
+
 On `windows-latest`:
 
 | Claim | How |
@@ -287,7 +313,8 @@ Not exercised:
 Not exercised on physical hardware:
 
 - Windows 10/11 machines. Runtime results so far come only from the
-  GitHub-hosted `windows-latest` runner image.
+  GitHub-hosted `windows-latest` runner image, which has Visual Studio and
+  its C runtime DLLs installed, so it cannot show a missing C runtime.
 - A person following the [quickstart](quickstart.md) on a physical machine or
   VM. The `quickstart` CI job runs the same commands against a local test
   upstream.

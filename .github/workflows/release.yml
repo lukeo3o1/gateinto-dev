@@ -29,6 +29,8 @@ jobs:
           targets: ${{ env.RELEASE_TARGET }}
       - run: cargo test --all-targets --all-features --locked
       - run: cargo build --locked --release --target $env:RELEASE_TARGET --bin gateinto
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe"
       - name: Package
         id: package
         env:

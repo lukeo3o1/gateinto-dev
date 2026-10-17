@@ -27,6 +27,10 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo test --all-targets --all-features --locked
+      - name: Check that gateinto.exe links the C runtime statically
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/assert-static-crt.ps1 -Path target\debug\gateinto.exe
 
   quickstart:
     name: quickstart (windows-latest)

@@ -43,9 +43,9 @@ Notes:
 - The checksum only proves the download matches the file the workflow
   published next to it. `gateinto.exe` is not code signed, so SmartScreen may
   warn about it.
-- The binary links the Microsoft Visual C++ runtime dynamically. If Windows
-  reports that `VCRUNTIME140.dll` is missing, install the current Microsoft
-  Visual C++ Redistributable for x64.
+- The binary links the Microsoft C runtime statically, so no Visual C++
+  Redistributable is required. Older builds needed it; see
+  [troubleshooting](troubleshooting.md#vcruntime140dll-was-not-found).
 - No release has been published yet at the time of writing. Until one is,
   build from source.
 
