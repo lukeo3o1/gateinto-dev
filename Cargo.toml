@@ -30,3 +30,7 @@ rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"
 [[example]]
 name = "test_upstream"
 test = true
+
+[[test]]
+name = "fake_browser"
+harness = false
