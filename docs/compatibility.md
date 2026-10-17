@@ -161,6 +161,8 @@ only Markdown files or files under `docs/` skip the workflow, except changes to
 `README.md` and `docs/quickstart.md`; no test or job reads any other
 documentation file. Pushes to `master` always run it. A new push to a pull
 request cancels the run still in progress for it.
+Other runs, such as pushes to `master`, each get their own concurrency group,
+so none of them is cancelled or replaced by a later one.
 
 A `build-windows-release` job runs the quickstart's
 `cargo build --release --locked` on `windows-latest`, builds the
