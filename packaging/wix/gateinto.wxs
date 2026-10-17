@@ -13,6 +13,7 @@
     <MediaTemplate EmbedCab="yes" />
 
     <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="AUTOSTART" Secure="yes" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="LocalProgramsFolder" Name="Programs">
@@ -24,6 +25,7 @@
       <Component Id="Executable" Directory="INSTALLFOLDER" Guid="D0BAAB5A-B9FF-4F34-9BBE-8F2E399F5E34">
         <File Id="GateintoExe" Name="gateinto.exe" Source="$(var.BinaryPath)" KeyPath="no" />
         <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveLocalProgramsFolder" Directory="LocalProgramsFolder" On="uninstall" />
       </Component>
@@ -39,7 +41,7 @@
       <Feature Id="Autostart" Title="Start the Gateinto agent at logon" Level="2">
         <Level Value="1" Condition="AUTOSTART = &quot;1&quot;" />
         <Component Id="Autostart" Directory="INSTALLFOLDER" Guid="3A1DFF58-BAE5-4BDB-A96C-0D54E6AB6039">
-          <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Gateinto" Type="string" Value="&quot;[INSTALLFOLDER]gateinto.exe&quot; agent" KeyPath="yes" />
+          <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Gateinto" Type="string" Value="&quot;[INSTALLFOLDER]gateinto.exe&quot; agent --detach" KeyPath="yes" />
         </Component>
       </Feature>
     </Feature>
