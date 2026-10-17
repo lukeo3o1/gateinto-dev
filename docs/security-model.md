@@ -117,11 +117,12 @@ Non-guarantees:
 - **Not a defense against malware running as the user.** Such a program can
   read the credential from the browser, or wait for it and race a new
   session, or simply use the device identity directly.
-- **The rate limit can lock out the legitimate client.** A local program that
-  sends 10 wrong credentials makes the session answer `429` to everyone,
-  including the browser with the right credential, for up to 60 seconds.
-  This is accepted because a local attacker can already take the binding
-  first.
+- **The rate limit can lock out the legitimate client indefinitely.** A local
+  program that sends 10 wrong credentials makes the session answer `429` to
+  everyone, including the browser with the right credential, for up to 60
+  seconds, and by sending another burst each time the window ends it can
+  renew the lockout for as long as it runs. This is accepted because a local
+  attacker can already take the binding first.
 - **Basic credentials are sent in clear on loopback.** Anything that can
   capture loopback traffic on the machine can read them. The credential only
   protects this one session's port.
@@ -178,6 +179,9 @@ Non-guarantees:
   `127.0.0.1`. A
   non-loopback address is refused unless `--unsafe-allow-non-loopback-listen`
   is given on the command line; the configuration file has no key for it.
+  With `[device_session] auth = "basic_tofu"` that flag sends the Basic
+  credential in cleartext over the network, and any host that can reach the
+  port can bind its credential first.
 - **No secrets or payload in logs.** Tunnel payload, private keys and local
   proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
   listen address, the client's local address and port for each tunnel, tunnel
