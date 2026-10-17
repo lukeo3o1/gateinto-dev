@@ -11,7 +11,7 @@ on:
       - .cargo/config.toml
       - Cargo.toml
       - Cargo.lock
-      - src/identity/**
+      - src/**
       - docs/windows7-feasibility.md
 
 permissions:

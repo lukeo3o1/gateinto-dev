@@ -105,7 +105,7 @@ CI: [.github/workflows/windows7.yml](../.github/workflows/windows7.yml) runs the
 same build for both `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` on
 `windows-latest`. It runs on `workflow_dispatch` and on pull requests that
 change the workflow, its scripts, `.cargo/config.toml`, `Cargo.toml`,
-`Cargo.lock`, `src/identity/**` or this document. The i686 job installs NASM
+`Cargo.lock`, anything under `src/` or this document. The i686 job installs NASM
 2.16.03 with `ilammy/setup-nasm@v1`, as `ci.yml` does. Both jobs set
 `AWS_LC_SYS_CMAKE_BUILDER=0`: only the `cc` builder defines `_WIN32_WINNT=0x0601`
 for `-win7-windows-msvc` targets. Each job checks the static C runtime and runs
