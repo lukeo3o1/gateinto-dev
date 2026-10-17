@@ -75,9 +75,29 @@ struct KeyInitArgs {
     #[arg(long, value_enum)]
     backend: Option<BackendArg>,
 
+    /// Create a software key when the TPM cannot be used, even if the config file disables it
+    #[arg(long, conflicts_with = "no_software_fallback")]
+    software_fallback: bool,
+
     /// Fail instead of creating a software key when the TPM cannot be used
     #[arg(long)]
     no_software_fallback: bool,
+}
+
+impl KeyInitArgs {
+    fn settings(&self) -> Result<DeviceKeySettings> {
+        let mut settings = device_key_settings(&self.config, self.name.clone())?;
+        if let Some(backend) = self.backend {
+            settings.preferred = backend.into();
+        }
+        if self.software_fallback {
+            settings.software_fallback_on_first_create = true;
+        }
+        if self.no_software_fallback {
+            settings.software_fallback_on_first_create = false;
+        }
+        Ok(settings)
+    }
 }
 
 #[derive(Args)]
@@ -260,13 +280,7 @@ fn device_key_settings(config: &ConfigArg, name: Option<KeyName>) -> Result<Devi
 fn key(command: KeyCommand) -> Result {
     match command {
         KeyCommand::Init(args) => {
-            let mut settings = device_key_settings(&args.config, args.name.clone())?;
-            if let Some(backend) = args.backend {
-                settings.preferred = backend.into();
-            }
-            if args.no_software_fallback {
-                settings.software_fallback_on_first_create = false;
-            }
+            let settings = args.settings()?;
             key_init(&gateinto::identity::system_store()?, settings)
         }
         KeyCommand::Info(args) => {
@@ -402,4 +416,89 @@ async fn proxy(args: ProxyArgs) -> Result {
     };
     Proxy::bind(config).await?.run().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_init_temp_path() -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("gateinto-key-init-{}-{n}.toml", std::process::id()))
+    }
+
+    fn key_init_settings(file: Option<&str>, flags: &[&str]) -> Result<DeviceKeySettings> {
+        key_init_settings_at(&key_init_temp_path(), file, flags)
+    }
+
+    fn key_init_settings_at(
+        path: &std::path::Path,
+        file: Option<&str>,
+        flags: &[&str],
+    ) -> Result<DeviceKeySettings> {
+        let mut args = vec!["gateinto", "key", "init"];
+        let path_arg = path.display().to_string();
+        if let Some(text) = file {
+            std::fs::write(path, text).unwrap();
+            args.extend(["--config", &path_arg]);
+        }
+        args.extend(flags);
+        let settings = Cli::try_parse_from(args)
+            .map_err(Into::into)
+            .and_then(|cli| match cli.command {
+                Command::Key(KeyCommand::Init(args)) => args.settings(),
+                _ => unreachable!(),
+            });
+        let _ = std::fs::remove_file(path);
+        settings
+    }
+
+    #[test]
+    fn key_init_settings_removes_the_config_file_when_parsing_fails() {
+        let path = key_init_temp_path();
+        let result = key_init_settings_at(
+            &path,
+            Some(FALLBACK_ON),
+            &["--software-fallback", "--no-software-fallback"],
+        );
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    const FALLBACK_ON: &str = "[device_key]\nsoftware_fallback_on_first_create = true\n";
+    const FALLBACK_OFF: &str = "[device_key]\nsoftware_fallback_on_first_create = false\n";
+
+    #[test]
+    fn software_fallback_defaults_to_allowed() {
+        assert!(
+            key_init_settings(None, &[])
+                .unwrap()
+                .software_fallback_on_first_create
+        );
+    }
+
+    #[test]
+    fn software_fallback_comes_from_the_config_file() {
+        for (file, expected) in [(FALLBACK_ON, true), (FALLBACK_OFF, false)] {
+            let settings = key_init_settings(Some(file), &[]).unwrap();
+            assert_eq!(settings.software_fallback_on_first_create, expected);
+        }
+    }
+
+    #[test]
+    fn software_fallback_flags_override_the_config_file() {
+        let disabled = key_init_settings(Some(FALLBACK_ON), &["--no-software-fallback"]).unwrap();
+        assert!(!disabled.software_fallback_on_first_create);
+        let enabled = key_init_settings(Some(FALLBACK_OFF), &["--software-fallback"]).unwrap();
+        assert!(enabled.software_fallback_on_first_create);
+    }
+
+    #[test]
+    fn software_fallback_flags_are_mutually_exclusive() {
+        let error = key_init_settings(None, &["--software-fallback", "--no-software-fallback"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be used with"), "{error}");
+    }
 }
