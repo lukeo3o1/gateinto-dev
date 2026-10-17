@@ -123,18 +123,23 @@ pub fn profiles_root() -> Option<PathBuf> {
 }
 
 pub fn profiles_root_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let profiles = match crate::ipc::instance_from(&env).ok()? {
+        Some(instance) => format!("profiles-{instance}"),
+        None => "profiles".to_owned(),
+    };
     let absolute = |name| {
         env(name)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    if cfg!(windows) {
-        absolute("LOCALAPPDATA").map(|dir| dir.join("Gateinto").join("profiles"))
+    let base = if cfg!(windows) {
+        absolute("LOCALAPPDATA").map(|dir| dir.join("Gateinto"))
     } else {
         absolute("XDG_STATE_HOME")
             .or_else(|| absolute("HOME").map(|home| home.join(".local").join("state")))
-            .map(|dir| dir.join("gateinto").join("profiles"))
-    }
+            .map(|dir| dir.join("gateinto"))
+    };
+    base.map(|dir| dir.join(profiles))
 }
 
 pub fn spawn(executable: &Path, args: Vec<OsString>) -> io::Result<Child> {
@@ -365,6 +370,47 @@ mod tests {
             );
             assert_eq!(profiles_root_from(env(&[])), None);
         }
+    }
+
+    #[test]
+    fn each_agent_instance_has_its_own_profiles_directory() {
+        let (base, root) = if cfg!(windows) {
+            (
+                ("LOCALAPPDATA", r"C:\Local"),
+                PathBuf::from(r"C:\Local").join("Gateinto"),
+            )
+        } else {
+            (
+                ("XDG_STATE_HOME", "/state"),
+                PathBuf::from("/state/gateinto"),
+            )
+        };
+        assert_eq!(
+            profiles_root_from(env(&[base, ("GATEINTO_INSTANCE", "test-1")])),
+            Some(root.join("profiles-test-1"))
+        );
+        assert_eq!(
+            profiles_root_from(env(&[base, ("GATEINTO_INSTANCE", "../x")])),
+            None
+        );
+    }
+
+    #[test]
+    fn sweeping_one_instance_leaves_another_instances_profiles_alone() {
+        let state = temp_root("instances");
+        let root = |instance| {
+            let vars = [
+                ("LOCALAPPDATA", state.to_str().unwrap()),
+                ("XDG_STATE_HOME", state.to_str().unwrap()),
+                ("GATEINTO_INSTANCE", instance),
+            ];
+            profiles_root_from(env(&vars)).unwrap()
+        };
+        let other = ProfileDir::create(&root("b"), SessionId(1)).unwrap();
+
+        assert_eq!(sweep(&root("a")), 0);
+
+        assert!(other.path().join(MARKER).exists());
     }
 
     #[test]
