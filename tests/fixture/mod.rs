@@ -3,9 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gateinto::proxy::{Config, Limits, Proxy, Upstream};
-use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, PublicKeyData,
+};
 use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -46,21 +50,59 @@ impl TestCa {
     }
 
     pub fn server_config(&self, name: &str) -> Arc<ServerConfig> {
+        self.server_config_with_client_ca(name, None)
+    }
+
+    pub fn server_config_requiring_client_certificates(
+        &self,
+        name: &str,
+        client_ca: &TestCa,
+    ) -> Arc<ServerConfig> {
+        self.server_config_with_client_ca(name, Some(client_ca))
+    }
+
+    fn server_config_with_client_ca(
+        &self,
+        name: &str,
+        client_ca: Option<&TestCa>,
+    ) -> Arc<ServerConfig> {
         let key = KeyPair::generate().unwrap();
         let certificate = CertificateParams::new(vec![name.to_owned()])
             .unwrap()
             .signed_by(&key, &self.issuer)
             .unwrap();
-        let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        let provider = Arc::new(aws_lc_rs::default_provider());
+        let builder = ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_no_client_auth()
+            .unwrap();
+        let builder = match client_ca {
+            Some(client_ca) => builder.with_client_cert_verifier(
+                WebPkiClientVerifier::builder_with_provider(Arc::new(client_ca.roots()), provider)
+                    .build()
+                    .unwrap(),
+            ),
+            None => builder.with_no_client_auth(),
+        };
+        let config = builder
             .with_single_cert(
                 vec![certificate.der().clone()],
                 PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
             )
             .unwrap();
         Arc::new(config)
+    }
+
+    pub fn issue_client_certificate(&self, public_key: &impl PublicKeyData) -> IssuedCertificate {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "gateinto-test-client");
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let certificate = params.signed_by(public_key, &self.issuer).unwrap();
+        IssuedCertificate {
+            der: certificate.der().clone(),
+            pem: certificate.pem(),
+        }
     }
 
     pub fn client_config(&self) -> Arc<ClientConfig> {
@@ -71,6 +113,11 @@ impl TestCa {
             .with_no_client_auth();
         Arc::new(config)
     }
+}
+
+pub struct IssuedCertificate {
+    pub der: CertificateDer<'static>,
+    pub pem: String,
 }
 
 #[derive(Clone)]
@@ -85,6 +132,7 @@ pub enum Behavior {
 pub struct UpstreamProxy {
     pub addr: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,
+    client_certificates: Arc<Mutex<Vec<Vec<CertificateDer<'static>>>>>,
 }
 
 impl UpstreamProxy {
@@ -93,17 +141,23 @@ impl UpstreamProxy {
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let acceptor = TlsAcceptor::from(config);
+        let client_certificates = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let presented = client_certificates.clone();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let acceptor = acceptor.clone();
                 let behavior = behavior.clone();
                 let recorded = recorded.clone();
+                let presented = presented.clone();
                 tokio::spawn(async move {
                     let Ok(mut tls) = acceptor.accept(stream).await else {
                         return;
                     };
+                    if let Some(chain) = tls.get_ref().1.peer_certificates() {
+                        presented.lock().unwrap().push(chain.to_vec());
+                    }
                     let (head, rest) = read_head(&mut tls).await;
                     recorded.lock().unwrap().push(head.clone());
                     match behavior {
@@ -128,11 +182,19 @@ impl UpstreamProxy {
                 });
             }
         });
-        Self { addr, requests }
+        Self {
+            addr,
+            requests,
+            client_certificates,
+        }
     }
 
     pub fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub fn client_certificates(&self) -> Vec<Vec<CertificateDer<'static>>> {
+        self.client_certificates.lock().unwrap().clone()
     }
 }
 
@@ -254,6 +316,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
             server_name: ServerName::try_from(server_name.to_owned()).unwrap(),
             roots,
         },
+        client_certificate: None,
         limits: Limits::default(),
     }
 }

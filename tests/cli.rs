@@ -96,6 +96,7 @@ fn key_commands_require_windows() {
         &["key", "init"][..],
         &["key", "info"],
         &["key", "info", "--name", "other", "--spki-out", "unused.der"],
+        &["key", "info", "--client-cert-file", "unused.pem"],
         &[
             "key",
             "init",
@@ -120,4 +121,72 @@ fn key_commands_reject_an_empty_name() {
         assert!(!success);
         assert!(stderr.contains("key name must not be empty"), "{stderr}");
     }
+}
+
+fn proxy_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "proxy",
+        "--upstream-host",
+        "127.0.0.1",
+        "--upstream-port",
+        "9",
+        "--listen",
+        "127.0.0.1:0",
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+#[test]
+fn proxy_rejects_an_unknown_client_certificate_mode() {
+    let (success, stderr) = gateinto(&proxy_args(&["--client-certificate", "sometimes"]));
+    assert!(!success);
+    assert!(stderr.contains("--client-certificate"), "{stderr}");
+    for mode in ["optional", "required", "off"] {
+        assert!(stderr.contains(mode), "{stderr}");
+    }
+}
+
+#[test]
+fn proxy_rejects_an_empty_key_name() {
+    let (success, stderr) = gateinto(&proxy_args(&["--key-name", ""]));
+    assert!(!success);
+    assert!(stderr.contains("key name must not be empty"), "{stderr}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn proxy_requiring_a_client_certificate_fails_off_windows() {
+    for extra in [
+        &["--client-certificate", "required"][..],
+        &[
+            "--client-certificate",
+            "required",
+            "--client-cert-file",
+            "/nonexistent/gateinto-client.pem",
+        ],
+    ] {
+        let (success, stderr) = gateinto(&proxy_args(extra));
+        assert!(!success, "{extra:?}");
+        assert!(
+            stderr.contains("error: device keys are only supported on Windows"),
+            "{stderr}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn proxy_requiring_a_client_certificate_fails_without_the_device_key() {
+    let (success, stderr) = gateinto(&proxy_args(&[
+        "--client-certificate",
+        "required",
+        "--key-name",
+        "gateinto-test-missing-device-key",
+    ]));
+    assert!(!success);
+    assert!(
+        stderr.contains("no device key named \"gateinto-test-missing-device-key\""),
+        "{stderr}"
+    );
 }

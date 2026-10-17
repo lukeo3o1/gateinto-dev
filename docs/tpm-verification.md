@@ -68,5 +68,64 @@ Manual check of the device key on a Windows 10/11 machine with a TPM 2.0.
    the same name in both providers and checks that `key init` refuses to choose
    one and `key info` warns on stderr naming both backends.
 
+## Client authentication with a TPM key
+
+**Status: not yet executed.** CI has no TPM, so mTLS with a TPM-backed key is
+only checked by these steps. They need OpenSSL 3 and an upstream HTTPS proxy
+that requires client certificates from a test CA you control.
+
+9. Create a TPM key and export its public key:
+
+   ```powershell
+   gateinto key init --name gateinto-tpm-mtls --no-software-fallback
+   gateinto key info --name gateinto-tpm-mtls --spki-out tpm-mtls.der
+   ```
+
+   Expect `backend: tpm` and `client-certificate: none`.
+10. Issue a client certificate for `tpm-mtls.der` with the test CA, as in the
+    README section "Getting a test client certificate", and configure the
+    upstream to trust that CA for client certificates.
+11. Check the file against the key:
+
+    ```powershell
+    gateinto key info --name gateinto-tpm-mtls --client-cert-file client.pem
+    ```
+
+    Expect `client-certificate-source: file client.pem` and the certificate's
+    thumbprint. Repeat with a certificate issued for another key and expect an
+    error saying it "does not belong to the device key".
+12. Run the proxy with the file and open a tunnel:
+
+    ```powershell
+    gateinto proxy --upstream-host <host> --upstream-port <port> --ca-file <upstream-ca.pem> `
+      --key-name gateinto-tpm-mtls --client-certificate required --client-cert-file client.pem
+    curl.exe --proxy http://127.0.0.1:18736 https://example.com/
+    ```
+
+    Expect the log line `client certificate authentication enabled` with
+    `backend=tpm`, a successful request, and the upstream logging the client
+    certificate. Record whether Windows showed any PIN or consent prompt; the
+    signer uses `NCRYPT_SILENT_FLAG`, so a key that needs one fails instead.
+13. Import the certificate and let the proxy find it:
+
+    ```powershell
+    certutil -user -addstore My client.pem
+    gateinto key info --name gateinto-tpm-mtls
+    ```
+
+    Expect `client-certificate-source: CurrentUser\My`. Run step 12 again
+    without `--client-cert-file` and expect the same result.
+14. Run step 12 with `--client-certificate optional` and a key name that does
+    not exist. Expect one warning ending in "mTLS is not configured and
+    upstream connections do not authenticate this device", and `502` from the
+    proxy for requests to an upstream that requires a client certificate.
+15. Clean up:
+
+    ```powershell
+    certutil -user -delstore My <thumbprint>
+    certutil -csp "Microsoft Platform Crypto Provider" -delkey -user gateinto-tpm-mtls
+    Remove-Item tpm-mtls.der, client.pem
+    ```
+
 Record the Windows build, TPM manufacturer and firmware version (`Get-Tpm`),
 and the output of each step in `docs/compatibility.md`.

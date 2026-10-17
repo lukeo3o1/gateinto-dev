@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod fixture;
 
 use std::net::SocketAddr;
@@ -491,11 +492,16 @@ impl Drop for Child {
 struct Agent {
     child: Child,
     addr: SocketAddr,
+    startup: Vec<String>,
     stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
 }
 
 impl Agent {
     async fn spawn(setup: &Setup, log_filter: &str) -> Self {
+        Self::spawn_with(setup, log_filter, &[]).await
+    }
+
+    async fn spawn_with(setup: &Setup, log_filter: &str, extra: &[&str]) -> Self {
         let ca_file = write_temp("cli-ca.pem", setup.ca.pem().as_bytes());
         let mut child = Child(
             std::process::Command::new(env!("CARGO_BIN_EXE_gateinto"))
@@ -510,24 +516,27 @@ impl Agent {
                 .args(["--upstream-server-name", PROXY_NAME])
                 .arg("--ca-file")
                 .arg(&ca_file)
+                .args(extra)
                 .env("RUST_LOG", log_filter)
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
         let stderr = child.0.stderr.take().unwrap();
-        let (addr, stderr) = tokio::task::spawn_blocking(move || {
+        let (addr, startup, stderr) = tokio::task::spawn_blocking(move || {
             use std::io::BufRead;
             let mut lines = std::io::BufReader::new(stderr).lines();
+            let mut startup = Vec::new();
             loop {
                 let line = lines
                     .next()
-                    .expect("proxy exited before listening")
+                    .unwrap_or_else(|| panic!("proxy exited before listening: {startup:?}"))
                     .unwrap();
                 if let Some((_, addr)) = line.split_once("local_addr=") {
                     let addr = addr.split_whitespace().next().unwrap().parse().unwrap();
-                    return (addr, lines);
+                    return (addr, startup, lines);
                 }
+                startup.push(line);
             }
         })
         .await
@@ -535,6 +544,7 @@ impl Agent {
         Self {
             child,
             addr,
+            startup,
             stderr,
         }
     }
@@ -543,8 +553,9 @@ impl Agent {
         let _ = self.child.0.kill();
         let _ = self.child.0.wait();
         tokio::task::spawn_blocking(move || {
-            self.stderr
-                .map_while(Result::ok)
+            self.startup
+                .into_iter()
+                .chain(self.stderr.map_while(Result::ok))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -585,4 +596,45 @@ async fn tunnel_target_is_logged_only_at_debug() {
     echo_through(agent.addr, target).await;
     let debug = agent.stop().await;
     assert!(debug.contains(&target.to_string()), "{debug}");
+}
+
+const NOT_CONFIGURED: &str =
+    "mTLS is not configured and upstream connections do not authenticate this device";
+const MISSING_KEY: &str = "gateinto-test-missing-device-key";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn optional_client_certificate_without_a_device_identity_warns_once_and_relays() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let target = echo_server().await;
+
+    for extra in [
+        &["--key-name", MISSING_KEY][..],
+        &[
+            "--key-name",
+            MISSING_KEY,
+            "--client-certificate",
+            "optional",
+        ],
+    ] {
+        let agent = Agent::spawn_with(&setup, "info", extra).await;
+        echo_through(agent.addr, target).await;
+        echo_through(agent.addr, target).await;
+        let log = agent.stop().await;
+        assert_eq!(log.matches(NOT_CONFIGURED).count(), 1, "{log}");
+        assert!(log.contains("WARN"), "{log}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disabled_client_certificate_relays_without_the_warning() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let agent = Agent::spawn_with(
+        &setup,
+        "info",
+        &["--key-name", MISSING_KEY, "--client-certificate", "off"],
+    )
+    .await;
+    echo_through(agent.addr, echo_server().await).await;
+    let log = agent.stop().await;
+    assert!(!log.contains(NOT_CONFIGURED), "{log}");
 }

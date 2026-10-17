@@ -11,7 +11,7 @@ on Windows come from CI.
 | `rustls` | 0.23.46 | TLS 1.3 client | Latest stable. `0.24.0-dev.*` exists but is a pre-release and is not used. Features: `aws_lc_rs`, `std`. `tls12` is off, so only TLS 1.3 is available. |
 | `aws-lc-rs` | 1.18.2 | Crypto provider | Pulled in by `rustls/aws_lc_rs`. Also a direct dependency for SHA-256 fingerprints and the device key self-test signature check; this resolves to the same package, so `Cargo.lock` gains no new crate. |
 | `aws-lc-sys` | 0.46.0 | AWS-LC build | Transitive. |
-| `rustls-cng` | 0.7.1 | CNG `SigningKey` | Requires `rustls ^0.23` and `windows-sys ^0.61`. Used with `default-features = false` so it does not enable `rustls/tls12`. |
+| `rustls-cng` | 0.7.1 | CNG `SigningKey`, certificate store | Requires `rustls ^0.23` and `windows-sys ^0.61`. Used with `default-features = false` so it does not enable `rustls/tls12`. `CngSigningKey` signs the TLS 1.3 client authentication; `CertStore::open(CurrentUser, "My")` and `find_all` enumerate `CurrentUser\My`. `CngSigningKey` does not implement `SigningKey::public_key`, so rustls' `CertifiedKey::keys_match` cannot be used; Gateinto compares the certificate's SPKI with the device key's itself. |
 | `windows-sys` | 0.61.2 | NCrypt FFI | Same major as `rustls-cng`, so key handles are the same type. |
 | `tokio` | 1.53.3 | Async runtime | Features: `rt-multi-thread`, `net`, `io-util`, `macros`, `time`, `sync`. |
 | `tokio-rustls` | 0.26.6 | Async TLS | Requires `rustls ^0.23.27`, compatible with 0.23.46. Its default features enable `rustls/tls12`, so it is used with `default-features = false, features = ["aws_lc_rs"]`. |
@@ -47,7 +47,7 @@ Locally on Linux:
 | `rustls/tls12` is off with `tokio-rustls` added, and one `rustls` is used. | `cargo tree -e features -i rustls --target all` lists no `tls12`; `cargo tree -i rustls --target all -e normal`. |
 | The crate builds and all tests pass with Rust 1.88.0, the declared `rust-version`. `rcgen` and `time` declare 1.88. | `cargo +1.88 test --all-targets --all-features --locked`; `cargo metadata` `rust_version` fields. |
 | The double `CONNECT` data path, status mapping, limits, half-close and early data behave as documented in the README. | `tests/proxy.rs` against an in-process TLS 1.3 upstream proxy fixture, loopback only. |
-| Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`, including `src/identity/windows_cng.rs` and `tests/device_key_windows.rs`. | See below. |
+| Windows code type-checks and passes clippy for `x86_64-pc-windows-msvc`, including `src/identity/windows_cng.rs`, `tests/device_key_windows.rs` and `tests/mtls_windows.rs`. | See below. |
 | The device key lifecycle rules hold: an existing `tpm` or `software` key is reused; both providers are always probed, and keys in both are an error for `key init` and a warning for `key info`; a TPM that is present but not ready during lookup is an error that creates nothing in either provider, even when a software key exists; any other open failure than "not found" or "provider unavailable" is an error and creates nothing; an unavailable TPM, a failed TPM creation or a failed TPM self-test falls back to software (deleting a half-created TPM key first); a TPM reported as not ready while TPM Base Services report `TBS_E_TPM_NOT_FOUND` counts as unavailable, so a software key is created on first init (or an error with fallback disabled, creating nothing) and reused afterwards, while not ready with a TPM present stops with an error and creates nothing; disabled fallback is an error; `--backend software` skips the TPM; `key info` never creates. | Unit tests in `src/identity/device_key.rs` against a fake key store. |
 | The DER SubjectPublicKeyInfo built from an uncompressed P-256 point equals the one AWS-LC produces; the fingerprint is lowercase hex SHA-256; the ECC public blob parser rejects a wrong magic, a wrong `cbKey` and wrong lengths with a specific error. | Unit tests in `src/identity/encoding.rs`. |
 | CNG status codes are classified as "not found" (`NTE_BAD_KEYSET`, `NTE_NOT_FOUND`, `NTE_NO_KEY`), "provider unavailable", meaning absent (`NTE_PROV_DLL_NOT_FOUND`, `NTE_BAD_PROVIDER`, `NTE_DEVICE_NOT_FOUND`, `TBS_E_TPM_NOT_FOUND`), "provider not ready", meaning present but not usable now (`NTE_DEVICE_NOT_READY`, `NTE_PROVIDER_DLL_FAIL`, `TBS_E_SERVICE_NOT_RUNNING`, `TBS_E_SERVICE_DISABLED`), or other failures. When opening a provider fails, "not found" codes also count as absent; "not ready" and other failures are passed through and stop the lookup. A "not ready" result from the Platform Crypto Provider becomes "provider unavailable" only when the TPM Base Services probe returns `TBS_E_TPM_NOT_FOUND`; a successful probe or any other probe failure keeps it "not ready", with the probe result appended to the reason; the probe runs only for "not ready". | Unit tests in `src/identity/cng_status.rs`. Whether Windows actually returns these codes is not verified; see Unverified. |
@@ -132,9 +132,50 @@ without creating a software key.
 A TPM disabled in firmware is indistinguishable from no TPM, so it leads to a
 software identity. Use `--no-software-fallback` on machines known to have a TPM.
 
+## Client certificate (mTLS)
+
+Design choices:
+
+- The certificate store is read with `rustls-cng` `CertStore` (already a
+  dependency, no extra `unsafe` in Gateinto) rather than with Crypt32 through
+  `windows-sys`. All selection logic runs on the DER bytes, so it is the same
+  code on every platform.
+- X.509 fields (SubjectPublicKeyInfo, validity, extended key usage, subject)
+  are read by a small DER reader in `src/identity/x509.rs` instead of a new
+  crate; `Cargo.lock` is unchanged. The thumbprint is SHA-1 over the
+  certificate DER, as Windows computes it. Certificates the reader cannot
+  parse are skipped during the store search and are an error in a
+  `--client-cert-file`.
+- The client certificate is only checked against the device key. Gateinto does
+  not validate its chain or issuer; the upstream does.
+
+Where each check runs:
+
+| Check | Where | Platforms |
+| --- | --- | --- |
+| SPKI, validity (UTCTime and GeneralizedTime, inclusive bounds), EKU, subject and thumbprint extraction; malformed DER is rejected. | Unit tests in `src/identity/x509.rs` with `rcgen` certificates. | All (Linux locally and in CI, Windows in CI) |
+| Store candidate selection: SPKI equality, Client Authentication EKU or no EKU, validity at a given time, latest NotAfter among several, unparsable entries skipped. | Unit tests in `src/identity/client_cert.rs`. | All |
+| PEM loading: leaf and intermediates in order; missing file, file without certificates and malformed leaf name the file. | Unit tests in `src/identity/client_cert.rs`. | All |
+| `optional`/`required`/`off` decision table, including unsupported platform, missing key, missing certificate, mismatched certificate and unreadable file; the key is opened, never created; a mismatched certificate is refused before the signing key is opened. | Unit tests in `src/identity/client_cert.rs` against a fake `ClientIdentityStore`. | All |
+| An upstream that requires client certificates (`WebPkiClientVerifier` with a test client CA) rejects an agent without one (`502`, never `200`); accepts the certificate bound to a software test key (tunnel works and the fixture recorded exactly that certificate); rejects a certificate from another CA (`502`). A certificate for a different key is refused locally before any connection. | `tests/mtls.rs` with a test-only software `ClientIdentityStore`. | All. Ran locally on Linux. |
+| `--client-certificate` values, `--key-name` validation; `required` fails with "device keys are only supported on Windows" off Windows, also with `--client-cert-file`; `optional` (default) logs the "mTLS is not configured" warning exactly once and relays; `off` does not warn. `key info --client-cert-file` fails off Windows. | `tests/cli.rs`, `tests/proxy.rs` (spawning the binary). The warning tests pass a key name that does not exist, so they also hold on Windows. | All; the Windows branches only in CI. |
+| A software CNG device key with a unique name gets an `rcgen` test-CA certificate for its SPKI. (a) Via `--client-cert-file` semantics the tunnel through the mTLS fixture works, signed by `CngSigningKey`, and `key info --client-cert-file` reports its thumbprint. (b) After importing it into `CurrentUser\My` (Crypt32 `CertAddEncodedCertificateToStore`), the proxy finds it by SPKI with no file, the tunnel works, and `key info` reports it with source `CurrentUser\My`. Drop guards remove the certificate and delete the key. | `tests/mtls_windows.rs`. | `windows-latest` only (Software KSP; the TPM-absent probe makes init use software there). **Type-checked only; pending a CI run.** |
+| TPM-backed device key signing the client authentication. | Manual steps in [tpm-verification.md](tpm-verification.md). | Not executed. |
+
 ## Unverified
 
 Not exercised at all yet:
+
+- `tests/mtls_windows.rs` and the Windows branches of `tests/cli.rs` (pending
+  the next CI run): `CngStore` as a `ClientIdentityStore`, `CertStore`
+  enumeration of `CurrentUser\My`, and adding and removing a certificate there
+  on the hosted runner.
+- mTLS with a TPM-backed key, including whether `CngSigningKey` signs with it
+  silently. Manual steps are in [tpm-verification.md](tpm-verification.md).
+- The `certutil -user -addstore My` import shown in the README. The OpenSSL
+  commands there were run with OpenSSL 3.0.13 on Linux against a stand-in key,
+  and the result was parsed by `load_certificate_file`.
+- A real upstream proxy requiring client certificates.
 
 - `tests/device_key_windows.rs` and the updated `tests/windows_cng.rs` on
   Windows with the TPM Base Services probe (pending the next CI run). That

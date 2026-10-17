@@ -1,7 +1,12 @@
+use std::sync::Arc;
 use std::{fmt, mem, ptr};
 
+use rustls::pki_types::CertificateDer;
+use rustls::sign::SigningKey;
 use rustls_cng::error::CngError;
 use rustls_cng::key::{NCryptKey, SignaturePadding};
+use rustls_cng::signer::CngSigningKey;
+use rustls_cng::store::{CertStore, CertStoreType};
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY,
     NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey,
@@ -12,6 +17,7 @@ use windows_sys::Win32::System::TpmBaseServices::{
     TBS_SUCCESS, TPM_DEVICE_INFO, Tbsi_GetDeviceInfo,
 };
 
+use crate::identity::client_cert::ClientIdentityStore;
 use crate::identity::cng_status;
 use crate::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
 use crate::identity::encoding::{BlobError, P256Point, parse_ecc_public_blob};
@@ -224,6 +230,22 @@ impl KeyStore for CngStore {
         NCryptKey::new_borrowed(key.0)
             .sign(digest, SignaturePadding::None)
             .map_err(store_error)
+    }
+}
+
+impl ClientIdentityStore for CngStore {
+    fn signing_key(&self, key: CngKey) -> Result<Arc<dyn SigningKey>, StoreError> {
+        let signing_key = CngSigningKey::new(key.into_ncrypt_key()).map_err(store_error)?;
+        Ok(Arc::new(signing_key))
+    }
+
+    fn client_certificates(&self) -> Result<Vec<CertificateDer<'static>>, StoreError> {
+        let store = CertStore::open(CertStoreType::CurrentUser, "My").map_err(store_error)?;
+        let certificates = store.find_all().map_err(store_error)?;
+        Ok(certificates
+            .iter()
+            .map(|certificate| CertificateDer::from(certificate.as_der().to_vec()))
+            .collect())
     }
 }
 
