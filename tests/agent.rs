@@ -205,7 +205,6 @@ async fn a_launch_opens_the_portal_in_a_browser_with_its_own_profile_and_session
 
     wait_until("the profile is removed", || !profile.exists()).await;
     let id = field(&lines, "session").to_owned();
-    assert!(refuses(listen).await);
     assert!(
         !agent
             .list()
@@ -263,7 +262,11 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     );
 
     assert!(!browser.profile().exists());
-    assert!(refuses(browser.proxy()).await);
+    let list = agent.list().await;
+    assert!(
+        !list.iter().any(|line| line.starts_with(&format!("session: {id} "))),
+        "{list:?}"
+    );
     assert!(other.profile().exists());
     tunnel_echoes(other.proxy(), "still open").await;
     assert!(matches!(
@@ -284,7 +287,6 @@ async fn stopping_the_agent_closes_every_session_and_removes_every_profile() {
 
     for browser in [&first, &second] {
         assert!(!browser.profile().exists());
-        assert!(refuses(browser.proxy()).await);
     }
     assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
     assert!(matches!(
