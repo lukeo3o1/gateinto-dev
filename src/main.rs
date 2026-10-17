@@ -430,6 +430,9 @@ fn device_key_settings(config: &ConfigArg, name: Option<KeyName>) -> Result<Devi
 fn key(command: KeyCommand) -> Result {
     match command {
         KeyCommand::Init(args) => {
+            if let Some(note) = lifecycle::check_current_account()? {
+                eprintln!("{note}");
+            }
             let settings = args.settings()?;
             key_init(&gateinto::identity::system_store()?, settings)
         }
