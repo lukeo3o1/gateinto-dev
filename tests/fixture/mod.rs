@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -304,6 +304,7 @@ pub enum Behavior {
 
 pub struct UpstreamProxy {
     pub addr: SocketAddr,
+    accepted: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<String>>>,
     client_certificates: Arc<Mutex<Vec<Vec<CertificateDer<'static>>>>>,
     negotiated_groups: Arc<Mutex<Vec<NamedGroup>>>,
@@ -327,9 +328,12 @@ impl UpstreamProxy {
         let negotiated = negotiated_groups.clone();
         let handshake_errors = Arc::new(Mutex::new(Vec::new()));
         let failed = handshake_errors.clone();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counted = accepted.clone();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
+                counted.fetch_add(1, Ordering::Relaxed);
                 let acceptor = acceptor.clone();
                 let behavior = behavior.clone();
                 let recorded = recorded.clone();
@@ -379,6 +383,7 @@ impl UpstreamProxy {
         });
         Self {
             addr,
+            accepted,
             requests,
             client_certificates,
             negotiated_groups,
@@ -399,6 +404,10 @@ impl UpstreamProxy {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::Relaxed)
     }
 
     pub fn negotiated_groups(&self) -> Vec<NamedGroup> {
