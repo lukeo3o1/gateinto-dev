@@ -146,7 +146,7 @@ fn decode_base64(encoded: &[u8]) -> Option<Vec<u8>> {
     }
     let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
     let last = encoded.len() / 4 - 1;
-    for (index, quad) in encoded.chunks_exact(4).enumerate() {
+    for (index, quad) in encoded.as_chunks::<4>().0.iter().enumerate() {
         let pad = if index == last { padding } else { 0 };
         let mut bits = 0u32;
         for &byte in &quad[..4 - pad] {
