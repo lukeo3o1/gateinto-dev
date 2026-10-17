@@ -23,8 +23,9 @@ A machine-wide install for several users is not provided.
 | Item | Where | Removed by uninstall |
 |---|---|---|
 | `gateinto.exe` | `%LOCALAPPDATA%\Programs\Gateinto` | yes |
+| Install folder appended to the user `PATH` | `HKCU\Environment` | yes |
 | `gateinto://` handler | `HKCU\Software\Classes\gateinto`, command `"<INSTALLFOLDER>gateinto.exe" open -- "%1"` | yes, the whole key |
-| Logon autostart (optional, off by default) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Gateinto` = `"<INSTALLFOLDER>gateinto.exe" agent` | yes |
+| Logon autostart (optional, off by default) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Gateinto` = `"<INSTALLFOLDER>gateinto.exe" agent --detach` | yes |
 | Install marker | `HKCU\Software\Gateinto\Installer` | yes |
 | Uninstall entry | written by Windows Installer | yes |
 
