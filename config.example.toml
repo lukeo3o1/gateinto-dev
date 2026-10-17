@@ -36,6 +36,10 @@ client_certificate = "optional"
 # certificates with the device key, a separate one for each session. Cannot be
 # combined with client_cert_file. The upstream must be configured to trust it.
 # self_signed_client_cert = false
+# Start page of browser sessions launched for this gateway, for example by a
+# gateinto:// link. Must be an https:// URL. It is never taken from the link.
+# Without it the browser opens about:blank.
+# portal_url = "https://portal.example.invalid/"
 
 [device_key]
 name = "gateinto-device-v1"
@@ -43,6 +47,11 @@ name = "gateinto-device-v1"
 preferred = "tpm"
 # Whether `gateinto key init` may create a software key when the TPM cannot be used.
 software_fallback_on_first_create = true
+
+# Browser used by `gateinto agent` for browser sessions. Defaults to Chrome,
+# then Edge, from their standard install locations on Windows.
+# [browser]
+# executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 
 # Limits apply to each session separately.
 [limits]

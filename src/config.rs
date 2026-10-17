@@ -29,6 +29,8 @@ pub struct ConfigFile {
     pub device_key: DeviceKey,
     #[serde(default)]
     pub limits: LimitsSection,
+    #[serde(default)]
+    pub browser: BrowserSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
@@ -76,6 +78,73 @@ impl fmt::Display for GatewayName {
         f.write_str(&self.0)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct PortalUrl(String);
+
+impl PortalUrl {
+    pub const MAX_LEN: usize = 2048;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for PortalUrl {
+    type Err = InvalidPortalUrl;
+
+    fn from_str(url: &str) -> Result<Self, Self::Err> {
+        const SCHEME: &str = "https://";
+        let printable = url
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !br#""<>\^`{|}"#.contains(&byte));
+        let authority = url
+            .get(..SCHEME.len())
+            .filter(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+            .and_then(|_| url[SCHEME.len()..].split(['/', '?', '#']).next())
+            .unwrap_or_default();
+        let host = match authority.rsplit_once(':') {
+            Some((host, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => host,
+            _ => authority,
+        };
+        if url.len() <= Self::MAX_LEN && printable && !host.is_empty() && !authority.contains('@') {
+            Ok(Self(url.to_owned()))
+        } else {
+            Err(InvalidPortalUrl)
+        }
+    }
+}
+
+impl TryFrom<String> for PortalUrl {
+    type Error = InvalidPortalUrl;
+
+    fn try_from(url: String) -> Result<Self, Self::Error> {
+        url.parse()
+    }
+}
+
+impl fmt::Display for PortalUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidPortalUrl;
+
+impl fmt::Display for InvalidPortalUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "portal_url must be an https:// URL with a host and no user information, of at most \
+             {} printable ASCII characters without spaces, quotes or backslashes",
+            PortalUrl::MAX_LEN
+        )
+    }
+}
+
+impl std::error::Error for InvalidPortalUrl {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidGatewayName(String);
@@ -153,6 +222,7 @@ pub struct GatewaySection {
     pub client_certificate: Option<ClientCertificateMode>,
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: Option<bool>,
+    pub portal_url: Option<PortalUrl>,
 }
 
 impl GatewaySection {
@@ -169,6 +239,7 @@ impl GatewaySection {
             self_signed_client_cert: overrides
                 .self_signed_client_cert
                 .or(self.self_signed_client_cert),
+            portal_url: overrides.portal_url.or(self.portal_url),
         }
     }
 }
@@ -213,6 +284,12 @@ pub struct LimitsSection {
     pub header_max_bytes: Option<NonZeroU32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserSection {
+    pub executable: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
     pub gateway: Option<GatewayName>,
@@ -239,6 +316,7 @@ pub struct GatewayProfile {
     pub client_certificate: ClientCertificateMode,
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: bool,
+    pub portal_url: Option<PortalUrl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +384,9 @@ impl ConfigFile {
             {
                 *relative = base.join(&*relative);
             }
+        }
+        if let Some(executable) = &mut file.browser.executable {
+            *executable = base.join(&*executable);
         }
         file.path = Some(path.to_owned());
         Ok(file)
@@ -428,6 +509,7 @@ impl ConfigFile {
             client_certificate: section.client_certificate.unwrap_or_default(),
             client_cert_file: section.client_cert_file,
             self_signed_client_cert,
+            portal_url: section.portal_url,
         })
     }
 
@@ -575,6 +657,7 @@ ca_file = "/etc/gateinto/ca.pem"
 tls_mode = "hybrid_required"
 client_certificate = "required"
 client_cert_file = "/etc/gateinto/client.pem"
+portal_url = "https://portal.example.test/start?from=gateinto"
 
 [gateways.home]
 host = "home.example.test"
@@ -626,6 +709,11 @@ port = 443
                     client_certificate: ClientCertificateMode::Required,
                     client_cert_file: Some(PathBuf::from("/etc/gateinto/client.pem")),
                     self_signed_client_cert: false,
+                    portal_url: Some(
+                        "https://portal.example.test/start?from=gateinto"
+                            .parse()
+                            .unwrap()
+                    ),
                 },
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
@@ -655,6 +743,7 @@ port = 443
             ClientCertificateMode::Optional
         );
         assert_eq!(settings.gateway.client_cert_file, None);
+        assert_eq!(settings.gateway.portal_url, None);
         assert_eq!(
             settings.device_key,
             DeviceKeySettings {
@@ -926,6 +1015,73 @@ port = 443
     }
 
     #[test]
+    fn portal_urls_must_be_plain_https_urls() {
+        for url in [
+            "https://portal.example.test",
+            "HTTPS://portal.example.test/",
+            "https://portal.example.test:8443/a/b?c=d&e=%20#top",
+            "https://10.0.0.1/",
+            "https://[::1]:443/",
+        ] {
+            let parsed: PortalUrl = url.parse().unwrap();
+            assert_eq!(parsed.as_str(), url);
+        }
+        let long = format!(
+            "https://portal.example.test/{}",
+            "a".repeat(PortalUrl::MAX_LEN)
+        );
+        for url in [
+            "",
+            "http://portal.example.test/",
+            "https:portal.example.test",
+            "https:/portal.example.test",
+            "https://",
+            "https:///path",
+            "https://:443/",
+            "https://?q",
+            "https://user@portal.example.test/",
+            "https://user:secret@portal.example.test/",
+            "https://portal.example.test/a b",
+            "https://portal.example.test/\"quoted\"",
+            "https://portal.example.test/<script>",
+            "https://portal.example.test/\\path",
+            "https://portal.example.test/\n",
+            "https://portal.example.test/caf\u{e9}",
+            " https://portal.example.test/",
+            "javascript:alert(1)",
+            "file:///C:/Windows",
+            "data:text/html,hi",
+            "--disable-web-security",
+            &long,
+        ] {
+            assert!(url.parse::<PortalUrl>().is_err(), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_portal_url_is_an_error_naming_the_gateway() {
+        let text = format!("{MINIMAL}portal_url = \"http://portal.example.test/\"\n");
+        let error = ConfigFile::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+        assert!(error.contains("portal_url"), "{error}");
+        assert!(error.contains("https"), "{error}");
+    }
+
+    #[test]
+    fn the_browser_section_names_an_executable() {
+        let file = ConfigFile::parse("[browser]\nexecutable = \"/opt/chrome/chrome\"\n").unwrap();
+        assert_eq!(
+            file.browser.executable,
+            Some(PathBuf::from("/opt/chrome/chrome"))
+        );
+        assert_eq!(ConfigFile::parse("").unwrap().browser.executable, None);
+        let error = ConfigFile::parse("[browser]\nargs = []\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("args"), "{error}");
+    }
+
+    #[test]
     fn self_signed_client_cert_is_off_unless_enabled() {
         assert!(!settings(MINIMAL).unwrap().gateway.self_signed_client_cert);
         assert!(!settings(FULL).unwrap().gateway.self_signed_client_cert);
@@ -1077,7 +1233,8 @@ port = 443
             format!(
                 "{MINIMAL}ca_file = \"certs/ca.pem\"\nclient_cert_file = '{}'\n\
                  [gateways.other]\nhost = \"other.test\"\nport = 1\nca_file = \"other.pem\"\n\
-                 client_cert_file = \"keys/client.pem\"\n",
+                 client_cert_file = \"keys/client.pem\"\n\
+                 [browser]\nexecutable = \"bin/chrome\"\n",
                 absolute.display()
             ),
         )
@@ -1091,6 +1248,7 @@ port = 443
         assert_eq!(main.client_cert_file, Some(absolute));
         assert_eq!(other.upstream.ca_file, Some(dir.join("other.pem")));
         assert_eq!(other.client_cert_file, Some(dir.join("keys/client.pem")));
+        assert_eq!(file.browser.executable, Some(dir.join("bin/chrome")));
     }
 
     #[test]
