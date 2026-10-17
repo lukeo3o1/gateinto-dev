@@ -13,10 +13,12 @@ post-quantum group `X25519MLKEM768`.
 Pre-release proof of concept, not production ready, and not externally
 security reviewed. Implemented: the double `CONNECT` relay, the device key
 (`gateinto key`), mutual TLS with the device key, selectable key exchange
-modes, `gateinto check-upstream`, a TOML configuration file, and short-lived
+modes, `gateinto check-upstream`, a TOML configuration file with named gateway
+profiles, the device session with per-session isolation, and short-lived
 self-signed client certificates issued with the device key. Not implemented:
-certificate enrollment (CA-issued client certificates are issued and installed
-by hand), key rotation and deletion, an SBOM and code signing.
+browser sessions (planned), certificate enrollment (CA-issued client
+certificates are issued and installed by hand), key rotation and deletion, an
+SBOM and code signing.
 
 Tests run in CI on GitHub-hosted Linux and Windows runners (`ubuntu-latest`
 and `windows-latest`) against in-process test proxies. TPM-backed keys, real
@@ -65,7 +67,7 @@ in a [configuration file](#configuration-file). Clients then use
 | `--tls-mode` | `hybrid_preferred` | Key exchange policy: `hybrid_preferred`, `hybrid_required` or `classical_only`. See [TLS modes](#tls-modes). |
 | `--client-certificate` | `optional` | Client authentication to the upstream: `optional`, `required` or `off`. See [Client certificate](#client-certificate-mtls). |
 | `--client-cert-file` | search `CurrentUser\My` | PEM file with the client certificate, optionally followed by intermediates. |
-| `--self-signed-client-cert` | off | Issue a short-lived self-signed client certificate with the device key at startup instead of using a file or `CurrentUser\My`. Cannot be combined with `--client-cert-file`. See [Self-signed client certificate](#self-signed-client-certificate). |
+| `--self-signed-client-cert` | off | Issue short-lived self-signed client certificates with the device key, one per session, instead of using a file or `CurrentUser\My`. Cannot be combined with `--client-cert-file`. See [Self-signed client certificate](#self-signed-client-certificate). |
 | `--key-name` | `gateinto-device-v1` | CNG device key that signs the client authentication. It is only opened, never created. |
 | `--max-tunnels` | 64 | Concurrent connections; further connections get `503`. |
 | `--max-header-bytes` | 16384 | Limit for the request and the upstream response header block. |
@@ -227,6 +229,34 @@ certificate's public key is not the device key's.
 There is no rotate or delete command. Manual steps for checking a real TPM
 are in [docs/tpm-verification.md](docs/tpm-verification.md).
 
+## Sessions
+
+A session is one local entry point into the tunnel: a loopback listener bound
+to one [gateway profile](#configuration-file), with its own TLS client
+configuration, its own client certificate, its own upstream connections and
+its own limits (`[limits]` applies to each session separately). Sessions
+share only the device key.
+
+- `gateinto proxy` runs one session, the device session, for background
+  programs. It listens on `[device_session] listen` (or `--listen`), relays
+  through `[device_session] gateway` (or the only configured gateway, or the
+  upstream flags alone) and has no local authentication. It runs until the
+  process is stopped. Its log lines carry `session{id=1 kind=device
+  gateway=<name>}`.
+- With self-signed client certificates, each session issues its own
+  certificate for the device key when it starts and renews only its own; two
+  sessions never present the same certificate. A certificate file or
+  `CurrentUser\My` certificate is the same in every session.
+- Closing a session stops it from accepting immediately: its port refuses new
+  connections, its established tunnels are aborted, and its certificate is
+  discarded, so no new `CONNECT` can use it. Other sessions keep running. The
+  device session is closed when the process ends.
+
+Browser sessions, started from a `gateinto://` URI with their own listener and
+optional local proxy authentication, are planned and not implemented. They will
+only be able to name a configured gateway, never add an upstream, a CA or
+another trust setting. See [docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
+
 ## Configuration file
 
 `gateinto proxy`, `gateinto check-upstream`, `gateinto key init` and
@@ -263,7 +293,7 @@ header_max_bytes = 16384
 A gateway profile (`[gateways.<name>]`) holds everything about one upstream
 HTTPS proxy: its address, the name and CAs its certificate is verified
 against, the TLS mode and the client certificate settings. The device session
-(`[device_session]`) names the gateway it relays
+(`[device_session]`, see [Sessions](#sessions)) names the gateway it relays
 through and its listen address. Without `[device_session] gateway`, the device
 session uses the only configured gateway; with several gateways it must be
 set.
@@ -373,20 +403,23 @@ and ends with "mTLS is not configured and upstream connections do not
 authenticate this device". An upstream that requires a client certificate
 then rejects the handshake, and local clients get `502`. With client auth
 enabled, the subject, thumbprint, NotAfter, source and key backend are logged at
-`info`.
+`info` (for a self-signed certificate the device key's SPKI SHA-256 instead of
+thumbprint and NotAfter, and each session logs its own certificate's
+SHA-256).
 
 ### Self-signed client certificate
 
 With `--self-signed-client-cert` (or `[gateways.<name>] self_signed_client_cert = true`),
-`proxy` and `check-upstream` issue a new certificate at startup:
+`check-upstream` issues a new certificate at startup, and `proxy` issues a new
+one for each session when it starts (and one at startup to check the key):
 `CN=Gateinto device` as subject and issuer, a random 16-byte serial number,
 valid from 5 minutes before issuance until 1 hour after it, critical basic
 constraints without CA, critical key usage `digitalSignature`, extended key
 usage `clientAuth`, and the device key's public key. The device key signs the
 certificate and the TLS `CertificateVerify` through CNG; there is no other
 private key, and the certificate is never written to disk or to a store. Once
-the current certificate is 30 minutes or older, a running proxy issues a new one
-before the next upstream connection with `required`, or when the upstream next
+a session's current certificate is 30 minutes or older, the session issues a
+new one for itself before the next upstream connection with `required`, or when the upstream next
 asks for one with `optional`. A failed renewal is retried at most once a
 minute. An expired certificate is never sent: if renewing fails after the
 current one has expired, `required` fails each upstream connection locally and

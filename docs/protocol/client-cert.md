@@ -12,21 +12,26 @@ Gateinto cannot make an upstream trust it.
 
 ## When a certificate is issued
 
-- `gateinto proxy` and `gateinto check-upstream` issue a certificate once at
-  startup, before the proxy listens or the check connects. Nothing is read from
-  a file or from `CurrentUser\My`, and the certificate is never written to disk
-  or to a certificate store; it exists only in memory.
+- `gateinto check-upstream` issues a certificate once at startup, before the
+  check connects. `gateinto proxy` issues one at startup to check the device
+  key, and then each session issues its own when it starts, before it listens
+  (see [Sessions](../../README.md#sessions)); the device session uses its own,
+  and two sessions never share one. Nothing is read from a file or from
+  `CurrentUser\My`, and the certificate is never written to disk or to a
+  certificate store; it exists only in memory.
 - `--client-certificate` (the gateway's `client_certificate`) applies as for the other
   sources: with `required`, failing to open the device key or to issue the
-  certificate is a startup error; with `optional` (the default) it is logged
-  as a warning and the upstream connection is made without client
-  authentication; with `off` no certificate is issued.
+  certificate is a startup error (for a session, an error that stops it from
+  starting); with `optional` (the default) it is logged as a warning and the
+  upstream connection is made without client authentication; with `off` no
+  certificate is issued.
 - `--self-signed-client-cert` cannot be combined with `--client-cert-file`, and
   `self_signed_client_cert = true` cannot be combined with a
   `client_cert_file`, whether each comes from the configuration file or the
   command line; Gateinto exits with an error naming both.
-- Every start issues a new certificate. A running proxy also issues a new one
-  once the current certificate was issued 30 minutes or more earlier (half its
+- Every start, and every session, issues a new certificate. A running session
+  also issues a new one for itself once its current certificate was issued 30
+  minutes or more earlier (half its
   validity): with `required`, before opening the next upstream connection,
   whether or not the upstream will ask for a certificate; with `optional`, when
   the upstream next asks for one. The renewal is logged at `info` with the
@@ -108,8 +113,8 @@ device key signed both the certificate and the handshake.
   certificate whose SubjectPublicKeyInfo matches it. The TLS 1.3
   `CertificateVerify` check every TLS server performs then proves possession
   of the device key.
-- Do not pin the certificate's own fingerprint: it changes with every start and
-  every renewal.
+- Do not pin the certificate's own fingerprint: it changes with every start,
+  every session and every renewal.
 - A server that only accepts client certificates issued by a configured client
   CA rejects these certificates unless its policy is configured to trust them.
   How, and whether, a given proxy can be configured to trust a client by its
@@ -141,8 +146,11 @@ certificate (`client-certificate: not requested`).
 `client-certificate-sha256` is the certificate sent in the handshake, or the
 current certificate when none was sent.
 
-At startup the proxy logs at `info` the subject, the SHA-1 thumbprint, the
-NotAfter time, `source=self-signed` and the key backend.
+At startup the proxy logs at `info` the subject, the device key's SPKI SHA-256
+(`spki_sha256`), `source=self-signed` and the key backend. Each session then
+logs the SHA-256 of its own certificate (`issued the session's self-signed
+client certificate sha256=...`), and every renewal logs the SHA-256 of the new
+one.
 
 ## Verification status
 
@@ -157,7 +165,10 @@ NotAfter time, `source=self-signed` and the key backend.
   two different certificates with the same SPKI; an upstream trusting another
   SPKI rejects the handshake. With an expired certificate whose renewal fails,
   `required` fails without connecting and `optional` connects without a
-  client certificate. `tests/check_upstream.rs` checks the report lines.
+  client certificate. `tests/sessions.rs` runs two sessions in one process
+  from the same self-signed source and checks that each presents its own
+  certificate (same SPKI, different fingerprints) on every tunnel and never
+  the other's. `tests/check_upstream.rs` checks the report lines.
 - An issued certificate was also inspected once with OpenSSL 3.0.13
   (`openssl x509 -text`, and `openssl verify -purpose sslclient` with the
   certificate as its own CA, which reported `OK`). This is not part of the

@@ -51,6 +51,28 @@ it. Which of these mechanisms are covered by tests is in
   upstream trust it. Fields and trust requirements are in
   [protocol/client-cert.md](protocol/client-cert.md).
 
+### Sessions and gateways
+
+- **Session isolation.** Each session has its own listener, its own TLS client
+  configuration and client certificate resolver, its own upstream connections
+  and its own limits. With self-signed client certificates each session issues
+  its own certificate for the device key, so sessions never present each
+  other's certificate; a file or store certificate is necessarily the same in
+  every session, since there is one per device key. The device key itself is
+  shared: it is the one identity of the machine.
+- **Closing a session.** Closing stops accepting at once, drops the listener so
+  its port refuses connections, and aborts every tunnel the session has
+  established. The session's certificate is dropped with it and is not
+  reachable from another session, so no new `CONNECT` can use it. Only
+  `gateinto proxy`'s single device session exists today; it is closed when
+  the process ends.
+- **Gateway profiles are local.** An upstream (host, port, server name, CA
+  file, TLS mode, client certificate settings) only comes from the local
+  configuration file or the command line. Selecting a gateway by name is a
+  lookup in the loaded file; a name cannot add a host, a CA or a trust setting.
+  The planned browser sessions will only be able to name a configured
+  gateway.
+
 ### The tunnel content
 
 - **No MITM of the inner TLS.** Gateinto does not terminate, inspect or modify
@@ -100,10 +122,12 @@ it. Which of these mechanisms are covered by tests is in
   non-loopback address is refused unless `--unsafe-allow-non-loopback-listen`
   is given on the command line; the configuration file has no key for it.
 - **No secrets or payload in logs.** Tunnel payload and private keys are never
-  logged. At `info`, logs contain the listen address, the client's local
-  address and port for each tunnel, tunnel established and idle-timeout
-  events, and the client certificate's subject, SHA-1 thumbprint, NotAfter,
-  source and key backend. Target `host:port`, the negotiated TLS version and
+  logged. At `info`, logs contain each session's id, kind, gateway name and
+  listen address, the client's local address and port for each tunnel, tunnel
+  established and idle-timeout events, and the client certificate's subject,
+  SHA-1 thumbprint, NotAfter, source and key backend (for self-signed
+  certificates the device key's SPKI SHA-256 and, per session, the SHA-256 of
+  the session's certificate). Target `host:port`, the negotiated TLS version and
   group, and byte counts are logged only at `debug`. `check-upstream` prints
   TLS parameters, the server certificate subject and the upstream status line,
   never upstream headers or bodies. The configuration file holds no secrets.
@@ -113,8 +137,9 @@ it. Which of these mechanisms are covered by tests is in
 ## What it does not protect
 
 - **Local users and processes.** The loopback listener has no
-  authentication. Any local process, including other users' processes, can
-  use the tunnel and the device identity behind it.
+  authentication (the only local authentication policy is `none`). Any local
+  process, including other users' processes, can use the tunnel and the device
+  identity behind it.
 - **Administrators and malware running as the user.** They can use or steal
   the identity (a software key can be copied), read traffic before it enters
   the tunnel, change the configuration, add CAs or replace the binary.
