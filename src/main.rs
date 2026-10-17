@@ -152,17 +152,36 @@ enum KeyCommand {
 
 #[derive(Args)]
 struct ConfigArg {
-    /// TOML configuration file; command line flags override its values
+    /// TOML configuration file; command line flags override its values [default:
+    /// %APPDATA%\Gateinto\gateinto.toml on Windows, $XDG_CONFIG_HOME/gateinto/gateinto.toml
+    /// elsewhere, when that file exists]
     #[arg(long)]
     config: Option<PathBuf>,
 }
 
 impl ConfigArg {
-    fn load(&self) -> Result<ConfigFile, config::ConfigError> {
-        self.config
-            .as_deref()
-            .map_or_else(|| Ok(ConfigFile::default()), ConfigFile::load)
+    fn path(&self) -> Option<(PathBuf, bool)> {
+        match &self.config {
+            Some(path) => Some((path.clone(), false)),
+            None => config::default_path()
+                .filter(|path| path.is_file())
+                .map(|path| (path, true)),
+        }
     }
+
+    fn load(&self) -> Result<ConfigFile, config::ConfigError> {
+        self.path().map_or_else(
+            || Ok(ConfigFile::default()),
+            |(path, _)| ConfigFile::load(&path),
+        )
+    }
+}
+
+fn default_config_display() -> String {
+    config::default_path().map_or_else(
+        || "no default location".to_owned(),
+        |path| path.display().to_string(),
+    )
 }
 
 #[derive(Args)]
@@ -833,14 +852,18 @@ fn uri(command: UriCommand) -> Result {
 }
 
 fn print_config(args: &ConfigArg, file: &ConfigFile) {
-    match &args.config {
-        Some(path) => {
-            println!("config: {}", path.display());
+    match args.path() {
+        Some((path, default)) => {
+            let location = if default { " (default location)" } else { "" };
+            println!("config: {}{location}", path.display());
             for line in lifecycle::gateway_lines(file) {
                 println!("gateway: {line}");
             }
         }
-        None => println!("config: none (pass --config to check a configuration file)"),
+        None => println!(
+            "config: none (no file at {}; pass --config to use another file)",
+            default_config_display()
+        ),
     }
 }
 
@@ -935,10 +958,15 @@ fn config_to_purge(args: &ResetArgs) -> Result<Option<PathBuf>> {
     if !args.purge_config {
         return Ok(None);
     }
-    let path = args.config.config.as_deref().ok_or(
-        "--purge-config deletes only the config file named with --config; nothing was deleted",
-    )?;
-    let metadata = std::fs::symlink_metadata(path)
+    let Some((path, _)) = args.config.path() else {
+        return Err(format!(
+            "--purge-config found no config file named with --config or at {}; nothing was \
+             deleted",
+            default_config_display()
+        )
+        .into());
+    };
+    let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
     if !metadata.is_file() {
         return Err(format!(
@@ -947,7 +975,7 @@ fn config_to_purge(args: &ResetArgs) -> Result<Option<PathBuf>> {
         )
         .into());
     }
-    Ok(Some(std::path::absolute(path)?))
+    Ok(Some(std::path::absolute(&path)?))
 }
 
 async fn reset(args: ResetArgs) -> Result {

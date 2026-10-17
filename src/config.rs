@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -15,6 +16,28 @@ use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
 use crate::proxy::{DEFAULT_LISTEN, LocalAuth};
 use crate::tls::TlsMode;
+
+pub const FILE_NAME: &str = "gateinto.toml";
+
+pub fn default_path() -> Option<PathBuf> {
+    default_path_from(|name| std::env::var_os(name))
+}
+
+pub fn default_path_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let absolute = |name| {
+        env(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let dir = if cfg!(windows) {
+        absolute("APPDATA").map(|dir| dir.join("Gateinto"))
+    } else {
+        absolute("XDG_CONFIG_HOME")
+            .or_else(|| absolute("HOME").map(|home| home.join(".config")))
+            .map(|dir| dir.join("gateinto"))
+    };
+    dir.map(|dir| dir.join(FILE_NAME))
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -646,6 +669,47 @@ impl std::error::Error for ConfigError {}
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let pairs: Vec<(String, OsString)> = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_default_config_file_is_in_the_roaming_app_data_folder() {
+        assert_eq!(
+            default_path_from(vars(&[("APPDATA", r"C:\Users\me\AppData\Roaming")])),
+            Some(PathBuf::from(
+                r"C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml"
+            ))
+        );
+        assert_eq!(default_path_from(vars(&[("APPDATA", "relative")])), None);
+        assert_eq!(default_path_from(vars(&[])), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_default_config_file_is_in_the_xdg_config_folder() {
+        assert_eq!(
+            default_path_from(vars(&[("XDG_CONFIG_HOME", "/cfg"), ("HOME", "/home/me")])),
+            Some(PathBuf::from("/cfg/gateinto/gateinto.toml"))
+        );
+        assert_eq!(
+            default_path_from(vars(&[("XDG_CONFIG_HOME", "rel"), ("HOME", "/home/me")])),
+            Some(PathBuf::from("/home/me/.config/gateinto/gateinto.toml"))
+        );
+        assert_eq!(default_path_from(vars(&[("HOME", "rel")])), None);
+        assert_eq!(default_path_from(vars(&[])), None);
+    }
 
     const FULL: &str = r#"
 [device_session]

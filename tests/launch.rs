@@ -98,6 +98,8 @@ impl Launcher {
             ("XDG_STATE_HOME", dir.join("state").into()),
             ("HOME", dir.join("home").into()),
             ("LOCALAPPDATA", dir.join("local").into()),
+            ("XDG_CONFIG_HOME", dir.join("config").into()),
+            ("APPDATA", dir.join("roaming").into()),
             ("RUST_LOG", OsString::from("info")),
         ];
         Self {
@@ -229,6 +231,33 @@ async fn repeated_launches_reach_the_running_agent_and_open_separate_sessions() 
         "{}",
         output.stderr
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_without_config_uses_the_default_config_file_like_the_installed_handler() {
+    let launcher = Launcher::new("").await;
+    let default = if cfg!(windows) {
+        launcher.dir.join("roaming").join("Gateinto")
+    } else {
+        launcher.dir.join("config").join("gateinto")
+    };
+    std::fs::create_dir_all(&default).unwrap();
+    std::fs::copy(&launcher.config, default.join("gateinto.toml")).unwrap();
+    std::fs::copy(launcher.dir.join("ca.pem"), default.join("ca.pem")).unwrap();
+
+    let output = launcher
+        .run(&[
+            "open",
+            "--",
+            "gateinto://connect?profile=main&auth=basic_tofu",
+        ])
+        .await;
+
+    let lines = output.success().lines();
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), PORTAL);
+    tunnel_echoes(browser.proxy()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
