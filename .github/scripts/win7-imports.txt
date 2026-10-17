@@ -33,6 +33,7 @@ kernel32.dll CreateMutexA
 kernel32.dll CreateNamedPipeW
 kernel32.dll CreateProcessW
 kernel32.dll CreateThread
+kernel32.dll DecodePointer
 kernel32.dll DeleteCriticalSection
 kernel32.dll DeleteFileW
 kernel32.dll DuplicateHandle
@@ -99,6 +100,8 @@ kernel32.dll InitializeCriticalSectionAndSpinCount
 kernel32.dll InitializeCriticalSectionEx
 kernel32.dll InitializeSListHead
 kernel32.dll InitializeSRWLock
+kernel32.dll InitOnceBeginInitialize
+kernel32.dll InitOnceComplete
 kernel32.dll InitOnceExecuteOnce
 kernel32.dll InterlockedFlushSList
 kernel32.dll InterlockedPushEntrySList
