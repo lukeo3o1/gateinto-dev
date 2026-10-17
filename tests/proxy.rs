@@ -81,11 +81,20 @@ async fn inner_tls_passes_through_the_tunnel() {
     let origin = tls_echo_origin(origin_ca.server_config("origin.test")).await;
     let stream = open_tunnel(agent, origin).await;
 
-    let mut tls = inner_tls(stream, origin_ca.client_config(), "origin.test").await;
+    let tls = inner_tls(stream, origin_ca.client_config(), "origin.test").await;
     let sent = payload(256 * 1024);
-    tls.write_all(&sent).await.unwrap();
+    let (mut reader, mut writer) = tokio::io::split(tls);
+    let to_send = sent.clone();
+    let writing = tokio::spawn(async move {
+        writer.write_all(&to_send).await.unwrap();
+        writer.flush().await.unwrap();
+    });
     let mut received = vec![0; sent.len()];
-    tls.read_exact(&mut received).await.unwrap();
+    timeout(Duration::from_secs(30), reader.read_exact(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    writing.await.unwrap();
 
     assert!(received == sent);
 }
