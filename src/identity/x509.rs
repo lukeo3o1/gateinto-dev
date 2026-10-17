@@ -501,7 +501,8 @@ mod tests {
         assert_eq!(encode_time(946_598_400), b"\x17\x0d991231000000Z");
         assert_eq!(encode_time(2_569_708_800), b"\x18\x0f20510607000000Z");
         for secs in [0, 951_782_400, 1_767_323_045, 2_524_607_999, 2_524_608_000] {
-            let mut reader = Reader(&encode_time(secs));
+            let encoded = encode_time(secs);
+            let mut reader = Reader(&encoded);
             assert_eq!(parse_time(&mut reader), Ok(secs));
         }
     }
