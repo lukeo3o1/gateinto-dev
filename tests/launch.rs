@@ -55,6 +55,7 @@ struct Launcher {
     config: PathBuf,
     env: Vec<(&'static str, OsString)>,
     profiles_root: PathBuf,
+    upstream_port: u16,
     _upstream: Option<UpstreamProxy>,
 }
 
@@ -77,6 +78,48 @@ impl Launcher {
         )
         .unwrap();
         Self::instance(dir, config, Some(upstream))
+    }
+
+    async fn without_gateways() -> Self {
+        let dir = temp_dir("linked");
+        let ca = TestCa::new();
+        let upstream = UpstreamProxy::start(ca.server_config("127.0.0.1"), Behavior::Tunnel).await;
+        let ca_file = dir.join("linked-ca.pem");
+        std::fs::write(&ca_file, ca.pem()).unwrap();
+        let config = dir.join("gateinto.toml");
+        std::fs::write(
+            &config,
+            format!("[browser]\nexecutable = '{}'\n", fake_browser().display()),
+        )
+        .unwrap();
+        let mut launcher = Self::instance(dir, config, Some(upstream));
+        launcher
+            .env
+            .push(("GATEINTO_TEST_LINKED_CA_FILE", ca_file.into()));
+        launcher
+    }
+
+    fn linked_store(&self) -> PathBuf {
+        let base = if cfg!(windows) {
+            self.dir.join("roaming").join("Gateinto")
+        } else {
+            self.dir.join("config").join("gateinto")
+        };
+        base.join("linked-gateways.toml")
+    }
+
+    fn endpoint(&self) -> gateinto::ipc::Endpoint {
+        let env = self.env.clone();
+        let lookup = move |name: &str| {
+            env.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        };
+        #[cfg(unix)]
+        let user = String::new();
+        #[cfg(windows)]
+        let user = gateinto::ipc::user_sid().unwrap();
+        gateinto::ipc::Endpoint::from_env_with(lookup, &user).unwrap()
     }
 
     fn instance(dir: PathBuf, config: PathBuf, upstream: Option<UpstreamProxy>) -> Self {
@@ -107,6 +150,7 @@ impl Launcher {
             config,
             env,
             profiles_root,
+            upstream_port: upstream.as_ref().map_or(0, |upstream| upstream.addr.port()),
             _upstream: upstream,
         }
     }
@@ -643,4 +687,171 @@ async fn uri_registration_is_windows_only() {
             output.stderr
         );
     }
+}
+
+fn link_uri(
+    profile: &str,
+    url: Option<&str>,
+    gateway: Option<&str>,
+    portal: Option<&str>,
+) -> String {
+    gateinto::uri::LaunchRequest::new(profile, "basic_tofu")
+        .unwrap()
+        .with_link(url, gateway, portal)
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_opens_a_start_page_on_the_configured_portal_origin_only() {
+    let launcher = Launcher::new("").await;
+    let start = "https://portal.example.test/deep/link?x=1";
+
+    let output = launcher
+        .open(&link_uri("main", Some(start), None, None))
+        .await;
+    let listen: SocketAddr = field(&output.success().lines(), "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), start);
+
+    for (uri, error) in [
+        (
+            link_uri("main", Some("https://evil.example/"), None, None),
+            "not on the origin",
+        ),
+        (
+            link_uri("main", None, Some("evil.example"), Some(PORTAL)),
+            "differs from the gateway \"main\"",
+        ),
+        (
+            link_uri("nope", None, None, None),
+            "unknown gateway \"nope\"",
+        ),
+    ] {
+        let output = launcher.open(&uri).await;
+        assert!(
+            output.failure().stderr.contains(error),
+            "{uri}: {}",
+            output.stderr
+        );
+    }
+    assert_eq!(browsers(&launcher.profiles_root).len(), 1);
+    assert!(!launcher.linked_store().exists());
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_terminal_open_refuses_a_new_gateway_and_stores_nothing() {
+    let launcher = Launcher::without_gateways().await;
+    let uri = link_uri(
+        "newco",
+        None,
+        Some(&format!("127.0.0.1:{}", launcher.upstream_port)),
+        Some("https://portal.newco.example/"),
+    );
+    for _ in 0..2 {
+        let output = launcher.open(&uri).await;
+        assert!(
+            output.failure().stderr.contains("no desktop or terminal"),
+            "{}",
+            output.stderr
+        );
+    }
+    assert!(!launcher.linked_store().exists());
+    assert!(browsers(&launcher.profiles_root).is_empty());
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstream() {
+    use gateinto::ipc::{self, Request, Response};
+
+    let launcher = Launcher::without_gateways().await;
+    let config = launcher.config.to_str().unwrap().to_owned();
+    launcher
+        .run(&["agent", "--detach", "--config", &config])
+        .await
+        .success();
+    let endpoint = launcher.endpoint();
+    let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
+    let portal = "https://portal.newco.example/home";
+    let start = "https://portal.newco.example/app";
+    let uri = link_uri("newco", Some(start), Some(&gateway), Some(portal));
+
+    let request = Request::Launch(uri.parse().unwrap());
+    let Response::Ok(lines) = ipc::send(&endpoint, &request).await.unwrap() else {
+        panic!("the agent refused the link");
+    };
+    let token = ipc::confirm_token(&lines).unwrap();
+    assert!(!launcher.linked_store().exists());
+    let lines = match ipc::send(&endpoint, &Request::Approve(token))
+        .await
+        .unwrap()
+    {
+        Response::Ok(lines) => lines,
+        Response::Error(error) => panic!("approving failed: {error}"),
+    };
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), start);
+    tunnel_echoes(listen).await;
+
+    let stored = std::fs::read_to_string(launcher.linked_store()).unwrap();
+    assert!(
+        stored.contains(&format!(
+            "[gateways.newco]\nhost = \"127.0.0.1\"\nport = {}\nportal_url = \"{portal}\"\n",
+            launcher.upstream_port
+        )),
+        "{stored}"
+    );
+    let output = launcher.open(&uri).await;
+    let listen: SocketAddr = field(&output.success().lines(), "listen").parse().unwrap();
+    wait_for_browser(&launcher.profiles_root, listen).await;
+    tunnel_echoes(listen).await;
+    let output = launcher
+        .run(&["gateway", "list", "--config", &config])
+        .await;
+    assert_eq!(
+        output.success().stdout,
+        format!("newco: {gateway}, portal https://portal.newco.example (linked)\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linked_gateway_trusts_only_the_public_roots() {
+    use gateinto::ipc::{self, Request, Response};
+
+    let mut launcher = Launcher::without_gateways().await;
+    launcher
+        .env
+        .retain(|(name, _)| *name != "GATEINTO_TEST_LINKED_CA_FILE");
+    let config = launcher.config.to_str().unwrap().to_owned();
+    launcher
+        .run(&["agent", "--detach", "--config", &config])
+        .await
+        .success();
+    let endpoint = launcher.endpoint();
+    let uri = link_uri(
+        "newco",
+        None,
+        Some(&format!("127.0.0.1:{}", launcher.upstream_port)),
+        Some("https://portal.newco.example/"),
+    );
+    let Response::Ok(lines) = ipc::send(&endpoint, &Request::Launch(uri.parse().unwrap()))
+        .await
+        .unwrap()
+    else {
+        panic!("the agent refused the link");
+    };
+    let token = ipc::confirm_token(&lines).unwrap();
+    let Response::Ok(lines) = ipc::send(&endpoint, &Request::Approve(token))
+        .await
+        .unwrap()
+    else {
+        panic!("approving failed");
+    };
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let target = echo_server().await.to_string();
+    let (_, response) = send(listen, &connect_with(&target, Some(&basic("me", "pw")))).await;
+    assert_eq!(response.status, 502, "{}", response.head);
 }
