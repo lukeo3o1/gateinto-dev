@@ -49,7 +49,9 @@ runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 [packaging/wix](packaging/wix/README.md): install, first run with
 `gateinto setup`, `gateinto status`, uninstall (which keeps the device key and
 the config file), reinstall with the same device identity, and the explicit
-purge. There is no WinGet package; `winget install` does not install Gateinto.
+purge. The MSI is not in the release zip yet; build it with
+`packaging/wix/build.ps1`. There is no WinGet package; `winget install` does
+not install Gateinto.
 
 ## Commands
 
@@ -58,10 +60,10 @@ purge. There is no WinGet package; `winget install` does not install Gateinto.
 | `gateinto proxy` | Run the local `CONNECT` proxy. |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
 | `gateinto session browser` | Run one browser session with `basic_tofu` local proxy authentication on an ephemeral loopback port. |
-| `gateinto agent` | Run the per-user agent: the device session if `[device_session] gateway` is set, and the endpoint that starts browser sessions. |
+| `gateinto agent` | Run the per-user agent: the device session if `[device_session] gateway` is set, and the endpoint that starts browser sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped and its profile deleted). |
-| `gateinto stop` | Close all of the agent's sessions and stop it. With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
+| `gateinto stop` | Close all of the agent's sessions and stop it. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |

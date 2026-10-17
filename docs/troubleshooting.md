@@ -184,7 +184,8 @@ this change (no release has been published yet). If you set `RUSTFLAGS` or
 
 See [install.md](install.md).
 
-- `refusing to run as LocalSystem (S-1-5-18) ...`: `gateinto setup` runs as a
+- `refusing to run as LocalSystem (S-1-5-18) ...`: `gateinto setup` or
+  `gateinto key init` runs as a
   service account, for example from a scheduled task or a deployment tool.
   Run it as the Windows user who uses Gateinto.
 - `note: running elevated ...`: only a note; the key is still created for the
@@ -204,6 +205,14 @@ See [install.md](install.md).
   confirmed ...`: the prefix does not match; nothing was deleted.
 - `stopping the running agent failed: ...; nothing was deleted`: stop the
   agent (`gateinto stop`) and retry.
+- `the agent (process <pid>) did not exit within 15 seconds`: from `stop`,
+  `reset` or the uninstaller. End that process (Task Manager) and retry;
+  `reset` deleted nothing.
+- `'gateinto' is not recognized` right after installing: open a new terminal;
+  the installer appended the install folder to the user `PATH`.
+- `refusing to delete the config file without confirmation`: no device key
+  exists and `reset` has no terminal to ask on; pass `--yes` with
+  `--purge-config`.
 - `--purge-config found no config file ...`: there is no default config file;
   name the file with `--config`.
 - After uninstalling, `gateinto.exe` remains in `%LOCALAPPDATA%\Programs\Gateinto`:

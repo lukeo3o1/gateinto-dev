@@ -5,7 +5,8 @@ installs: `gateinto setup`, `gateinto status` and `gateinto reset`. The MSI is b
 [packaging/wix](../packaging/wix/README.md).
 
 No WinGet package exists. `winget install` and `winget uninstall` do not install or remove
-Gateinto.
+Gateinto. The MSI is not part of the release zip yet; build it yourself with
+`packaging/wix/build.ps1` as described in [packaging/wix](../packaging/wix/README.md#build).
 
 ## Install
 
@@ -20,7 +21,9 @@ msiexec /i gateinto.msi /qn AUTOSTART=1   # silent, also start the agent at logo
 
 It installs:
 
-- `%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe`;
+- `%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe`, with that folder appended to the user
+  `PATH` (`HKCU\Environment`). Open a new terminal after installing so that `gateinto` is
+  found; terminals that were already open keep the old `PATH`;
 - the `gateinto://` handler in `HKCU\Software\Classes\gateinto`, with the command
   `"%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe" open -- "%1"` (the path is written out in
   full). The handler is per-user only; the MSI writes no `HKLM` handler. The executable path is
@@ -28,7 +31,9 @@ It installs:
   an option or a second command;
 - optionally, when `AUTOSTART=1` is set or the "Start the Gateinto agent at logon" feature is
   selected, the value `Gateinto` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which
-  runs `"…\gateinto.exe" agent` at logon. It is off by default;
+  runs `"…\gateinto.exe" agent --detach` at logon. `--detach` starts the agent as a
+  background process without a console, waits until it accepts requests and returns; if an
+  agent already runs it does nothing. It is off by default;
 - the uninstall entry under Settings → Apps → Installed apps, written by Windows Installer.
 
 The package creates no shortcuts. It does not create a device key or a config file, and none of
@@ -85,7 +90,11 @@ uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe
 
 `device-key` is `created` or `reused`. `setup` exits nonzero on any error.
 
-`setup` is the only step besides `key init` that creates a key. `gateinto agent`,
+Commands that run with logging (`agent`, `proxy`, `session browser`, `check-upstream`) log at
+`info` which default config file they loaded.
+
+`setup` is the only step besides `key init` that creates a key. `key init` refuses the same
+service accounts as `setup`. `gateinto agent`,
 `gateinto open` (and with it a clicked `gateinto://` link), `proxy` and `check-upstream`
 only open the device key. If it is missing, a gateway with `client_certificate = "required"`
 fails with "no device key named …; run `gateinto setup` to create it". The agent can be started
@@ -138,6 +147,7 @@ msiexec /x gateinto.msi /qn
 | Resource | Default uninstall |
 |---|---|
 | `gateinto.exe` | removed |
+| Install folder in the user `PATH` | removed |
 | `gateinto://` handler (`HKCU\Software\Classes\gateinto`) | removed |
 | Logon autostart entry created by the installer | removed |
 | Uninstall entry | removed |
@@ -149,10 +159,16 @@ msiexec /x gateinto.msi /qn
 
 Before files are removed, the uninstaller runs `gateinto.exe stop --remove-stale-profiles` as
 the installing user. A running agent closes every session, ends their browsers, deletes their
-profiles and exits. Then the Gateinto-marked profile directories left by a crashed agent are
+profiles and exits; `stop` waits up to 15 seconds until the agent process has exited, so
+`gateinto.exe` is no longer in use when Windows Installer removes it. Then the Gateinto-marked profile directories left by a crashed agent are
 deleted. A profile still held open by a running browser cannot be deleted and is left in
 place. The step's failure does not stop the uninstall, for example when no agent is running.
 Only directories that Gateinto created and marked are deleted.
+
+During an interactive uninstall a console window may flash briefly while `gateinto.exe stop`
+runs, because `gateinto.exe` is a console program. A major upgrade (installing a newer MSI over
+an older one) runs the same step for the old version: it stops a running agent and does not
+start it again. The next `gateinto://` link or `gateinto agent --detach` starts a new one.
 
 An uninstall does not revoke anything and does not delete the device identity.
 
@@ -202,7 +218,8 @@ Rules:
   anything else is refused and nothing is deleted. Without `--confirm-spki` and without a
   terminal on stdin, `reset` refuses before it opens any key.
 - `reset` stops a running agent first (`stop`), so sessions close and their profiles are
-  deleted. If the agent cannot be stopped, nothing is deleted.
+  deleted, and waits up to 15 seconds until the agent process has exited. If the agent cannot
+  be stopped or does not exit in time, nothing is deleted.
 - It deletes only the key named `[device_key] name` (or `--name`), in the current user's scope.
   It opens that key in its provider with `NCryptOpenKey`, checks its SPKI against the
   confirmation again and deletes that handle with `NCryptDeleteKey`. It never deletes other
@@ -211,6 +228,10 @@ Rules:
 - `--purge-config` also deletes the config file: the one named with `--config`, or
   `%APPDATA%\Gateinto\gateinto.toml`. It must be a regular file that parses as a Gateinto config.
   Only that file is deleted, never a directory.
+- When no device key exists, `--purge-config` still deletes the config file. There is no SPKI to
+  confirm then, so `reset` prints that no key was deleted and asks you to type `purge`, or
+  takes `--yes` instead of the prompt. `--yes` only works together with `--purge-config` and
+  never replaces the SPKI confirmation of an existing key.
 - `reset` does not unregister the `gateinto://` handler. The uninstaller removes it, or
   `gateinto uri unregister` for a development registration.
 - After a purge, `gateinto setup` creates a new key with a new `spki-sha256`. That is a new
@@ -229,11 +250,14 @@ command until the next uninstall or repair.
 The CI job `msi` on `windows-latest` builds the MSI and checks the following, with the Microsoft
 Software Key Storage Provider (the runner has no TPM):
 
-- a silent per-user install writes the exe, the exact handler command and the uninstall entry;
-- `setup` creates a key;
+- a silent per-user install writes the exe, the user `PATH` entry, the exact handler command
+  and the uninstall entry, and creates no device key (`key info` fails until `setup` runs);
+- the first `setup` creates a key;
 - a silent uninstall with a running agent stops the agent and removes the exe and the handler,
   while `key info`, run from a copy outside the install folder, still shows the same SPKI;
-- after a reinstall, `setup` reuses the key with the same SPKI;
+- after a reinstall with `AUTOSTART=1`, the Run value is exactly
+  `"…\gateinto.exe" agent --detach` and `setup` reuses the key with the same SPKI; the next
+  uninstall removes the Run value;
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
