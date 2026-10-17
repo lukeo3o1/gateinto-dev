@@ -26,18 +26,22 @@ Gateinto cannot make an upstream trust it.
   `client_cert_file`, whether each comes from the configuration file or the
   command line; Gateinto exits with an error naming both.
 - Every start issues a new certificate. A running proxy also issues a new one
-  when the upstream asks for a client certificate and the current certificate
-  was issued 30 minutes or more earlier (half its validity). The renewal is
-  logged at `info` with the SHA-256 of the new certificate. If a renewal fails
-  while the previous certificate is still valid, a warning is logged and the
-  previous certificate is sent. An expired certificate is never sent: once the
-  previous certificate's NotAfter has been reached and a renewal fails, no
-  certificate is available. With `required`, every new upstream connection
-  then first retries the renewal and, if it fails again, fails locally before
-  connecting; the proxy answers `502` and logs the error, and `check-upstream`
-  exits with it. With `optional`, a warning is logged and the handshake
-  continues without a client certificate, as when none could be loaded at
-  startup. Each later connection tries the renewal again.
+  once the current certificate was issued 30 minutes or more earlier (half its
+  validity): with `required`, before opening the next upstream connection,
+  whether or not the upstream will ask for a certificate; with `optional`, when
+  the upstream next asks for one. The renewal is logged at `info` with the
+  SHA-256 of the new certificate. If a renewal fails while the previous
+  certificate is still valid, a warning is logged and the previous certificate
+  is sent. A failed renewal is not retried until a minute has passed; until
+  then the previous certificate is used without a new attempt or warning. An
+  expired certificate is never sent: once the previous certificate's NotAfter
+  has been reached and a renewal fails, no certificate is available until a
+  later renewal succeeds. With `required`, every new upstream connection then
+  fails locally before connecting, retrying the renewal first when a minute has
+  passed since the last attempt; the proxy answers `502` and logs the error,
+  and `check-upstream` exits with it. With `optional`, a warning is logged and
+  the handshake continues without a client certificate, as when none could be
+  loaded at startup.
 
 ## The key and the signatures
 
