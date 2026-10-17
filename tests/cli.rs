@@ -190,3 +190,13 @@ fn proxy_requiring_a_client_certificate_fails_without_the_device_key() {
         "{stderr}"
     );
 }
+
+#[test]
+fn proxy_rejects_an_unknown_tls_mode() {
+    let (success, stderr) = gateinto(&proxy_args(&["--tls-mode", "hybrid"]));
+    assert!(!success);
+    assert!(stderr.contains("--tls-mode"), "{stderr}");
+    for mode in ["hybrid_preferred", "hybrid_required", "classical_only"] {
+        assert!(stderr.contains(mode), "{stderr}");
+    }
+}

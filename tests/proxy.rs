@@ -647,3 +647,36 @@ async fn disabled_client_certificate_relays_without_the_warning() {
     let log = agent.stop().await;
     assert!(!log.contains(NOT_CONFIGURED), "{log}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn negotiated_key_exchange_group_is_logged_per_tunnel_at_debug() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let target = echo_server().await;
+    for (extra, group) in [
+        (&[][..], "key_exchange_group=Some(X25519MLKEM768)"),
+        (
+            &["--tls-mode", "hybrid_preferred"],
+            "key_exchange_group=Some(X25519MLKEM768)",
+        ),
+        (
+            &["--tls-mode", "hybrid_required"],
+            "key_exchange_group=Some(X25519MLKEM768)",
+        ),
+        (
+            &["--tls-mode", "classical_only"],
+            "key_exchange_group=Some(X25519)",
+        ),
+    ] {
+        let agent = Agent::spawn_with(&setup, "debug", extra).await;
+        echo_through(agent.addr, target).await;
+        echo_through(agent.addr, target).await;
+        let log = agent.stop().await;
+        assert_eq!(log.matches(group).count(), 2, "{extra:?}: {log}");
+        assert_eq!(log.matches("version=Some(TLSv1_3)").count(), 2, "{log}");
+    }
+
+    let agent = Agent::spawn(&setup, "info").await;
+    echo_through(agent.addr, target).await;
+    let info = agent.stop().await;
+    assert!(!info.contains("key_exchange_group"), "{info}");
+}

@@ -1,0 +1,40 @@
+# Example Gateinto configuration. Use it with:
+#   gateinto proxy --config config.example.toml
+# Command line flags override values from this file. Unknown keys are errors.
+# Relative paths are resolved against the directory of this file.
+
+[listen]
+# Must be a loopback address. A non-loopback address additionally requires the
+# --unsafe-allow-non-loopback-listen command line flag; it cannot be allowed here.
+address = "127.0.0.1:18736"
+
+[upstream]
+# Placeholder that never resolves. Replace it with your own HTTPS forward proxy.
+host = "proxy.example.invalid"
+port = 443
+# Name verified in the upstream certificate. Defaults to host.
+# server_name = "proxy.example.invalid"
+# PEM bundle of CAs trusted for the upstream. Defaults to the Mozilla roots.
+# ca_file = "upstream-ca.pem"
+
+[tls]
+# hybrid_preferred (X25519MLKEM768, then X25519), hybrid_required
+# (X25519MLKEM768 only) or classical_only (X25519 only).
+mode = "hybrid_preferred"
+# optional, required or off.
+client_certificate = "optional"
+# PEM client certificate for the device key. Defaults to searching CurrentUser\My.
+# client_cert_file = "client.pem"
+
+[device_key]
+name = "gateinto-device-v1"
+# Where `gateinto key init` creates a new key: tpm or software.
+preferred = "tpm"
+# Whether `gateinto key init` may create a software key when the TPM cannot be used.
+software_fallback_on_first_create = true
+
+[limits]
+max_concurrent_tunnels = 64
+connect_timeout_seconds = 10
+idle_timeout_seconds = 300
+header_max_bytes = 16384

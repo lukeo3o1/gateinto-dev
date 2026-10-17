@@ -8,7 +8,8 @@ use crate::identity::encoding::{P256Point, p256_spki_der, sha256_fingerprint};
 pub const DEFAULT_KEY_NAME: &str = "gateinto-device-v1";
 pub const ALGORITHM: &str = "ECDSA P-256";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Backend {
     Tpm,
     Software,
@@ -23,8 +24,17 @@ impl fmt::Display for Backend {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct KeyName(String);
+
+impl TryFrom<String> for KeyName {
+    type Error = InvalidKeyName;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        name.parse()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidKeyName {

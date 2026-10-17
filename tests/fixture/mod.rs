@@ -3,14 +3,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gateinto::proxy::{Config, Limits, Proxy, Upstream};
+use gateinto::tls::TlsMode;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PublicKeyData,
 };
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::aws_lc_rs::{self, kx_group};
+use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::{ClientConfig, NamedGroup, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -18,6 +20,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 pub const PROXY_NAME: &str = "proxy.test";
 pub const SECRET: &str = "fixture-secret-realm";
+pub const HYBRID_GROUPS: &[&dyn SupportedKxGroup] = &[kx_group::X25519MLKEM768, kx_group::X25519];
+pub const CLASSICAL_GROUPS: &[&dyn SupportedKxGroup] = &[kx_group::X25519];
 
 pub struct TestCa {
     certificate: CertificateDer<'static>,
@@ -50,7 +54,15 @@ impl TestCa {
     }
 
     pub fn server_config(&self, name: &str) -> Arc<ServerConfig> {
-        self.server_config_with_client_ca(name, None)
+        self.server_config_with_client_ca(name, None, HYBRID_GROUPS)
+    }
+
+    pub fn server_config_with_groups(
+        &self,
+        name: &str,
+        groups: &[&'static dyn SupportedKxGroup],
+    ) -> Arc<ServerConfig> {
+        self.server_config_with_client_ca(name, None, groups)
     }
 
     pub fn server_config_requiring_client_certificates(
@@ -58,29 +70,48 @@ impl TestCa {
         name: &str,
         client_ca: &TestCa,
     ) -> Arc<ServerConfig> {
-        self.server_config_with_client_ca(name, Some(client_ca))
+        self.server_config_with_client_ca(name, Some((client_ca, true)), HYBRID_GROUPS)
+    }
+
+    pub fn server_config_requesting_client_certificates(
+        &self,
+        name: &str,
+        client_ca: &TestCa,
+    ) -> Arc<ServerConfig> {
+        self.server_config_with_client_ca(name, Some((client_ca, false)), HYBRID_GROUPS)
     }
 
     fn server_config_with_client_ca(
         &self,
         name: &str,
-        client_ca: Option<&TestCa>,
+        client_ca: Option<(&TestCa, bool)>,
+        groups: &[&'static dyn SupportedKxGroup],
     ) -> Arc<ServerConfig> {
         let key = KeyPair::generate().unwrap();
         let certificate = CertificateParams::new(vec![name.to_owned()])
             .unwrap()
             .signed_by(&key, &self.issuer)
             .unwrap();
-        let provider = Arc::new(aws_lc_rs::default_provider());
+        let provider = Arc::new(CryptoProvider {
+            kx_groups: groups.to_vec(),
+            ..aws_lc_rs::default_provider()
+        });
         let builder = ServerConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap();
         let builder = match client_ca {
-            Some(client_ca) => builder.with_client_cert_verifier(
-                WebPkiClientVerifier::builder_with_provider(Arc::new(client_ca.roots()), provider)
-                    .build()
-                    .unwrap(),
-            ),
+            Some((client_ca, required)) => {
+                let verifier = WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(client_ca.roots()),
+                    provider,
+                );
+                let verifier = if required {
+                    verifier
+                } else {
+                    verifier.allow_unauthenticated()
+                };
+                builder.with_client_cert_verifier(verifier.build().unwrap())
+            }
             None => builder.with_no_client_auth(),
         };
         let config = builder
@@ -133,6 +164,8 @@ pub struct UpstreamProxy {
     pub addr: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,
     client_certificates: Arc<Mutex<Vec<Vec<CertificateDer<'static>>>>>,
+    negotiated_groups: Arc<Mutex<Vec<NamedGroup>>>,
+    handshake_errors: Arc<Mutex<Vec<String>>>,
 }
 
 impl UpstreamProxy {
@@ -142,8 +175,12 @@ impl UpstreamProxy {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let acceptor = TlsAcceptor::from(config);
         let client_certificates = Arc::new(Mutex::new(Vec::new()));
+        let negotiated_groups = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
         let presented = client_certificates.clone();
+        let negotiated = negotiated_groups.clone();
+        let handshake_errors = Arc::new(Mutex::new(Vec::new()));
+        let failed = handshake_errors.clone();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -151,14 +188,26 @@ impl UpstreamProxy {
                 let behavior = behavior.clone();
                 let recorded = recorded.clone();
                 let presented = presented.clone();
+                let negotiated = negotiated.clone();
+                let failed = failed.clone();
                 tokio::spawn(async move {
-                    let Ok(mut tls) = acceptor.accept(stream).await else {
-                        return;
+                    let mut tls = match acceptor.accept(stream).await {
+                        Ok(tls) => tls,
+                        Err(error) => {
+                            failed.lock().unwrap().push(error.to_string());
+                            return;
+                        }
                     };
+                    if let Some(group) = tls.get_ref().1.negotiated_key_exchange_group() {
+                        negotiated.lock().unwrap().push(group.name());
+                    }
                     if let Some(chain) = tls.get_ref().1.peer_certificates() {
                         presented.lock().unwrap().push(chain.to_vec());
                     }
                     let (head, rest) = read_head(&mut tls).await;
+                    if head.is_empty() {
+                        return;
+                    }
                     recorded.lock().unwrap().push(head.clone());
                     match behavior {
                         Behavior::Tunnel => tunnel(tls, &head, &rest, b"").await,
@@ -186,7 +235,28 @@ impl UpstreamProxy {
             addr,
             requests,
             client_certificates,
+            negotiated_groups,
+            handshake_errors,
         }
+    }
+
+    pub async fn wait_for_handshake_errors(&self, count: usize) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let errors = self.handshake_errors.lock().unwrap().clone();
+            if errors.len() >= count {
+                return errors;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {count} failed handshakes, got {errors:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    pub fn negotiated_groups(&self) -> Vec<NamedGroup> {
+        self.negotiated_groups.lock().unwrap().clone()
     }
 
     pub fn requests(&self) -> Vec<String> {
@@ -316,6 +386,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
             server_name: ServerName::try_from(server_name.to_owned()).unwrap(),
             roots,
         },
+        tls_mode: TlsMode::default(),
         client_certificate: None,
         limits: Limits::default(),
     }

@@ -5,7 +5,8 @@ Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows. It listens on
 and issues a second `CONNECT` there. Client authentication (mTLS) uses a
 non-exportable ECDSA P-256 device key held by Windows CNG (TPM preferred,
 software key storage as fallback) and a client certificate issued for it. Key exchange prefers the hybrid
-post-quantum group `X25519MLKEM768` and falls back to `X25519`.
+post-quantum group `X25519MLKEM768` and falls back to `X25519`; a TLS mode can
+require the hybrid group or use only `X25519` (see [TLS modes](#tls-modes)).
 
 ## Status
 
@@ -13,7 +14,9 @@ Early proof of concept. Not production ready. The double `CONNECT` data path
 works with and without client authentication. The device key can be created
 and inspected with `gateinto key`, and the proxy signs the TLS 1.3 client
 authentication with it when a client certificate for it is available. There is
-no enrollment: the certificate has to be obtained and installed by hand. See
+no enrollment: the certificate has to be obtained and installed by hand. The
+key exchange policy is selectable, `gateinto check-upstream` shows what an
+upstream negotiates, and settings can come from a TOML file. See
 [docs/compatibility.md](docs/compatibility.md).
 
 Windows 7 is experimental and unsupported; see [docs/windows7-feasibility.md](docs/windows7-feasibility.md).
@@ -30,18 +33,21 @@ Windows 7 is experimental and unsupported; see [docs/windows7-feasibility.md](do
 gateinto proxy --upstream-host proxy.example.com --upstream-port 443
 ```
 
-The upstream endpoint has no default and must be given. Clients then use
+The upstream endpoint has no default and must be given, on the command line or
+in a [configuration file](#configuration-file). Clients then use
 `http://127.0.0.1:18736` as their HTTP proxy, for example
 `curl --proxy http://127.0.0.1:18736 https://example.com/`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--config` | none | TOML configuration file. Flags given on the command line override its values. |
 | `--listen` | `127.0.0.1:18736` | Local listen address. Must be loopback. |
 | `--unsafe-allow-non-loopback-listen` | off | Allow a non-loopback listen address. This exposes the proxy, and the upstream identity behind it, to the network. |
-| `--upstream-host` | required | Upstream HTTPS proxy host name or IP address. |
-| `--upstream-port` | required | Upstream HTTPS proxy port. |
+| `--upstream-host` | required (flag or config) | Upstream HTTPS proxy host name or IP address. |
+| `--upstream-port` | required (flag or config) | Upstream HTTPS proxy port. |
 | `--upstream-server-name` | upstream host | Name verified against the upstream certificate. |
 | `--ca-file` | Mozilla roots | PEM bundle of CAs trusted for the upstream. Replaces the default roots. |
+| `--tls-mode` | `hybrid_preferred` | Key exchange policy: `hybrid_preferred`, `hybrid_required` or `classical_only`. See [TLS modes](#tls-modes). |
 | `--client-certificate` | `optional` | Client authentication to the upstream: `optional`, `required` or `off`. See [Client certificate](#client-certificate-mtls). |
 | `--client-cert-file` | search `CurrentUser\My` | PEM file with the client certificate, optionally followed by intermediates. |
 | `--key-name` | `gateinto-device-v1` | CNG device key that signs the client authentication. It is only opened, never created. |
@@ -65,6 +71,7 @@ Local responses:
 | Upstream `403` | `403` |
 | Upstream `407` or any other status | `502`; upstream headers and body are not forwarded |
 | Upstream connect, TLS or certificate failure, malformed reply | `502` |
+| `hybrid_required` and the upstream cannot negotiate `X25519MLKEM768` | `502` |
 | Upstream connect, handshake or reply timeout | `504` |
 | Method other than `CONNECT` | `405` |
 | Malformed request | `400` |
@@ -84,9 +91,130 @@ root program as bundled by `webpki-roots`. This is deterministic and identical
 on every platform; it ignores roots added to the operating system store, so a
 proxy with a private CA needs `--ca-file`.
 
+## TLS modes
+
+The upstream connection is always TLS 1.3 only, and the upstream certificate
+and name are always verified with WebPKI as described above. `--tls-mode` (or
+`[tls] mode`) only decides which key exchange groups are offered:
+
+| Mode | Offered groups, in order | Upstream without `X25519MLKEM768` |
+| --- | --- | --- |
+| `hybrid_preferred` (default) | `X25519MLKEM768`, `X25519` | Falls back to `X25519`. |
+| `hybrid_required` | `X25519MLKEM768` | Handshake fails; local clients get `502`. Never downgrades. |
+| `classical_only` | `X25519` | Uses `X25519` (also against hybrid-capable upstreams). |
+
+After every upstream handshake Gateinto reads the negotiated protocol version
+and key exchange group and logs them at `debug` per tunnel
+(`upstream TLS established version=Some(TLSv1_3)
+key_exchange_group=Some(X25519MLKEM768)`). It also checks that the version is
+TLS 1.3 and that the group is one the mode offers, and refuses the tunnel with
+`502` otherwise. For `hybrid_required` this is a second check behind the offered
+list: a tunnel is never relayed over anything but `X25519MLKEM768`.
+
+The hybrid group protects the confidentiality of the outer TLS session against
+later decryption by a quantum computer. Certificates and the device key still
+use classical signatures, so authentication is not post-quantum.
+
+## Checking the upstream
+
+```sh
+gateinto check-upstream --upstream-host proxy.example.com --upstream-port 443
+gateinto check-upstream --config gateinto.toml --target example.com:443
+```
+
+`check-upstream` takes the same upstream, TLS and client certificate options as
+`proxy` (or `--config`), connects once, completes the TLS handshake and prints:
+
+```text
+upstream: proxy.example.com:443
+server-name: proxy.example.com
+tls-mode: hybrid_preferred
+tls-version: TLSv1_3
+key-exchange-group: X25519MLKEM768
+cipher-suite: TLS13_AES_256_GCM_SHA384
+server-certificate-subject: CN=proxy.example.com
+client-certificate: not requested
+```
+
+`client-certificate` is `not requested`, `requested by the upstream, none sent`
+or `sent`. With `--target host:port` it also sends `CONNECT` for that target
+and prints `connect-target` and the upstream's status line as
+`connect-status`; no upstream headers or body are printed, and the tunnel is
+closed right away. No keys or other secrets are printed.
+
+The command exits nonzero, with the reason on stderr, when the connection,
+handshake, certificate verification or the mode check fails, when it does not
+finish within the connect timeout (`[limits] connect_timeout_seconds`, default
+10 s), or when the upstream answers the `CONNECT` with a non-`2xx` status. An
+upstream that rejects the client certificate may only report that after the
+handshake; use `--target` to see it.
+
+## Configuration file
+
+`gateinto proxy`, `gateinto check-upstream`, `gateinto key init` and
+`gateinto key info` accept `--config <path>` with a TOML file. See
+[config.example.toml](config.example.toml).
+
+```toml
+[listen]
+address = "127.0.0.1:18736"
+
+[upstream]
+host = "proxy.example.invalid"   # required, here or with --upstream-host
+port = 443                       # required, here or with --upstream-port
+server_name = "proxy.example.invalid"
+ca_file = "upstream-ca.pem"
+
+[tls]
+mode = "hybrid_preferred"        # hybrid_preferred | hybrid_required | classical_only
+client_certificate = "optional"  # optional | required | off
+client_cert_file = "client.pem"
+
+[device_key]
+name = "gateinto-device-v1"
+preferred = "tpm"                # tpm | software
+software_fallback_on_first_create = true
+
+[limits]
+max_concurrent_tunnels = 64
+connect_timeout_seconds = 10
+idle_timeout_seconds = 300
+header_max_bytes = 16384
+```
+
+Every key is optional except the upstream `host` and `port`, which must come
+from the file or the command line; there is no default upstream. Missing keys
+take the defaults of the matching flags.
+
+| Key | Flag that overrides it |
+| --- | --- |
+| `[listen] address` | `--listen` |
+| `[upstream] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
+| `[tls] mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
+| `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
+| `[device_key] preferred` | `--backend` (`key init`) |
+| `[device_key] software_fallback_on_first_create` | `--no-software-fallback` (`key init`) |
+| `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | `--max-tunnels`, `--connect-timeout-secs`, `--idle-timeout-secs`, `--max-header-bytes` (`proxy`) |
+
+Rules:
+
+- Command line flags override the file, key by key.
+- Unknown sections and keys are errors, as are values of the wrong type, zero
+  limits, ports or timeouts, and an empty key name. Errors name the file, line
+  and key.
+- Relative `ca_file` and `client_cert_file` paths are resolved against the
+  directory of the configuration file. Relative paths on the command line are
+  resolved against the current directory.
+- A non-loopback `[listen] address` still requires the
+  `--unsafe-allow-non-loopback-listen` command line flag. There is no key for
+  it, so a configuration file alone can never expose the proxy to the network.
+- `[device_key] preferred` and `software_fallback_on_first_create` only affect
+  `key init`; the proxy only opens the key named by `[device_key] name`.
+
 ## Client certificate (mTLS)
 
-The upstream connection is TLS 1.3 only, prefers `X25519MLKEM768`, and
+The upstream connection is TLS 1.3 only, uses the key exchange of the
+selected [TLS mode](#tls-modes), and
 verifies the upstream certificate exactly as without client authentication.
 When the upstream asks for a client certificate, Gateinto sends the configured
 one and signs `CertificateVerify` with the device key through CNG
@@ -205,6 +333,7 @@ runners have no TPM; there the Platform Crypto Provider reports
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--config` | none | Read `[device_key]` from this TOML file; the flags below override it. |
 | `--name` | `gateinto-device-v1` | CNG key name. Must not be empty or contain NUL. |
 | `--backend` | `tpm` | Where to create a new key: `tpm` (falls back to software unless disabled) or `software`. An existing key is reused wherever it is. |
 | `--no-software-fallback` | off | Fail instead of creating a software key when the TPM cannot be used. |

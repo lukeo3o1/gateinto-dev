@@ -1,6 +1,6 @@
 # Architecture
 
-This describes the code on `master`. Items marked **Planned** do not exist yet.
+This describes the current code. Items marked **Planned** do not exist yet.
 
 ## Data path
 
@@ -12,7 +12,9 @@ This describes the code on `master`. Items marked **Planned** do not exist yet.
 +------------------------------- gateinto ---------------------------------+
 |  1. read and parse the request head (limits, timeout)                    |
 |  2. TCP connect to the upstream proxy                                    |
-|  3. TLS 1.3 handshake, WebPKI verification of the upstream certificate   |
+|  3. TLS 1.3 handshake, WebPKI verification of the upstream certificate,  |
+|     client certificate signed by the device key if configured;           |
+|     check the negotiated version and key exchange against the TLS mode   |
 |  4. send CONNECT target:443 HTTP/1.1 inside TLS                          |
 |  5. read the upstream status line and header block                       |
 |  6. upstream 2xx: send local 200, then relay bytes in both directions    |
@@ -34,12 +36,14 @@ it; it relays bytes.
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`gateinto proxy ...`), logging setup, building `proxy::Config`. |
+| `src/main.rs` | Command line (`proxy`, `check-upstream`, `key init`, `key info`), merging flags over the configuration file, logging setup, building `proxy::Config`. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), flag-over-file merge, defaults, relative path resolution. |
+| `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
-| `src/proxy/mod.rs` | Listener, connection limit, per-connection state machine, upstream connect, status mapping, error responses. |
+| `src/proxy/mod.rs` | Listener, connection limit, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
-| `src/tls.rs` | Crypto provider with key exchange groups `X25519MLKEM768`, then `X25519`; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
-| `src/identity/` | Windows CNG helpers (`windows_cng.rs`, `cfg(windows)` only): create, open, export and delete a persisted ECDSA P-256 key. Used by tests only; not wired into the proxy. |
+| `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
+| `src/identity/` | Device key lifecycle (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
 
 ## Local 200 only after upstream 2xx
 
@@ -73,40 +77,51 @@ side.
 
 | Limit | Flag | Default |
 | --- | --- | --- |
-| Concurrent connections, including those still sending their request | `--max-tunnels` | 64 |
-| Request and upstream response header block | `--max-header-bytes` | 16384 bytes |
-| Reading the local request | `--connect-timeout-secs` | 10 s |
-| Upstream TCP connect, TLS handshake and `CONNECT` reply together | `--connect-timeout-secs` | 10 s (separate budget) |
-| Tunnel without traffic in either direction | `--idle-timeout-secs` | 300 s |
+| Concurrent connections, including those still sending their request | `--max-tunnels` / `max_concurrent_tunnels` | 64 |
+| Request and upstream response header block | `--max-header-bytes` / `header_max_bytes` | 16384 bytes |
+| Reading the local request | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s |
+| Upstream TCP connect, TLS handshake and `CONNECT` reply together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s (separate budget) |
+| Tunnel without traffic in either direction | `--idle-timeout-secs` / `idle_timeout_seconds` | 300 s |
 
 The listen address must be loopback unless `--unsafe-allow-non-loopback-listen`
-is given.
+is given on the command line. The configuration file has no key for it.
+
+## Configuration
+
+Settings come from command line flags, then the `--config` TOML file, then
+built-in defaults, resolved key by key. The upstream host and port have no
+default. See the README for the schema.
 
 ## TLS
 
 - TLS 1.3 only; `rustls` is built without `tls12`.
-- Key exchange groups in order: `X25519MLKEM768` (hybrid), `X25519`.
+- Key exchange groups by TLS mode: `hybrid_preferred` (default) offers
+  `X25519MLKEM768`, then `X25519`; `hybrid_required` offers only
+  `X25519MLKEM768`; `classical_only` offers only `X25519`.
+- After each handshake the negotiated version and group are logged at `debug`
+  and checked: anything but TLS 1.3 with a group the mode offers ends the
+  tunnel with `502`. For `hybrid_required` this is a second line of defense
+  behind the offered list.
 - The upstream certificate is verified with WebPKI against the Mozilla roots
   from `webpki-roots`, or only against `--ca-file` when given. The name checked
   is `--upstream-server-name`, defaulting to `--upstream-host`.
-- No client certificate is sent on `master`.
+- When the upstream requests a client certificate and one is configured, the
+  certificate bound to the device key is sent and `CertificateVerify` is signed
+  through CNG.
 
 ## Planned
 
-These components are designed but not implemented on `master`. Do not rely on
-them.
+Implemented: the device key lifecycle (`key init`, `key info`, TPM preferred
+with software fallback), mutual TLS with the device key, TLS modes with
+`check-upstream`, and the TOML configuration file.
 
-- **Planned: device key lifecycle.** Commands to create, show and delete the
-  device key in Windows CNG, preferring the TPM ("Microsoft Platform Crypto
-  Provider") and falling back to software key storage, and to export a public
-  key or certificate request for enrollment.
-- **Planned: mutual TLS.** Presenting a client certificate for the device key
-  to the upstream proxy, with signatures made through CNG so the private key
-  never leaves the key store.
-- **Planned: TLS modes.** Choices for how the upstream TLS connection is
-  configured beyond the current fixed TLS 1.3 setup.
-- **Planned: configuration file.** A TOML file as an alternative to command
-  line flags.
+These components are designed but not implemented. Do not rely on them.
+
+- **Planned: enrollment.** Obtaining the client certificate for the device key
+  (certificate request or enrollment protocol) instead of installing it by
+  hand.
+- **Planned: key rotation and deletion.** Commands to replace or delete the
+  device key.
 
 See also [threat-model.md](threat-model.md) and
 [compatibility.md](compatibility.md).
