@@ -8,6 +8,9 @@ use windows_sys::Win32::Security::Cryptography::{
     NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject, NCryptOpenKey,
     NCryptOpenStorageProvider, NCryptSetProperty,
 };
+use windows_sys::Win32::System::TpmBaseServices::{
+    TBS_SUCCESS, TPM_DEVICE_INFO, Tbsi_GetDeviceInfo,
+};
 
 use crate::identity::cng_status;
 use crate::identity::device_key::{Backend, KeyName, KeyStore, StoreError};
@@ -172,21 +175,38 @@ fn open_provider(backend: Backend) -> Result<StorageProvider, StoreError> {
     })
 }
 
+fn probe_tpm() -> Result<(), u32> {
+    let mut info = TPM_DEVICE_INFO::default();
+    match unsafe { Tbsi_GetDeviceInfo(size_of::<TPM_DEVICE_INFO>() as u32, (&raw mut info).cast()) }
+    {
+        TBS_SUCCESS => Ok(()),
+        code => Err(code),
+    }
+}
+
+fn with_provider<T>(
+    backend: Backend,
+    operation: impl FnOnce(StorageProvider) -> Result<T, CngError>,
+) -> Result<T, StoreError> {
+    let result =
+        open_provider(backend).and_then(|provider| operation(provider).map_err(store_error));
+    match backend {
+        Backend::Tpm => result.map_err(|error| cng_status::tpm_provider_error(error, probe_tpm)),
+        Backend::Software => result,
+    }
+}
+
 pub struct CngStore;
 
 impl KeyStore for CngStore {
     type Key = CngKey;
 
     fn open(&self, backend: Backend, name: &KeyName) -> Result<CngKey, StoreError> {
-        open_provider(backend)?
-            .open_key(name.as_str())
-            .map_err(store_error)
+        with_provider(backend, |provider| provider.open_key(name.as_str()))
     }
 
     fn create(&self, backend: Backend, name: &KeyName) -> Result<CngKey, StoreError> {
-        open_provider(backend)?
-            .create_key(name.as_str())
-            .map_err(store_error)
+        with_provider(backend, |provider| provider.create_key(name.as_str()))
     }
 
     fn delete(&self, key: CngKey) -> Result<(), StoreError> {

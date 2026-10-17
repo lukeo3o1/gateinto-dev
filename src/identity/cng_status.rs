@@ -8,6 +8,8 @@ enum Class {
     Failed,
 }
 
+const TBS_E_TPM_NOT_FOUND: u32 = 0x8028_400F;
+
 const KNOWN: &[(u32, &str, Class)] = &[
     (0x8009_000D, "NTE_NO_KEY", Class::NotFound),
     (0x8009_0011, "NTE_NOT_FOUND", Class::NotFound),
@@ -18,7 +20,11 @@ const KNOWN: &[(u32, &str, Class)] = &[
     (0x8009_0030, "NTE_DEVICE_NOT_READY", Class::NotReady),
     (0x8009_0035, "NTE_DEVICE_NOT_FOUND", Class::Unavailable),
     (0x8028_4008, "TBS_E_SERVICE_NOT_RUNNING", Class::NotReady),
-    (0x8028_400F, "TBS_E_TPM_NOT_FOUND", Class::Unavailable),
+    (
+        TBS_E_TPM_NOT_FOUND,
+        "TBS_E_TPM_NOT_FOUND",
+        Class::Unavailable,
+    ),
     (0x8028_4010, "TBS_E_SERVICE_DISABLED", Class::NotReady),
     (0x8009_000F, "NTE_EXISTS", Class::Failed),
     (0x8009_0010, "NTE_PERM", Class::Failed),
@@ -50,6 +56,26 @@ pub fn provider_error(code: u32) -> StoreError {
     match classify(code) {
         (description, Class::NotFound) => StoreError::ProviderUnavailable(description),
         (description, class) => to_store_error(description, class),
+    }
+}
+
+pub fn tpm_provider_error(
+    error: StoreError,
+    probe_tpm: impl FnOnce() -> Result<(), u32>,
+) -> StoreError {
+    let StoreError::ProviderNotReady(reason) = error else {
+        return error;
+    };
+    match probe_tpm() {
+        Ok(()) => StoreError::ProviderNotReady(reason),
+        Err(code) => {
+            let reason = format!("{reason}; TPM Base Services report {}", classify(code).0);
+            if code == TBS_E_TPM_NOT_FOUND {
+                StoreError::ProviderUnavailable(reason)
+            } else {
+                StoreError::ProviderNotReady(reason)
+            }
+        }
     }
 }
 
@@ -122,6 +148,68 @@ mod tests {
             provider_error(0x1234_5678),
             StoreError::Failed("0x12345678".to_owned())
         );
+    }
+
+    #[test]
+    fn not_ready_tpm_provider_without_a_tpm_is_unavailable() {
+        assert_eq!(
+            tpm_provider_error(store_error(0x8009_0030), || Err(TBS_E_TPM_NOT_FOUND)),
+            StoreError::ProviderUnavailable(
+                "NTE_DEVICE_NOT_READY (0x80090030); TPM Base Services report \
+                 TBS_E_TPM_NOT_FOUND (0x8028400f)"
+                    .to_owned()
+            )
+        );
+        for code in NOT_READY {
+            assert!(
+                matches!(
+                    tpm_provider_error(provider_error(code), || Err(TBS_E_TPM_NOT_FOUND)),
+                    StoreError::ProviderUnavailable(_)
+                ),
+                "{code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn not_ready_tpm_provider_with_a_tpm_stays_not_ready() {
+        for code in NOT_READY {
+            assert_eq!(
+                tpm_provider_error(store_error(code), || Ok(())),
+                store_error(code),
+                "{code:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn not_ready_tpm_provider_with_an_inconclusive_probe_stays_not_ready() {
+        assert_eq!(
+            tpm_provider_error(store_error(0x8009_0030), || Err(0x8028_4008)),
+            StoreError::ProviderNotReady(
+                "NTE_DEVICE_NOT_READY (0x80090030); TPM Base Services report \
+                 TBS_E_SERVICE_NOT_RUNNING (0x80284008)"
+                    .to_owned()
+            )
+        );
+        assert!(matches!(
+            tpm_provider_error(store_error(0x8009_0030), || Err(0x1234_5678)),
+            StoreError::ProviderNotReady(_)
+        ));
+    }
+
+    #[test]
+    fn tpm_presence_is_probed_only_when_the_provider_is_not_ready() {
+        for error in [
+            StoreError::NotFound,
+            store_error(0x8009_0013),
+            store_error(0x8009_0010),
+        ] {
+            assert_eq!(
+                tpm_provider_error(error.clone(), || panic!("probed for {error:?}")),
+                error
+            );
+        }
     }
 
     #[test]

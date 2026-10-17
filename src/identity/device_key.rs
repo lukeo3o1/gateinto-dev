@@ -726,6 +726,93 @@ mod tests {
         );
     }
 
+    fn device_not_ready_with_tpm_probe(probe: Result<(), u32>) -> StoreError {
+        crate::identity::cng_status::tpm_provider_error(
+            crate::identity::cng_status::store_error(0x8009_0030),
+            || probe,
+        )
+    }
+
+    fn device_not_ready_without_a_tpm(store: FakeStore) -> FakeStore {
+        let error = device_not_ready_with_tpm_probe(Err(0x8028_400F));
+        store
+            .open_error(Backend::Tpm, error.clone())
+            .create_error(Backend::Tpm, error)
+    }
+
+    #[test]
+    fn device_not_ready_without_a_tpm_falls_back_to_software_and_then_reuses_it() {
+        let store = device_not_ready_without_a_tpm(FakeStore::default());
+
+        let (created, provenance) = init(&store, &name(), InitOptions::default()).unwrap();
+
+        assert!(matches!(
+            provenance,
+            Provenance::CreatedAfterFallback(TpmProblem::Unavailable(_))
+        ));
+        assert_eq!(created.backend, Backend::Software);
+        let (reused, provenance) = init(&store, &name(), InitOptions::default()).unwrap();
+        assert_eq!(provenance, Provenance::Reused);
+        assert_eq!(reused.backend, Backend::Software);
+        assert_eq!(reused.fingerprint(), created.fingerprint());
+        assert_eq!(
+            store.created(),
+            vec![
+                "create tpm gateinto-device-v1",
+                "create software gateinto-device-v1"
+            ]
+        );
+        let (shown, duplicate_keys) = info(&store, &name()).unwrap();
+        assert_eq!(shown.fingerprint(), created.fingerprint());
+        assert_eq!(duplicate_keys, None);
+    }
+
+    #[test]
+    fn device_not_ready_without_a_tpm_and_disabled_fallback_creates_nothing() {
+        let store = device_not_ready_without_a_tpm(FakeStore::default());
+
+        let error = init(&store, &name(), no_fallback()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            KeyError::TpmUnusable(TpmProblem::Unavailable(_))
+        ));
+        assert!(
+            error
+                .to_string()
+                .starts_with("the TPM provider is unavailable: ")
+        );
+        assert!(store.backends().is_empty());
+    }
+
+    #[test]
+    fn device_not_ready_with_a_tpm_stops_init_and_creates_nothing() {
+        let error = device_not_ready_with_tpm_probe(Ok(()));
+        let store = FakeStore::default().open_error(Backend::Tpm, error.clone());
+
+        assert!(matches!(
+            init(&store, &name(), InitOptions::default()).unwrap_err(),
+            KeyError::ProviderNotReady {
+                backend: Backend::Tpm,
+                ..
+            }
+        ));
+        assert!(store.created().is_empty());
+        assert!(store.backends().is_empty());
+
+        let store = FakeStore::default()
+            .with_key(Backend::Software)
+            .open_error(Backend::Tpm, error);
+        assert!(matches!(
+            init(&store, &name(), InitOptions::default()).unwrap_err(),
+            KeyError::ProviderNotReady {
+                backend: Backend::Tpm,
+                ..
+            }
+        ));
+        assert!(store.created().is_empty());
+    }
+
     #[test]
     fn software_provider_not_ready_during_lookup_is_an_error() {
         let store = FakeStore::default().open_error(
