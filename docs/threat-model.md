@@ -139,3 +139,7 @@ meant to protect, against whom, and what it does not protect.
   local process or user is connecting.
 - Acting as a general-purpose HTTP proxy (only `CONNECT` is supported).
 - Post-quantum authentication.
+- Forcing system-wide traffic through the proxy; only clients configured to
+  use it are proxied.
+- Authorizing access to services on the remote Edge's behalf; that decision
+  stays with the upstream.
