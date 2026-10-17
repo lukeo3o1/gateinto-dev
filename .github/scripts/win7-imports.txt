@@ -191,6 +191,9 @@ ntdll.dll NtOpenFile
 ntdll.dll NtReadFile
 ntdll.dll NtWriteFile
 ntdll.dll RtlNtStatusToDosError
+user32.dll GetProcessWindowStation
+user32.dll GetUserObjectInformationW
+user32.dll MessageBoxW
 ws2_32.dll #115
 ws2_32.dll accept
 ws2_32.dll bind
