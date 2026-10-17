@@ -925,7 +925,7 @@ mod tests {
         assert!(
             problem
                 .to_string()
-                .ends_with("TPM Base Services device info unavailable (Windows 7 or earlier)"),
+                .ends_with("Tbsi_GetDeviceInfo unavailable (expected on Windows 7)"),
             "{problem}"
         );
     }

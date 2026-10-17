@@ -31,8 +31,8 @@ Fixes:
 
 - `Tbsi_GetDeviceInfo` is now loaded at runtime with
   `LoadLibraryExW("tbs.dll", LOAD_LIBRARY_SEARCH_SYSTEM32)` and `GetProcAddress`.
-  When it is missing, the TPM probe reports `TPM Base Services device info
-  unavailable (Windows 7 or earlier)`. A not-ready TPM provider is then treated
+  When it is missing, the TPM probe reports `Tbsi_GetDeviceInfo unavailable
+  (expected on Windows 7)`. A not-ready TPM provider is then treated
   as unavailable, so `key init` falls back to the Software KSP, or fails with
   that reason when fallback is disabled. On Windows 8 and later the probe
   behaves as before. A unit test in `src/identity/windows_cng.rs`, run by the

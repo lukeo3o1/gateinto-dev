@@ -86,7 +86,7 @@ pub fn tpm_provider_error(
     match probe_tpm() {
         Ok(()) => StoreError::ProviderNotReady(reason),
         Err(TpmProbeError::DeviceInfoUnavailable) => StoreError::ProviderUnavailable(format!(
-            "{reason}; TPM Base Services device info unavailable (Windows 7 or earlier)"
+            "{reason}; Tbsi_GetDeviceInfo unavailable (expected on Windows 7)"
         )),
         Err(TpmProbeError::Status(code)) => {
             let reason = format!("{reason}; TPM Base Services report {}", classify(code).0);
@@ -198,8 +198,8 @@ mod tests {
                 TpmProbeError::DeviceInfoUnavailable
             )),
             StoreError::ProviderUnavailable(
-                "NTE_DEVICE_NOT_READY (0x80090030); TPM Base Services device info \
-                 unavailable (Windows 7 or earlier)"
+                "NTE_DEVICE_NOT_READY (0x80090030); Tbsi_GetDeviceInfo unavailable \
+                 (expected on Windows 7)"
                     .to_owned()
             )
         );
