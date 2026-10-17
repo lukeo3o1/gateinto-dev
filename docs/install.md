@@ -32,8 +32,9 @@ It installs:
 - optionally, when `AUTOSTART=1` is set or the "Start the Gateinto agent at logon" feature is
   selected, the value `Gateinto` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which
   runs `"…\gateinto.exe" agent --detach` at logon. `--detach` starts the agent as a
-  background process without a console, waits until it accepts requests and returns; if an
-  agent already runs it does nothing. It is off by default;
+  background process and waits until it accepts requests; if an agent already runs it does
+  nothing. The agent runs without a console; a console window may flash briefly at logon. It
+  is off by default;
 - the uninstall entry under Settings → Apps → Installed apps, written by Windows Installer.
 
 The package creates no shortcuts. It does not create a device key or a config file, and none of
