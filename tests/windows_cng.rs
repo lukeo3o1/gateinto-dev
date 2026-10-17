@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use common::{TestServer, connect};
+use gateinto::identity::p256_signer::P256SigningKey;
 use gateinto::identity::windows_cng::{
     SOFTWARE_KEY_STORAGE_PROVIDER, create_ecdsa_p256_key, delete_key, export_public_key, open_key,
 };
@@ -21,7 +22,6 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::sign::{CertifiedKey, SigningKey};
 use rustls::{ClientConfig, NamedGroup, RootCertStore, SignatureAlgorithm, SignatureScheme};
 use rustls_cng::key::SignaturePadding;
-use rustls_cng::signer::CngSigningKey;
 
 struct TestKeyName(String);
 
@@ -131,7 +131,7 @@ fn rustls_signer_produces_der_ecdsa_p256_sha256_signature() {
     let name = TestKeyName::new();
     let key = create_ecdsa_p256_key(SOFTWARE_KEY_STORAGE_PROVIDER, &name.0).unwrap();
     let public_key = export_public_key(&key).unwrap();
-    let signing_key = CngSigningKey::new(key).unwrap();
+    let signing_key = P256SigningKey::new(key);
     let message = b"gateinto tls signature";
 
     assert_eq!(signing_key.algorithm(), SignatureAlgorithm::ECDSA);
@@ -154,7 +154,7 @@ fn rustls_signer_produces_der_ecdsa_p256_sha256_signature() {
 fn rustls_signer_rejects_unsupported_schemes() {
     let name = TestKeyName::new();
     let key = create_ecdsa_p256_key(SOFTWARE_KEY_STORAGE_PROVIDER, &name.0).unwrap();
-    let signing_key = CngSigningKey::new(key).unwrap();
+    let signing_key = P256SigningKey::new(key);
 
     assert!(
         signing_key
@@ -200,7 +200,7 @@ fn tls13_client_authenticates_with_cng_key() {
     );
     let certified_key = CertifiedKey::new(
         vec![client_certificate.clone()],
-        Arc::new(CngSigningKey::new(key).unwrap()),
+        Arc::new(P256SigningKey::new(key)),
     );
     let client_config = ClientConfig::builder_with_provider(Arc::new(
         gateinto::tls::TlsMode::default().crypto_provider(),
