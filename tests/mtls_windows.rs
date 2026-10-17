@@ -6,7 +6,6 @@ mod fixture;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,6 +15,7 @@ use gateinto::identity::client_cert::{
     configure,
 };
 use gateinto::identity::device_key::{self, Backend, InitOptions, KeyName};
+use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::identity::windows_cng::{
     CngStore, PLATFORM_CRYPTO_PROVIDER, SOFTWARE_KEY_STORAGE_PROVIDER, delete_key,
 };
@@ -125,13 +125,11 @@ impl Drop for ImportedCertificate {
     }
 }
 
-fn required(key: &TestKey, file: Option<&Path>) -> ClientIdentity {
+fn required(key: &TestKey, source: CertificateSource) -> ClientIdentity {
     let options = ClientCertificateOptions {
         mode: ClientCertificateMode::Required,
         key_name: key.0.clone(),
-        source: file.map_or(CertificateSource::Store, |file| {
-            CertificateSource::File(file.to_owned())
-        }),
+        source,
     };
     match configure(&options, Ok(&CngStore), UnixTime::now()).unwrap() {
         ClientAuth::Enabled(identity) => identity,
@@ -149,8 +147,13 @@ async fn tunnel_through_mtls_upstream(
         Behavior::Tunnel,
     )
     .await;
+    tunnel(identity, &server_ca, &upstream).await;
+    upstream
+}
+
+async fn tunnel(identity: ClientIdentity, server_ca: &TestCa, upstream: &UpstreamProxy) {
     let mut config = agent_config(upstream.addr, server_ca.roots(), PROXY_NAME);
-    config.client_certificate = Some(Arc::clone(&identity.certified_key).into());
+    config.client_certificate = ClientAuth::Enabled(identity).into_client_certificate();
     let agent = start_agent(config).await;
 
     let mut stream = open_tunnel(agent, echo_server().await).await;
@@ -160,7 +163,6 @@ async fn tunnel_through_mtls_upstream(
         read_to_end_within(&mut stream, CLOSE_WITHIN).await,
         b"signed by cng"
     );
-    upstream
 }
 
 fn key_info(args: &[&str]) -> String {
@@ -189,7 +191,7 @@ async fn client_certificate_file_authenticates_with_the_cng_device_key() {
     let certificate = client_ca.issue_client_certificate(&public_key);
     let file = TempFile::new(&certificate.pem);
 
-    let identity = required(&key, Some(&file.0));
+    let identity = required(&key, CertificateSource::File(file.0.clone()));
     assert_eq!(identity.backend, Backend::Software);
     assert_eq!(
         identity.binding.source,
@@ -227,7 +229,7 @@ async fn client_certificate_is_found_in_the_user_store_by_its_public_key() {
     );
     let _imported = ImportedCertificate::import(&certificate.der);
 
-    let identity = required(&key, None);
+    let identity = required(&key, CertificateSource::Store);
     assert_eq!(identity.binding.source, CertificateSource::Store);
     let upstream = tunnel_through_mtls_upstream(identity, &client_ca).await;
 
@@ -241,4 +243,33 @@ async fn client_certificate_is_found_in_the_user_store_by_its_public_key() {
         parse_certificate(&certificate.der).unwrap().sha1_thumbprint
     );
     assert_eq!(field(&info, "client-certificate-source"), "CurrentUser\\My");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn self_signed_certificates_are_signed_by_the_cng_device_key() {
+    let (key, public_key) = create_device_key();
+    let spki = public_key.subject_public_key_info();
+    let server_ca = TestCa::new();
+    let upstream = UpstreamProxy::start(
+        server_ca.server_config_trusting_client_spki(PROXY_NAME, spki.clone()),
+        Behavior::Tunnel,
+    )
+    .await;
+
+    for _ in 0..2 {
+        let identity = required(&key, CertificateSource::SelfSigned);
+        assert_eq!(identity.backend, Backend::Software);
+        assert_eq!(identity.binding.source, CertificateSource::SelfSigned);
+        assert_eq!(identity.binding.leaf.spki, spki);
+        tunnel(identity, &server_ca, &upstream).await;
+    }
+
+    let presented = upstream.client_certificates();
+    assert_eq!(presented.len(), 2);
+    assert!(presented.iter().all(|chain| chain.len() == 1));
+    let (first, second) = (&presented[0][0], &presented[1][0]);
+    assert_ne!(sha256_fingerprint(first), sha256_fingerprint(second));
+    for certificate in [first, second] {
+        assert_eq!(parse_certificate(certificate).unwrap().spki, spki);
+    }
 }
