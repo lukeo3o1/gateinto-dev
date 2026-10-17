@@ -1,0 +1,118 @@
+name: Windows compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 3 * * 2'
+  push:
+    branches: [master]
+    paths:
+      - src/**
+      - Cargo.*
+      - packaging/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  NASM_VERSION: '2.16.03'
+
+jobs:
+  x64:
+    name: ${{ matrix.os }}, x86_64-pc-windows-msvc tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compat-x64-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo test --all-targets --all-features --locked
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path target\debug\gateinto.exe
+
+  i686:
+    name: ${{ matrix.os }}, i686-pc-windows-msvc tests under WOW64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TARGET: i686-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compat-i686-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install NASM ${{ env.NASM_VERSION }}
+        uses: ilammy/setup-nasm@v1
+        with:
+          version: ${{ env.NASM_VERSION }}
+      - run: cargo test --target $env:TARGET --all-targets --all-features --locked
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto.exe"
+
+  msi:
+    name: ${{ matrix.os }}, msi install, uninstall and purge (Software KSP)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      WIX_VERSION: '5.0.2'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compat-release-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo build --release --locked
+      - name: Check that gateinto.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto.exe
+      - name: Install WiX ${{ env.WIX_VERSION }}
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix exited with $LASTEXITCODE" }
+          Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
+      - name: Build the MSI
+        run: |
+          pwsh packaging/wix/build.ps1 -Output "$env:RUNNER_TEMP\gateinto.msi"
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
+      - name: Install, set up, uninstall, reinstall and purge (Software KSP)
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -Exe target\release\gateinto.exe -LogDir "$env:RUNNER_TEMP\msi"
+      - name: Upload the installer logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/msi/*.log
+          if-no-files-found: ignore

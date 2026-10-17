@@ -7,6 +7,39 @@ Findings from the project skeleton spike, recorded on 2026-10-16 with Rust 1.97.
 on Linux x86_64. Windows behavior is only type-checked locally; runtime results
 on Windows come from CI.
 
+## Compatibility matrix
+
+Each cell names what verified it. "CI (label)" names the GitHub-hosted runner
+label; "not run yet" means the job exists but has not produced a result.
+Hosted runners have no TPM, so every CI key is a Microsoft Software Key
+Storage Provider key. Recorded on 2026-10-17.
+
+| Windows | Build | Unit and integration tests | MSI lifecycle | TPM | Real browser |
+| --- | --- | --- | --- | --- | --- |
+| Windows 10 22H2 client | manual: not yet | manual: not yet | manual: not yet | manual: not yet ([tpm-verification.md](tpm-verification.md)) | manual: not yet ([browser-verification.md](browser-verification.md)) |
+| Windows 11 client | manual: not yet | manual: not yet | manual: not yet | manual: not yet ([tpm-verification.md](tpm-verification.md)) | manual: not yet ([browser-verification.md](browser-verification.md)) |
+| Windows Server 2022 | CI (windows-2022, `compat.yml`): not run yet | CI (windows-2022, `compat.yml`): not run yet | CI (windows-2022, `compat.yml`): not run yet | none: no TPM on hosted runners | not verified |
+| Windows Server 2025 | CI (windows-latest, `ci.yml`); CI (windows-2025, `compat.yml`): not run yet | CI (windows-latest, `ci.yml`); CI (windows-2025, `compat.yml`): not run yet | CI (windows-latest, `ci.yml` `msi` job): passed on 553b5ae before the PATH, autostart, StopAgent and no-key checks were added; CI (windows-2025, `compat.yml`): not run yet | none: no TPM on hosted runners | not verified |
+| 32-bit Windows 10 | CI (windows-latest, `ci.yml` `windows-i686`, 64-bit host): not run yet | CI under WOW64 on 64-bit Windows Server only (`ci.yml` `windows-i686`, `compat.yml` `i686`): not run yet; on 32-bit Windows 10: manual: not yet | not applicable: the MSI is x64 only | manual: not yet | manual: not yet |
+| Windows 7 SP1 | see [windows7-feasibility.md](windows7-feasibility.md) | manual: not yet | not verified | not verified | not verified |
+
+Windows Server is not client Windows. Windows Server 2022 shares the servicing
+base of Windows 10 21H2, and Windows Server 2025 that of Windows 11 24H2; this
+is context only. A result on a Server runner does not verify Windows 10 22H2 or
+Windows 11 client editions, which differ in editions, installed components,
+default policies and browser availability.
+
+`windows-latest` currently resolves to the same Windows Server 2025 image as
+`windows-2025`, so `compat.yml` adds Windows Server 2022 and keeps Windows
+Server 2025 pinned when `windows-latest` moves on.
+[.github/workflows/compat.yml](../.github/workflows/compat.yml) runs on
+`windows-2022` and `windows-2025`, weekly, by `workflow_dispatch` and on pushes
+to `master` that change `src/**`, `Cargo.*` or `packaging/**`. Its jobs are
+independent: the x64 tests with the static C runtime check, the i686 tests
+under WOW64 with the same check, and a release build installed as an MSI by
+[.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), the
+script the `ci.yml` `msi` job also runs.
+
 ## Crates
 
 | Crate | Version | Role | Notes |
