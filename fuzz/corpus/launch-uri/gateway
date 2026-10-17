@@ -1,0 +1,1 @@
+gateinto://connect?profile=corp&gateway=proxy.corp.example%3A443&portal=https%3A%2F%2Fportal.corp.example%2F&url=https%3A%2F%2Fportal.corp.example%2Fapp
