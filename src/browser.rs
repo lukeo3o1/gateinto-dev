@@ -97,12 +97,17 @@ pub fn windows_candidates(
         (
             "chrome.exe",
             &["Google", "Chrome", "Application"],
-            &["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"],
+            &[
+                "ProgramW6432",
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "LOCALAPPDATA",
+            ],
         ),
         (
             "msedge.exe",
             &["Microsoft", "Edge", "Application"],
-            &["ProgramFiles(x86)", "ProgramFiles"],
+            &["ProgramFiles(x86)", "ProgramW6432", "ProgramFiles"],
         ),
     ];
     let mut candidates = Vec::new();
@@ -112,7 +117,10 @@ pub fn windows_candidates(
             let dir = folders
                 .iter()
                 .fold(PathBuf::from(base), |path, folder| path.join(folder));
-            candidates.push(dir.join(executable));
+            let candidate = dir.join(executable);
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
         }
     }
     candidates
@@ -334,6 +342,58 @@ mod tests {
                 install(r"C:\PF86", &chrome),
                 install(r"C:\Users\me\AppData\Local", &chrome),
                 PathBuf::from(r"C:\AppPaths\msedge.exe"),
+                install(r"C:\PF86", &edge),
+                install(r"C:\PF", &edge),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_64_bit_process_lists_each_install_folder_once() {
+        let env = env(&[
+            ("ProgramFiles", r"C:\PF"),
+            ("ProgramFiles(x86)", r"C:\PF86"),
+            ("ProgramW6432", r"C:\PF"),
+        ]);
+        let install = |base: &str, parts: &[&str]| {
+            parts
+                .iter()
+                .fold(PathBuf::from(base), |path, part| path.join(part))
+        };
+        let chrome = ["Google", "Chrome", "Application", "chrome.exe"];
+        let edge = ["Microsoft", "Edge", "Application", "msedge.exe"];
+
+        assert_eq!(
+            windows_candidates(env, |_| None),
+            vec![
+                install(r"C:\PF", &chrome),
+                install(r"C:\PF86", &chrome),
+                install(r"C:\PF86", &edge),
+                install(r"C:\PF", &edge),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_32_bit_process_on_64_bit_windows_finds_64_bit_browsers() {
+        let env = env(&[
+            ("ProgramFiles", r"C:\PF86"),
+            ("ProgramFiles(x86)", r"C:\PF86"),
+            ("ProgramW6432", r"C:\PF"),
+        ]);
+        let install = |base: &str, parts: &[&str]| {
+            parts
+                .iter()
+                .fold(PathBuf::from(base), |path, part| path.join(part))
+        };
+        let chrome = ["Google", "Chrome", "Application", "chrome.exe"];
+        let edge = ["Microsoft", "Edge", "Application", "msedge.exe"];
+
+        assert_eq!(
+            windows_candidates(env, |_| None),
+            vec![
+                install(r"C:\PF", &chrome),
+                install(r"C:\PF86", &chrome),
                 install(r"C:\PF86", &edge),
                 install(r"C:\PF", &edge),
             ]
