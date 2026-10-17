@@ -1,8 +1,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gateinto::identity::certificates::DeviceSigner;
+use gateinto::identity::certificates::{DeviceSigner, SelfSignedCertificates};
 use gateinto::identity::x509::parse_certificate;
 use gateinto::proxy::{Config, Limits, Proxy, Upstream};
 use gateinto::tls::TlsMode;
@@ -16,9 +17,10 @@ use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::WebPkiClientVerifier;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::sign::{Signer, SigningKey};
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName, NamedGroup,
-    RootCertStore, ServerConfig, SignatureScheme,
+    RootCertStore, ServerConfig, SignatureAlgorithm, SignatureScheme,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -249,6 +251,41 @@ pub fn software_signer(key: &KeyPair) -> DeviceSigner {
         key.public_key_raw().try_into().unwrap(),
         aws_lc_rs::sign::any_ecdsa_type(&der).unwrap(),
     )
+}
+
+#[derive(Debug)]
+struct FailingAfterIssueKey {
+    inner: Arc<dyn SigningKey>,
+    failing: Arc<AtomicBool>,
+}
+
+impl SigningKey for FailingAfterIssueKey {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+        if self.failing.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.inner.choose_scheme(offered)
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        self.inner.algorithm()
+    }
+}
+
+pub fn expired_self_signed_certificates(key: &KeyPair) -> Arc<SelfSignedCertificates> {
+    let failing = Arc::new(AtomicBool::new(false));
+    let signer = DeviceSigner::new(
+        key.public_key_raw().try_into().unwrap(),
+        Arc::new(FailingAfterIssueKey {
+            inner: software_signer(key).key(),
+            failing: failing.clone(),
+        }),
+    );
+    let issued_at =
+        UnixTime::since_unix_epoch(Duration::from_secs(UnixTime::now().as_secs() - 2 * 60 * 60));
+    let certificates = SelfSignedCertificates::new(signer, issued_at).unwrap();
+    failing.store(true, Ordering::Relaxed);
+    Arc::new(certificates)
 }
 
 pub struct IssuedCertificate {

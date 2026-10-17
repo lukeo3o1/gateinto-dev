@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::RootCertStore;
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{ServerName, UnixTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -18,6 +18,7 @@ use crate::http::{
     Authority, DEFAULT_MAX_HEADER_BYTES, ParseError, ParseResult, parse_connect_request,
     parse_response,
 };
+use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
 use crate::tls::{self, NegotiationError, TlsMode};
 
@@ -96,6 +97,7 @@ pub struct Proxy {
 
 pub(crate) struct Endpoint {
     connector: TlsConnector,
+    client_certificate: Arc<tls::ClientCertificateResolver>,
     host: String,
     port: u16,
     server_name: ServerName<'static>,
@@ -108,9 +110,10 @@ impl Endpoint {
         tls_mode: TlsMode,
         client_certificate: Arc<tls::ClientCertificateResolver>,
     ) -> Result<Self, rustls::Error> {
-        let config = tls::client_config(tls_mode, upstream.roots, client_certificate)?;
+        let config = tls::client_config(tls_mode, upstream.roots, client_certificate.clone())?;
         Ok(Self {
             connector: TlsConnector::from(Arc::new(config)),
+            client_certificate,
             host: upstream.host,
             port: upstream.port,
             server_name: upstream.server_name,
@@ -119,6 +122,9 @@ impl Endpoint {
     }
 
     pub(crate) async fn connect(&self) -> Result<TlsStream<TcpStream>, UpstreamError> {
+        self.client_certificate
+            .check_required(UnixTime::now())
+            .map_err(UpstreamError::ClientCertificate)?;
         let tcp = TcpStream::connect((self.host.as_str(), self.port))
             .await
             .map_err(UpstreamError::Connect)?;
@@ -367,6 +373,7 @@ where
 
 #[derive(Debug)]
 pub(crate) enum UpstreamError {
+    ClientCertificate(ExpiredCertificate),
     Connect(io::Error),
     Tls(io::Error),
     Negotiation(NegotiationError),
@@ -387,6 +394,9 @@ impl UpstreamError {
 impl fmt::Display for UpstreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ClientCertificate(error) => {
+                write!(f, "no client certificate available: {error}")
+            }
             Self::Connect(error) => write!(f, "connect failed: {error}"),
             Self::Tls(error) => write!(f, "TLS handshake failed: {error}"),
             Self::Negotiation(error) => write!(f, "TLS negotiation refused: {error}"),

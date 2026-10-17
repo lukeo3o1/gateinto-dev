@@ -7,10 +7,10 @@ use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
 use rustls::SignatureScheme;
 use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::sign::{CertifiedKey, SigningKey};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::identity::encoding::{P256Point, p256_spki_der, sha256_fingerprint};
-use crate::identity::x509::encode_time;
+use crate::identity::x509::{encode_time, format_utc};
 
 pub const SUBJECT_COMMON_NAME: &str = "Gateinto device";
 pub const VALIDITY: Duration = Duration::from_secs(60 * 60);
@@ -43,6 +43,25 @@ impl fmt::Display for IssueError {
 }
 
 impl std::error::Error for IssueError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredCertificate {
+    pub not_after: i64,
+    pub renewal: IssueError,
+}
+
+impl fmt::Display for ExpiredCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the self-signed client certificate expired at {} and renewing it failed: {}",
+            format_utc(self.not_after),
+            self.renewal
+        )
+    }
+}
+
+impl std::error::Error for ExpiredCertificate {}
 
 #[derive(Debug, Clone)]
 pub struct DeviceSigner {
@@ -190,6 +209,7 @@ pub struct SelfSignedCertificates {
 struct Current {
     certified_key: Arc<CertifiedKey>,
     issued_at: u64,
+    not_after: u64,
 }
 
 impl SelfSignedCertificates {
@@ -206,6 +226,7 @@ impl SelfSignedCertificates {
         Ok(Current {
             certified_key: Arc::new(CertifiedKey::new(vec![der], signer.key())),
             issued_at: now.as_secs(),
+            not_after: now.as_secs().saturating_add(VALIDITY.as_secs()),
         })
     }
 
@@ -217,14 +238,29 @@ impl SelfSignedCertificates {
         self.lock().certified_key.clone()
     }
 
-    pub fn certified_key_at(&self, now: UnixTime) -> Result<Arc<CertifiedKey>, IssueError> {
+    pub fn certified_key_at(&self, now: UnixTime) -> Result<Arc<CertifiedKey>, ExpiredCertificate> {
         let mut current = self.lock();
         if now.as_secs().saturating_sub(current.issued_at) >= RENEW_AFTER.as_secs() {
-            *current = Self::issue(&self.signer, now)?;
-            info!(
-                sha256 = %sha256_fingerprint(&current.certified_key.cert[0]),
-                "renewed the self-signed client certificate"
-            );
+            match Self::issue(&self.signer, now) {
+                Ok(renewed) => {
+                    *current = renewed;
+                    info!(
+                        sha256 = %sha256_fingerprint(&current.certified_key.cert[0]),
+                        "renewed the self-signed client certificate"
+                    );
+                }
+                Err(renewal) if now.as_secs() >= current.not_after => {
+                    return Err(ExpiredCertificate {
+                        not_after: i64::try_from(current.not_after).unwrap_or(i64::MAX),
+                        renewal,
+                    });
+                }
+                Err(error) => warn!(
+                    "renewing the self-signed client certificate failed: {error}; sending the \
+                     previous one, valid until {}",
+                    format_utc(i64::try_from(current.not_after).unwrap_or(i64::MAX))
+                ),
+            }
         }
         Ok(current.certified_key.clone())
     }
@@ -245,6 +281,11 @@ mod tests {
     use rustls::RootCertStore;
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::server::WebPkiClientVerifier;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use rustls::SignatureAlgorithm;
+    use rustls::sign::Signer;
 
     use super::*;
     use crate::identity::encoding::sha256_fingerprint;
@@ -430,5 +471,65 @@ mod tests {
             &certificates.certified_key_at(at(NOW + 1801)).unwrap(),
             &renewed
         ));
+    }
+
+    #[derive(Debug)]
+    struct SwitchableKey {
+        inner: Arc<dyn SigningKey>,
+        failing: Arc<AtomicBool>,
+    }
+
+    impl SigningKey for SwitchableKey {
+        fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            if self.failing.load(Ordering::Relaxed) {
+                return None;
+            }
+            self.inner.choose_scheme(offered)
+        }
+
+        fn algorithm(&self) -> SignatureAlgorithm {
+            self.inner.algorithm()
+        }
+    }
+
+    fn switchable_signer() -> (DeviceSigner, Arc<AtomicBool>) {
+        let signer = software_signer();
+        let failing = Arc::new(AtomicBool::new(false));
+        let key = SwitchableKey {
+            inner: signer.key(),
+            failing: failing.clone(),
+        };
+        (DeviceSigner::new(signer.point, Arc::new(key)), failing)
+    }
+
+    #[test]
+    fn a_failed_renewal_keeps_the_previous_certificate_only_until_it_expires() {
+        let (signer, failing) = switchable_signer();
+        let certificates = SelfSignedCertificates::new(signer, at(NOW)).unwrap();
+        let first = certificates.current();
+        failing.store(true, Ordering::Relaxed);
+
+        let after_failed_renewal = certificates.certified_key_at(at(NOW + 1800)).unwrap();
+        let last_valid_second = certificates.certified_key_at(at(NOW + 3599)).unwrap();
+        let expired = certificates.certified_key_at(at(NOW + 3600)).unwrap_err();
+
+        assert!(Arc::ptr_eq(&after_failed_renewal, &first));
+        assert!(Arc::ptr_eq(&last_valid_second, &first));
+        assert_eq!(
+            expired,
+            ExpiredCertificate {
+                not_after: (NOW + 3600) as i64,
+                renewal: IssueError::NoScheme,
+            }
+        );
+        assert_eq!(
+            expired.to_string(),
+            "the self-signed client certificate expired at 2028-01-01T01:00:00Z and \
+             renewing it failed: the device key cannot sign with ECDSA P-256 SHA-256"
+        );
+        failing.store(false, Ordering::Relaxed);
+        let renewed = certificates.certified_key_at(at(NOW + 3700)).unwrap();
+        assert_ne!(renewed.cert, first.cert);
+        assert!(Arc::ptr_eq(&renewed, &certificates.current()));
     }
 }

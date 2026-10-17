@@ -28,9 +28,16 @@ Gateinto cannot make an upstream trust it.
 - Every start issues a new certificate. A running proxy also issues a new one
   when the upstream asks for a client certificate and the current certificate
   was issued 30 minutes or more earlier (half its validity). The renewal is
-  logged at `info` with the SHA-256 of the new certificate. If a renewal fails,
-  a warning is logged and the previous certificate is sent; once it has expired
-  the upstream may reject it.
+  logged at `info` with the SHA-256 of the new certificate. If a renewal fails
+  while the previous certificate is still valid, a warning is logged and the
+  previous certificate is sent. An expired certificate is never sent: once the
+  previous certificate's NotAfter has been reached and a renewal fails, no
+  certificate is available. With `required`, every new upstream connection
+  then first retries the renewal and, if it fails again, fails locally before
+  connecting; the proxy answers `502` and logs the error, and `check-upstream`
+  exits with it. With `optional`, a warning is logged and the handshake
+  continues without a client certificate, as when none could be loaded at
+  startup. Each later connection tries the renewal again.
 
 ## The key and the signatures
 
@@ -137,11 +144,14 @@ NotAfter time, `source=self-signed` and the key backend.
   field above, that two certificates share the SPKI and differ in DER,
   fingerprint and serial, that the signature verifies with `rustls-webpki`
   (validity boundaries included), that a key not matching the public key or
-  unable to sign ECDSA P-256 SHA-256 is refused, and the renewal after 30
-  minutes. `tests/mtls.rs` runs the proxy twice against an upstream fixture
-  that trusts the SPKI, with a software test key, and checks two different
-  certificates with the same SPKI; an upstream trusting another SPKI rejects
-  the handshake. `tests/check_upstream.rs` checks the report lines.
+  unable to sign ECDSA P-256 SHA-256 is refused, the renewal after 30
+  minutes, and that after failed renewals the previous certificate is used
+  only until it expires. `tests/mtls.rs` runs the proxy twice against an
+  upstream fixture that trusts the SPKI, with a software test key, and checks
+  two different certificates with the same SPKI; an upstream trusting another
+  SPKI rejects the handshake. With an expired certificate whose renewal fails,
+  `required` fails without connecting and `optional` connects without a
+  client certificate. `tests/check_upstream.rs` checks the report lines.
 - An issued certificate was also inspected once with OpenSSL 3.0.13
   (`openssl x509 -text`, and `openssl verify -purpose sslclient` with the
   certificate as its own CA, which reported `OK`). This is not part of the

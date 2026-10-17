@@ -364,7 +364,10 @@ usage `clientAuth`, and the device key's public key. The device key signs the
 certificate and the TLS `CertificateVerify` through CNG; there is no other
 private key, and the certificate is never written to disk or to a store. A
 running proxy issues a new certificate when the upstream asks for one and the
-current certificate is 30 minutes or older.
+current certificate is 30 minutes or older. An expired certificate is never
+sent: if renewing fails after the current one has expired, `required` fails
+each upstream connection locally and `optional` connects without a client
+certificate.
 
 Every certificate has a different serial number, DER and fingerprint, but the
 same SubjectPublicKeyInfo. The upstream therefore has to identify the device by

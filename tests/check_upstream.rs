@@ -228,7 +228,10 @@ async fn reports_the_self_signed_client_certificate_and_the_device_key() {
     let setup = Setup::start(config, ca, Behavior::Tunnel).await;
     let mut options = setup.options(TlsMode::HybridPreferred);
     options.target = Some(authority(echo_server().await));
-    options.client_certificate = Some(ClientCertificate::SelfSigned(certificates.clone()));
+    options.client_certificate = Some(ClientCertificate::SelfSigned {
+        certificates: certificates.clone(),
+        required: true,
+    });
 
     let report = check_upstream(options).await.unwrap();
 
