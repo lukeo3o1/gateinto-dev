@@ -9,7 +9,6 @@ use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use crate::http::is_token;
 
 const MAX_ENCODED_BYTES: usize = 1024;
-const MAX_DECODED_BYTES: usize = MAX_ENCODED_BYTES / 4 * 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FailureLimit {
@@ -28,8 +27,10 @@ impl Default for FailureLimit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
+    Bound,
     Accepted,
     Challenge,
+    Rejected,
     Malformed,
     RateLimited { retry_after: Duration },
 }
@@ -92,11 +93,14 @@ impl BasicTofu {
         let verdict = match parse_basic(authorization) {
             Ok(credential) => {
                 let tag = hmac::sign(&self.key, &credential);
-                let bound = self.bound.get_or_init(|| tag);
+                if self.bound.set(tag).is_ok() {
+                    return Verdict::Bound;
+                }
+                let bound = self.bound.get().expect("set above if it was empty");
                 if verify_slices_are_equal(bound.as_ref(), tag.as_ref()).is_ok() {
                     return Verdict::Accepted;
                 }
-                Verdict::Challenge
+                Verdict::Rejected
             }
             Err(Rejection::Scheme) => Verdict::Challenge,
             Err(Rejection::Malformed) => Verdict::Malformed,
@@ -133,7 +137,7 @@ fn parse_basic(value: &[u8]) -> Result<Vec<u8>, Rejection> {
 }
 
 fn decode_base64(encoded: &[u8]) -> Option<Vec<u8>> {
-    if encoded.is_empty() || encoded.len() % 4 != 0 {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(4) {
         return None;
     }
     let padding = encoded.iter().rev().take_while(|&&b| b == b'=').count();
@@ -173,6 +177,8 @@ fn sextet(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MAX_DECODED_BYTES: usize = MAX_ENCODED_BYTES / 4 * 3;
 
     const LIMIT: FailureLimit = FailureLimit {
         max_failures: 3,
@@ -276,10 +282,10 @@ mod tests {
     #[test]
     fn the_first_credential_binds_and_only_it_is_accepted_afterwards() {
         let tofu = BasicTofu::new(LIMIT).unwrap();
+        assert_eq!(check(&tofu, &basic("alice:first")), Verdict::Bound);
         assert_eq!(check(&tofu, &basic("alice:first")), Verdict::Accepted);
-        assert_eq!(check(&tofu, &basic("alice:first")), Verdict::Accepted);
-        assert_eq!(check(&tofu, &basic("alice:other")), Verdict::Challenge);
-        assert_eq!(check(&tofu, &basic("bob:first")), Verdict::Challenge);
+        assert_eq!(check(&tofu, &basic("alice:other")), Verdict::Rejected);
+        assert_eq!(check(&tofu, &basic("bob:first")), Verdict::Rejected);
         assert_eq!(check(&tofu, &basic("alice:first")), Verdict::Accepted);
     }
 
@@ -289,7 +295,7 @@ mod tests {
         let token = encode(b"u:p");
         assert_eq!(
             check(&tofu, format!("bAsIc {token}").as_bytes()),
-            Verdict::Accepted
+            Verdict::Bound
         );
         assert_eq!(
             check(&tofu, format!("BASIC {token}").as_bytes()),
@@ -314,7 +320,7 @@ mod tests {
         }
         assert_eq!(
             check(&tofu, &basic("u:p")),
-            Verdict::Accepted,
+            Verdict::Bound,
             "nothing was bound"
         );
     }
@@ -347,7 +353,7 @@ mod tests {
                 String::from_utf8_lossy(&header)
             );
         }
-        assert_eq!(check(&tofu, &basic(":p")), Verdict::Accepted);
+        assert_eq!(check(&tofu, &basic(":p")), Verdict::Bound);
     }
 
     #[test]
@@ -355,11 +361,11 @@ mod tests {
         let tofu = BasicTofu::new(LIMIT).unwrap();
         assert_eq!(
             check(&tofu, &basic("j\u{f6}rg:p:a:ss \u{e9}")),
-            Verdict::Accepted
+            Verdict::Bound
         );
         let longest = format!("u:{}", "p".repeat(MAX_DECODED_BYTES - 2));
         let tofu = BasicTofu::new(LIMIT).unwrap();
-        assert_eq!(check(&tofu, &basic(&longest)), Verdict::Accepted);
+        assert_eq!(check(&tofu, &basic(&longest)), Verdict::Bound);
     }
 
     #[test]
@@ -385,7 +391,7 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     .filter_map(|(i, handle)| {
-                        (handle.join().unwrap() == Verdict::Accepted).then_some(i)
+                        (handle.join().unwrap() == Verdict::Bound).then_some(i)
                     })
                     .collect()
             });
@@ -395,7 +401,7 @@ mod tests {
                 let expected = if i == winner {
                     Verdict::Accepted
                 } else {
-                    Verdict::Challenge
+                    Verdict::Rejected
                 };
                 assert_eq!(check(&tofu, &basic(&format!("u:{i}"))), expected);
             }
@@ -406,13 +412,10 @@ mod tests {
     fn failures_beyond_the_limit_are_rate_limited_until_the_window_ends() {
         let tofu = BasicTofu::new(LIMIT).unwrap();
         let start = Instant::now();
-        assert_eq!(
-            tofu.check(Some(&basic("u:right")), start),
-            Verdict::Accepted
-        );
+        assert_eq!(tofu.check(Some(&basic("u:right")), start), Verdict::Bound);
         assert_eq!(
             tofu.check(Some(&basic("u:wrong")), start),
-            Verdict::Challenge
+            Verdict::Rejected
         );
         assert_eq!(tofu.check(Some(b"Basic !"), start), Verdict::Malformed);
         assert_eq!(tofu.check(None, start), Verdict::Challenge, "not a failure");
@@ -445,7 +448,7 @@ mod tests {
         );
         assert_eq!(
             tofu.check(Some(&basic("u:wrong")), reset),
-            Verdict::Challenge
+            Verdict::Rejected
         );
         assert_eq!(
             tofu.check(Some(&basic("u:right")), reset),
@@ -457,7 +460,7 @@ mod tests {
     fn rate_limiting_does_not_accept_the_bound_credential_after_a_flood() {
         let tofu = BasicTofu::new(LIMIT).unwrap();
         let now = Instant::now();
-        assert_eq!(tofu.check(Some(&basic("u:right")), now), Verdict::Accepted);
+        assert_eq!(tofu.check(Some(&basic("u:right")), now), Verdict::Bound);
         for _ in 0..LIMIT.max_failures {
             tofu.check(Some(&basic("u:guess")), now);
         }

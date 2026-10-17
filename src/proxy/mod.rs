@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::RootCertStore;
 use rustls::pki_types::{ServerName, UnixTime};
@@ -28,6 +28,7 @@ mod basic_tofu;
 mod relay;
 
 pub use basic_tofu::FailureLimit;
+use basic_tofu::{BasicTofu, Verdict};
 
 pub const DEFAULT_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18736));
@@ -40,6 +41,7 @@ pub struct Limits {
     pub idle_timeout: Duration,
     pub max_pending_rejects: usize,
     pub reject_linger: Duration,
+    pub local_auth_failures: FailureLimit,
 }
 
 impl Default for Limits {
@@ -51,6 +53,7 @@ impl Default for Limits {
             idle_timeout: Duration::from_secs(300),
             max_pending_rejects: 64,
             reject_linger: Duration::from_secs(1),
+            local_auth_failures: FailureLimit::default(),
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct Upstream {
 pub enum LocalAuth {
     #[default]
     None,
+    BasicTofu,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +87,7 @@ pub struct Config {
 #[derive(Debug)]
 pub enum Error {
     NonLoopbackListen(SocketAddr),
+    Random,
     Tls(rustls::Error),
     Io(io::Error),
 }
@@ -94,6 +99,7 @@ impl fmt::Display for Error {
                 f,
                 "refusing to listen on non-loopback address {addr}; pass --unsafe-allow-non-loopback-listen to override"
             ),
+            Self::Random => f.write_str("the system random number generator failed"),
             Self::Tls(error) => write!(f, "invalid upstream TLS configuration: {error}"),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -177,7 +183,7 @@ pub(crate) async fn request_tunnel<T>(
 
 struct Shared {
     endpoint: Endpoint,
-    local_auth: LocalAuth,
+    basic_tofu: Option<BasicTofu>,
     limits: Limits,
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
@@ -196,6 +202,12 @@ impl Proxy {
             )),
         )
         .map_err(Error::Tls)?;
+        let basic_tofu = match config.local_auth {
+            LocalAuth::None => None,
+            LocalAuth::BasicTofu => {
+                Some(BasicTofu::new(config.limits.local_auth_failures).map_err(|_| Error::Random)?)
+            }
+        };
         let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
         let tunnels = Arc::new(Semaphore::new(
             config.limits.max_tunnels.min(Semaphore::MAX_PERMITS),
@@ -208,7 +220,7 @@ impl Proxy {
         ));
         let shared = Shared {
             endpoint,
-            local_auth: config.local_auth,
+            basic_tofu,
             limits: config.limits,
             tunnels,
             rejects,
@@ -223,6 +235,10 @@ impl Proxy {
         self.listener
             .local_addr()
             .expect("a bound listener has a local address")
+    }
+
+    pub fn realm(&self) -> Option<&str> {
+        self.shared.basic_tofu.as_ref().map(BasicTofu::realm)
     }
 
     pub async fn run(self) {
@@ -293,15 +309,42 @@ impl Shared {
         let limits = &self.limits;
         let request = read_head(&mut client, limits.max_header_bytes, parse_connect_request);
         let (request, client_early) = match timeout(limits.handshake_timeout, request).await {
-            Err(_) => return reject(client, Status::RequestTimeout, limits.reject_linger).await,
+            Err(_) => {
+                return reject(client, Status::RequestTimeout, limits.reject_linger).await;
+            }
             Ok(Err(error)) => {
                 debug!(?error, "invalid request");
                 return reject(client, error.local_status(), limits.reject_linger).await;
             }
             Ok(Ok(request)) => request,
         };
-        match self.local_auth {
-            LocalAuth::None => {}
+        if let Some(tofu) = &self.basic_tofu {
+            let authorization = request.proxy_authorization.as_deref();
+            let status = match tofu.check(authorization, Instant::now()) {
+                Verdict::Bound => {
+                    info!("bound the first local proxy credential to this session");
+                    None
+                }
+                Verdict::Accepted => None,
+                Verdict::Challenge => Some(Status::ProxyAuthenticationRequired),
+                Verdict::Rejected => {
+                    warn!("local proxy credential differs from the one bound to this session");
+                    Some(Status::ProxyAuthenticationRequired)
+                }
+                Verdict::Malformed => {
+                    warn!("malformed local proxy credential");
+                    Some(Status::BadRequest)
+                }
+                Verdict::RateLimited { retry_after } => {
+                    warn!("local proxy authentication rate limited");
+                    Some(Status::TooManyRequests { retry_after })
+                }
+            };
+            if let Some(status) = status {
+                debug!(?status, "rejecting");
+                let response = status.response_in(tofu.realm());
+                return reject_with(client, &response, limits.reject_linger).await;
+            }
         }
         let target = request.target;
         debug!(%target, "opening tunnel");
@@ -445,6 +488,8 @@ impl fmt::Display for UpstreamError {
 #[derive(Debug, Clone, Copy)]
 enum Status {
     BadRequest,
+    ProxyAuthenticationRequired,
+    TooManyRequests { retry_after: Duration },
     Forbidden,
     MethodNotAllowed,
     RequestTimeout,
@@ -456,8 +501,14 @@ enum Status {
 
 impl Status {
     fn response(self) -> String {
+        self.response_in("")
+    }
+
+    fn response_in(self, realm: &str) -> String {
         let (code, reason) = match self {
             Self::BadRequest => (400, "Bad Request"),
+            Self::ProxyAuthenticationRequired => (407, "Proxy Authentication Required"),
+            Self::TooManyRequests { .. } => (429, "Too Many Requests"),
             Self::Forbidden => (403, "Forbidden"),
             Self::MethodNotAllowed => (405, "Method Not Allowed"),
             Self::RequestTimeout => (408, "Request Timeout"),
@@ -466,24 +517,30 @@ impl Status {
             Self::ServiceUnavailable => (503, "Service Unavailable"),
             Self::GatewayTimeout => (504, "Gateway Timeout"),
         };
-        let allow = match self {
-            Self::MethodNotAllowed => "Allow: CONNECT\r\n",
-            _ => "",
+        let extra = match self {
+            Self::MethodNotAllowed => "Allow: CONNECT\r\n".to_owned(),
+            Self::ProxyAuthenticationRequired => {
+                format!("Proxy-Authenticate: Basic realm=\"{realm}\", charset=\"UTF-8\"\r\n")
+            }
+            Self::TooManyRequests { retry_after } => {
+                let seconds = retry_after.as_millis().div_ceil(1000).max(1);
+                format!("Retry-After: {seconds}\r\n")
+            }
+            _ => String::new(),
         };
-        format!("HTTP/1.1 {code} {reason}\r\n{allow}Connection: close\r\nContent-Length: 0\r\n\r\n")
+        format!("HTTP/1.1 {code} {reason}\r\n{extra}Connection: close\r\nContent-Length: 0\r\n\r\n")
     }
 }
 
 const LINGER_BYTES: usize = 64 * 1024;
 
-async fn reject(mut stream: TcpStream, status: Status, linger: Duration) {
+async fn reject(stream: TcpStream, status: Status, linger: Duration) {
     debug!(?status, "rejecting");
-    if stream
-        .write_all(status.response().as_bytes())
-        .await
-        .is_err()
-        || stream.shutdown().await.is_err()
-    {
+    reject_with(stream, &status.response(), linger).await;
+}
+
+async fn reject_with(mut stream: TcpStream, response: &str, linger: Duration) {
+    if stream.write_all(response.as_bytes()).await.is_err() || stream.shutdown().await.is_err() {
         return;
     }
     // Closing with unread input makes the kernel send RST, which can discard the response before

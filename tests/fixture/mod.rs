@@ -614,3 +614,37 @@ pub async fn read_to_end_within(stream: &mut TcpStream, limit: Duration) -> Vec<
     }
     received
 }
+
+pub fn connect_with(target: &str, authorization: Option<&str>) -> Vec<u8> {
+    let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+    if let Some(value) = authorization {
+        request.push_str(&format!("Proxy-Authorization: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.into_bytes()
+}
+
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+pub fn basic(user: &str, password: &str) -> String {
+    format!("Basic {}", base64(format!("{user}:{password}").as_bytes()))
+}
