@@ -32,8 +32,8 @@ impl fmt::Display for ServiceAccount {
         write!(
             f,
             "refusing to run as {} ({}): the device key belongs to the Windows user who uses \
-             Gateinto, so run `gateinto setup` as that user, not from an installer, a service or \
-             a scheduled task running as a service account",
+             Gateinto, so run `gateinto setup` or `gateinto key init` as that user, not from \
+             an installer, a service or a scheduled task running as a service account",
             self.name, self.sid
         )
     }
@@ -226,8 +226,9 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "refusing to run as LocalSystem (S-1-5-18): the device key belongs to the Windows \
-             user who uses Gateinto, so run `gateinto setup` as that user, not from an installer, \
-             a service or a scheduled task running as a service account"
+             user who uses Gateinto, so run `gateinto setup` or `gateinto key init` as that \
+             user, not from an installer, a service or a scheduled task running as a service \
+             account"
         );
     }
 
