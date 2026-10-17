@@ -1,7 +1,49 @@
 # Windows 7 feasibility
 
 Feasibility study, not a release gate. Windows 7 is experimental and
-unsupported. Recorded on 2026-10-16.
+unsupported. Recorded on 2026-10-16, updated on 2026-10-17.
+
+The regular releases, `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc`,
+require Windows 10 or later: Rust std for those targets needs Windows 10. They
+do not start on Windows 7. The only Windows 7 candidates are the experimental
+`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` artifacts of
+[windows7.yml](../.github/workflows/windows7.yml), and neither has been run on
+Windows 7.
+
+## Observed failure on Windows 7
+
+A user ran a regular release build of `gateinto.exe` on Windows 7 (most likely
+32-bit, so the `i686-pc-windows-msvc` zip) and the loader refused to start it:
+
+```text
+The procedure entry point Tbsi_GetDeviceInfo could not be located in the dynamic link library tbs.dll.
+```
+
+`Tbsi_GetDeviceInfo` first shipped with Windows 8, and the TPM probe in
+`src/identity/windows_cng.rs` imported it statically. The regular builds would
+not have run on Windows 7 even without it, because of Rust std. The win7
+artifact had the same import: the workflow's deny-list of Windows 8+ names did
+not include `Tbsi_GetDeviceInfo`, so the job passed. It also missed
+`bcrypt.dll!BCryptHash`, a Windows 10 function imported by
+`rustls_cng::signer::CngSigningKey`.
+
+Fixes:
+
+- `Tbsi_GetDeviceInfo` is now loaded at runtime with
+  `LoadLibraryExW("tbs.dll", LOAD_LIBRARY_SEARCH_SYSTEM32)` and `GetProcAddress`.
+  When it is missing, the TPM probe reports `TPM Base Services device info
+  unavailable (Windows 7 or earlier)`. A not-ready TPM provider is then treated
+  as unavailable, so `key init` falls back to the Software KSP, or fails with
+  that reason when fallback is disabled. On Windows 8 and later the probe
+  behaves as before.
+- TLS client authentication and certificate signing no longer use
+  `CngSigningKey`. Gateinto hashes with aws-lc-rs, signs the SHA-256 digest with
+  `NCryptSignHash`, and encodes the signature as DER
+  (`src/identity/p256_signer.rs`), so `BCryptHash` is no longer referenced.
+- The workflow now fails on any static import that is not in an allow-list of
+  functions that exist on Windows 7 SP1 (see [CI](#build-attempt)).
+
+None of this has been run on Windows 7 yet.
 
 ## Goal
 
@@ -48,23 +90,44 @@ cargo +nightly-2026-09-15 build -Z build-std=std,panic_abort --target x86_64-win
 dumpbin /nologo /imports target\x86_64-win7-windows-msvc\release\gateinto.exe
 ```
 
-NASM and CMake are not needed: `rustls`'s `aws_lc_rs` feature enables
-`aws-lc-rs/prebuilt-nasm`, and `aws-lc-sys` uses its `cc` builder when the
-universal bindings apply. The build log should contain the `aws-lc-sys` warning
+For `x86_64-win7-windows-msvc`, NASM and CMake are not needed: `rustls`'s
+`aws_lc_rs` feature enables `aws-lc-rs/prebuilt-nasm`, and `aws-lc-sys` uses its
+`cc` builder when the universal bindings apply. `i686-win7-windows-msvc` builds
+the same way, with `--target i686-win7-windows-msvc`, but needs NASM on `PATH`:
+prebuilt NASM objects exist only for `x86_64`, and the 32-bit sources are
+assembled with `nasm -f win32`. The build log should contain the `aws-lc-sys` warning
 `Setting _WIN32_WINNT to _WIN32_WINNT_WIN7 for x86_64-win7-windows-msvc target`;
 without it the binary uses `ProcessPrng` (see below).
 
 CI: [.github/workflows/windows7.yml](../.github/workflows/windows7.yml) runs the
-same build on `windows-latest` on `workflow_dispatch` and on pull requests that
-change the workflow or this document. It then runs `dumpbin /imports`, prints
-the imported DLLs, lists Windows 8+ API names found as strings in the binary
-(candidates for `GetProcAddress`), fails if a Windows 8+ API is in the static
-import table, and uploads `gateinto.exe` and `imports.txt` when the build
-succeeded. If the string scan finds `ProcessPrng`, the job emits a
-`ProcessPrng found` warning annotation but does not fail: AWS-LC loads
-`ProcessPrng` at runtime and would abort on Windows 7, so a green job is not
-evidence of Windows 7 compatibility. Check the annotations, not only the job
-status.
+same build for both `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` on
+`windows-latest`. It runs on `workflow_dispatch` and on pull requests that
+change the workflow, its scripts, `.cargo/config.toml`, `Cargo.toml`,
+`Cargo.lock`, `src/identity/**` or this document. The i686 job installs NASM
+2.16.03 with `ilammy/setup-nasm@v1`, as `ci.yml` does. Both jobs set
+`AWS_LC_SYS_CMAKE_BUILDER=0`: only the `cc` builder defines `_WIN32_WINNT=0x0601`
+for `-win7-windows-msvc` targets. Each job checks the static C runtime and runs
+`dumpbin /imports`. Then
+[assert-win7-imports.ps1](../.github/scripts/assert-win7-imports.ps1) fails the
+job in two cases:
+
+- a static import is not in
+  [win7-imports.txt](../.github/scripts/win7-imports.txt), an allow-list of
+  `dll function` pairs that exist on Windows 7 SP1;
+- `ProcessPrng` appears as a string in the binary (AWS-LC's runtime lookup,
+  which aborts on Windows 7).
+
+The audit also lists the other Windows 8+ names found as strings (candidates for
+`GetProcAddress`). Each job uploads its `gateinto.exe` and `imports.txt` as the
+artifact `gateinto-<target>` when the build succeeded.
+
+An allow-list replaced the old deny-list because the deny-list only caught the
+names someone thought of. `Tbsi_GetDeviceInfo` and `BCryptHash` got through it.
+The allow-list is the import table of the last x64 win7 build, minus those two.
+When a dependency update adds an import, the job fails until someone checks the
+function's minimum supported client and either adds it to the list or removes
+the import. The i686 import table has not been seen yet, so the first i686 run
+may report functions that exist on Windows 7 but are missing from the list.
 
 The workflow names its variables `NIGHTLY_TOOLCHAIN` and `WIN7_TARGET` because
 Windows environment variable names are case-insensitive: a workflow-level
@@ -98,6 +161,16 @@ name collision above, before any build.
 
 The static audit passing does not show that the binary runs on Windows 7.
 
+Run [39056727677](https://github.com/lukeo3o1/gateinto-dev/actions/runs/39056727677),
+job `x86_64-win7-windows-msvc`, commit `983f38a`: the build succeeded and the
+old audit passed. The import table lists `advapi32.dll`, `bcrypt.dll`,
+`crypt32.dll`, `kernel32.dll`, `ncrypt.dll`, `ntdll.dll`, `tbs.dll` and
+`ws2_32.dll`, and no `VCRUNTIME140.dll` or `api-ms-win-crt-*`, so the static C
+runtime applies to this target. It also lists `tbs.dll!Tbsi_GetDeviceInfo`
+(Windows 8) and `bcrypt.dll!BCryptHash` (Windows 10), so that binary would not
+have loaded on Windows 7. Run against this run's import table, the new audit
+reports exactly those two imports. With both removed, it passes.
+
 ## Dependency findings
 
 Versions are those in `Cargo.lock`. Only crates that reach the Windows binary
@@ -106,32 +179,35 @@ are listed, plus `getrandom`.
 | Crate | Version | Windows API concern | Win7 status | Evidence |
 | --- | --- | --- | --- | --- |
 | Rust std (`x86_64-win7-windows-msvc`) | `nightly-2026-09-15` | Tier 3: no upstream tests, needs nightly `-Z build-std`. The target replaces `ProcessPrng` with `RtlGenRandom`, `GetSystemTimePreciseAsFileTime` with `GetSystemTimeAsFileTime`, loads `WaitOnAddress` optionally with an NT keyed-event fallback, and uses SRW locks for `Mutex`, `RwLock` and `Condvar`. `SetThreadDescription` is also looked up at runtime. The CI string scan found exactly these optional names (`WaitOnAddress`, `WakeByAddressSingle` via `api-ms-win-core-synch-l1-2-0`, `GetSystemTimePreciseAsFileTime`, `SetThreadDescription`) and none in the import table. | risk (Tier 3, builds; fallbacks not run on Windows 7) | `library/std/src/sys/random/windows.rs`, `sys/pal/windows/c.rs`, `sys/pal/windows/compat.rs`, `sys/sync/{mutex,condvar,rwlock,thread_parking}/mod.rs` |
-| MSVC CRT | runner toolset | The recorded run linked `vcruntime140.dll` and the UCRT (`api-ms-win-crt-*`) dynamically, so Windows 7 SP1 would need the UCRT update (KB2999226) or a Visual C++ redistributable that still installs on Windows 7. `.cargo/config.toml` now sets `+crt-static` for every MSVC target, including this one, so later builds should import neither; the workflow now fails if they do, but no run has confirmed it yet. | risk (static CRT not yet confirmed for this target) | CI `imports.txt` of the recorded run: `VCRUNTIME140.dll` and nine `api-ms-win-crt-*-l1-1-0.dll`; [compatibility.md](compatibility.md#static-c-runtime) |
+| MSVC CRT | runner toolset | The first recorded run linked `vcruntime140.dll` and the UCRT (`api-ms-win-crt-*`) dynamically. `.cargo/config.toml` now sets `+crt-static` for every MSVC target, and run 39056727677 imports neither for `x86_64-win7-windows-msvc`, so the UCRT update is no longer needed. The i686 win7 build has not run yet. | ok for x64 by build evidence | CI `imports.txt` of run 38962289234 and the import table of run 39056727677; [compatibility.md](compatibility.md#static-c-runtime) |
 | `tokio` / `mio` | 1.53.3 / 1.2.4 | IOCP plus AFD polling: `NtCreateFile` on `\Device\Afd\Mio`, `NtDeviceIoControlFile` (`IOCTL_AFD_POLL`), `NtCancelIoFileEx`, `GetQueuedCompletionStatusEx`, `SetFileCompletionNotificationModes`, all Vista or later. `WSASocketW` is called with `WSA_FLAG_NO_HANDLE_INHERIT` and no fallback, a flag supported from Windows 7 SP1. | ok on SP1 | `mio-1.2.4/src/sys/windows/afd.rs`, `iocp.rs`, `net.rs:36` |
 | `socket2` | 0.6.5 | `WSA_FLAG_NO_HANDLE_INHERIT`, as above. | ok on SP1 | `socket2-0.6.5/src/sys/windows.rs` |
 | `aws-lc-sys` (AWS-LC) | 0.46.0 | Entropy: by default `LoadLibraryW("bcryptprimitives")` plus `GetProcAddress("ProcessPrng")`, which calls `abort()` on Windows 7 and does not show in the import table. With `_WIN32_WINNT <= 0x0601` it uses `BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)` from `bcrypt.dll` instead. The `cc` builder defines `_WIN32_WINNT=0x0601` for `-win7-windows-` targets; the CMake builder does so only for `-win7-windows-gnu`. Threads use `InitOnceExecuteOnce` and SRW locks (Windows 7 or later). CI build: `bcrypt.dll` imported and no `ProcessPrng` string in the binary, consistent with the `BCryptGenRandom` path. | ok by build evidence (not run on Windows 7) | `aws-lc/crypto/rand_extra/windows.c`, `builder/cc_builder.rs:445`, `builder/cmake_builder.rs:450`, `builder/main.rs` (`get_builder`, `is_bindgen_required`), `aws-lc/crypto/thread_win.c` |
 | `aws-lc-rs` | 1.18.2 | No Windows API of its own. The win7 target is not among the pre-generated binding targets, so the universal bindings are used; not a documented platform. | risk | `aws-lc-sys-0.46.0/builder/main.rs` (`supported_platform`), no `win7` in `aws-lc-rs-1.18.2` |
 | `rustls`, `rustls-webpki`, `tokio-rustls`, `webpki-roots` | 0.23.46, 0.103.15, 0.26.6, 1.0.9 | No OS API; TLS does not use SChannel, so no Windows TLS updates are needed. | ok | Source has no Windows FFI |
-| `rustls-cng` | 0.7.1 | `NCryptSignHash`, `NCryptGetProperty`, `NCryptSetProperty`, `NCryptFreeObject`, `Cert*`, `CryptAcquireCertificatePrivateKey`, `BCryptHash`: all Vista or later. | ok | `rustls-cng-0.7.1/src` |
+| `rustls-cng` | 0.7.1 | `NCryptSignHash`, `NCryptGetProperty`, `NCryptSetProperty`, `NCryptFreeObject`, `Cert*`: Vista or later. `CngSigningKey` hashes with `BCryptHash` and the `BCRYPT_SHA*_ALG_HANDLE` pseudo-handles, which need Windows 10, and was imported statically until Gateinto stopped using it. Unreferenced functions such as `CryptAcquireCertificatePrivateKey` do not reach the import table. | ok now that `CngSigningKey` is unused | `rustls-cng-0.7.1/src/signer.rs`; import table of run 39056727677 |
 | `windows-sys`, `windows-link` | 0.61.2, 0.2.1 | `raw-dylib` imports by DLL name. Every function used by the crates above maps to `kernel32`, `ntdll`, `ws2_32`, `ncrypt`, `crypt32` or `bcrypt`, not to API-set DLLs. | ok | `windows-link-0.2.1/src/lib.rs`, `link!` lines in `windows-sys-0.61.2/src` |
-| `gateinto` CNG key code | 0.1.0 | Software KSP (`Microsoft Software Key Storage Provider`) and `NCryptCreatePersistedKey` and related functions exist on Windows 7. The TPM key backend needs the `Microsoft Platform Crypto Provider`, which first shipped with Windows 8. | risk (TPM not available) | `src/identity/windows_cng.rs` |
+| `gateinto` CNG key code | 0.1.0 | Software KSP (`Microsoft Software Key Storage Provider`) and `NCryptCreatePersistedKey` and related functions exist on Windows 7. The TPM key backend needs the `Microsoft Platform Crypto Provider`, which first shipped with Windows 8. Opening it on Windows 7 is expected to fail with a "provider unavailable" status (`NTE_BAD_PROVIDER`, `NTE_PROV_DLL_NOT_FOUND`, `NTE_NOT_FOUND` and similar), which makes `key init` fall back to the Software KSP. An unrecognised status would stop `key init` with an error instead. `Tbsi_GetDeviceInfo` (Windows 8) is resolved at runtime. | risk (TPM not available; provider status on Windows 7 not observed) | `src/identity/windows_cng.rs`, `src/identity/cng_status.rs` |
 | `anstyle-query`, `anstyle-wincon` (clap) | 1.1.5, 3.0.11 | `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is rejected on Windows 7; the failure is handled and only disables colors. | ok | `anstyle-query-1.1.5/src/windows.rs` |
 | `getrandom` | 0.4.3, 0.2.17 | 0.4.3 is only a build-script dependency on the host (`jobserver` from `cc` from `aws-lc-sys`); 0.2.17 is in `Cargo.lock` but in no build graph. Neither reaches the binary. 0.4.3 would pick `windows_legacy` (`RtlGenRandom`) on win7. | ok | `cargo tree --target all -e all -i getrandom@…`, `getrandom-0.4.3/src/backends.rs:161` |
 
-No examined code uses `SetDefaultDllDirectories` or `LOAD_LIBRARY_SEARCH_*`, so
-KB2533623 (superseded by KB3063858) is not required by this evidence.
+Gateinto passes `LOAD_LIBRARY_SEARCH_SYSTEM32` to `LoadLibraryExW` when it
+loads `tbs.dll`. On Windows 7 without KB2533623 (superseded by KB3063858), that
+flag makes the call fail with `ERROR_INVALID_PARAMETER`. The probe then reports
+the device info as unavailable, which is the right answer on Windows 7 anyway,
+so the update is not required.
 
 ## Conclusion
 
 `partial`
 
-`gateinto.exe` builds and links for `x86_64-win7-windows-msvc` in CI and passes
-the static import audit: no Windows 8+ API in the import table, no `ProcessPrng`
-string, and the only Windows 8+ names found by the string scan are std's
-optional runtime lookups. Nothing has been run on Windows 7 SP1, the target is
-Tier 3, the recorded binary needed the UCRT and VC++ runtime there (the static
-C runtime setting added since is not yet confirmed for this target), and the
-TPM key storage provider does not exist on Windows 7.
+`gateinto.exe` builds and links for `x86_64-win7-windows-msvc` in CI. The builds
+recorded so far imported `Tbsi_GetDeviceInfo` and `BCryptHash`, so they would not
+have loaded on Windows 7. Both imports are removed now, and the allow-list audit
+fails if another import that Windows 7 lacks appears. Neither the fixed x64
+build nor any `i686-win7-windows-msvc` build has run in CI yet. Nothing has been
+run on Windows 7 SP1, the targets are Tier 3, and the TPM key storage provider
+does not exist on Windows 7, so only software keys can work there.
 
 ## Alternatives if blocked
 
@@ -149,18 +225,21 @@ TPM key storage provider does not exist on Windows 7.
 
 To reach `working`:
 
-1. Windows 7 SP1 x64 VM with all updates, including KB2999226 (UCRT) and
-   KB3063858.
-2. Copy `gateinto.exe` from the `gateinto-x86_64-win7-windows-msvc` artifact
-   of run 38962289234 (or a newer one), or rebuild with
-   [windows7.yml](../.github/workflows/windows7.yml) if the artifact has
-   expired, and check that it starts: `gateinto --help`.
+1. A Windows 7 SP1 machine or VM with all updates, 32-bit or x64 to match the
+   artifact.
+2. Copy `gateinto.exe` from the `gateinto-i686-win7-windows-msvc` (32-bit) or
+   `gateinto-x86_64-win7-windows-msvc` artifact of a passing
+   [windows7.yml](../.github/workflows/windows7.yml) run made after the fixes
+   above. Older artifacts import `Tbsi_GetDeviceInfo` and do not load. Check
+   that it starts: `gateinto --help`.
 3. Run `gateinto proxy --upstream-host <host> --upstream-port <port>` against a
    controlled upstream proxy and send
    `curl --proxy http://127.0.0.1:18736 https://example.com/` through it. The
    TLS 1.3 handshake to the upstream proxy exercises AWS-LC's `BCryptGenRandom`
    entropy path at runtime. Confirm in the upstream proxy's TLS log that
    `X25519MLKEM768` was negotiated.
-4. Run `gateinto key init --backend software` and `gateinto key info`, and
-   confirm that a software KSP key is created and reused.
+4. Run `gateinto setup` (or `gateinto key init`) without `--backend`, and
+   confirm that it creates a software KSP key with a "the TPM provider is
+   unavailable" warning instead of an error. Then run `gateinto key info` and
+   confirm the key is reused.
 5. Record the results here and replace the label above.
