@@ -13,7 +13,7 @@ use serde::de::{self, Deserializer, MapAccess, Visitor};
 use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
-use crate::proxy::DEFAULT_LISTEN;
+use crate::proxy::{DEFAULT_LISTEN, LocalAuth};
 use crate::tls::TlsMode;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -139,6 +139,7 @@ impl<'de> Deserialize<'de> for Gateways {
 pub struct DeviceSessionSection {
     pub gateway: Option<GatewayName>,
     pub listen: Option<SocketAddr>,
+    pub auth: Option<LocalAuth>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -224,6 +225,7 @@ pub struct Overrides {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub listen: SocketAddr,
+    pub device_session_auth: LocalAuth,
     pub gateway: GatewayProfile,
     pub device_key: DeviceKeySettings,
     pub limits: LimitSettings,
@@ -334,6 +336,7 @@ impl ConfigFile {
                 .listen
                 .or(self.device_session.listen)
                 .unwrap_or(DEFAULT_LISTEN),
+            device_session_auth: self.device_session.auth.unwrap_or_default(),
             gateway,
             device_key: self.device_key.merge(&overrides.device_key).settings(),
             limits: LimitSettings {
@@ -562,6 +565,7 @@ mod tests {
 [device_session]
 gateway = "office"
 listen = "127.0.0.2:8080"
+auth = "basic_tofu"
 
 [gateways.office]
 host = "proxy.example.test"
@@ -609,6 +613,7 @@ port = 443
             settings,
             Settings {
                 listen: "127.0.0.2:8080".parse().unwrap(),
+                device_session_auth: LocalAuth::BasicTofu,
                 gateway: GatewayProfile {
                     name: name("office"),
                     upstream: UpstreamSettings {
@@ -734,6 +739,25 @@ port = 443
         assert_eq!(settings.gateway.upstream.port, 443);
         assert_eq!(settings.gateway.tls_mode, TlsMode::HybridPreferred);
         assert_eq!(settings.listen, "127.0.0.2:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn the_device_session_auth_defaults_to_none() {
+        assert_eq!(
+            settings(MINIMAL).unwrap().device_session_auth,
+            LocalAuth::None
+        );
+        for (value, expected) in [
+            ("none", LocalAuth::None),
+            ("basic_tofu", LocalAuth::BasicTofu),
+        ] {
+            let text = format!("[device_session]\nauth = \"{value}\"\n{MINIMAL}");
+            assert_eq!(settings(&text).unwrap().device_session_auth, expected);
+        }
+        let error = ConfigFile::parse("[device_session]\nauth = \"basic\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("basic_tofu"), "{error}");
     }
 
     #[test]

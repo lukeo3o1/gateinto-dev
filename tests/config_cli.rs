@@ -448,3 +448,126 @@ fn proxy_refuses_several_gateways_without_a_device_session_gateway() {
         "{error}"
     );
 }
+
+struct BrowserSession {
+    _child: Child,
+    agent: SocketAddr,
+    realm: String,
+    stdout: Vec<String>,
+}
+
+async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSession {
+    let extra = args(extra);
+    tokio::task::spawn_blocking(move || {
+        let mut child = Child(
+            Command::new(env!("CARGO_BIN_EXE_gateinto"))
+                .args(["session", "browser", "--config"])
+                .arg(&config)
+                .args(&extra)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut lines = std::io::BufReader::new(child.0.stdout.take().unwrap()).lines();
+        let mut stdout = Vec::new();
+        let (mut agent, mut realm) = (None, None);
+        while agent.is_none() || realm.is_none() {
+            let line = lines
+                .next()
+                .expect("session exited before printing its listener")
+                .unwrap();
+            if let Some(addr) = line.strip_prefix("listen: ") {
+                agent = Some(addr.parse().unwrap());
+            }
+            if let Some(value) = line.strip_prefix("realm: ") {
+                realm = Some(value.to_owned());
+            }
+            stdout.push(line);
+        }
+        std::thread::spawn(move || lines.for_each(drop));
+        BrowserSession {
+            _child: child,
+            agent: agent.unwrap(),
+            realm: realm.unwrap(),
+            stdout,
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
+    let fixture = Fixture::new().await;
+    let target = echo_server().await.to_string();
+    let closed = unused_port().await.port();
+    let config = fixture.config(&format!(
+        "client_certificate = \"off\"\n\
+         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n\
+         [device_session]\ngateway = \"closed\"\nlisten = \"127.0.0.1:18736\"\n"
+    ));
+
+    let first = spawn_browser_session(config.clone(), &["--gateway", "main"]).await;
+    let second = spawn_browser_session(config, &["--gateway", "main"]).await;
+
+    for session in [&first, &second] {
+        assert!(session.agent.ip().is_loopback(), "{}", session.agent);
+        assert_ne!(session.agent.port(), 18736);
+        assert!(session.realm.starts_with("Gateinto "), "{}", session.realm);
+        assert!(
+            session.stdout.iter().any(|line| line == "gateway: main"),
+            "{:?}",
+            session.stdout
+        );
+    }
+    assert_ne!(first.agent, second.agent);
+    assert_ne!(first.realm, second.realm);
+
+    let (_, challenge) = send(first.agent, &connect_with(&target, None)).await;
+    assert_eq!(challenge.status, 407, "{}", challenge.head);
+    assert!(
+        challenge.head.contains(&format!(
+            "Proxy-Authenticate: Basic realm=\"{}\"",
+            first.realm
+        )),
+        "{}",
+        challenge.head
+    );
+    let mine = basic("me", "browser secret");
+    let (mut stream, response) = send(first.agent, &connect_with(&target, Some(&mine))).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    stream.write_all(b"browser").await.unwrap();
+    stream.shutdown().await.unwrap();
+    assert_eq!(
+        read_to_end_within(&mut stream, std::time::Duration::from_secs(5)).await,
+        b"browser"
+    );
+    let (_, other) = send(first.agent, &connect_with(&target, Some(&basic("me", "x")))).await;
+    assert_eq!(other.status, 407);
+    let (_, fresh) = send(
+        second.agent,
+        &connect_with(&target, Some(&basic("me", "x"))),
+    )
+    .await;
+    assert_eq!(fresh.status, 200, "{}", fresh.head);
+    for line in first.stdout.iter().chain(&second.stdout) {
+        assert!(!line.contains("browser secret"), "{line}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_applies_the_device_session_auth() {
+    let fixture = Fixture::new().await;
+    let target = echo_server().await.to_string();
+    let config = fixture.config(
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"basic_tofu\"\n",
+    );
+
+    let (_child, agent) = spawn_proxy(config, &[]).await;
+
+    let (_, challenge) = send(agent, &connect_with(&target, None)).await;
+    assert_eq!(challenge.status, 407, "{}", challenge.head);
+    let (_, response) = send(agent, &connect_with(&target, Some(&basic("d", "pw")))).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+}

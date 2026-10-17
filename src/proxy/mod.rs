@@ -66,7 +66,8 @@ pub struct Upstream {
     pub roots: RootCertStore,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LocalAuth {
     #[default]
     None,
