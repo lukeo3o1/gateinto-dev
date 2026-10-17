@@ -104,6 +104,7 @@ fn key_commands_require_windows() {
             "software",
             "--no-software-fallback",
         ],
+        &["key", "init", "--software-fallback"],
     ] {
         let (success, stderr) = gateinto(args);
         assert!(!success, "{args:?}");
@@ -199,4 +200,65 @@ fn proxy_rejects_an_unknown_tls_mode() {
     for mode in ["hybrid_preferred", "hybrid_required", "classical_only"] {
         assert!(stderr.contains(mode), "{stderr}");
     }
+}
+
+fn help(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+        .args(args)
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{args:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) {
+    let lines: Vec<&str> = help.lines().map(str::trim_start).collect();
+    let start = lines
+        .iter()
+        .position(|line| line.split_whitespace().next() == Some(flag))
+        .unwrap_or_else(|| panic!("{flag} missing from help:\n{help}"));
+    let entry: Vec<&str> = lines[start..]
+        .iter()
+        .enumerate()
+        .take_while(|(i, line)| *i == 0 || !line.starts_with('-'))
+        .map(|(_, line)| *line)
+        .collect();
+    assert!(
+        entry.join(" ").contains(&format!("[default: {default}]")),
+        "{flag} should document [default: {default}]:\n{help}"
+    );
+}
+
+#[test]
+fn help_defaults_match_the_real_defaults() {
+    use gateinto::config::{DeviceKeySettings, LimitSettings};
+    use gateinto::identity::client_cert::ClientCertificateMode;
+    use gateinto::identity::device_key::DEFAULT_KEY_NAME;
+    use gateinto::proxy::DEFAULT_LISTEN;
+    use gateinto::tls::TlsMode;
+
+    let limits = LimitSettings::default();
+    let device_key = DeviceKeySettings::default();
+    let client_certificate = format!("{:?}", ClientCertificateMode::default()).to_lowercase();
+
+    let proxy = help(&["proxy"]);
+    assert_flag_default(&proxy, "--listen", DEFAULT_LISTEN);
+    assert_flag_default(&proxy, "--max-tunnels", limits.max_concurrent_tunnels);
+    assert_flag_default(&proxy, "--max-header-bytes", limits.header_max_bytes);
+    assert_flag_default(
+        &proxy,
+        "--connect-timeout-secs",
+        limits.connect_timeout_seconds,
+    );
+    assert_flag_default(&proxy, "--idle-timeout-secs", limits.idle_timeout_seconds);
+    for upstream in [proxy, help(&["check-upstream"])] {
+        assert_flag_default(&upstream, "--tls-mode", TlsMode::default());
+        assert_flag_default(&upstream, "--client-certificate", &client_certificate);
+        assert_flag_default(&upstream, "--key-name", DEFAULT_KEY_NAME);
+    }
+    for command in ["init", "info"] {
+        assert_flag_default(&help(&["key", command]), "--name", DEFAULT_KEY_NAME);
+    }
+    assert_flag_default(&help(&["key", "init"]), "--backend", device_key.preferred);
 }
