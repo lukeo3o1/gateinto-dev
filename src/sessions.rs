@@ -16,12 +16,14 @@ use crate::proxy::{self, Proxy};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Device,
+    Browser,
 }
 
 impl fmt::Display for SessionKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Device => "device",
+            Self::Browser => "browser",
         })
     }
 }
@@ -68,6 +70,7 @@ pub struct Session {
     kind: SessionKind,
     gateway: GatewayName,
     local_addr: SocketAddr,
+    realm: Option<String>,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -87,6 +90,10 @@ impl Session {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    pub fn realm(&self) -> Option<&str> {
+        self.realm.as_deref()
     }
 
     async fn close(self) {
@@ -118,6 +125,7 @@ impl SessionManager {
             .await
             .map_err(SessionError::Proxy)?;
         let local_addr = proxy.local_addr();
+        let realm = proxy.realm().map(str::to_owned);
         let (close, closed) = oneshot::channel();
         let shutdown = async {
             let _ = closed.await;
@@ -128,6 +136,7 @@ impl SessionManager {
             kind: config.kind,
             gateway: config.gateway,
             local_addr,
+            realm,
             close,
             task,
         };
