@@ -3,7 +3,9 @@ use std::io::BufRead;
 use std::path::Path;
 
 use crate::config::ConfigFile;
-use crate::identity::device_key::{Backend, KeyName, SpkiConfirmation};
+use crate::identity::device_key::{
+    self, Backend, KeyName, KeyStore, PurgeError, PurgedKey, SpkiConfirmation,
+};
 use crate::proxy::DEFAULT_LISTEN;
 use crate::registration::{self, RegistrationError};
 
@@ -168,6 +170,37 @@ pub fn confirm_from(input: &mut impl BufRead, fingerprint: &str) -> bool {
     line.trim()
         .parse::<SpkiConfirmation>()
         .is_ok_and(|confirmation| confirmation.matches(fingerprint))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResetError {
+    Purge(PurgeError),
+    StopAgent(String),
+}
+
+impl fmt::Display for ResetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Purge(error) => write!(f, "{error}"),
+            Self::StopAgent(error) => write!(
+                f,
+                "stopping the running agent failed: {error}; nothing was deleted"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResetError {}
+
+pub async fn purge_device_identity<S: KeyStore>(
+    store: &S,
+    name: &KeyName,
+    confirmation: &SpkiConfirmation,
+    stop_agent: impl Future<Output = Result<(), String>>,
+) -> Result<PurgedKey, ResetError> {
+    drop(device_key::confirmed(store, name, confirmation).map_err(ResetError::Purge)?);
+    stop_agent.await.map_err(ResetError::StopAgent)?;
+    device_key::purge(store, name, confirmation).map_err(ResetError::Purge)
 }
 
 #[cfg(test)]

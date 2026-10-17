@@ -307,3 +307,138 @@ fn check_upstream_gateway_needs_a_configured_gateway() {
         "{stderr}"
     );
 }
+
+fn gateinto_without_terminal(args: &[&str]) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_gateinto"))
+        .args(args)
+        .env("GATEINTO_INSTANCE", format!("cli-{}", std::process::id()))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+const SPKI_PREFIX: &str = "0123456789abcdef";
+
+#[test]
+fn reset_requires_the_purge_flag() {
+    let (success, _, stderr) = gateinto_without_terminal(&["reset", "--confirm-spki", SPKI_PREFIX]);
+    assert!(!success);
+    assert!(stderr.contains("--purge-device-identity"), "{stderr}");
+}
+
+#[test]
+fn reset_rejects_a_short_or_non_hex_spki_confirmation() {
+    for value in ["0123456789abcde", "purge", "0123456789abcdeg", ""] {
+        let (success, _, stderr) = gateinto_without_terminal(&[
+            "reset",
+            "--purge-device-identity",
+            "--confirm-spki",
+            value,
+        ]);
+        assert!(!success, "{value}");
+        assert!(
+            stderr.contains("16 to 64 hexadecimal digits"),
+            "{value}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn reset_without_a_terminal_needs_confirm_spki_and_touches_nothing() {
+    let (success, stdout, stderr) =
+        gateinto_without_terminal(&["reset", "--purge-device-identity"]);
+    assert!(!success);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(
+        stderr,
+        "error: refusing to delete the device key without confirmation: no terminal to ask on; \
+         pass --confirm-spki with at least the first 16 hex digits of the spki-sha256 shown by \
+         `gateinto status`\n"
+    );
+}
+
+#[test]
+fn reset_deletes_a_config_file_only_when_named_with_config() {
+    let (success, _, stderr) = gateinto_without_terminal(&[
+        "reset",
+        "--purge-device-identity",
+        "--purge-config",
+        "--confirm-spki",
+        SPKI_PREFIX,
+    ]);
+    assert!(!success);
+    assert!(
+        stderr.contains("--purge-config deletes only the config file named with --config"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn reset_refuses_to_delete_a_file_that_is_not_a_gateinto_config() {
+    let path = std::env::temp_dir().join(format!("gateinto-not-config-{}.txt", std::process::id()));
+    std::fs::write(&path, "important = \"data\"\n").unwrap();
+    let (success, _, stderr) = gateinto_without_terminal(&[
+        "reset",
+        "--purge-device-identity",
+        "--purge-config",
+        "--config",
+        path.to_str().unwrap(),
+        "--confirm-spki",
+        SPKI_PREFIX,
+    ]);
+    let kept = path.exists();
+    let _ = std::fs::remove_file(&path);
+    assert!(!success);
+    assert!(kept);
+    assert!(stderr.contains("unknown field"), "{stderr}");
+}
+
+#[test]
+fn setup_and_status_check_the_config_before_touching_the_key() {
+    let path =
+        std::env::temp_dir().join(format!("gateinto-bad-config-{}.toml", std::process::id()));
+    std::fs::write(&path, "[gateways.main]\nport = \"x\"\n").unwrap();
+    for command in ["setup", "status"] {
+        let (success, stdout, stderr) =
+            gateinto_without_terminal(&[command, "--config", path.to_str().unwrap()]);
+        assert!(!success, "{command}");
+        assert!(!stdout.contains("device-key"), "{command}: {stdout}");
+        assert!(
+            stderr.contains(path.to_str().unwrap()),
+            "{command}: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn setup_requires_windows() {
+    let (success, _, stderr) = gateinto_without_terminal(&["setup"]);
+    assert!(!success);
+    assert!(
+        stderr.contains("device keys are only supported on Windows"),
+        "{stderr}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn status_is_read_only_and_reports_what_it_can() {
+    let (success, stdout, stderr) = gateinto_without_terminal(&["status"]);
+    assert!(success, "{stdout}{stderr}");
+    assert_eq!(
+        stdout,
+        "key-name: gateinto-device-v1\n\
+         device-key: unavailable: device keys are only supported on Windows\n\
+         config: none (pass --config to check a configuration file)\n\
+         device-session: none\n\
+         agent: not running\n\
+         uri-handler: not supported on this platform\n"
+    );
+}

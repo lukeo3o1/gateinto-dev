@@ -314,6 +314,72 @@ async fn sessions_can_be_closed_explicitly_and_stop_closes_the_rest() {
     assert!(output.failure().stderr.contains("no agent is running"));
 }
 
+async fn status(launcher: &Launcher) -> Vec<String> {
+    let config = launcher.config.to_str().unwrap().to_owned();
+    launcher
+        .run(&["status", "--config", &config])
+        .await
+        .success()
+        .lines()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes() {
+    let launcher = Launcher::new("").await;
+    let before = status(&launcher).await;
+    assert!(
+        before.contains(&"agent: not running".to_owned()),
+        "{before:?}"
+    );
+    let (lines, browser) = launcher.opened("main").await;
+
+    let after = status(&launcher).await;
+
+    assert!(
+        after.contains(&format!("config: {}", launcher.config.display())),
+        "{after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|line| line.starts_with("gateway: main: 127.0.0.1:")),
+        "{after:?}"
+    );
+    assert!(
+        after.contains(&"device-session: none".to_owned()),
+        "{after:?}"
+    );
+    assert!(after.contains(&"agent: running".to_owned()), "{after:?}");
+    assert!(listed(&after, &lines), "{after:?}");
+    let text = after.join("\n");
+    for secret in [PORTAL, "ca.pem", field(&lines, "realm")] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+    assert!(browser.profile().exists());
+    assert_eq!(launcher.list().await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_as_run_by_the_uninstaller_closes_sessions_and_profiles_and_tolerates_no_agent() {
+    let launcher = Launcher::new("").await;
+    let (_, browser) = launcher.opened("main").await;
+
+    launcher.run(&["stop"]).await.success();
+
+    assert!(!browser.profile().exists());
+    assert!(
+        status(&launcher)
+            .await
+            .contains(&"agent: not running".to_owned())
+    );
+    let output = launcher.run(&["stop"]).await;
+    assert!(
+        output.failure().stderr.contains("no agent is running"),
+        "{}",
+        output.stderr
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn profiles_left_behind_are_removed_when_the_agent_starts() {
     let launcher = Launcher::new("").await;

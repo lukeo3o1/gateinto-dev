@@ -248,7 +248,7 @@ impl fmt::Display for KeyError {
         match self {
             Self::NotFound(name) => write!(
                 f,
-                "no device key named \"{name}\"; run `gateinto key init` to create it"
+                "no device key named \"{name}\"; run `gateinto setup` to create it"
             ),
             Self::Duplicate(duplicate) => write!(
                 f,
@@ -514,11 +514,11 @@ impl fmt::Display for PurgeError {
 
 impl std::error::Error for PurgeError {}
 
-pub fn purge<S: KeyStore>(
+pub fn confirmed<S: KeyStore>(
     store: &S,
     name: &KeyName,
     confirmation: &SpkiConfirmation,
-) -> Result<PurgedKey, PurgeError> {
+) -> Result<DeviceKey<S::Key>, PurgeError> {
     let key = match find(store, name).map_err(PurgeError::Key)? {
         Found::One(key) => key,
         Found::Both { duplicate, .. } => {
@@ -533,6 +533,16 @@ pub fn purge<S: KeyStore>(
             confirmed: confirmation.as_str().to_owned(),
         });
     }
+    Ok(key)
+}
+
+pub fn purge<S: KeyStore>(
+    store: &S,
+    name: &KeyName,
+    confirmation: &SpkiConfirmation,
+) -> Result<PurgedKey, PurgeError> {
+    let key = confirmed(store, name, confirmation)?;
+    let fingerprint = key.fingerprint();
     let backend = key.backend;
     store
         .delete(key.key)
