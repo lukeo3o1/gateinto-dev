@@ -131,8 +131,9 @@ client-certificate: not requested
 `client-certificate` is `not requested`, `requested by the upstream, none sent`
 or `sent`. With `--self-signed-client-cert` three more lines follow it:
 `client-certificate-source: self-signed`, `client-certificate-sha256` (SHA-256
-of the issued certificate) and `device-key-spki-sha256` (SHA-256 of the device
-key's SubjectPublicKeyInfo, the same value as `spki-sha256` in `key info`). With `--target host:port` it also sends `CONNECT` for that target
+of the certificate sent in the handshake) and `device-key-spki-sha256` (SHA-256
+of the device key's SubjectPublicKeyInfo, the same value as `spki-sha256` in
+`key info`). With `--target host:port` it also sends `CONNECT` for that target
 and prints `connect-target` and the upstream's status line as
 `connect-status`; no upstream headers or body are printed, and the tunnel is
 closed right away. No keys or other secrets are printed.
