@@ -61,7 +61,25 @@ pub struct Parsed<T> {
 
 pub type ParseResult<T> = Result<Option<Parsed<T>>, ParseError>;
 
-pub fn parse_connect_request(buf: &[u8], max_header_bytes: usize) -> ParseResult<Authority> {
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConnectRequest {
+    pub target: Authority,
+    pub proxy_authorization: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for ConnectRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectRequest")
+            .field("target", &self.target)
+            .field(
+                "proxy_authorization",
+                &self.proxy_authorization.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+pub fn parse_connect_request(buf: &[u8], max_header_bytes: usize) -> ParseResult<ConnectRequest> {
     let Some(head_len) = head_len(buf, max_header_bytes)? else {
         return Ok(None);
     };
@@ -90,14 +108,25 @@ pub fn parse_connect_request(buf: &[u8], max_header_bytes: usize) -> ParseResult
         .filter(|field| field.name.eq_ignore_ascii_case(b"content-length"))
         .all(|field| field.value == b"0");
     if count(b"host") != 1
+        || count(b"proxy-authorization") > 1
         || count(b"transfer-encoding") != 0
         || count(b"content-length") > 1
         || !content_length_ok
     {
         return Err(ParseError::Malformed);
     }
-    let value = parse_authority(target).ok_or(ParseError::Malformed)?;
-    Ok(Some(Parsed { value, head_len }))
+    let target = parse_authority(target).ok_or(ParseError::Malformed)?;
+    let proxy_authorization = fields
+        .iter()
+        .find(|field| field.name.eq_ignore_ascii_case(b"proxy-authorization"))
+        .map(|field| field.value.to_vec());
+    Ok(Some(Parsed {
+        value: ConnectRequest {
+            target,
+            proxy_authorization,
+        },
+        head_len,
+    }))
 }
 
 pub fn parse_response(buf: &[u8], max_header_bytes: usize) -> ParseResult<u16> {
@@ -234,13 +263,20 @@ mod tests {
 
     const MAX: usize = DEFAULT_MAX_HEADER_BYTES;
 
-    fn request(buf: &[u8]) -> ParseResult<Authority> {
+    fn request(buf: &[u8]) -> ParseResult<ConnectRequest> {
         parse_connect_request(buf, MAX)
     }
 
     fn authority(target: &str) -> Result<Authority, ParseError> {
         let head = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
-        request(head.as_bytes()).map(|parsed| parsed.unwrap().value)
+        request(head.as_bytes()).map(|parsed| parsed.unwrap().value.target)
+    }
+
+    fn connect(target: Authority) -> ConnectRequest {
+        ConnectRequest {
+            target,
+            proxy_authorization: None,
+        }
     }
 
     fn name(host: &str, port: u16) -> Authority {
@@ -256,7 +292,7 @@ mod tests {
         assert_eq!(
             request(head),
             Ok(Some(Parsed {
-                value: name("example.com", 443),
+                value: connect(name("example.com", 443)),
                 head_len: head.len(),
             }))
         );
@@ -468,7 +504,10 @@ mod tests {
     #[test]
     fn accepts_valid_header_values() {
         let head = b"CONNECT a.test:1 HTTP/1.1\r\nHost: a.test:1\r\nUser-Agent:\tcurl/8 (x)\t \r\nX-Obs: caf\xc3\xa9\r\nX-Empty:\r\nProxy-Connection: Keep-Alive\r\n\r\n";
-        assert_eq!(request(head).unwrap().unwrap().value, name("a.test", 1));
+        assert_eq!(
+            request(head).unwrap().unwrap().value,
+            connect(name("a.test", 1))
+        );
     }
 
     #[test]
@@ -485,7 +524,8 @@ mod tests {
             request(b"CONNECT a.test:1 HTTP/1.1\r\nHOST: a.test:1\r\n\r\n")
                 .unwrap()
                 .unwrap()
-                .value,
+                .value
+                .target,
             name("a.test", 1)
         );
     }
@@ -510,6 +550,36 @@ mod tests {
             request(b"CONNECT a.test:1 HTTP/1.1\r\nHost: a.test:1\r\nContent-Length: 0\r\n\r\n")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn returns_the_proxy_authorization_value() {
+        let head = b"CONNECT a.test:1 HTTP/1.1\r\nHost: a.test:1\r\nproxy-authorization:  Basic dTpw \r\n\r\n";
+        assert_eq!(
+            request(head).unwrap().unwrap().value,
+            ConnectRequest {
+                target: name("a.test", 1),
+                proxy_authorization: Some(b"Basic dTpw".to_vec()),
+            }
+        );
+    }
+
+    #[test]
+    fn debug_output_redacts_the_proxy_authorization() {
+        let head = b"CONNECT a.test:1 HTTP/1.1\r\nHost: a.test:1\r\nProxy-Authorization: Basic c2VjcmV0OnB3\r\n\r\n";
+        let debug = format!("{:?}", request(head).unwrap().unwrap());
+        assert!(!debug.contains("c2VjcmV0OnB3"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+    }
+
+    #[test]
+    fn rejects_more_than_one_proxy_authorization() {
+        assert_eq!(
+            request(
+                b"CONNECT a.test:1 HTTP/1.1\r\nHost: a.test:1\r\nProxy-Authorization: Basic dTpw\r\nProxy-Authorization: Basic dTpw\r\n\r\n"
+            ),
+            Err(ParseError::Malformed)
         );
     }
 
