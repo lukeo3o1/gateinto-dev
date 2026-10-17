@@ -137,7 +137,10 @@ always compiled from scratch, and a release never writes a cache.
 The release workflow
 ([.github/workflows/release.yml](../.github/workflows/release.yml)) ran once
 via `workflow_dispatch` on a branch and produced the `x86_64-pc-windows-msvc`
-zip artifact. No release was created and no tag was pushed.
+zip artifact. No release was created and no tag was pushed. The workflow now
+also builds the MSI from the release `gateinto.exe` with
+`packaging/wix/build.ps1` and WiX 5.0.2 and attaches it with its `.sha256`;
+this step has not run yet.
 
 ### Static C runtime
 

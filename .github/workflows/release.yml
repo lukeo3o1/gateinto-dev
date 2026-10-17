@@ -11,6 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TARGET: x86_64-pc-windows-msvc
+  WIX_VERSION: '5.0.2'
 
 jobs:
   build:
@@ -54,6 +55,22 @@ jobs:
           Get-ChildItem dist
           Get-Content (Join-Path 'dist' "$zip.sha256")
           "package=$package" >> $env:GITHUB_OUTPUT
+      - name: Install WiX ${{ env.WIX_VERSION }}
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix exited with $LASTEXITCODE" }
+          Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
+      - name: Build the MSI
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+        run: |
+          $msi = "$env:PACKAGE.msi"
+          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" -Output (Join-Path $PWD "dist\$msi")
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path 'dist' $msi)).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText((Join-Path 'dist' "$msi.sha256"), "$hash  $msi`n")
+          Get-ChildItem dist
+          Get-Content (Join-Path 'dist' "$msi.sha256")
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.package }}

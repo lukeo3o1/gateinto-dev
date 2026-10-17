@@ -39,7 +39,8 @@ downgrade is refused.
 
 ## Build
 
-The MSI is not attached to releases yet; build it from a checkout. Requires the Rust toolchain, the .NET SDK and WiX v5:
+The release workflow builds the MSI from the release's `gateinto.exe` with the same `build.ps1` and
+WiX 5.0.2 and attaches it to the release. To build it from a checkout instead you need the Rust toolchain, the .NET SDK and WiX v5:
 
 ```powershell
 dotnet tool install --global wix --version 5.0.2
