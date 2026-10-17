@@ -136,6 +136,39 @@ network could use it and the identity behind it. Keep the default
 `--unsafe-allow-non-loopback-listen` only if you control who can reach the
 address. See [threat-model.md](threat-model.md).
 
+## Launch links and the agent
+
+Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
+`gateinto session close` and `gateinto stop`
+([protocol/launch-uri.md](protocol/launch-uri.md)):
+
+- `invalid launch URI: ...`: the link breaks a rule of the format; the
+  message names the rule. Nothing was started.
+- `unknown gateway "<name>"; configured gateways: ...`: the agent's
+  configuration file has no `[gateways.<name>]` table. The agent reads its
+  file once when it starts; after editing the file run `gateinto stop` so the
+  next launch starts a new agent.
+- `no agent is running`: from `session list`, `session close` or `stop`.
+  `gateinto open` starts one by itself.
+- `an agent is already running for this user at ...`: only one agent per user
+  (and per `GATEINTO_INSTANCE`) can run. Use `gateinto stop` to replace it.
+- `the agent exited (...) before accepting requests`: the agent started by
+  `open` could not start, usually because of the configuration file or a
+  device session that cannot listen. Run `gateinto agent --config <file>` in
+  a console to see the error.
+- `neither Chrome nor Edge was found`, or `browser executable ... not found`:
+  set `[browser] executable` to the browser's full path.
+- `too many launch requests` or `4 browser sessions are already open`: wait a
+  minute, or close sessions with `gateinto session list` and
+  `gateinto session close <id>`.
+- The window closed but `gateinto session list` still shows the session: the
+  browser process is still running (for example in the background). Close it
+  with `gateinto session close <id>`.
+- A directory is left in `%LOCALAPPDATA%\Gateinto\profiles`: a browser
+  process still held a file when the session closed, or the agent crashed.
+  The next agent start deletes it. Directories without Gateinto's marker file
+  are never deleted; remove those by hand.
+
 ## Windows 7
 
 Windows 7 is experimental and unsupported. See

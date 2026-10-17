@@ -86,12 +86,12 @@ that certificate. Other sessions are not affected.
 Kinds: `SessionKind::Device` is the long-running session for background
 programs, configured by `[device_session]` (or the command line); its local
 authentication is `[device_session] auth`, `none` by default.
-`gateinto proxy` starts exactly one device session and runs until it is
-stopped (Ctrl+C ends the process). `SessionKind::Browser` is a session for one
-browser: `gateinto session browser` starts one on `127.0.0.1:0` with
-`BasicTofu`, prints its port and realm and runs until Ctrl+C. Starting browser
-sessions from a `gateinto://` URI and launching the browser are not
-implemented yet.
+`gateinto proxy` starts exactly one device session and runs until Ctrl+C (or
+SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
+`SessionKind::Browser` is a session for one browser: `gateinto session
+browser` starts one on `127.0.0.1:0` with `BasicTofu`, prints its port and
+realm and runs until Ctrl+C, then closes it the same way. The agent (below)
+starts browser sessions for launch URIs and runs the device session too.
 
 ### Local proxy authentication (`basic_tofu`)
 
@@ -122,12 +122,80 @@ first credentials are ordered and exactly one binds. The upstream `CONNECT`
 is built from the target alone, so the local credential never reaches the
 upstream. `ConnectRequest`'s `Debug` output redacts the header value.
 
+## Agent, launch URIs and browser sessions
+
+```text
+ browser click: gateinto://connect?profile=office
+        |
+ Windows URL handler (HKCU\Software\Classes\gateinto)
+        |  "gateinto.exe" open --config "<file>" -- "%1"
+        v
+ gateinto open ---- uri::LaunchRequest (strict parse; invalid URI ends here)
+        |  "launch office basic_tofu\n"
+        |  named pipe \\.\pipe\gateinto-agent-<SID> (Unix socket in tests)
+        |  (no agent: spawn detached `gateinto agent --config <file>`, retry)
+        v
+ gateinto agent ---- agent::Agent
+        |  parse again, rate limit, session cap, profile lookup in its config
+        |-- SessionManager::start(Browser, 127.0.0.1:0, BasicTofu)
+        |-- browser::ProfileDir::create(<profiles>/<id>-<random>, marker)
+        |-- chrome.exe --user-data-dir=... --proxy-server=http://127.0.0.1:<port> ... <portal_url>
+        '-- watch task: browser exit or close request
+               -> SessionManager::close, delete marked profile directory
+```
+
+The full protocol, limits and guarantees are in
+[protocol/launch-uri.md](protocol/launch-uri.md).
+
+- `uri::LaunchRequest` parses `gateinto://connect?profile=...&auth=...&v=1`
+  into a `GatewayName` and a `LaunchAuth`. `LaunchRequest::new` holds the
+  value rules and is also used by the agent to parse IPC requests, so the
+  agent applies the same rules again instead of trusting `open`.
+- `ipc` holds the request and response types (`Request`, `Response`), their
+  one-line text encoding with size limits, the per-user `Endpoint` (a named
+  pipe named after the user's SID on Windows, a socket in a private directory
+  on Unix, both suffixed by `GATEINTO_INSTANCE` when it is set), the
+  `Server` that only one agent can bind, and `send` for clients.
+- `agent::Agent` owns a `SessionManager` and one watch task per browser
+  session. `Agent::serve` first deletes profile directories left by an
+  earlier agent, then accepts at most 8 connections at a time, answers one
+  request per connection and stops on `stop` or when its shutdown future
+  (Ctrl+C) completes, closing every session before it returns. Launches are
+  serialized; each is counted by a sliding-window limiter (5 per 60 s) and
+  refused beyond 4 open browser sessions. The `agent::Profiles` trait turns a
+  gateway name into the proxy configuration and `portal_url` of a browser
+  session; `main.rs` implements it with the loaded configuration file, the
+  tests with in-process fixtures. The agent forces the session to
+  `127.0.0.1:0` and `BasicTofu` whatever the profile says.
+- A browser's watch task waits for the browser process to exit or for a
+  close request (`close <id>`, `stop`, Ctrl+C), kills the browser in the
+  second case, closes the session, deletes the profile directory (retrying
+  for about 10 seconds) and removes itself. `close` and `stop` answer only
+  after that is done.
+- `browser` finds Chrome or Edge, builds the argument list, starts the
+  process without a shell (`tokio::process`, killed when the agent drops it)
+  and manages profile directories. A profile directory is deleted only if it
+  lies directly in the profiles directory, has the `<id>-<16 hex>` name, is
+  a real directory and holds the marker file with the exact marker content.
+- `registration` builds and recognizes the handler command and, on Windows,
+  writes and deletes `HKCU\Software\Classes\<scheme>` through `registry`
+  (thin `windows-sys` wrappers).
+- `gateinto open` (in `main.rs`) parses the URI first, then sends the
+  request; if no agent answers it starts one (Windows: `DETACHED_PROCESS`
+  and `CREATE_NEW_PROCESS_GROUP`, standard handles made non-inheritable; Unix:
+  a new process group) and retries with backoff for up to 30 seconds.
+
 ## Modules
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `key init`, `key info`), merging flags over the configuration file, logging setup, building `proxy::Config` and starting the device session or a browser session. |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles and their lookup by name, the device session's gateway, listen address and local authentication, flag-over-file merge, defaults, relative path resolution. |
+| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `uri register`, `uri unregister`, `key init`, `key info`), merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/uri.rs` | Strict parser for `gateinto://` launch URIs. |
+| `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
+| `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
+| `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
+| `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the device session's gateway, listen address and local authentication, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
@@ -220,13 +288,15 @@ Do not rely on these; they do not exist.
   (certificate request or enrollment protocol) instead of issuing and
   installing it by hand.
 - **Key rotation and deletion.** Commands to replace or delete the device key.
-- **Starting browser sessions from a URI.** No `gateinto://` URI handler and
-  no browser launch. `gateinto session browser` starts one browser session by
-  hand.
-- **Several sessions from the command line.** `gateinto proxy` and
-  `gateinto session browser` start one session each; more sessions in one
-  process exist only through the library (`SessionManager`), as used by the
-  tests.
+- **Installer and machine-wide URI registration.** `gateinto uri register`
+  only writes the current user's `HKCU` key, for development. There is no
+  installer, no `HKLM` registration and no code signing.
+- **Detecting closed browser windows.** The agent watches the browser process
+  it started, not its windows; see the limitations in
+  [protocol/launch-uri.md](protocol/launch-uri.md#browser-launch).
+- **Browsers other than Chrome and Edge.** Firefox and others are not looked
+  for; `[browser] executable` can name another Chromium-based browser that
+  accepts the same switches.
 
 See also [security-model.md](security-model.md),
 [threat-model.md](threat-model.md) and [verification.md](verification.md).
