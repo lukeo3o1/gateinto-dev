@@ -190,8 +190,8 @@ impl Agent {
             Request::List => Ok(self.list().await),
             Request::Close(id) => self.close(id).await.map(|()| Vec::new()),
             Request::Stop => {
-                self.close_all().await;
                 self.inner.stop.notify_one();
+                self.close_all().await;
                 Ok(Vec::new())
             }
         };

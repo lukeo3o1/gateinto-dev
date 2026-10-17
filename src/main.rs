@@ -648,14 +648,14 @@ async fn agent(args: ConfigArg) -> Result {
 }
 
 const AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+const AGENT_START_ATTEMPTS: u32 = 3;
 
 async fn open(args: OpenArgs) -> Result {
     let request = Request::Launch(args.uri.parse::<LaunchRequest>()?);
     let endpoint = Endpoint::for_current_user()?;
     let response = match ipc::send(&endpoint, &request).await {
-        Err(RequestError::NotRunning) => {
-            let mut child = spawn_agent(args.config.config.as_deref())?;
-            wait_for_agent(&endpoint, &request, &mut child).await?
+        Err(RequestError::NotRunning | RequestError::Closed) => {
+            start_agent_and_send(&endpoint, &request, args.config.config.as_deref()).await?
         }
         result => result?,
     };
@@ -702,26 +702,34 @@ fn stop_inheriting_standard_handles() {
     }
 }
 
-async fn wait_for_agent(
+async fn start_agent_and_send(
     endpoint: &Endpoint,
     request: &Request,
-    child: &mut std::process::Child,
+    config: Option<&Path>,
 ) -> Result<Response> {
     let deadline = Instant::now() + AGENT_START_TIMEOUT;
+    let mut child = spawn_agent(config)?;
+    let mut started = 1;
     let mut delay = Duration::from_millis(25);
     loop {
         tokio::time::sleep(delay).await;
         let exited = child.try_wait()?;
-        match ipc::send(endpoint, request).await {
-            Err(RequestError::NotRunning) => {}
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let limit = remaining.max(Duration::from_secs(1));
+        match ipc::send_with_timeout(endpoint, request, limit).await {
+            Err(RequestError::NotRunning | RequestError::Closed) => {}
             result => return Ok(result?),
         }
         if let Some(status) = exited {
-            return Err(format!(
-                "the agent exited ({status}) before accepting requests; run `gateinto agent` \
-                 to see why"
-            )
-            .into());
+            if started == AGENT_START_ATTEMPTS {
+                return Err(format!(
+                    "the agent exited ({status}) before accepting requests; run `gateinto agent` \
+                     to see why"
+                )
+                .into());
+            }
+            child = spawn_agent(config)?;
+            started += 1;
         }
         if Instant::now() >= deadline {
             return Err(format!(
