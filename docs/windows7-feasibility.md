@@ -106,7 +106,7 @@ are listed, plus `getrandom`.
 | Crate | Version | Windows API concern | Win7 status | Evidence |
 | --- | --- | --- | --- | --- |
 | Rust std (`x86_64-win7-windows-msvc`) | `nightly-2026-09-15` | Tier 3: no upstream tests, needs nightly `-Z build-std`. The target replaces `ProcessPrng` with `RtlGenRandom`, `GetSystemTimePreciseAsFileTime` with `GetSystemTimeAsFileTime`, loads `WaitOnAddress` optionally with an NT keyed-event fallback, and uses SRW locks for `Mutex`, `RwLock` and `Condvar`. `SetThreadDescription` is also looked up at runtime. The CI string scan found exactly these optional names (`WaitOnAddress`, `WakeByAddressSingle` via `api-ms-win-core-synch-l1-2-0`, `GetSystemTimePreciseAsFileTime`, `SetThreadDescription`) and none in the import table. | risk (Tier 3, builds; fallbacks not run on Windows 7) | `library/std/src/sys/random/windows.rs`, `sys/pal/windows/c.rs`, `sys/pal/windows/compat.rs`, `sys/sync/{mutex,condvar,rwlock,thread_parking}/mod.rs` |
-| MSVC CRT | runner toolset | Rust links `vcruntime140.dll` and the UCRT (`api-ms-win-crt-*`) dynamically. Windows 7 SP1 needs the UCRT update (KB2999226) or a Visual C++ redistributable that still installs on Windows 7, or a static CRT build. | risk (needs KB2999226 or redistributable) | CI `imports.txt`: `VCRUNTIME140.dll` and nine `api-ms-win-crt-*-l1-1-0.dll` |
+| MSVC CRT | runner toolset | The recorded run linked `vcruntime140.dll` and the UCRT (`api-ms-win-crt-*`) dynamically, so Windows 7 SP1 would need the UCRT update (KB2999226) or a Visual C++ redistributable that still installs on Windows 7. `.cargo/config.toml` now sets `+crt-static` for every MSVC target, including this one, so later builds should import neither; no run of this workflow has confirmed that yet. | risk (static CRT not yet confirmed for this target) | CI `imports.txt` of the recorded run: `VCRUNTIME140.dll` and nine `api-ms-win-crt-*-l1-1-0.dll`; [compatibility.md](compatibility.md#static-c-runtime) |
 | `tokio` / `mio` | 1.53.3 / 1.2.4 | IOCP plus AFD polling: `NtCreateFile` on `\Device\Afd\Mio`, `NtDeviceIoControlFile` (`IOCTL_AFD_POLL`), `NtCancelIoFileEx`, `GetQueuedCompletionStatusEx`, `SetFileCompletionNotificationModes`, all Vista or later. `WSASocketW` is called with `WSA_FLAG_NO_HANDLE_INHERIT` and no fallback, a flag supported from Windows 7 SP1. | ok on SP1 | `mio-1.2.4/src/sys/windows/afd.rs`, `iocp.rs`, `net.rs:36` |
 | `socket2` | 0.6.5 | `WSA_FLAG_NO_HANDLE_INHERIT`, as above. | ok on SP1 | `socket2-0.6.5/src/sys/windows.rs` |
 | `aws-lc-sys` (AWS-LC) | 0.46.0 | Entropy: by default `LoadLibraryW("bcryptprimitives")` plus `GetProcAddress("ProcessPrng")`, which calls `abort()` on Windows 7 and does not show in the import table. With `_WIN32_WINNT <= 0x0601` it uses `BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)` from `bcrypt.dll` instead. The `cc` builder defines `_WIN32_WINNT=0x0601` for `-win7-windows-` targets; the CMake builder does so only for `-win7-windows-gnu`. Threads use `InitOnceExecuteOnce` and SRW locks (Windows 7 or later). CI build: `bcrypt.dll` imported and no `ProcessPrng` string in the binary, consistent with the `BCryptGenRandom` path. | ok by build evidence (not run on Windows 7) | `aws-lc/crypto/rand_extra/windows.c`, `builder/cc_builder.rs:445`, `builder/cmake_builder.rs:450`, `builder/main.rs` (`get_builder`, `is_bindgen_required`), `aws-lc/crypto/thread_win.c` |
@@ -129,8 +129,9 @@ KB2533623 (superseded by KB3063858) is not required by this evidence.
 the static import audit: no Windows 8+ API in the import table, no `ProcessPrng`
 string, and the only Windows 8+ names found by the string scan are std's
 optional runtime lookups. Nothing has been run on Windows 7 SP1, the target is
-Tier 3, the binary needs the UCRT and VC++ runtime there, and the TPM key
-storage provider does not exist on Windows 7.
+Tier 3, the recorded binary needed the UCRT and VC++ runtime there (the static
+C runtime setting added since is not yet confirmed for this target), and the
+TPM key storage provider does not exist on Windows 7.
 
 ## Alternatives if blocked
 
@@ -142,8 +143,9 @@ storage provider does not exist on Windows 7.
   `getrandom` 0.2 (`BCryptGenRandom` with an `RtlGenRandom` fallback). It has no
   `X25519MLKEM768`, so it drops the post-quantum hybrid group. Taking that
   trade-off is a policy decision, not part of this study.
-- If the UCRT is the problem: link the CRT statically with
-  `-C target-feature=+crt-static`.
+- If the UCRT is the problem: `.cargo/config.toml` already links the CRT
+  statically with `-C target-feature=+crt-static`; confirm that the import
+  table no longer lists `VCRUNTIME140.dll` or `api-ms-win-crt-*`.
 
 To reach `working`:
 

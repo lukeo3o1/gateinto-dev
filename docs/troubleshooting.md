@@ -169,6 +169,16 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   The next agent start deletes it. Directories without Gateinto's marker file
   are never deleted; remove those by hand.
 
+## VCRUNTIME140.dll was not found
+
+"The code execution cannot proceed because VCRUNTIME140.dll was not found"
+comes from an older build that linked the Microsoft C runtime dynamically and
+needed the Visual C++ Redistributable for x64. Current builds link the C
+runtime statically (`.cargo/config.toml` sets `+crt-static` for MSVC targets),
+so no redistributable is required: download a current release or rebuild from
+source. If you set `RUSTFLAGS` when building, it replaces the flags from
+`.cargo/config.toml`; add `-C target-feature=+crt-static` to it.
+
 ## Windows 7
 
 Windows 7 is experimental and unsupported. See
