@@ -1,10 +1,12 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
+use gateinto::browser;
 use gateinto::check::{self, CheckOptions};
 use gateinto::config::{self, ConfigFile, DeviceKeySettings, GatewayName, Overrides, Settings};
 use gateinto::http::Authority;
@@ -13,9 +15,12 @@ use gateinto::identity::client_cert::{
     ClientIdentityStore,
 };
 use gateinto::identity::device_key::{self, Backend, InitOptions, KeyName, KeyStore, Provenance};
+use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
 use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
-use gateinto::sessions::{SessionConfig, SessionKind, SessionManager};
+use gateinto::registration;
+use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use gateinto::tls::{self, TlsMode};
+use gateinto::uri::LaunchRequest;
 use rustls::pki_types::{ServerName, UnixTime};
 use tracing_subscriber::EnvFilter;
 
@@ -37,15 +42,51 @@ enum Command {
     /// Manage the device key held by Windows CNG
     #[command(subcommand)]
     Key(KeyCommand),
-    /// Run a single session until interrupted
+    /// Run or manage sessions
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Run the agent: the device session named by [device_session] gateway, if any, and the
+    /// per-user endpoint that starts browser sessions for `gateinto open`
+    Agent(ConfigArg),
+    /// Ask the agent to start a browser session for a gateinto:// launch URI, starting the agent
+    /// first if none is running
+    Open(OpenArgs),
+    /// Stop the running agent after closing all of its sessions
+    Stop,
+    /// Register or remove the per-user gateinto:// URI handler (Windows, development use)
+    #[command(subcommand)]
+    Uri(UriCommand),
 }
 
 #[derive(Subcommand)]
 enum SessionCommand {
     /// Start a browser session with basic_tofu proxy authentication on an ephemeral loopback port
+    /// and run it until interrupted
     Browser(BrowserSessionArgs),
+    /// List the sessions of the running agent
+    List,
+    /// Close a session of the running agent, stopping its browser and deleting its profile
+    Close {
+        /// Session id as shown by `gateinto session list`
+        id: SessionId,
+    },
+}
+
+#[derive(Args)]
+struct OpenArgs {
+    #[command(flatten)]
+    config: ConfigArg,
+
+    /// Launch URI such as gateinto://connect?profile=<gateway>; put -- before it
+    uri: String,
+}
+
+#[derive(Subcommand)]
+enum UriCommand {
+    /// Write HKCU\Software\Classes\gateinto so that gateinto:// links run `gateinto open`
+    Register(ConfigArg),
+    /// Remove HKCU\Software\Classes\gateinto if it runs a Gateinto executable
+    Unregister,
 }
 
 #[derive(Args)]
@@ -291,6 +332,12 @@ async fn main() -> ExitCode {
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
+        Command::Session(SessionCommand::List) => agent_request(Request::List).await,
+        Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
+        Command::Agent(args) => agent(args).await,
+        Command::Open(args) => open(args).await,
+        Command::Stop => agent_request(Request::Stop).await,
+        Command::Uri(command) => uri(command),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -450,7 +497,9 @@ async fn proxy(args: ProxyArgs) -> Result {
             proxy: config,
         })
         .await?;
-    std::future::pending().await
+    shutdown_signal().await;
+    sessions.close_all().await;
+    Ok(())
 }
 
 fn proxy_config(settings: &Settings) -> Result<Config> {
@@ -497,7 +546,216 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     println!("listen: {}", session.local_addr());
     println!("realm: {}", session.realm().unwrap_or_default());
     println!("Press Ctrl-C to close the session.");
-    std::future::pending().await
+    shutdown_signal().await;
+    sessions.close_all().await;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if result.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+struct ConfigProfiles(ConfigFile);
+
+impl Profiles for ConfigProfiles {
+    fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String> {
+        self.0.gateway(gateway).map_err(|error| error.to_string())?;
+        let overrides = Overrides {
+            gateway: Some(gateway.clone()),
+            ..Overrides::default()
+        };
+        let settings = self
+            .0
+            .settings(&overrides)
+            .map_err(|error| error.to_string())?;
+        Ok(BrowserSessionPlan {
+            proxy: proxy_config(&settings).map_err(|error| error.to_string())?,
+            portal_url: settings.gateway.portal_url,
+        })
+    }
+}
+
+async fn agent(args: ConfigArg) -> Result {
+    let file = args.load()?;
+    init_logging("info");
+    let endpoint = Endpoint::for_current_user()?;
+    let server = Server::bind(&endpoint)?;
+    let profiles_root = browser::profiles_root()
+        .ok_or("cannot find the per-user application data directory for browser profiles")?;
+    let options = AgentOptions {
+        browser: file.browser.executable.clone(),
+        profiles_root,
+        limits: AgentLimits::default(),
+    };
+    let device_session = file.device_session.gateway.is_some();
+    let agent = Agent::new(options, ConfigProfiles(file.clone()));
+    if device_session {
+        let settings = file.settings(&Overrides::default())?;
+        let config = Config {
+            listen: settings.listen,
+            local_auth: settings.device_session_auth,
+            ..proxy_config(&settings)?
+        };
+        agent
+            .start_session(SessionConfig {
+                kind: SessionKind::Device,
+                gateway: settings.gateway.name,
+                proxy: config,
+            })
+            .await?;
+    }
+    tracing::info!(%endpoint, "agent ready");
+    agent.serve(server, shutdown_signal()).await;
+    Ok(())
+}
+
+const AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn open(args: OpenArgs) -> Result {
+    let request = Request::Launch(args.uri.parse::<LaunchRequest>()?);
+    let endpoint = Endpoint::for_current_user()?;
+    let response = match ipc::send(&endpoint, &request).await {
+        Err(RequestError::NotRunning) => {
+            let mut child = spawn_agent(args.config.config.as_deref())?;
+            wait_for_agent(&endpoint, &request, &mut child).await?
+        }
+        result => result?,
+    };
+    print_response(response)
+}
+
+fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command.arg("agent");
+    if let Some(config) = config {
+        command.arg("--config").arg(config);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+        std::os::windows::process::CommandExt::creation_flags(
+            &mut command,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+        );
+        stop_inheriting_standard_handles();
+    }
+    Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn stop_inheriting_standard_handles() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    for handle in [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        // SAFETY: the standard handles stay open for the life of the process; a null or
+        // invalid handle only makes the call fail.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
+}
+
+async fn wait_for_agent(
+    endpoint: &Endpoint,
+    request: &Request,
+    child: &mut std::process::Child,
+) -> Result<Response> {
+    let deadline = Instant::now() + AGENT_START_TIMEOUT;
+    let mut delay = Duration::from_millis(25);
+    loop {
+        tokio::time::sleep(delay).await;
+        let exited = child.try_wait()?;
+        match ipc::send(endpoint, request).await {
+            Err(RequestError::NotRunning) => {}
+            result => return Ok(result?),
+        }
+        if let Some(status) = exited {
+            return Err(format!(
+                "the agent exited ({status}) before accepting requests; run `gateinto agent` \
+                 to see why"
+            )
+            .into());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the agent did not accept requests within {} seconds",
+                AGENT_START_TIMEOUT.as_secs()
+            )
+            .into());
+        }
+        delay = (delay * 2).min(Duration::from_secs(1));
+    }
+}
+
+fn print_response(response: Response) -> Result {
+    match response {
+        Response::Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Response::Error(message) => Err(message.into()),
+    }
+}
+
+async fn agent_request(request: Request) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    print_response(ipc::send(&endpoint, &request).await?)
+}
+
+fn uri(command: UriCommand) -> Result {
+    match command {
+        UriCommand::Register(args) => {
+            let config = args
+                .config
+                .as_deref()
+                .map(std::path::absolute)
+                .transpose()?;
+            if let Some(config) = &config {
+                ConfigFile::load(config)?;
+            }
+            let command =
+                registration::handler_command(&std::env::current_exe()?, config.as_deref())?;
+            registration::register(registration::SCHEME, &command)?;
+            println!("registered gateinto:// for the current user: {command}");
+        }
+        UriCommand::Unregister => {
+            if registration::unregister(registration::SCHEME)? {
+                println!("removed the gateinto:// handler of the current user");
+            } else {
+                println!("no gateinto:// handler is registered for the current user");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
