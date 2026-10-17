@@ -9,7 +9,9 @@ CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) runs
 `cargo test --all-targets --all-features --locked` on GitHub-hosted
 `ubuntu-latest` and `windows-latest`. `windows-latest` has no TPM. All tests
 use in-process rustls fixtures on loopback; no test talks to a real upstream
-proxy.
+proxy. Pull requests that change only Markdown files or files under `docs/`
+skip CI, except changes to `README.md` and `docs/quickstart.md`; pushes to
+`master` always run it.
 
 A `build-windows-release` job on `windows-latest` runs the quickstart's
 `cargo build --release --locked` and builds `examples/test_upstream.rs`, checks

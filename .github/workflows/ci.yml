@@ -4,6 +4,12 @@ on:
   push:
     branches: [master]
   pull_request:
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!**/*.md'
+      - docs/quickstart.md
+      - README.md
 
 permissions:
   contents: read
