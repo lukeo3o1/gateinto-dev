@@ -388,6 +388,36 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
     assert_eq!(launcher.list().await.len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_detach_starts_a_background_agent_once_and_returns() {
+    let launcher = Launcher::new("").await;
+    let config = launcher.config.to_str().unwrap().to_owned();
+
+    let output = launcher
+        .run(&["agent", "--detach", "--config", &config])
+        .await;
+
+    assert_eq!(
+        output.success().lines(),
+        vec!["started the agent".to_owned()]
+    );
+    assert!(
+        status(&launcher)
+            .await
+            .contains(&"agent: running".to_owned())
+    );
+    let output = launcher
+        .run(&["agent", "--detach", "--config", &config])
+        .await;
+    assert_eq!(
+        output.success().lines(),
+        vec!["an agent is already running".to_owned()]
+    );
+    let (_, browser) = launcher.opened("main").await;
+    assert_eq!(browser.start_page(), PORTAL);
+    launcher.run(&["stop"]).await.success();
+}
+
 fn stopped_pid(lines: &[String]) -> u32 {
     lines
         .iter()
