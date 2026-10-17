@@ -227,7 +227,11 @@ portal_url = "https://example.com/"
     confirming) opens no browser: `open` rejects the URI before contacting
     the agent. Record the confirmation dialogs, whether
     "always allow" is offered, and what happens on repeated clicks
-    (rate limit after 5 a minute).
+    (rate limit after 5 a minute). Clicking `office` launching a window shows
+    that the browser passed the URI in the accepted `gateinto://connect?`
+    form; also add `<a href="gateinto://connect/?profile=office">slash</a>`
+    and record whether it launches too, and if a link does not launch, run
+    `gateinto open` by hand with the same URI to see the error.
 
 22. Remove the handler and stop the agent:
 

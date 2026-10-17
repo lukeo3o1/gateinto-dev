@@ -289,7 +289,8 @@ In short:
   credential, host, CA, URL or command; `profile` is only looked up by name.
 - The registered handler runs `gateinto open -- "<uri>"`, which validates the
   URI and passes the request to the user's agent (`gateinto agent`) over a
-  local named pipe (a Unix socket on Linux, for development), starting the
+  local named pipe that only the user can open (a Unix socket on Linux, for
+  development), starting the
   agent with the same `--config` if none runs. The agent validates the request
   again.
 - The agent accepts at most 5 launches a minute and 4 browser sessions at a
