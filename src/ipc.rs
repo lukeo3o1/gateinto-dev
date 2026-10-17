@@ -3,6 +3,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -12,6 +13,7 @@ use crate::uri::LaunchRequest;
 pub const MAX_REQUEST_BYTES: usize = 1024;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const INSTANCE_VARIABLE: &str = "GATEINTO_INSTANCE";
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -224,6 +226,8 @@ impl std::error::Error for BindError {}
 #[derive(Debug)]
 pub enum RequestError {
     NotRunning,
+    Closed,
+    TimedOut,
     Io(io::Error),
     Protocol(ProtocolError),
 }
@@ -232,6 +236,12 @@ impl fmt::Display for RequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotRunning => f.write_str("no agent is running"),
+            Self::Closed => f.write_str("the agent closed the connection without an answer"),
+            Self::TimedOut => write!(
+                f,
+                "the agent did not answer within {} seconds",
+                REQUEST_TIMEOUT.as_secs()
+            ),
             Self::Io(error) => write!(f, "talking to the agent failed: {error}"),
             Self::Protocol(error) => error.fmt(f),
         }
@@ -247,10 +257,39 @@ impl From<io::Error> for RequestError {
 }
 
 pub async fn send(endpoint: &Endpoint, request: &Request) -> Result<Response, RequestError> {
+    send_with_timeout(endpoint, request, REQUEST_TIMEOUT).await
+}
+
+pub async fn send_with_timeout(
+    endpoint: &Endpoint,
+    request: &Request,
+    limit: Duration,
+) -> Result<Response, RequestError> {
+    tokio::time::timeout(limit, exchange(endpoint, request))
+        .await
+        .unwrap_or(Err(RequestError::TimedOut))
+}
+
+fn closed_or_io(error: io::Error) -> RequestError {
+    match error.kind() {
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset => RequestError::Closed,
+        _ => RequestError::Io(error),
+    }
+}
+
+async fn exchange(endpoint: &Endpoint, request: &Request) -> Result<Response, RequestError> {
     let mut stream = connect(endpoint).await?;
-    stream.write_all(format!("{request}\n").as_bytes()).await?;
-    stream.flush().await?;
-    let response = read_to_close(&mut stream, MAX_RESPONSE_BYTES).await?;
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .map_err(closed_or_io)?;
+    stream.flush().await.map_err(closed_or_io)?;
+    let response = read_to_close(&mut stream, MAX_RESPONSE_BYTES)
+        .await
+        .map_err(closed_or_io)?;
+    if response.is_empty() {
+        return Err(RequestError::Closed);
+    }
     if response.len() > MAX_RESPONSE_BYTES {
         return Err(RequestError::Protocol(ProtocolError(
             "the agent's response is too long",
@@ -400,7 +439,6 @@ mod windows {
 
     use super::{BindError, Connection, Endpoint, RequestError};
 
-    const BUSY_RETRIES: u32 = 100;
     const BUSY_DELAY: Duration = Duration::from_millis(20);
 
     #[derive(Debug)]
@@ -435,7 +473,7 @@ mod windows {
     }
 
     pub async fn connect(endpoint: &Endpoint) -> Result<Connection, RequestError> {
-        for _ in 0..BUSY_RETRIES {
+        loop {
             match ClientOptions::new().open(endpoint.path()) {
                 Ok(client) => return Ok(Box::new(client)),
                 Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
@@ -447,10 +485,6 @@ mod windows {
                 Err(error) => return Err(RequestError::Io(error)),
             }
         }
-        Err(RequestError::Io(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "the agent's pipe stayed busy",
-        )))
     }
 
     struct Token(HANDLE);

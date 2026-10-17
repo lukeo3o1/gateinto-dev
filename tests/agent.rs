@@ -264,7 +264,9 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     assert!(!browser.profile().exists());
     let list = agent.list().await;
     assert!(
-        !list.iter().any(|line| line.starts_with(&format!("session: {id} "))),
+        !list
+            .iter()
+            .any(|line| line.starts_with(&format!("session: {id} "))),
         "{list:?}"
     );
     assert!(other.profile().exists());
@@ -467,4 +469,32 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
 fn the_default_pipe_is_named_after_the_user_sid() {
     let name = Endpoint::for_current_user().unwrap().to_string();
     assert!(name.starts_with(r"\\.\pipe\gateinto-agent-S-1-"), "{name}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_to_an_agent_that_never_answers_times_out() {
+    let dir = temp_dir("hung");
+    let endpoint = endpoint(&dir);
+    let _server = Server::bind(&endpoint).unwrap();
+
+    let result =
+        ipc::send_with_timeout(&endpoint, &Request::List, Duration::from_millis(300)).await;
+
+    assert!(matches!(result, Err(RequestError::TimedOut)), "{result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_closed_without_an_answer_is_reported_as_closed() {
+    let dir = temp_dir("closed");
+    let endpoint = endpoint(&dir);
+    let mut server = Server::bind(&endpoint).unwrap();
+    let accepting = tokio::spawn(async move {
+        drop(server.accept().await.unwrap());
+        server
+    });
+
+    let result = ipc::send(&endpoint, &Request::List).await;
+
+    assert!(matches!(result, Err(RequestError::Closed)), "{result:?}");
+    drop(accepting.await.unwrap());
 }
