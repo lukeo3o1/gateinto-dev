@@ -13,7 +13,8 @@ use gateinto::identity::client_cert::{
     ClientIdentityStore,
 };
 use gateinto::identity::device_key::{self, Backend, InitOptions, KeyName, KeyStore, Provenance};
-use gateinto::proxy::{Config, Limits, Proxy, Upstream};
+use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
+use gateinto::sessions::{SessionConfig, SessionKind, SessionManager};
 use gateinto::tls::{self, TlsMode};
 use rustls::pki_types::{ServerName, UnixTime};
 use tracing_subscriber::EnvFilter;
@@ -419,6 +420,7 @@ async fn proxy(args: ProxyArgs) -> Result {
     let config = Config {
         listen: settings.listen,
         allow_non_loopback: args.unsafe_allow_non_loopback_listen,
+        local_auth: LocalAuth::None,
         upstream: upstream(&settings)?,
         tls_mode: settings.gateway.tls_mode,
         client_certificate: client_certificate(&settings)?,
@@ -430,8 +432,15 @@ async fn proxy(args: ProxyArgs) -> Result {
             ..Limits::default()
         },
     };
-    Proxy::bind(config).await?.run().await;
-    Ok(())
+    let mut sessions = SessionManager::new();
+    sessions
+        .start(SessionConfig {
+            kind: SessionKind::Device,
+            gateway: settings.gateway.name,
+            proxy: config,
+        })
+        .await?;
+    std::future::pending().await
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use rustls::pki_types::{ServerName, UnixTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -58,10 +60,17 @@ pub struct Upstream {
     pub roots: RootCertStore,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LocalAuth {
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
     pub allow_non_loopback: bool,
+    pub local_auth: LocalAuth,
     pub upstream: Upstream,
     pub tls_mode: TlsMode,
     pub client_certificate: Option<ClientCertificate>,
@@ -165,6 +174,7 @@ pub(crate) async fn request_tunnel<T>(
 
 struct Shared {
     endpoint: Endpoint,
+    local_auth: LocalAuth,
     limits: Limits,
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
@@ -195,6 +205,7 @@ impl Proxy {
         ));
         let shared = Shared {
             endpoint,
+            local_auth: config.local_auth,
             limits: config.limits,
             tunnels,
             rejects,
@@ -212,9 +223,22 @@ impl Proxy {
     }
 
     pub async fn run(self) {
+        self.run_until(std::future::pending()).await;
+    }
+
+    pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
         info!(local_addr = %self.local_addr(), "listening");
+        let Self { listener, shared } = self;
+        let mut connections = JoinSet::new();
+        let mut shutdown = std::pin::pin!(shutdown);
         loop {
-            let (stream, peer) = match self.listener.accept().await {
+            let accepted = tokio::select! {
+                biased;
+                () = &mut shutdown => break,
+                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                accepted = listener.accept() => accepted,
+            };
+            let (stream, peer) = match accepted {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     warn!(%error, "accept failed");
@@ -223,10 +247,10 @@ impl Proxy {
                 }
             };
             let span = info_span!("connection", %peer);
-            match self.shared.tunnels.clone().try_acquire_owned() {
+            match shared.tunnels.clone().try_acquire_owned() {
                 Ok(permit) => {
-                    let shared = self.shared.clone();
-                    tokio::spawn(
+                    let shared = shared.clone();
+                    connections.spawn(
                         async move {
                             shared.handle(stream).await;
                             drop(permit);
@@ -234,10 +258,10 @@ impl Proxy {
                         .instrument(span),
                     );
                 }
-                Err(_) => match self.shared.rejects.clone().try_acquire_owned() {
+                Err(_) => match shared.rejects.clone().try_acquire_owned() {
                     Ok(permit) => {
-                        let linger = self.shared.limits.reject_linger;
-                        tokio::spawn(
+                        let linger = shared.limits.reject_linger;
+                        connections.spawn(
                             async move {
                                 warn!("tunnel limit reached");
                                 reject(stream, Status::ServiceUnavailable, linger).await;
@@ -253,6 +277,10 @@ impl Proxy {
                 },
             }
         }
+        drop(listener);
+        let aborted = connections.len();
+        connections.shutdown().await;
+        info!(aborted, "closed");
     }
 }
 
@@ -269,6 +297,9 @@ impl Shared {
             }
             Ok(Ok(request)) => request,
         };
+        match self.local_auth {
+            LocalAuth::None => {}
+        }
         debug!(%target, "opening tunnel");
         let opening = timeout(limits.handshake_timeout, self.open_upstream(&target));
         let (mut upstream, upstream_early) = match opening.await {
