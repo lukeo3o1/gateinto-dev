@@ -30,11 +30,12 @@ Windows 11 client editions, which differ in editions, installed components,
 default policies and browser availability.
 
 `windows-latest` currently resolves to the same Windows Server 2025 image as
-`windows-2025`, so `compat.yml` adds Windows Server 2022 and keeps Windows
-Server 2025 pinned when `windows-latest` moves on.
+`windows-2025`, so `ci.yml` already covers it on every push.
 [.github/workflows/compat.yml](../.github/workflows/compat.yml) runs on
-`windows-2022` and `windows-2025`, weekly, by `workflow_dispatch` and on pushes
-to `master` that change `src/**`, `Cargo.*` or `packaging/**`. Its jobs are
+`windows-2022` only for pushes to `master` that change `src/**`, `Cargo.*`,
+`packaging/**`, `.github/scripts/**` or the workflow itself, and on both
+`windows-2022` and `windows-2025` weekly and by `workflow_dispatch`, so
+Windows Server 2025 stays pinned when `windows-latest` moves on. Its jobs are
 independent: the x64 tests with the static C runtime check, the i686 tests
 under WOW64 with the same check, and a release build installed as an MSI by
 [.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), the

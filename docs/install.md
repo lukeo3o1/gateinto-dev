@@ -252,7 +252,7 @@ command until the next uninstall or repair.
 ## Verification
 
 The CI job `msi` on `windows-latest`, and the `msi` jobs of the compatibility workflow on
-`windows-2022` and `windows-2025`, build the MSI and run
+`windows-2022` (and on `windows-2025` in its weekly and manual runs), build the MSI and run
 [.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), which checks the
 following with the Microsoft Software Key Storage Provider (the runners have no TPM):
 

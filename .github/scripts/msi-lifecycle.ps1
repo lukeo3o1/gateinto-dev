@@ -23,7 +23,7 @@ function Invoke-Msiexec([string] $Action, [string] $LogName, [string[]] $Propert
   $log = Join-Path $LogDir $LogName
   $arguments = @($Action, "`"$Msi`"", '/qn', '/norestart') + $Properties + @('/l*v', "`"$log`"")
   $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $arguments
-  if ($process.ExitCode -ne 0) { Get-Content $log -Tail 200; throw "msiexec $Action exited with $($process.ExitCode) (3010 means a restart was needed)" }
+  if ($process.ExitCode -ne 0) { Get-Content $log -Tail 200 | Out-Host; throw "msiexec $Action exited with $($process.ExitCode) (3010 means a restart was needed)" }
   $log
 }
 
