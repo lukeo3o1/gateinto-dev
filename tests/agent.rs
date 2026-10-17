@@ -6,27 +6,72 @@ mod launch_support;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fixture::*;
 use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
 use gateinto::browser::ProfileDir;
 use gateinto::config::{GatewayName, PortalUrl};
-use gateinto::ipc::{self, BindError, Endpoint, Request, RequestError, Response, Server};
+use gateinto::ipc::{
+    self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server,
+};
+use gateinto::link::{KnownGateway, LinkedGateway, Source};
 use gateinto::proxy::Config;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
-struct TestProfiles(BTreeMap<GatewayName, BrowserSessionPlan>);
+type Linked = Arc<Mutex<Vec<LinkedGateway>>>;
+
+struct TestProfiles {
+    plans: BTreeMap<GatewayName, (BrowserSessionPlan, Option<PortalUrl>)>,
+    template: Config,
+    linked: Linked,
+}
 
 impl Profiles for TestProfiles {
+    fn known(&self) -> Result<Vec<KnownGateway>, String> {
+        let configured = self
+            .plans
+            .iter()
+            .map(|(name, (plan, portal))| KnownGateway {
+                name: name.clone(),
+                host: Some(plan.proxy.upstream.host.clone()),
+                port: Some(plan.proxy.upstream.port),
+                portal_url: portal.clone(),
+                source: Source::Config,
+            });
+        let linked = self.linked.lock().unwrap().clone();
+        let linked = linked.into_iter().map(|gateway| KnownGateway {
+            name: gateway.name,
+            host: Some(gateway.address.host()),
+            port: Some(gateway.address.port()),
+            portal_url: Some(gateway.portal_url),
+            source: Source::Linked,
+        });
+        Ok(configured.chain(linked).collect())
+    }
+
+    fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
+        self.linked.lock().unwrap().push(gateway.clone());
+        Ok(())
+    }
+
     fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String> {
-        self.0
-            .get(gateway)
-            .cloned()
-            .ok_or_else(|| format!("unknown gateway \"{gateway}\""))
+        if let Some((plan, _)) = self.plans.get(gateway) {
+            return Ok(plan.clone());
+        }
+        let linked = self.linked.lock().unwrap();
+        let linked = linked
+            .iter()
+            .find(|linked| &linked.name == gateway)
+            .ok_or_else(|| format!("unknown gateway \"{gateway}\""))?;
+        let mut proxy = self.template.clone();
+        proxy.upstream.host = linked.address.host();
+        proxy.upstream.port = linked.address.port();
+        Ok(BrowserSessionPlan { proxy })
     }
 }
 
@@ -34,10 +79,29 @@ struct TestAgent {
     endpoint: Endpoint,
     profiles_root: PathBuf,
     serving: JoinHandle<()>,
+    linked: Linked,
+    upstream_port: u16,
     _upstream: UpstreamProxy,
 }
 
 const PORTAL: &str = "https://portal.example.test/start";
+const NEW_PORTAL: &str = "https://portal.newco.example/home";
+
+fn link(
+    profile: &str,
+    url: Option<&str>,
+    gateway: Option<&str>,
+    portal: Option<&str>,
+) -> LaunchRequest {
+    LaunchRequest::new(profile, "basic_tofu")
+        .unwrap()
+        .with_link(url, gateway, portal)
+        .unwrap()
+}
+
+fn refused(response: &Response, text: &str) -> bool {
+    matches!(response, Response::Error(error) if error.contains(text))
+}
 
 fn endpoint(dir: &std::path::Path) -> Endpoint {
     #[cfg(unix)]
@@ -66,19 +130,24 @@ impl TestAgent {
         let plans = BTreeMap::from([
             (
                 "main".parse().unwrap(),
-                BrowserSessionPlan {
-                    proxy: proxy.clone(),
-                    portal_url: Some(PORTAL.parse::<PortalUrl>().unwrap()),
-                },
+                (
+                    BrowserSessionPlan {
+                        proxy: proxy.clone(),
+                    },
+                    Some(PORTAL.parse::<PortalUrl>().unwrap()),
+                ),
             ),
             (
                 "bare".parse().unwrap(),
-                BrowserSessionPlan {
-                    proxy,
-                    portal_url: None,
-                },
+                (
+                    BrowserSessionPlan {
+                        proxy: proxy.clone(),
+                    },
+                    None,
+                ),
             ),
         ]);
+        let linked = Linked::default();
         let profiles_root = dir.join("state").join("profiles");
         let agent = Agent::new(
             AgentOptions {
@@ -86,7 +155,11 @@ impl TestAgent {
                 profiles_root: profiles_root.clone(),
                 limits,
             },
-            TestProfiles(plans),
+            TestProfiles {
+                plans,
+                template: proxy,
+                linked: linked.clone(),
+            },
         );
         let endpoint = endpoint(&dir);
         let server = Server::bind(&endpoint).unwrap();
@@ -96,8 +169,42 @@ impl TestAgent {
             endpoint,
             profiles_root,
             serving,
+            linked,
+            upstream_port: upstream.addr.port(),
             _upstream: upstream,
         }
+    }
+
+    fn linked(&self) -> Vec<LinkedGateway> {
+        self.linked.lock().unwrap().clone()
+    }
+
+    async fn opened(&self, request: Request) -> (Vec<String>, FakeBrowser) {
+        let lines = match self.send(request).await {
+            Response::Ok(lines) => lines,
+            Response::Error(error) => panic!("launch failed: {error}"),
+        };
+        assert_eq!(ipc::confirm_token(&lines), None, "{lines:?}");
+        let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+        let browser = wait_for_browser(&self.profiles_root, listen).await;
+        (lines, browser)
+    }
+
+    async fn asks(&self, request: LaunchRequest) -> (Vec<String>, ConfirmToken) {
+        let lines = match self.send(Request::Launch(request)).await {
+            Response::Ok(lines) => lines,
+            Response::Error(error) => panic!("launch failed: {error}"),
+        };
+        let token = ipc::confirm_token(&lines).unwrap_or_else(|| panic!("{lines:?}"));
+        (lines, token)
+    }
+
+    fn gateway(&self) -> String {
+        format!("localhost:{}", self.upstream_port)
+    }
+
+    fn new_link(&self, url: Option<&str>) -> LaunchRequest {
+        link("newco", url, Some(&self.gateway()), Some(NEW_PORTAL))
     }
 
     async fn send(&self, request: Request) -> Response {
@@ -159,6 +266,7 @@ fn limits() -> AgentLimits {
         launches: 10,
         launch_window: Duration::from_secs(60),
         max_browser_sessions: 4,
+        confirm_timeout: Duration::from_secs(60),
     }
 }
 
@@ -455,7 +563,15 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
             profiles_root: root,
             limits: limits(),
         },
-        TestProfiles(BTreeMap::new()),
+        TestProfiles {
+            plans: BTreeMap::new(),
+            template: agent_config(
+                SocketAddr::from((LOOPBACK, 1)),
+                rustls::RootCertStore::empty(),
+                PROXY_NAME,
+            ),
+            linked: Linked::default(),
+        },
     );
     let endpoint = endpoint(&dir);
     let server = Server::bind(&endpoint).unwrap();
@@ -548,4 +664,198 @@ async fn a_runtime_directory_owned_by_another_user_is_refused() {
         "{result:?}"
     );
     assert!(!run.join("agent.sock").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_opens_a_start_page_on_the_portal_origin_only() {
+    let agent = TestAgent::start(limits()).await;
+    let start = "https://portal.example.test/deep?x=1";
+
+    let (_, browser) = agent
+        .opened(Request::Launch(link("main", Some(start), None, None)))
+        .await;
+    assert_eq!(browser.start_page(), start);
+
+    for (profile, url, error) in [
+        ("main", "https://evil.example/", "not on the origin"),
+        (
+            "main",
+            "https://portal.example.test:8443/",
+            "not on the origin",
+        ),
+        ("bare", "https://portal.example.test/", "has no portal_url"),
+    ] {
+        let response = agent
+            .send(Request::Launch(link(profile, Some(url), None, None)))
+            .await;
+        assert!(refused(&response, error), "{url}: {response:?}");
+    }
+    assert_eq!(browsers(&agent.profiles_root).len(), 1);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_that_disagrees_with_a_local_gateway_is_refused_without_asking() {
+    let agent = TestAgent::start(limits()).await;
+    for (gateway, portal) in [
+        ("evil.example:443", PORTAL),
+        (
+            agent.gateway().as_str(),
+            "https://portal.example.test/other",
+        ),
+    ] {
+        let response = agent
+            .send(Request::Launch(link(
+                "main",
+                None,
+                Some(gateway),
+                Some(portal),
+            )))
+            .await;
+        assert!(refused(&response, "differs"), "{response:?}");
+    }
+    let upstream = format!("127.0.0.1:{}", agent.upstream_port);
+    let response = agent
+        .send(Request::Launch(link(
+            "other",
+            None,
+            Some(&upstream),
+            Some(NEW_PORTAL),
+        )))
+        .await;
+    assert!(refused(&response, "already set up as"), "{response:?}");
+    assert!(agent.linked().is_empty());
+    assert!(browsers(&agent.profiles_root).is_empty());
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_gateway_is_stored_only_after_approval_and_relays_the_session() {
+    let agent = TestAgent::start(limits()).await;
+    let start = "https://portal.newco.example/app";
+
+    let (lines, token) = agent.asks(agent.new_link(Some(start))).await;
+    assert_eq!(field(&lines, "gateway"), "newco");
+    assert_eq!(field(&lines, "address"), agent.gateway());
+    assert_eq!(field(&lines, "portal"), "https://portal.newco.example");
+    assert!(agent.linked().is_empty());
+    assert!(browsers(&agent.profiles_root).is_empty());
+
+    let (lines, browser) = agent.opened(Request::Approve(token)).await;
+    assert_eq!(field(&lines, "gateway"), "newco");
+    assert_eq!(browser.start_page(), start);
+    tunnel_echoes(browser.proxy(), "linked secret").await;
+    let linked = agent.linked();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].name.as_str(), "newco");
+    assert_eq!(linked[0].address.to_string(), agent.gateway());
+    assert_eq!(linked[0].portal_url.as_str(), NEW_PORTAL);
+    assert!(linked[0].approved_at.is_some());
+
+    assert!(refused(
+        &agent.send(Request::Approve(token)).await,
+        "no gateway confirmation"
+    ));
+    let (_, again) = agent
+        .opened(Request::Launch(link(
+            "newco",
+            None,
+            Some(&agent.gateway()),
+            Some(NEW_PORTAL),
+        )))
+        .await;
+    assert_eq!(again.start_page(), NEW_PORTAL);
+    let (_, plain) = agent
+        .opened(Request::Launch(link("newco", None, None, None)))
+        .await;
+    assert_eq!(plain.start_page(), NEW_PORTAL);
+    assert_eq!(agent.linked().len(), 1);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_denied_gateway_is_not_stored_and_cannot_be_approved_afterwards() {
+    let agent = TestAgent::start(limits()).await;
+    let (_, token) = agent.asks(agent.new_link(None)).await;
+
+    assert_eq!(
+        agent.send(Request::Deny(token)).await,
+        Response::Ok(Vec::new())
+    );
+    assert!(refused(
+        &agent.send(Request::Approve(token)).await,
+        "no gateway confirmation"
+    ));
+    assert!(agent.linked().is_empty());
+    assert!(browsers(&agent.profiles_root).is_empty());
+    let response = agent.launch("newco").await;
+    assert!(
+        refused(&response, "unknown gateway \"newco\""),
+        "{response:?}"
+    );
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_one_confirmation_waits_at_a_time_until_it_is_answered_or_expires() {
+    let agent = TestAgent::start(AgentLimits {
+        confirm_timeout: Duration::from_millis(500),
+        ..limits()
+    })
+    .await;
+    let (_, first) = agent.asks(agent.new_link(None)).await;
+    let other = link(
+        "other",
+        None,
+        Some("localhost:1"),
+        Some("https://other.example/"),
+    );
+
+    let response = agent.send(Request::Launch(other.clone())).await;
+    assert!(refused(&response, "already waiting"), "{response:?}");
+    let wrong = ConfirmToken::random().unwrap();
+    assert!(refused(
+        &agent.send(Request::Approve(wrong)).await,
+        "no gateway confirmation"
+    ));
+    assert!(refused(
+        &agent.send(Request::Deny(wrong)).await,
+        "no gateway confirmation"
+    ));
+    assert_eq!(
+        agent.send(Request::Deny(first)).await,
+        Response::Ok(Vec::new())
+    );
+
+    let (_, second) = agent.asks(other).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(refused(
+        &agent.send(Request::Approve(second)).await,
+        "no gateway confirmation"
+    ));
+    let (_, third) = agent.asks(agent.new_link(None)).await;
+    assert_ne!(third, second);
+    assert!(agent.linked().is_empty());
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_rate_limit_applies_before_any_confirmation_is_asked() {
+    let agent = TestAgent::start(AgentLimits {
+        launches: 1,
+        ..limits()
+    })
+    .await;
+    let (_, token) = agent.asks(agent.new_link(None)).await;
+    assert_eq!(
+        agent.send(Request::Deny(token)).await,
+        Response::Ok(Vec::new())
+    );
+
+    let response = agent.send(Request::Launch(agent.new_link(None))).await;
+    assert!(
+        refused(&response, "too many launch requests"),
+        "{response:?}"
+    );
+    agent.stop().await;
 }

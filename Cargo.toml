@@ -11,6 +11,9 @@ publish = false
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
+[features]
+test-hooks = []
+
 [dependencies]
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys"] }
 clap = { version = "4.6.7", features = ["derive"] }

@@ -19,6 +19,7 @@ use gateinto::identity::device_key::{
 };
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
 use gateinto::lifecycle;
+use gateinto::link::{self, KnownGateway, LinkedGateway, LinkedStore};
 use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
 use gateinto::registration;
 use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
@@ -695,22 +696,59 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-struct ConfigProfiles(ConfigFile);
+struct ConfigProfiles {
+    file: ConfigFile,
+    linked: Option<LinkedStore>,
+}
+
+impl ConfigProfiles {
+    fn linked(&self) -> Result<Vec<LinkedGateway>, String> {
+        self.linked
+            .as_ref()
+            .map_or(Ok(Vec::new()), LinkedStore::load)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn linked_test_ca() -> Option<PathBuf> {
+    std::env::var_os("GATEINTO_TEST_LINKED_CA_FILE").map(PathBuf::from)
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn linked_test_ca() -> Option<PathBuf> {
+    None
+}
 
 impl Profiles for ConfigProfiles {
+    fn known(&self) -> Result<Vec<KnownGateway>, String> {
+        Ok(link::known_gateways(&self.file, &self.linked()?))
+    }
+
+    fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
+        self.linked
+            .as_ref()
+            .ok_or("cannot find the per-user config directory to store the gateway in")?
+            .add(gateway)
+            .map_err(|error| error.to_string())
+    }
+
     fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String> {
-        self.0.gateway(gateway).map_err(|error| error.to_string())?;
-        let overrides = Overrides {
+        let configured = self.file.gateways.iter().any(|(name, _)| name == gateway);
+        let file = self.file.with_linked(&self.linked()?);
+        file.gateway(gateway).map_err(|error| error.to_string())?;
+        let mut overrides = Overrides {
             gateway: Some(gateway.clone()),
             ..Overrides::default()
         };
-        let settings = self
-            .0
+        if !configured {
+            overrides.gateway_settings.ca_file = linked_test_ca();
+        }
+        let settings = file
             .settings(&overrides)
             .map_err(|error| error.to_string())?;
         Ok(BrowserSessionPlan {
             proxy: proxy_config(&settings).map_err(|error| error.to_string())?,
-            portal_url: settings.gateway.portal_url,
         })
     }
 }
@@ -730,7 +768,11 @@ async fn agent(args: ConfigArg) -> Result {
         limits: AgentLimits::default(),
     };
     let device_session = file.device_session.gateway.is_some();
-    let agent = Agent::new(options, ConfigProfiles(file.clone()));
+    let profiles = ConfigProfiles {
+        file: file.clone(),
+        linked: link::default_store_path().map(LinkedStore::new),
+    };
+    let agent = Agent::new(options, profiles);
     if device_session {
         let settings = file.settings(&Overrides::default())?;
         let config = Config {
