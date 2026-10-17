@@ -45,6 +45,17 @@ Fixes:
 - The workflow now fails on any static import that is not in an allow-list of
   functions that exist on Windows 7 SP1 (see [CI](#build-attempt)).
 
+In run 39074036884 (commit `47926ff`), both win7 builds succeeded and passed
+the static C runtime check:
+
+- x64: 200 static imports, all on the allow-list. There is no `tbs.dll` and no
+  `BCryptHash`.
+- i686: built with NASM and the `cc` builder. The audit failed only on the three
+  kernel32 functions above, which are now on the list.
+
+For both targets, `bcrypt.dll` contributes only `BCryptGenRandom`, the only
+bcrypt entry on the list, and the string scan found no `ProcessPrng`.
+
 None of this has been run on Windows 7 yet.
 
 ## Goal
@@ -125,11 +136,17 @@ artifact `gateinto-<target>` when the build succeeded.
 
 An allow-list replaced the old deny-list because the deny-list only caught the
 names someone thought of. `Tbsi_GetDeviceInfo` and `BCryptHash` got through it.
-The allow-list is the import table of the last x64 win7 build, minus those two.
-When a dependency update adds an import, the job fails until someone checks the
-function's minimum supported client and either adds it to the list or removes
-the import. The i686 import table has not been seen yet, so the first i686 run
-may report functions that exist on Windows 7 but are missing from the list.
+The allow-list started as the import table of the last x64 win7 build, minus
+those two. The first i686 import table, from run
+[39074036884](https://github.com/lukeo3o1/gateinto-dev/actions/runs/39074036884),
+added three kernel32 functions that the 32-bit static CRT imports:
+`DecodePointer` (XP SP2), and `InitOnceBeginInitialize` and `InitOnceComplete`
+(Vista). When a dependency update adds an import, the job fails until someone
+checks the function's minimum supported client and either adds it to the list
+or removes the import.
+
+`Tbsi_GetDeviceInfo` now appears in the string scan for both targets. That is
+expected: it is the name passed to `GetProcAddress`, not a static import.
 
 The workflow names its variables `NIGHTLY_TOOLCHAIN` and `WIN7_TARGET` because
 Windows environment variable names are case-insensitive: a workflow-level
@@ -206,9 +223,10 @@ so the update is not required.
 `gateinto.exe` builds and links for `x86_64-win7-windows-msvc` in CI. The builds
 recorded so far imported `Tbsi_GetDeviceInfo` and `BCryptHash`, so they would not
 have loaded on Windows 7. Both imports are removed now, and the allow-list audit
-fails if another import that Windows 7 lacks appears. Neither the fixed x64
-build nor any `i686-win7-windows-msvc` build has run in CI yet. Nothing has been
-run on Windows 7 SP1, the targets are Tier 3, and the TPM key storage provider
+fails if another import that Windows 7 lacks appears. In run 39074036884 the
+fixed x64 build passed that audit. The `i686-win7-windows-msvc` build succeeded
+and failed only on three Windows 7-safe imports, which are now on the list.
+Nothing has been run on Windows 7 SP1, the targets are Tier 3, and the TPM key storage provider
 does not exist on Windows 7, so only software keys can work there.
 
 ## Alternatives if blocked
