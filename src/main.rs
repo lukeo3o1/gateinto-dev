@@ -188,6 +188,12 @@ impl ConfigArg {
         }
     }
 
+    fn log_default(&self) {
+        if let Some((path, true)) = self.path() {
+            tracing::info!(path = %path.display(), "using the default config file");
+        }
+    }
+
     fn load(&self) -> Result<ConfigFile, config::ConfigError> {
         self.path().map_or_else(
             || Ok(ConfigFile::default()),
@@ -545,6 +551,7 @@ async fn check_upstream(args: CheckUpstreamArgs) -> Result {
         overrides.gateway = args.gateway.clone();
     })?;
     init_logging("warn");
+    args.upstream.config.log_default();
     let options = CheckOptions {
         upstream: upstream(&settings)?,
         tls_mode: settings.gateway.tls_mode,
@@ -572,6 +579,7 @@ async fn proxy(args: ProxyArgs) -> Result {
         limits.idle_timeout_seconds = args.idle_timeout_secs.and_then(NonZeroU64::new);
     })?;
     init_logging("info");
+    args.upstream.config.log_default();
     let config = Config {
         listen: settings.listen,
         allow_non_loopback: args.unsafe_allow_non_loopback_listen,
@@ -616,6 +624,7 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
         overrides.gateway = args.gateway.clone();
     })?;
     init_logging("warn");
+    args.upstream.config.log_default();
     let config = Config {
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         local_auth: LocalAuth::BasicTofu,
@@ -704,6 +713,7 @@ async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
     let file = args.load()?;
     init_logging("info");
+    args.log_default();
     let endpoint = Endpoint::for_current_user()?;
     let server = Server::bind(&endpoint)?;
     let profiles_root = browser::profiles_root()

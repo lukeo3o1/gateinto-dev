@@ -485,3 +485,31 @@ fn status_reads_the_config_file_at_the_default_location() {
         "{stdout}"
     );
 }
+
+#[test]
+fn commands_log_which_default_config_file_they_loaded() {
+    let home = std::env::temp_dir().join(format!("gateinto-cli-log-{}", std::process::id()));
+    let path = default_config(&home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\nclient_certificate = \"off\"\n",
+    )
+    .unwrap();
+
+    let output = isolated::gateinto()
+        .args(["check-upstream"])
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home)
+        .env("RUST_LOG", "info")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("using the default config file")
+            && stderr.contains(&path.display().to_string()),
+        "{stderr}"
+    );
+}
