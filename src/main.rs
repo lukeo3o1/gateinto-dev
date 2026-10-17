@@ -18,8 +18,9 @@ use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
-use gateinto::lifecycle;
-use gateinto::link::{self, KnownGateway, LinkedGateway, LinkedStore};
+use gateinto::lifecycle::{self, Purge};
+use gateinto::link::{self, Confirmation, KnownGateway, LinkedGateway, LinkedStore, Source};
+use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
 use gateinto::registration;
 use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
@@ -57,6 +58,9 @@ enum Command {
     Open(OpenArgs),
     /// Stop the running agent after closing all of its sessions
     Stop(StopArgs),
+    /// List the gateways, or remove one that was added from a gateinto:// link
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
     /// Register or remove the per-user gateinto:// URI handler (Windows, development use)
     #[command(subcommand)]
     Uri(UriCommand),
@@ -113,7 +117,8 @@ struct ResetArgs {
     purge_device_identity: bool,
 
     /// Also delete the config file named with --config, or else the default
-    /// %APPDATA%\Gateinto\gateinto.toml
+    /// %APPDATA%\Gateinto\gateinto.toml, and the gateways added from gateinto:// links
+    /// (%APPDATA%\Gateinto\linked-gateways.toml)
     #[arg(long)]
     purge_config: bool,
 
@@ -148,6 +153,22 @@ struct OpenArgs {
 
     /// Launch URI such as gateinto://connect?profile=<gateway>; put -- before it
     uri: String,
+}
+
+#[derive(Subcommand)]
+enum GatewayCommand {
+    /// Show each gateway with its upstream, portal origin and source: the config file, or a
+    /// gateinto:// link you approved
+    List(ConfigArg),
+    /// Remove a gateway that was added from a gateinto:// link; gateways of the config file are
+    /// edited there
+    Forget {
+        #[command(flatten)]
+        config: ConfigArg,
+
+        /// Gateway name as shown by `gateinto gateway list`
+        name: GatewayName,
+    },
 }
 
 #[derive(Subcommand)]
@@ -432,6 +453,7 @@ async fn main() -> ExitCode {
         Command::Agent(args) => agent(args.config).await,
         Command::Open(args) => open(args).await,
         Command::Stop(args) => stop(args).await,
+        Command::Gateway(command) => gateway(command),
         Command::Uri(command) => uri(command),
         Command::Setup(args) => setup(args),
         Command::Status(args) => status(args).await,
@@ -812,7 +834,8 @@ const AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_START_ATTEMPTS: u32 = 3;
 
 async fn open(args: OpenArgs) -> Result {
-    let request = Request::Launch(args.uri.parse::<LaunchRequest>()?);
+    let launch = args.uri.parse::<LaunchRequest>()?;
+    let request = Request::Launch(launch.clone());
     let endpoint = Endpoint::for_current_user()?;
     let response = match ipc::send(&endpoint, &request).await {
         Err(RequestError::NotRunning | RequestError::Closed) => {
@@ -820,7 +843,37 @@ async fn open(args: OpenArgs) -> Result {
         }
         result => result?,
     };
-    print_response(response)
+    let token = match &response {
+        Response::Ok(lines) => ipc::confirm_token(lines),
+        Response::Error(_) => None,
+    };
+    let Some(token) = token else {
+        return print_response(response);
+    };
+    let (Some(gateway), Some(portal)) = (launch.gateway, launch.portal) else {
+        ipc::send(&endpoint, &Request::Deny(token)).await?;
+        return Err("the agent asked to confirm a gateway the link does not name".into());
+    };
+    let confirmation = Confirmation {
+        profile: launch.profile.clone(),
+        gateway,
+        portal,
+    };
+    let answer = tokio::task::spawn_blocking(move || {
+        prompt::ask(&confirmation).map_err(|error| error.to_string())
+    })
+    .await?;
+    match answer {
+        Ok(true) => print_response(ipc::send(&endpoint, &Request::Approve(token)).await?),
+        Ok(false) => {
+            ipc::send(&endpoint, &Request::Deny(token)).await?;
+            Err(link::LinkError::Denied(launch.profile).into())
+        }
+        Err(error) => {
+            ipc::send(&endpoint, &Request::Deny(token)).await?;
+            Err(error.into())
+        }
+    }
 }
 
 fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
@@ -987,20 +1040,81 @@ fn uri(command: UriCommand) -> Result {
     Ok(())
 }
 
-fn print_config(args: &ConfigArg, file: &ConfigFile) {
+fn linked_store() -> Option<LinkedStore> {
+    link::default_store_path().map(LinkedStore::new)
+}
+
+fn known_gateways(file: &ConfigFile) -> Result<Vec<KnownGateway>> {
+    let linked = linked_store().map_or(Ok(Vec::new()), |store| store.load())?;
+    Ok(link::known_gateways(file, &linked))
+}
+
+fn print_config(args: &ConfigArg, file: &ConfigFile) -> Result {
+    let known = known_gateways(file)?;
+    let lines = |source| {
+        let known: Vec<KnownGateway> = known
+            .iter()
+            .filter(|gateway| gateway.source == source)
+            .cloned()
+            .collect();
+        for line in lifecycle::gateway_lines(&known) {
+            println!("gateway: {line}");
+        }
+    };
     match args.path() {
         Some((path, default)) => {
             let location = if default { " (default location)" } else { "" };
             println!("config: {}{location}", path.display());
-            for line in lifecycle::gateway_lines(file) {
-                println!("gateway: {line}");
-            }
+            lines(Source::Config);
         }
         None => println!(
             "config: none (no file at {}; pass --config to use another file)",
             default_config_display()
         ),
     }
+    match linked_store() {
+        Some(store) if store.path().is_file() => {
+            println!("linked-gateways: {}", store.path().display());
+            lines(Source::Linked);
+        }
+        Some(store) => println!(
+            "linked-gateways: none (no file at {})",
+            store.path().display()
+        ),
+        None => println!("linked-gateways: none (no default location)"),
+    }
+    Ok(())
+}
+
+fn gateway(command: GatewayCommand) -> Result {
+    match command {
+        GatewayCommand::List(args) => {
+            for line in lifecycle::gateway_list(&known_gateways(&args.load()?)?) {
+                println!("{line}");
+            }
+        }
+        GatewayCommand::Forget { config, name } => {
+            let file = config.load()?;
+            let store = linked_store().ok_or("cannot find the per-user config directory")?;
+            let configured = file.gateways.iter().any(|(known, _)| *known == name);
+            if store.forget(&name)? {
+                println!("removed the gateway \"{name}\" added from a link");
+                if configured {
+                    println!("the config file still defines a gateway \"{name}\"");
+                }
+                println!("open browser sessions of this gateway stay open until closed");
+            } else if configured {
+                return Err(format!(
+                    "the gateway \"{name}\" is defined in the config file, not added from a \
+                     link; edit the config file to change it"
+                )
+                .into());
+            } else {
+                return Err(format!("no gateway added from a link named \"{name}\"").into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn print_handler() {
@@ -1016,7 +1130,7 @@ fn setup(args: KeyInitArgs) -> Result {
     }
     let file = args.config.load()?;
     let settings = args.settings()?;
-    print_config(&args.config, &file);
+    print_config(&args.config, &file)?;
     let store = gateinto::identity::system_store()?;
     let options = InitOptions {
         backend: settings.preferred,
@@ -1060,7 +1174,7 @@ async fn status(args: StatusArgs) -> Result {
             Err(error) => println!("device-key: error: {error}"),
         },
     }
-    print_config(&args.config, &file);
+    print_config(&args.config, &file)?;
     println!("device-session: {}", lifecycle::device_session_line(&file));
     let agent = match Endpoint::for_current_user() {
         Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
@@ -1085,48 +1199,50 @@ async fn stop_agent() -> Result<(), String> {
     stop_and_wait().await.map(drop)
 }
 
-fn config_to_purge(args: &ResetArgs) -> Result<Option<PathBuf>> {
+fn files_to_purge(args: &ResetArgs) -> Result<Option<Purge>> {
     if !args.purge_config {
         return Ok(None);
     }
-    let Some((path, _)) = args.config.path() else {
+    let config = args.config.path().map(|(path, _)| path);
+    let linked = link::default_store_path();
+    let purge = lifecycle::files_to_purge(config.as_deref(), linked.as_deref())?;
+    if purge == Purge::default() {
         return Err(format!(
-            "--purge-config found no config file named with --config or at {}; nothing was \
-             deleted",
+            "--purge-config found no config file named with --config or at {}, and no gateways \
+             added from links; nothing was deleted",
             default_config_display()
         )
         .into());
-    };
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "{} is not a regular file; --purge-config deletes only a Gateinto config file",
-            path.display()
-        )
-        .into());
     }
-    Ok(Some(std::path::absolute(&path)?))
+    Ok(Some(purge))
 }
 
 const NO_TERMINAL: &str = "refusing to delete the device key without confirmation: no \
                            terminal to ask on; pass --confirm-spki with at least the first 16 \
                            hex digits of the spki-sha256 shown by `gateinto status`";
 
-fn delete_config(path: &Path) -> Result {
-    std::fs::remove_file(path).map_err(|error| format!("deleting {}: {error}", path.display()))?;
-    println!("deleted config file {}", path.display());
+fn delete_files(files: &Purge) -> Result {
+    if let Some(path) = &files.config {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("deleting {}: {error}", path.display()))?;
+        println!("deleted config file {}", path.display());
+    }
+    if let Some(path) = &files.linked {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("deleting {}: {error}", path.display()))?;
+        println!(
+            "deleted the gateways added from links in {}",
+            path.display()
+        );
+    }
     Ok(())
 }
 
-fn purge_config_only(name: &KeyName, path: &Path, yes: bool, terminal: bool) -> Result {
+fn purge_files_only(name: &KeyName, files: &Purge, yes: bool, terminal: bool) -> Result {
     use std::io::{BufRead, Write};
 
     println!("no device key named \"{name}\"; no key was deleted");
-    println!(
-        "This permanently deletes the Gateinto config file {}.",
-        path.display()
-    );
+    println!("This permanently deletes {}.", files.items().join(" and "));
     if !yes {
         if !terminal {
             return Err(
@@ -1135,7 +1251,7 @@ fn purge_config_only(name: &KeyName, path: &Path, yes: bool, terminal: bool) -> 
                     .into(),
             );
         }
-        print!("\nType purge to delete the config file: ");
+        print!("\nType purge to delete them: ");
         std::io::stdout().flush()?;
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line)?;
@@ -1143,7 +1259,7 @@ fn purge_config_only(name: &KeyName, path: &Path, yes: bool, terminal: bool) -> 
             return Err("the confirmation did not match; nothing was deleted".into());
         }
     }
-    delete_config(path)
+    delete_files(files)
 }
 
 async fn reset(args: ResetArgs) -> Result {
@@ -1153,25 +1269,30 @@ async fn reset(args: ResetArgs) -> Result {
     if args.confirm_spki.is_none() && !args.yes && !terminal {
         return Err(NO_TERMINAL.into());
     }
-    let config = config_to_purge(&args)?;
+    let files = files_to_purge(&args)?;
     let name = device_key_settings(&args.config, args.name.clone())?.name;
     let store = gateinto::identity::system_store()?;
     let found = match device_key::info(&store, &name) {
         Ok((key, None)) => Some((key.backend, key.fingerprint())),
         Ok((_, Some(duplicate))) => return Err(KeyError::Duplicate(duplicate).into()),
-        Err(KeyError::NotFound(_)) if config.is_some() => None,
+        Err(KeyError::NotFound(_)) if files.is_some() => None,
         Err(error) => return Err(error.into()),
     };
     let Some((backend, fingerprint)) = found else {
-        let path = config.expect("only a config purge reaches here without a key");
-        return purge_config_only(&name, &path, args.yes, terminal);
+        let files = files.expect("only a config purge reaches here without a key");
+        return purge_files_only(&name, &files, args.yes, terminal);
     };
     if args.confirm_spki.is_none() && !terminal {
         return Err(NO_TERMINAL.into());
     }
     print!(
         "{}",
-        lifecycle::purge_warning(&name, backend, &fingerprint, config.as_deref())
+        lifecycle::purge_warning(
+            &name,
+            backend,
+            &fingerprint,
+            &files.clone().unwrap_or_default()
+        )
     );
     let confirmation = match args.confirm_spki {
         Some(confirmation) => confirmation,
@@ -1192,8 +1313,8 @@ async fn reset(args: ResetArgs) -> Result {
         purged.backend.provider(),
         purged.fingerprint
     );
-    if let Some(path) = config {
-        delete_config(&path)?;
+    if let Some(files) = &files {
+        delete_files(files)?;
     }
     println!(
         "The device is NOT revoked at any gateway. `gateinto setup` creates a new device key \

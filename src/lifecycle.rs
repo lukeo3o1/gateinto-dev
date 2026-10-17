@@ -1,11 +1,12 @@
 use std::fmt;
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::ConfigFile;
 use crate::identity::device_key::{
     self, Backend, KeyName, KeyStore, PurgeError, PurgedKey, SpkiConfirmation,
 };
+use crate::link::{KnownGateway, Origin};
 use crate::proxy::DEFAULT_LISTEN;
 use crate::registration::{self, RegistrationError};
 
@@ -115,14 +116,97 @@ pub fn handler_state(registered: Result<Option<String>, RegistrationError>) -> S
     }
 }
 
-pub fn gateway_lines(file: &ConfigFile) -> Vec<String> {
-    file.gateways
+fn address_line(gateway: &KnownGateway) -> String {
+    match (&gateway.host, gateway.port) {
+        (Some(host), Some(port)) if host.contains(':') => {
+            format!("{}: [{host}]:{port}", gateway.name)
+        }
+        (Some(host), Some(port)) => format!("{}: {host}:{port}", gateway.name),
+        _ => format!("{}: no upstream host:port", gateway.name),
+    }
+}
+
+pub fn gateway_lines(known: &[KnownGateway]) -> Vec<String> {
+    known
         .iter()
-        .map(|(name, section)| match (&section.host, section.port) {
-            (Some(host), Some(port)) => format!("{name}: {host}:{port}"),
-            _ => format!("{name}: no upstream host:port"),
+        .map(|gateway| format!("{} ({})", address_line(gateway), gateway.source))
+        .collect()
+}
+
+pub fn gateway_list(known: &[KnownGateway]) -> Vec<String> {
+    known
+        .iter()
+        .map(|gateway| {
+            let portal = match &gateway.portal_url {
+                None => "none".to_owned(),
+                Some(url) => Origin::of(url).map_or_else(
+                    || "set, without a strict origin".to_owned(),
+                    |o| o.to_string(),
+                ),
+            };
+            format!(
+                "{}, portal {portal} ({})",
+                address_line(gateway),
+                gateway.source
+            )
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Purge {
+    pub config: Option<PathBuf>,
+    pub linked: Option<PathBuf>,
+}
+
+impl Purge {
+    pub fn items(&self) -> Vec<String> {
+        let mut items = Vec::new();
+        if let Some(path) = &self.config {
+            items.push(format!("the Gateinto config file {}", path.display()));
+        }
+        if let Some(path) = &self.linked {
+            items.push(format!(
+                "the gateways added from links in {}",
+                path.display()
+            ));
+        }
+        items
+    }
+
+    pub fn describe(&self) -> String {
+        self.items()
+            .iter()
+            .map(|item| format!("and {item}.\n"))
+            .collect()
+    }
+}
+
+fn regular_file(path: &Path, optional: bool) -> Result<Option<PathBuf>, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => std::path::absolute(path)
+            .map(Some)
+            .map_err(|error| format!("reading {}: {error}", path.display())),
+        Ok(_) => Err(format!(
+            "{} is not a regular file; --purge-config deletes only Gateinto files",
+            path.display()
+        )),
+        Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("reading {}: {error}", path.display())),
+    }
+}
+
+pub fn files_to_purge(config: Option<&Path>, linked: Option<&Path>) -> Result<Purge, String> {
+    Ok(Purge {
+        config: config
+            .map(|path| regular_file(path, false))
+            .transpose()?
+            .flatten(),
+        linked: linked
+            .map(|path| regular_file(path, true))
+            .transpose()?
+            .flatten(),
+    })
 }
 
 pub fn device_session_line(file: &ConfigFile) -> String {
@@ -135,15 +219,8 @@ pub fn device_session_line(file: &ConfigFile) -> String {
     }
 }
 
-pub fn purge_warning(
-    name: &KeyName,
-    backend: Backend,
-    fingerprint: &str,
-    config: Option<&Path>,
-) -> String {
-    let config = config
-        .map(|path| format!("and the Gateinto config file {}.\n", path.display()))
-        .unwrap_or_default();
+pub fn purge_warning(name: &KeyName, backend: Backend, fingerprint: &str, files: &Purge) -> String {
+    let config = files.describe();
     format!(
         "This permanently deletes the Gateinto device key:\n\
          \x20 provider: {}\n\
@@ -206,6 +283,7 @@ pub async fn purge_device_identity<S: KeyStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::{self, LinkedGateway};
 
     #[test]
     fn service_accounts_are_recognised_by_sid() {
@@ -258,25 +336,98 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gateways_are_listed_with_host_and_port_only() {
+    fn known_gateways() -> Vec<KnownGateway> {
         let file = ConfigFile::parse(
             "[device_session]\ngateway = \"office\"\n\
              [gateways.office]\nhost = \"proxy.example.com\"\nport = 443\nca_file = \"ca.pem\"\n\
              [gateways.lab]\nhost = \"10.0.0.1\"\nport = 8443\n\
              portal_url = \"https://portal.example.com/?token=secret\"\n\
-             [gateways.broken]\nhost = \"x.example.com\"\n",
+             [gateways.broken]\nhost = \"x.example.com\"\n\
+             [gateways.v6]\nhost = \"::1\"\nport = 443\n",
         )
         .unwrap();
+        let linked = LinkedGateway {
+            name: "newco".parse().unwrap(),
+            address: "proxy.newco.example:8443".parse().unwrap(),
+            portal_url: "https://portal.newco.example:444/home?secret=1"
+                .parse()
+                .unwrap(),
+            approved_at: Some(1),
+        };
+        link::known_gateways(&file, &[linked])
+    }
 
+    #[test]
+    fn gateways_are_listed_with_host_port_and_source_only() {
         assert_eq!(
-            gateway_lines(&file),
+            gateway_lines(&known_gateways()),
             vec![
-                "broken: no upstream host:port",
-                "lab: 10.0.0.1:8443",
-                "office: proxy.example.com:443",
+                "broken: no upstream host:port (config)",
+                "lab: 10.0.0.1:8443 (config)",
+                "office: proxy.example.com:443 (config)",
+                "v6: [::1]:443 (config)",
+                "newco: proxy.newco.example:8443 (linked)",
             ]
         );
+    }
+
+    #[test]
+    fn the_gateway_list_adds_the_portal_origin_without_its_path() {
+        assert_eq!(
+            gateway_list(&known_gateways()),
+            vec![
+                "broken: no upstream host:port, portal none (config)",
+                "lab: 10.0.0.1:8443, portal https://portal.example.com (config)",
+                "office: proxy.example.com:443, portal none (config)",
+                "v6: [::1]:443, portal none (config)",
+                "newco: proxy.newco.example:8443, portal https://portal.newco.example:444 (linked)",
+            ]
+        );
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gateinto-lifecycle-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn purging_the_config_also_takes_the_linked_gateways_file() {
+        let dir = temp_dir("purge");
+        let (config, linked) = (dir.join("gateinto.toml"), dir.join(link::STORE_FILE));
+        let missing = dir.join("missing.toml");
+        std::fs::write(&config, "").unwrap();
+        assert_eq!(
+            files_to_purge(Some(&config), Some(&missing)).unwrap(),
+            Purge {
+                config: Some(std::path::absolute(&config).unwrap()),
+                linked: None
+            }
+        );
+        std::fs::write(&linked, "").unwrap();
+        assert_eq!(
+            files_to_purge(Some(&config), Some(&linked)).unwrap(),
+            Purge {
+                config: Some(std::path::absolute(&config).unwrap()),
+                linked: Some(std::path::absolute(&linked).unwrap()),
+            }
+        );
+        assert_eq!(
+            files_to_purge(None, Some(&linked)).unwrap(),
+            Purge {
+                config: None,
+                linked: Some(std::path::absolute(&linked).unwrap())
+            }
+        );
+        assert_eq!(files_to_purge(None, Some(&missing)), Ok(Purge::default()));
+        let error = files_to_purge(Some(&missing), Some(&linked)).unwrap_err();
+        assert!(error.contains("missing.toml"), "{error}");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let error = files_to_purge(Some(&config), Some(&dir.join("sub"))).unwrap_err();
+        assert!(error.contains("not a regular file"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -306,7 +457,10 @@ mod tests {
             &"gateinto-device-v1".parse().unwrap(),
             Backend::Software,
             &fingerprint,
-            Some(Path::new("/home/me/gateinto.toml")),
+            &Purge {
+                config: Some(PathBuf::from("/home/me/gateinto.toml")),
+                linked: Some(PathBuf::from("/home/me/linked-gateways.toml")),
+            },
         );
         assert_eq!(
             warning,
@@ -316,6 +470,7 @@ mod tests {
                  \x20 key name: gateinto-device-v1 (current Windows user)\n\
                  \x20 spki-sha256: {fingerprint}\n\
                  and the Gateinto config file /home/me/gateinto.toml.\n\
+                 and the gateways added from links in /home/me/linked-gateways.toml.\n\
                  \n\
                  - The device identity becomes invalid. Gateways that enrolled this key will not \
                  recognise the device; a new key may need to be enrolled again.\n\
@@ -330,11 +485,12 @@ mod tests {
             &"gateinto-device-v1".parse().unwrap(),
             Backend::Tpm,
             &fingerprint,
-            None,
+            &Purge::default(),
         );
         assert!(without_config.contains("provider: Microsoft Platform Crypto Provider\n"));
         assert!(without_config.contains(&format!("spki-sha256: {fingerprint}\n\n")));
         assert!(!without_config.contains("config file"));
+        assert!(!without_config.contains("links"));
     }
 
     #[test]
