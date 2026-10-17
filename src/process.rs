@@ -90,11 +90,20 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    // WaitForSingleObject counts in system timer ticks of about 15.6 ms, so it can return up
+    // to two ticks before Instant measures the full timeout.
+    const TIMER_SLACK: Duration = Duration::from_millis(32);
+
     #[test]
     fn a_running_process_is_reported_after_the_timeout() {
+        let timeout = Duration::from_millis(300);
         let started = Instant::now();
-        assert!(!wait_for_exit(std::process::id(), Duration::from_millis(300)).unwrap());
-        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(!wait_for_exit(std::process::id(), timeout).unwrap());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= timeout - TIMER_SLACK,
+            "returned after {elapsed:?}"
+        );
     }
 
     #[test]
