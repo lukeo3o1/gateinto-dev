@@ -16,10 +16,10 @@ it. Which of these mechanisms are covered by tests is in
   (`502`).
 - **Certificate verification is always on.** The upstream certificate and
   name are verified with WebPKI against the Mozilla roots from `webpki-roots`,
-  or only against the CAs in `--ca-file` / `[upstream] ca_file`. There is no
+  or only against the CAs in `--ca-file` / the gateway's `ca_file`. There is no
   flag or configuration key that disables verification. The name checked is
   `--upstream-server-name`, defaulting to the upstream host.
-- **Key exchange modes.** `--tls-mode` / `[tls] mode` decides which groups are
+- **Key exchange modes.** `--tls-mode` / the gateway's `tls_mode` decides which groups are
   offered:
   - `hybrid_preferred` (default): `X25519MLKEM768`, then `X25519`;
   - `hybrid_required`: only `X25519MLKEM768`; an upstream without it fails the

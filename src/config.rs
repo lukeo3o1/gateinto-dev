@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use rustls::pki_types::ServerName;
 use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 
 use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
@@ -16,40 +19,157 @@ use crate::tls::TlsMode;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
+    #[serde(skip)]
+    path: Option<PathBuf>,
     #[serde(default)]
-    pub listen: Listen,
+    pub device_session: DeviceSessionSection,
     #[serde(default)]
-    pub upstream: UpstreamSection,
-    #[serde(default)]
-    pub tls: Tls,
+    pub gateways: Gateways,
     #[serde(default)]
     pub device_key: DeviceKey,
     #[serde(default)]
     pub limits: LimitsSection,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Listen {
-    pub address: Option<SocketAddr>,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub struct GatewayName(String);
+
+impl GatewayName {
+    pub const MAX_LEN: usize = 64;
+
+    pub fn command_line() -> Self {
+        Self("command-line".to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for GatewayName {
+    type Err = InvalidGatewayName;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let valid = (1..=Self::MAX_LEN).contains(&name.len())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        if valid {
+            Ok(Self(name.to_owned()))
+        } else {
+            Err(InvalidGatewayName(name.to_owned()))
+        }
+    }
+}
+
+impl TryFrom<String> for GatewayName {
+    type Error = InvalidGatewayName;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        name.parse()
+    }
+}
+
+impl fmt::Display for GatewayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidGatewayName(String);
+
+impl fmt::Display for InvalidGatewayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid gateway name \"{}\": use 1 to {} characters from A-Z, a-z, 0-9, _ and -",
+            self.0,
+            GatewayName::MAX_LEN
+        )
+    }
+}
+
+impl std::error::Error for InvalidGatewayName {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Gateways(BTreeMap<GatewayName, GatewaySection>);
+
+impl Gateways {
+    fn names(&self) -> String {
+        if self.0.is_empty() {
+            return "none".to_owned();
+        }
+        let names: Vec<&str> = self.0.keys().map(GatewayName::as_str).collect();
+        names.join(", ")
+    }
+}
+
+impl<'de> Deserialize<'de> for Gateways {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct GatewaysVisitor;
+
+        impl<'de> Visitor<'de> for GatewaysVisitor {
+            type Value = Gateways;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a table of gateways")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Gateways, M::Error> {
+                let mut gateways = BTreeMap::new();
+                while let Some(name) = map.next_key::<GatewayName>()? {
+                    let section = map.next_value().map_err(|error| {
+                        let message = error.to_string().trim_end().replace('\n', " ");
+                        de::Error::custom(format!("gateway \"{name}\": {message}"))
+                    })?;
+                    gateways.insert(name, section);
+                }
+                Ok(Gateways(gateways))
+            }
+        }
+
+        deserializer.deserialize_map(GatewaysVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UpstreamSection {
+pub struct DeviceSessionSection {
+    pub gateway: Option<GatewayName>,
+    pub listen: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewaySection {
     pub host: Option<String>,
     pub port: Option<NonZeroU16>,
     pub server_name: Option<String>,
     pub ca_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Tls {
-    pub mode: Option<TlsMode>,
+    pub tls_mode: Option<TlsMode>,
     pub client_certificate: Option<ClientCertificateMode>,
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: Option<bool>,
+}
+
+impl GatewaySection {
+    fn merge(self, overrides: &Self) -> Self {
+        let overrides = overrides.clone();
+        Self {
+            host: overrides.host.or(self.host),
+            port: overrides.port.or(self.port),
+            server_name: overrides.server_name.or(self.server_name),
+            ca_file: overrides.ca_file.or(self.ca_file),
+            tls_mode: overrides.tls_mode.or(self.tls_mode),
+            client_certificate: overrides.client_certificate.or(self.client_certificate),
+            client_cert_file: overrides.client_cert_file.or(self.client_cert_file),
+            self_signed_client_cert: overrides
+                .self_signed_client_cert
+                .or(self.self_signed_client_cert),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -58,6 +178,29 @@ pub struct DeviceKey {
     pub name: Option<KeyName>,
     pub preferred: Option<Backend>,
     pub software_fallback_on_first_create: Option<bool>,
+}
+
+impl DeviceKey {
+    fn merge(&self, overrides: &Self) -> Self {
+        Self {
+            name: overrides.name.clone().or(self.name.clone()),
+            preferred: overrides.preferred.or(self.preferred),
+            software_fallback_on_first_create: overrides
+                .software_fallback_on_first_create
+                .or(self.software_fallback_on_first_create),
+        }
+    }
+
+    pub fn settings(&self) -> DeviceKeySettings {
+        let defaults = DeviceKeySettings::default();
+        DeviceKeySettings {
+            name: self.name.clone().unwrap_or(defaults.name),
+            preferred: self.preferred.unwrap_or(defaults.preferred),
+            software_fallback_on_first_create: self
+                .software_fallback_on_first_create
+                .unwrap_or(defaults.software_fallback_on_first_create),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -69,16 +212,31 @@ pub struct LimitsSection {
     pub header_max_bytes: Option<NonZeroU32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Overrides {
+    pub gateway: Option<GatewayName>,
+    pub gateway_settings: GatewaySection,
+    pub listen: Option<SocketAddr>,
+    pub device_key: DeviceKey,
+    pub limits: LimitsSection,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub listen: SocketAddr,
+    pub gateway: GatewayProfile,
+    pub device_key: DeviceKeySettings,
+    pub limits: LimitSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayProfile {
+    pub name: GatewayName,
     pub upstream: UpstreamSettings,
     pub tls_mode: TlsMode,
     pub client_certificate: ClientCertificateMode,
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: bool,
-    pub device_key: DeviceKeySettings,
-    pub limits: LimitSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,125 +297,142 @@ impl ConfigFile {
             .map_err(|error| in_file(ConfigError::new(ErrorKind::Read(error))))?;
         let mut file = Self::parse(&text).map_err(in_file)?;
         let base = path.parent().unwrap_or(Path::new(""));
-        for relative in [&mut file.upstream.ca_file, &mut file.tls.client_cert_file]
-            .into_iter()
-            .flatten()
-        {
-            *relative = base.join(&*relative);
+        for gateway in file.gateways.0.values_mut() {
+            for relative in [&mut gateway.ca_file, &mut gateway.client_cert_file]
+                .into_iter()
+                .flatten()
+            {
+                *relative = base.join(&*relative);
+            }
         }
+        file.path = Some(path.to_owned());
         Ok(file)
     }
 
-    pub fn merge(self, overrides: Self) -> Self {
-        Self {
-            listen: Listen {
-                address: overrides.listen.address.or(self.listen.address),
-            },
-            upstream: UpstreamSection {
-                host: overrides.upstream.host.or(self.upstream.host),
-                port: overrides.upstream.port.or(self.upstream.port),
-                server_name: overrides.upstream.server_name.or(self.upstream.server_name),
-                ca_file: overrides.upstream.ca_file.or(self.upstream.ca_file),
-            },
-            tls: Tls {
-                mode: overrides.tls.mode.or(self.tls.mode),
-                client_certificate: overrides
-                    .tls
-                    .client_certificate
-                    .or(self.tls.client_certificate),
-                client_cert_file: overrides.tls.client_cert_file.or(self.tls.client_cert_file),
-                self_signed_client_cert: overrides
-                    .tls
-                    .self_signed_client_cert
-                    .or(self.tls.self_signed_client_cert),
-            },
-            device_key: DeviceKey {
-                name: overrides.device_key.name.or(self.device_key.name),
-                preferred: overrides.device_key.preferred.or(self.device_key.preferred),
-                software_fallback_on_first_create: overrides
-                    .device_key
-                    .software_fallback_on_first_create
-                    .or(self.device_key.software_fallback_on_first_create),
-            },
-            limits: LimitsSection {
-                max_concurrent_tunnels: overrides
-                    .limits
-                    .max_concurrent_tunnels
-                    .or(self.limits.max_concurrent_tunnels),
-                connect_timeout_seconds: overrides
-                    .limits
-                    .connect_timeout_seconds
-                    .or(self.limits.connect_timeout_seconds),
-                idle_timeout_seconds: overrides
-                    .limits
-                    .idle_timeout_seconds
-                    .or(self.limits.idle_timeout_seconds),
-                header_max_bytes: overrides
-                    .limits
-                    .header_max_bytes
-                    .or(self.limits.header_max_bytes),
-            },
-        }
-    }
-
     pub fn device_key_settings(&self) -> DeviceKeySettings {
-        let defaults = DeviceKeySettings::default();
-        let section = &self.device_key;
-        DeviceKeySettings {
-            name: section.name.clone().unwrap_or(defaults.name),
-            preferred: section.preferred.unwrap_or(defaults.preferred),
-            software_fallback_on_first_create: section
-                .software_fallback_on_first_create
-                .unwrap_or(defaults.software_fallback_on_first_create),
-        }
+        self.device_key.settings()
     }
 
-    pub fn settings(&self) -> Result<Settings, ConfigError> {
-        let upstream = &self.upstream;
-        let (Some(host), Some(port)) = (&upstream.host, upstream.port) else {
-            return Err(ConfigError::new(ErrorKind::NoUpstream));
-        };
-        let server_name = upstream.server_name.clone().unwrap_or_else(|| host.clone());
-        ServerName::try_from(server_name.as_str()).map_err(|error| {
-            ConfigError::new(ErrorKind::ServerName(
-                server_name.clone(),
-                error.to_string(),
-            ))
+    pub fn gateway(&self, name: &GatewayName) -> Result<GatewayProfile, ConfigError> {
+        let section = self.gateways.0.get(name).ok_or_else(|| {
+            self.error(ErrorKind::UnknownGateway {
+                name: name.clone(),
+                reference: None,
+                configured: self.gateways.names(),
+            })
         })?;
-        let self_signed_client_cert = self.tls.self_signed_client_cert.unwrap_or(false);
-        if self_signed_client_cert && self.tls.client_cert_file.is_some() {
-            return Err(ConfigError::new(ErrorKind::ClientCertificateConflict));
-        }
+        self.profile(name.clone(), section.clone())
+    }
+
+    pub fn settings(&self, overrides: &Overrides) -> Result<Settings, ConfigError> {
+        let (name, section) = self.select_gateway(overrides.gateway.as_ref())?;
+        let gateway = self.profile(name, section.merge(&overrides.gateway_settings))?;
         let defaults = LimitSettings::default();
-        let limits = &self.limits;
+        let (file, cli) = (&self.limits, &overrides.limits);
         Ok(Settings {
-            listen: self.listen.address.unwrap_or(DEFAULT_LISTEN),
-            upstream: UpstreamSettings {
-                host: host.clone(),
-                port: port.get(),
-                server_name,
-                ca_file: upstream.ca_file.clone(),
-            },
-            tls_mode: self.tls.mode.unwrap_or_default(),
-            client_certificate: self.tls.client_certificate.unwrap_or_default(),
-            client_cert_file: self.tls.client_cert_file.clone(),
-            self_signed_client_cert,
-            device_key: self.device_key_settings(),
+            listen: overrides
+                .listen
+                .or(self.device_session.listen)
+                .unwrap_or(DEFAULT_LISTEN),
+            gateway,
+            device_key: self.device_key.merge(&overrides.device_key).settings(),
             limits: LimitSettings {
-                max_concurrent_tunnels: limits
+                max_concurrent_tunnels: cli
                     .max_concurrent_tunnels
+                    .or(file.max_concurrent_tunnels)
                     .map_or(defaults.max_concurrent_tunnels, NonZeroU32::get),
-                connect_timeout_seconds: limits
+                connect_timeout_seconds: cli
                     .connect_timeout_seconds
+                    .or(file.connect_timeout_seconds)
                     .map_or(defaults.connect_timeout_seconds, NonZeroU64::get),
-                idle_timeout_seconds: limits
+                idle_timeout_seconds: cli
                     .idle_timeout_seconds
+                    .or(file.idle_timeout_seconds)
                     .map_or(defaults.idle_timeout_seconds, NonZeroU64::get),
-                header_max_bytes: limits
+                header_max_bytes: cli
                     .header_max_bytes
+                    .or(file.header_max_bytes)
                     .map_or(defaults.header_max_bytes, NonZeroU32::get),
             },
         })
+    }
+
+    fn select_gateway(
+        &self,
+        requested: Option<&GatewayName>,
+    ) -> Result<(GatewayName, GatewaySection), ConfigError> {
+        let named = requested.map(|name| (name, Reference::Flag)).or_else(|| {
+            self.device_session
+                .gateway
+                .as_ref()
+                .map(|name| (name, Reference::DeviceSession))
+        });
+        if let Some((name, reference)) = named {
+            let section = self.gateways.0.get(name).ok_or_else(|| {
+                self.error(ErrorKind::UnknownGateway {
+                    name: name.clone(),
+                    reference: Some(reference),
+                    configured: self.gateways.names(),
+                })
+            })?;
+            return Ok((name.clone(), section.clone()));
+        }
+        let mut gateways = self.gateways.0.iter();
+        match (gateways.next(), gateways.next()) {
+            (None, _) => Ok((GatewayName::command_line(), GatewaySection::default())),
+            (Some((name, section)), None) => Ok((name.clone(), section.clone())),
+            (Some(_), Some(_)) => Err(self.error(ErrorKind::AmbiguousGateway {
+                count: self.gateways.0.len(),
+                configured: self.gateways.names(),
+            })),
+        }
+    }
+
+    fn profile(
+        &self,
+        name: GatewayName,
+        section: GatewaySection,
+    ) -> Result<GatewayProfile, ConfigError> {
+        let invalid = |kind| {
+            self.error(ErrorKind::Gateway {
+                name: name.clone(),
+                kind,
+            })
+        };
+        let (Some(host), Some(port)) = (section.host, section.port) else {
+            return Err(invalid(GatewayErrorKind::NoUpstream));
+        };
+        let server_name = section.server_name.unwrap_or_else(|| host.clone());
+        if let Err(error) = ServerName::try_from(server_name.as_str()) {
+            return Err(invalid(GatewayErrorKind::ServerName(
+                server_name.clone(),
+                error.to_string(),
+            )));
+        }
+        let self_signed_client_cert = section.self_signed_client_cert.unwrap_or(false);
+        if self_signed_client_cert && section.client_cert_file.is_some() {
+            return Err(invalid(GatewayErrorKind::ClientCertificateConflict));
+        }
+        Ok(GatewayProfile {
+            name,
+            upstream: UpstreamSettings {
+                host,
+                port: port.get(),
+                server_name,
+                ca_file: section.ca_file,
+            },
+            tls_mode: section.tls_mode.unwrap_or_default(),
+            client_certificate: section.client_certificate.unwrap_or_default(),
+            client_cert_file: section.client_cert_file,
+            self_signed_client_cert,
+        })
+    }
+
+    fn error(&self, kind: ErrorKind) -> ConfigError {
+        ConfigError {
+            path: self.path.clone(),
+            kind,
+        }
     }
 }
 
@@ -267,10 +442,33 @@ pub struct ConfigError {
     kind: ErrorKind,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Reference {
+    DeviceSession,
+    Flag,
+}
+
 #[derive(Debug)]
 enum ErrorKind {
     Read(io::Error),
     Parse(toml::de::Error),
+    UnknownGateway {
+        name: GatewayName,
+        reference: Option<Reference>,
+        configured: String,
+    },
+    AmbiguousGateway {
+        count: usize,
+        configured: String,
+    },
+    Gateway {
+        name: GatewayName,
+        kind: GatewayErrorKind,
+    },
+}
+
+#[derive(Debug)]
+enum GatewayErrorKind {
     NoUpstream,
     ServerName(String, String),
     ClientCertificateConflict,
@@ -290,14 +488,59 @@ impl fmt::Display for ConfigError {
         match &self.kind {
             ErrorKind::Read(error) => write!(f, "{error}"),
             ErrorKind::Parse(error) => write!(f, "{}", error.to_string().trim_end()),
-            ErrorKind::NoUpstream => f.write_str(
-                "no upstream configured; pass --upstream-host and --upstream-port, \
-                 or set host and port in the [upstream] section of the --config file",
+            ErrorKind::UnknownGateway {
+                name,
+                reference,
+                configured,
+            } => {
+                match reference {
+                    Some(Reference::DeviceSession) => {
+                        f.write_str("[device_session] gateway names the ")?
+                    }
+                    Some(Reference::Flag) => f.write_str("--gateway names the ")?,
+                    None => {}
+                }
+                write!(
+                    f,
+                    "unknown gateway \"{name}\"; configured gateways: {configured}"
+                )
+            }
+            ErrorKind::AmbiguousGateway { count, configured } => write!(
+                f,
+                "{count} gateways are configured ({configured}) and [device_session] names none; \
+                 set [device_session] gateway (check-upstream also accepts --gateway)"
             ),
-            ErrorKind::ServerName(name, error) => {
+            ErrorKind::Gateway { name, kind } if *name == GatewayName::command_line() => match kind
+            {
+                GatewayErrorKind::NoUpstream => f.write_str(
+                    "no upstream configured; pass --upstream-host and --upstream-port, or \
+                         add a [gateways.<name>] table with host and port to the --config file",
+                ),
+                kind => kind.fmt(f),
+            },
+            ErrorKind::Gateway { name, kind } => {
+                write!(f, "gateway \"{name}\": ")?;
+                match kind {
+                    GatewayErrorKind::NoUpstream => write!(
+                        f,
+                        "no upstream configured; set host and port in [gateways.{name}] or pass \
+                         --upstream-host and --upstream-port"
+                    ),
+                    kind => kind.fmt(f),
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for GatewayErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoUpstream => f.write_str("no upstream configured"),
+            Self::ServerName(name, error) => {
                 write!(f, "invalid upstream server name \"{name}\": {error}")
             }
-            ErrorKind::ClientCertificateConflict => f.write_str(
+            Self::ClientCertificateConflict => f.write_str(
                 "a client certificate file and a self-signed client certificate cannot be \
                  combined; set either client_cert_file (--client-cert-file) or \
                  self_signed_client_cert (--self-signed-client-cert)",
@@ -314,19 +557,22 @@ mod tests {
     use std::path::Path;
 
     const FULL: &str = r#"
-[listen]
-address = "127.0.0.2:8080"
+[device_session]
+gateway = "office"
+listen = "127.0.0.2:8080"
 
-[upstream]
+[gateways.office]
 host = "proxy.example.test"
 port = 8443
 server_name = "name.example.test"
 ca_file = "/etc/gateinto/ca.pem"
-
-[tls]
-mode = "hybrid_required"
+tls_mode = "hybrid_required"
 client_certificate = "required"
 client_cert_file = "/etc/gateinto/client.pem"
+
+[gateways.home]
+host = "home.example.test"
+port = 443
 
 [device_key]
 name = "gateinto-other"
@@ -341,13 +587,17 @@ header_max_bytes = 4096
 "#;
 
     const MINIMAL: &str = r#"
-[upstream]
+[gateways.main]
 host = "proxy.example.test"
 port = 443
 "#;
 
+    fn name(name: &str) -> GatewayName {
+        name.parse().unwrap()
+    }
+
     fn settings(text: &str) -> Result<Settings, ConfigError> {
-        ConfigFile::parse(text)?.settings()
+        ConfigFile::parse(text)?.settings(&Overrides::default())
     }
 
     #[test]
@@ -357,16 +607,19 @@ port = 443
             settings,
             Settings {
                 listen: "127.0.0.2:8080".parse().unwrap(),
-                upstream: UpstreamSettings {
-                    host: "proxy.example.test".to_owned(),
-                    port: 8443,
-                    server_name: "name.example.test".to_owned(),
-                    ca_file: Some(PathBuf::from("/etc/gateinto/ca.pem")),
+                gateway: GatewayProfile {
+                    name: name("office"),
+                    upstream: UpstreamSettings {
+                        host: "proxy.example.test".to_owned(),
+                        port: 8443,
+                        server_name: "name.example.test".to_owned(),
+                        ca_file: Some(PathBuf::from("/etc/gateinto/ca.pem")),
+                    },
+                    tls_mode: TlsMode::HybridRequired,
+                    client_certificate: ClientCertificateMode::Required,
+                    client_cert_file: Some(PathBuf::from("/etc/gateinto/client.pem")),
+                    self_signed_client_cert: false,
                 },
-                tls_mode: TlsMode::HybridRequired,
-                client_certificate: ClientCertificateMode::Required,
-                client_cert_file: Some(PathBuf::from("/etc/gateinto/client.pem")),
-                self_signed_client_cert: false,
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
                     preferred: Backend::Software,
@@ -386,12 +639,15 @@ port = 443
     fn omitted_values_take_the_defaults() {
         let settings = settings(MINIMAL).unwrap();
         assert_eq!(settings.listen, crate::proxy::DEFAULT_LISTEN);
-        assert_eq!(settings.upstream.server_name, "proxy.example.test");
-        assert_eq!(settings.upstream.ca_file, None);
-        assert_eq!(settings.tls_mode, TlsMode::HybridPreferred);
-        assert_eq!(settings.client_certificate, ClientCertificateMode::Optional);
-        assert_eq!(settings.client_cert_file, None);
-        assert_eq!(settings.device_key, DeviceKeySettings::default());
+        assert_eq!(settings.gateway.name, name("main"));
+        assert_eq!(settings.gateway.upstream.server_name, "proxy.example.test");
+        assert_eq!(settings.gateway.upstream.ca_file, None);
+        assert_eq!(settings.gateway.tls_mode, TlsMode::HybridPreferred);
+        assert_eq!(
+            settings.gateway.client_certificate,
+            ClientCertificateMode::Optional
+        );
+        assert_eq!(settings.gateway.client_cert_file, None);
         assert_eq!(
             settings.device_key,
             DeviceKeySettings {
@@ -416,23 +672,143 @@ port = 443
         let file = ConfigFile::parse("").unwrap();
         assert_eq!(file, ConfigFile::default());
         assert_eq!(file.device_key_settings(), DeviceKeySettings::default());
-        let error = file.settings().unwrap_err().to_string();
+        let error = file
+            .settings(&Overrides::default())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("no upstream configured"), "{error}");
         assert!(error.contains("--upstream-host"), "{error}");
         assert!(error.contains("--upstream-port"), "{error}");
-        assert!(error.contains("[upstream]"), "{error}");
+        assert!(error.contains("[gateways.<name>]"), "{error}");
     }
 
     #[test]
-    fn an_incomplete_upstream_is_an_error() {
+    fn an_incomplete_gateway_is_an_error_naming_it() {
         for text in [
-            "[upstream]\nhost = \"proxy.example.test\"\n",
-            "[upstream]\nport = 443\n",
-            "[upstream]\nserver_name = \"proxy.example.test\"\n",
+            "[gateways.main]\nhost = \"proxy.example.test\"\n",
+            "[gateways.main]\nport = 443\n",
+            "[gateways.main]\nserver_name = \"proxy.example.test\"\n",
         ] {
             let error = settings(text).unwrap_err().to_string();
-            assert!(error.contains("no upstream configured"), "{text}: {error}");
+            assert!(
+                error.starts_with("gateway \"main\": no upstream configured"),
+                "{text}: {error}"
+            );
+            assert!(error.contains("[gateways.main]"), "{text}: {error}");
+            assert!(error.contains("--upstream-host"), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn the_device_session_uses_the_only_gateway_by_default() {
+        let settings = settings(MINIMAL).unwrap();
+        assert_eq!(settings.gateway.name, name("main"));
+        assert_eq!(settings.gateway.upstream.host, "proxy.example.test");
+    }
+
+    #[test]
+    fn the_device_session_names_its_gateway_among_several() {
+        let file = ConfigFile::parse(FULL).unwrap();
+        let settings = file.settings(&Overrides::default()).unwrap();
+        assert_eq!(settings.gateway.name, name("office"));
+        assert_eq!(settings.gateway.upstream.host, "proxy.example.test");
+
+        let text = FULL.replace("gateway = \"office\"", "gateway = \"home\"");
+        let settings = super::tests::settings(&text).unwrap();
+        assert_eq!(settings.gateway.name, name("home"));
+        assert_eq!(settings.gateway.upstream.host, "home.example.test");
+        assert_eq!(settings.gateway.upstream.port, 443);
+        assert_eq!(settings.gateway.tls_mode, TlsMode::HybridPreferred);
+        assert_eq!(settings.listen, "127.0.0.2:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn several_gateways_need_a_device_session_gateway() {
+        let text = format!("{MINIMAL}[gateways.other]\nhost = \"other.test\"\nport = 443\n");
+        let error = settings(&text).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "2 gateways are configured (main, other) and [device_session] names none; set \
+             [device_session] gateway (check-upstream also accepts --gateway)"
+        );
+    }
+
+    #[test]
+    fn an_unknown_gateway_reference_is_an_error_naming_it() {
+        let text = format!("[device_session]\ngateway = \"missing\"\n{MINIMAL}");
+        let error = settings(&text).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "[device_session] gateway names the unknown gateway \"missing\"; configured \
+             gateways: main"
+        );
+
+        let overrides = Overrides {
+            gateway: Some(name("absent")),
+            ..Overrides::default()
+        };
+        let error = ConfigFile::parse(MINIMAL)
+            .unwrap()
+            .settings(&overrides)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "--gateway names the unknown gateway \"absent\"; configured gateways: main"
+        );
+
+        let error = ConfigFile::default()
+            .settings(&overrides)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "--gateway names the unknown gateway \"absent\"; configured gateways: none"
+        );
+    }
+
+    #[test]
+    fn gateway_names_are_validated() {
+        let longest = "a".repeat(64);
+        for valid in ["a", "Office_2", "home-vpn", "0", longest.as_str()] {
+            assert_eq!(name(valid).as_str(), valid);
+            let text = format!("[gateways.\"{valid}\"]\nhost = \"h.test\"\nport = 1\n");
+            assert_eq!(settings(&text).unwrap().gateway.name.as_str(), valid);
+        }
+        let too_long = "a".repeat(65);
+        for invalid in ["", "a b", "a.b", "é", "a/b", too_long.as_str()] {
+            let error = invalid.parse::<GatewayName>().unwrap_err().to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "invalid gateway name \"{invalid}\": use 1 to 64 characters from A-Z, \
+                     a-z, 0-9, _ and -"
+                )
+            );
+            for text in [
+                format!("[gateways.\"{invalid}\"]\nhost = \"h.test\"\nport = 1\n"),
+                format!("[device_session]\ngateway = \"{invalid}\"\n"),
+            ] {
+                let parsed = ConfigFile::parse(&text).unwrap_err().to_string();
+                assert!(parsed.contains(&error), "{text}: {parsed}");
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_lookup_only_reads_the_loaded_file() {
+        let file = ConfigFile::parse(FULL).unwrap();
+        let home = file.gateway(&name("home")).unwrap();
+        assert_eq!(home.name, name("home"));
+        assert_eq!(home.upstream.host, "home.example.test");
+        assert_eq!(home.upstream.server_name, "home.example.test");
+        assert_eq!(home.upstream.ca_file, None);
+
+        let error = file.gateway(&name("other")).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "unknown gateway \"other\"; configured gateways: home, office"
+        );
     }
 
     #[test]
@@ -440,27 +816,34 @@ port = 443
         for (text, key) in [
             ("unknown = 1\n", "unknown"),
             ("[proxy]\nport = 1\n", "proxy"),
-            ("[listen]\nport = 1\n", "port"),
-            ("[upstream]\nhostname = \"x\"\n", "hostname"),
-            ("[tls]\nversion = \"1.3\"\n", "version"),
+            ("[listen]\naddress = \"127.0.0.1:1\"\n", "listen"),
+            ("[upstream]\nhost = \"x\"\n", "upstream"),
+            ("[tls]\nmode = \"classical_only\"\n", "tls"),
+            ("[device_session]\nport = 1\n", "port"),
             ("[device_key]\nbackend = \"tpm\"\n", "backend"),
             ("[limits]\nmax_tunnels = 1\n", "max_tunnels"),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains(key), "{text}: {error}");
         }
+        let error = ConfigFile::parse("[gateways.main]\nhostname = \"x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+        assert!(error.contains("hostname"), "{error}");
     }
 
     #[test]
     fn non_loopback_listen_cannot_be_allowed_from_the_file() {
         for text in [
             "unsafe_allow_non_loopback_listen = true\n",
-            "[listen]\nunsafe_allow_non_loopback_listen = true\n",
-            "[listen]\nallow_non_loopback = true\n",
+            "[device_session]\nunsafe_allow_non_loopback_listen = true\n",
+            "[device_session]\nallow_non_loopback = true\n",
+            "[gateways.main]\nunsafe_allow_non_loopback_listen = true\n",
         ] {
             assert!(ConfigFile::parse(text).is_err(), "{text}");
         }
-        let text = format!("[listen]\naddress = \"0.0.0.0:18736\"\n{MINIMAL}");
+        let text = format!("[device_session]\nlisten = \"0.0.0.0:18736\"\n{MINIMAL}");
         let settings = settings(&text).unwrap();
         assert!(!settings.listen.ip().is_loopback());
     }
@@ -468,11 +851,19 @@ port = 443
     #[test]
     fn invalid_values_are_rejected() {
         for (text, expected) in [
-            ("[listen]\naddress = \"localhost\"\n", "address"),
-            ("[upstream]\nport = 0\n", "port"),
-            ("[upstream]\nport = 70000\n", "port"),
-            ("[tls]\nmode = \"hybrid\"\n", "hybrid_preferred"),
-            ("[tls]\nclient_certificate = \"sometimes\"\n", "optional"),
+            ("[device_session]\nlisten = \"localhost\"\n", "listen"),
+            ("[device_session]\ngateway = 1\n", "gateway"),
+            ("[gateways]\nmain = 1\n", "gateway \"main\""),
+            ("[gateways.main]\nport = 0\n", "port"),
+            ("[gateways.main]\nport = 70000\n", "port"),
+            (
+                "[gateways.main]\ntls_mode = \"hybrid\"\n",
+                "hybrid_preferred",
+            ),
+            (
+                "[gateways.main]\nclient_certificate = \"sometimes\"\n",
+                "optional",
+            ),
             ("[device_key]\nname = \"\"\n", "key name must not be empty"),
             ("[device_key]\npreferred = \"hsm\"\n", "tpm"),
             (
@@ -488,8 +879,8 @@ port = 443
                 "idle_timeout_seconds",
             ),
             ("[limits]\nheader_max_bytes = 0\n", "header_max_bytes"),
-            ("[upstream]\nhost = 1\n", "host"),
-            ("[upstream\n", "TOML"),
+            ("[gateways.main]\nhost = 1\n", "host"),
+            ("[gateways.main\n", "TOML"),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains(expected), "{text}: {error}");
@@ -498,11 +889,11 @@ port = 443
 
     #[test]
     fn self_signed_client_cert_is_off_unless_enabled() {
-        assert!(!settings(MINIMAL).unwrap().self_signed_client_cert);
-        assert!(!settings(FULL).unwrap().self_signed_client_cert);
-        let text = format!("{MINIMAL}[tls]\nself_signed_client_cert = true\n");
-        assert!(settings(&text).unwrap().self_signed_client_cert);
-        let error = ConfigFile::parse("[tls]\nself_signed_client_cert = \"yes\"\n")
+        assert!(!settings(MINIMAL).unwrap().gateway.self_signed_client_cert);
+        assert!(!settings(FULL).unwrap().gateway.self_signed_client_cert);
+        let text = format!("{MINIMAL}self_signed_client_cert = true\n");
+        assert!(settings(&text).unwrap().gateway.self_signed_client_cert);
+        let error = ConfigFile::parse("[gateways.main]\nself_signed_client_cert = \"yes\"\n")
             .unwrap_err()
             .to_string();
         assert!(error.contains("self_signed_client_cert"), "{error}");
@@ -510,62 +901,56 @@ port = 443
 
     #[test]
     fn self_signed_client_cert_and_client_cert_file_are_exclusive() {
-        let text = format!(
-            "{MINIMAL}[tls]\nself_signed_client_cert = true\nclient_cert_file = \"client.pem\"\n"
-        );
+        let text =
+            format!("{MINIMAL}self_signed_client_cert = true\nclient_cert_file = \"client.pem\"\n");
         assert_eq!(
             settings(&text).unwrap_err().to_string(),
-            "a client certificate file and a self-signed client certificate cannot be combined; \
-             set either client_cert_file (--client-cert-file) or self_signed_client_cert \
-             (--self-signed-client-cert)"
+            "gateway \"main\": a client certificate file and a self-signed client certificate \
+             cannot be combined; set either client_cert_file (--client-cert-file) or \
+             self_signed_client_cert (--self-signed-client-cert)"
         );
         let disabled = format!(
-            "{MINIMAL}[tls]\nself_signed_client_cert = false\nclient_cert_file = \"client.pem\"\n"
+            "{MINIMAL}self_signed_client_cert = false\nclient_cert_file = \"client.pem\"\n"
         );
         assert!(settings(&disabled).is_ok());
     }
 
     #[test]
     fn self_signed_client_cert_can_be_enabled_by_an_override() {
-        let overrides = ConfigFile {
-            tls: Tls {
+        let overrides = Overrides {
+            gateway_settings: GatewaySection {
                 self_signed_client_cert: Some(true),
-                ..Tls::default()
+                ..GatewaySection::default()
             },
-            ..ConfigFile::default()
+            ..Overrides::default()
         };
         let file = ConfigFile::parse(MINIMAL).unwrap();
 
         assert!(
-            file.merge(overrides)
-                .settings()
+            file.settings(&overrides)
                 .unwrap()
+                .gateway
                 .self_signed_client_cert
         );
     }
 
     #[test]
     fn invalid_upstream_server_name_is_rejected() {
-        let text =
-            "[upstream]\nhost = \"proxy.example.test\"\nport = 443\nserver_name = \"not a name\"\n";
-        let error = settings(text).unwrap_err().to_string();
+        let text = format!("{MINIMAL}server_name = \"not a name\"\n");
+        let error = settings(&text).unwrap_err().to_string();
+        assert!(error.starts_with("gateway \"main\": "), "{error}");
         assert!(error.contains("server name"), "{error}");
     }
 
     #[test]
     fn overrides_take_precedence_field_by_field() {
         let file = ConfigFile::parse(FULL).unwrap();
-        let overrides = ConfigFile {
-            listen: Listen {
-                address: Some("127.0.0.3:9000".parse().unwrap()),
-            },
-            upstream: UpstreamSection {
+        let overrides = Overrides {
+            listen: Some("127.0.0.3:9000".parse().unwrap()),
+            gateway_settings: GatewaySection {
                 port: NonZeroU16::new(9443),
-                ..UpstreamSection::default()
-            },
-            tls: Tls {
-                mode: Some(TlsMode::ClassicalOnly),
-                ..Tls::default()
+                tls_mode: Some(TlsMode::ClassicalOnly),
+                ..GatewaySection::default()
             },
             device_key: DeviceKey {
                 software_fallback_on_first_create: Some(true),
@@ -575,16 +960,21 @@ port = 443
                 idle_timeout_seconds: NonZeroU64::new(5),
                 ..LimitsSection::default()
             },
+            ..Overrides::default()
         };
 
-        let settings = file.merge(overrides).settings().unwrap();
+        let settings = file.settings(&overrides).unwrap();
 
         assert_eq!(settings.listen, "127.0.0.3:9000".parse().unwrap());
-        assert_eq!(settings.upstream.host, "proxy.example.test");
-        assert_eq!(settings.upstream.port, 9443);
-        assert_eq!(settings.upstream.server_name, "name.example.test");
-        assert_eq!(settings.tls_mode, TlsMode::ClassicalOnly);
-        assert_eq!(settings.client_certificate, ClientCertificateMode::Required);
+        assert_eq!(settings.gateway.name, name("office"));
+        assert_eq!(settings.gateway.upstream.host, "proxy.example.test");
+        assert_eq!(settings.gateway.upstream.port, 9443);
+        assert_eq!(settings.gateway.upstream.server_name, "name.example.test");
+        assert_eq!(settings.gateway.tls_mode, TlsMode::ClassicalOnly);
+        assert_eq!(
+            settings.gateway.client_certificate,
+            ClientCertificateMode::Required
+        );
         assert_eq!(settings.device_key.preferred, Backend::Software);
         assert!(settings.device_key.software_fallback_on_first_create);
         assert_eq!(settings.limits.idle_timeout_seconds, 5);
@@ -592,18 +982,43 @@ port = 443
     }
 
     #[test]
+    fn overrides_apply_to_the_selected_gateway_only() {
+        let file = ConfigFile::parse(FULL).unwrap();
+        let overrides = Overrides {
+            gateway: Some(name("home")),
+            gateway_settings: GatewaySection {
+                tls_mode: Some(TlsMode::ClassicalOnly),
+                ..GatewaySection::default()
+            },
+            ..Overrides::default()
+        };
+
+        let home = file.settings(&overrides).unwrap().gateway;
+
+        assert_eq!(home.name, name("home"));
+        assert_eq!(home.upstream.host, "home.example.test");
+        assert_eq!(home.tls_mode, TlsMode::ClassicalOnly);
+        assert_eq!(home.client_certificate, ClientCertificateMode::Optional);
+        let office = file.gateway(&name("office")).unwrap();
+        assert_eq!(office.tls_mode, TlsMode::HybridRequired);
+    }
+
+    #[test]
     fn overrides_alone_can_supply_the_upstream() {
-        let overrides = ConfigFile {
-            upstream: UpstreamSection {
+        let overrides = Overrides {
+            gateway_settings: GatewaySection {
                 host: Some("cli.example.test".to_owned()),
                 port: NonZeroU16::new(443),
-                ..UpstreamSection::default()
+                ..GatewaySection::default()
             },
-            ..ConfigFile::default()
+            ..Overrides::default()
         };
-        let settings = ConfigFile::default().merge(overrides).settings().unwrap();
-        assert_eq!(settings.upstream.host, "cli.example.test");
-        assert_eq!(settings.upstream.server_name, "cli.example.test");
+        let settings = ConfigFile::default().settings(&overrides).unwrap();
+        assert_eq!(settings.gateway.name, GatewayName::command_line());
+        assert_eq!(settings.gateway.name.as_str(), "command-line");
+        assert_eq!(settings.gateway.upstream.host, "cli.example.test");
+        assert_eq!(settings.gateway.upstream.server_name, "cli.example.test");
+        assert_eq!(settings.listen, crate::proxy::DEFAULT_LISTEN);
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -622,40 +1037,65 @@ port = 443
         std::fs::write(
             &path,
             format!(
-                "{MINIMAL}ca_file = \"certs/ca.pem\"\n[tls]\nclient_cert_file = '{}'\n",
+                "{MINIMAL}ca_file = \"certs/ca.pem\"\nclient_cert_file = '{}'\n\
+                 [gateways.other]\nhost = \"other.test\"\nport = 1\nca_file = \"other.pem\"\n\
+                 client_cert_file = \"keys/client.pem\"\n",
                 absolute.display()
             ),
         )
         .unwrap();
 
-        let settings = ConfigFile::load(&path).unwrap().settings().unwrap();
+        let file = ConfigFile::load(&path).unwrap();
+        let main = file.gateway(&name("main")).unwrap();
+        let other = file.gateway(&name("other")).unwrap();
 
-        assert_eq!(settings.upstream.ca_file, Some(dir.join("certs/ca.pem")));
-        assert_eq!(settings.client_cert_file, Some(absolute));
+        assert_eq!(main.upstream.ca_file, Some(dir.join("certs/ca.pem")));
+        assert_eq!(main.client_cert_file, Some(absolute));
+        assert_eq!(other.upstream.ca_file, Some(dir.join("other.pem")));
+        assert_eq!(other.client_cert_file, Some(dir.join("keys/client.pem")));
     }
 
     #[test]
-    fn load_errors_name_the_file() {
+    fn errors_name_the_file() {
         let dir = temp_dir("errors");
         let missing = dir.join("missing.toml");
         let error = ConfigFile::load(&missing).unwrap_err().to_string();
         assert!(error.contains(&missing.display().to_string()), "{error}");
 
         let invalid = dir.join("invalid.toml");
-        std::fs::write(&invalid, "[upstream]\nhostname = \"x\"\n").unwrap();
+        std::fs::write(&invalid, "[gateways.main]\nhostname = \"x\"\n").unwrap();
         let error = ConfigFile::load(&invalid).unwrap_err().to_string();
         assert!(error.contains(&invalid.display().to_string()), "{error}");
         assert!(error.contains("hostname"), "{error}");
+
+        let incomplete = dir.join("incomplete.toml");
+        std::fs::write(&incomplete, "[gateways.main]\nport = 1\n").unwrap();
+        let file = ConfigFile::load(&incomplete).unwrap();
+        for error in [
+            file.settings(&Overrides::default()).unwrap_err(),
+            file.gateway(&name("main")).unwrap_err(),
+            file.gateway(&name("other")).unwrap_err(),
+        ] {
+            let error = error.to_string();
+            assert!(
+                error.starts_with(&format!("config file {}: ", incomplete.display())),
+                "{error}"
+            );
+        }
     }
 
     #[test]
     fn example_file_parses() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let file = ConfigFile::load(&path).unwrap();
-        let settings = file.settings().unwrap();
+        let settings = file.settings(&Overrides::default()).unwrap();
         assert!(settings.listen.ip().is_loopback());
-        assert!(settings.upstream.host.ends_with(".invalid"), "{settings:?}");
-        assert_eq!(settings.tls_mode, TlsMode::HybridPreferred);
+        assert_eq!(settings.gateway.name, name("default"));
+        assert!(
+            settings.gateway.upstream.host.ends_with(".invalid"),
+            "{settings:?}"
+        );
+        assert_eq!(settings.gateway.tls_mode, TlsMode::HybridPreferred);
         assert_eq!(settings.limits, LimitSettings::default());
         assert_eq!(settings.device_key, DeviceKeySettings::default());
     }

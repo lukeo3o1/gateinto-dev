@@ -3,12 +3,17 @@
 # Command line flags override values from this file. Unknown keys are errors.
 # Relative paths are resolved against the directory of this file.
 
-[listen]
+[device_session]
+# The gateway the device session relays through. May be left out when exactly
+# one gateway is configured.
+gateway = "default"
 # Must be a loopback address. A non-loopback address additionally requires the
 # --unsafe-allow-non-loopback-listen command line flag; it cannot be allowed here.
-address = "127.0.0.1:18736"
+listen = "127.0.0.1:18736"
 
-[upstream]
+# One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,
+# a-z, 0-9, _ and -.
+[gateways.default]
 # Placeholder that never resolves. Replace it with your own HTTPS forward proxy.
 host = "proxy.example.invalid"
 port = 443
@@ -16,18 +21,16 @@ port = 443
 # server_name = "proxy.example.invalid"
 # PEM bundle of CAs trusted for the upstream. Defaults to the Mozilla roots.
 # ca_file = "upstream-ca.pem"
-
-[tls]
 # hybrid_preferred (X25519MLKEM768, then X25519), hybrid_required
 # (X25519MLKEM768 only) or classical_only (X25519 only).
-mode = "hybrid_preferred"
+tls_mode = "hybrid_preferred"
 # optional, required or off.
 client_certificate = "optional"
 # PEM client certificate for the device key. Defaults to searching CurrentUser\My.
 # client_cert_file = "client.pem"
-# Instead of a file or store certificate, issue a short-lived self-signed
-# certificate with the device key at startup. Cannot be combined with
-# client_cert_file. The upstream must be configured to trust it.
+# Instead of a file or store certificate, issue short-lived self-signed
+# certificates with the device key, a separate one for each session. Cannot be
+# combined with client_cert_file. The upstream must be configured to trust it.
 # self_signed_client_cert = false
 
 [device_key]
@@ -37,6 +40,7 @@ preferred = "tpm"
 # Whether `gateinto key init` may create a software key when the TPM cannot be used.
 software_fallback_on_first_create = true
 
+# Limits apply to each session separately.
 [limits]
 max_concurrent_tunnels = 64
 connect_timeout_seconds = 10

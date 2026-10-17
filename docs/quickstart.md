@@ -96,12 +96,12 @@ these must hold:
   roots added to the Windows certificate store are not used.
 - **Private CA.** Issue the server certificate from your own CA, with the
   server's name in the Subject Alternative Name, and give Gateinto the CA
-  certificate in PEM format with `--ca-file` or `[upstream] ca_file`. Use a
+  certificate in PEM format with `--ca-file` or `ca_file` in the gateway table. Use a
   separate CA and server certificate, not one self-signed certificate for both.
 
 If you connect by IP address, the certificate must contain that address as an
 IP Subject Alternative Name, or set
-`--upstream-server-name` / `[upstream] server_name` to a DNS name the
+`--upstream-server-name` / `server_name` to a DNS name the
 certificate contains.
 
 ### Example: stunnel in front of Squid
@@ -184,10 +184,11 @@ upstream does not require client certificates.
 ## 4. Write a configuration file and check the upstream
 
 Copy [config.example.toml](../config.example.toml) to, for example,
-`C:\gateinto\gateinto.toml` and set at least the upstream:
+`C:\gateinto\gateinto.toml` and set at least the upstream in the
+`[gateways.default]` table (a gateway profile):
 
 ```toml
-[upstream]
+[gateways.default]
 host = "proxy.example.com"
 port = 443
 # ca_file = "upstream-ca.pem"   # only for a private CA; relative to this file
@@ -247,8 +248,8 @@ Logs go to stderr:
 ```
 
 The warning is expected without a client certificate: the default
-`client_certificate = "optional"` mode continues without mTLS. Set `[tls]
-client_certificate = "off"` to silence it, or `"required"` once you have a
+`client_certificate = "optional"` mode continues without mTLS. Set
+`client_certificate = "off"` in the gateway table to silence it, or `"required"` once you have a
 certificate (step 7). Stop the proxy with Ctrl+C.
 
 ## 6. Use the tunnel
@@ -288,9 +289,9 @@ device key's public key:
    [Getting a test client certificate](../README.md#getting-a-test-client-certificate).
    Tools that generate their own key pair (such as `New-SelfSignedCertificate`)
    produce certificates that do not match and are refused.
-3. Point Gateinto at it with `[tls] client_cert_file = "client.pem"`, or
-   import it into `CurrentUser\My`, and set `[tls] client_certificate =
-   "required"`.
+3. Point Gateinto at it with `client_cert_file = "client.pem"` in the
+   gateway table, or import it into `CurrentUser\My`, and set
+   `client_certificate = "required"` there.
 4. `gateinto key info --client-cert-file client.pem` checks the certificate
    against the key, and `check-upstream` should then print
    `client-certificate: sent`.

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gateinto::check::{self, CheckOptions};
-use gateinto::config::{self, ConfigFile, DeviceKeySettings, Settings};
+use gateinto::config::{self, ConfigFile, DeviceKeySettings, GatewayName, Overrides, Settings};
 use gateinto::http::Authority;
 use gateinto::identity::client_cert::{
     self, CertificateSource, ClientCertificate, ClientCertificateMode, ClientCertificateOptions,
@@ -184,6 +184,10 @@ struct CheckUpstreamArgs {
     #[command(flatten)]
     upstream: UpstreamArgs,
 
+    /// Gateway from --config to check [default: the device session's gateway, or the only gateway]
+    #[arg(long)]
+    gateway: Option<GatewayName>,
+
     /// Also send CONNECT for this host:port and print the upstream status line
     #[arg(long)]
     target: Option<Authority>,
@@ -232,24 +236,25 @@ struct UpstreamArgs {
 }
 
 impl UpstreamArgs {
-    fn overrides(&self) -> ConfigFile {
-        let mut overrides = ConfigFile::default();
-        overrides.upstream.host = self.upstream_host.clone();
-        overrides.upstream.port = self.upstream_port.and_then(NonZeroU16::new);
-        overrides.upstream.server_name = self.upstream_server_name.clone();
-        overrides.upstream.ca_file = self.ca_file.clone();
-        overrides.tls.mode = self.tls_mode;
-        overrides.tls.client_certificate = self.client_certificate.map(Into::into);
-        overrides.tls.client_cert_file = self.client_cert_file.clone();
-        overrides.tls.self_signed_client_cert = self.self_signed_client_cert.then_some(true);
+    fn overrides(&self) -> Overrides {
+        let mut overrides = Overrides::default();
+        let gateway = &mut overrides.gateway_settings;
+        gateway.host = self.upstream_host.clone();
+        gateway.port = self.upstream_port.and_then(NonZeroU16::new);
+        gateway.server_name = self.upstream_server_name.clone();
+        gateway.ca_file = self.ca_file.clone();
+        gateway.tls_mode = self.tls_mode;
+        gateway.client_certificate = self.client_certificate.map(Into::into);
+        gateway.client_cert_file = self.client_cert_file.clone();
+        gateway.self_signed_client_cert = self.self_signed_client_cert.then_some(true);
         overrides.device_key.name = self.key_name.clone();
         overrides
     }
 
-    fn settings(&self, extra: impl FnOnce(&mut ConfigFile)) -> Result<Settings> {
+    fn settings(&self, extra: impl FnOnce(&mut Overrides)) -> Result<Settings> {
         let mut overrides = self.overrides();
         extra(&mut overrides);
-        Ok(self.config.load()?.merge(overrides).settings()?)
+        Ok(self.config.load()?.settings(&overrides)?)
     }
 }
 
@@ -347,7 +352,7 @@ fn init_logging(default_filter: &str) {
 }
 
 fn upstream(settings: &Settings) -> Result<Upstream> {
-    let upstream = &settings.upstream;
+    let upstream = &settings.gateway.upstream;
     let server_name = ServerName::try_from(upstream.server_name.clone())
         .map_err(|error| format!("invalid upstream server name: {error}"))?;
     let roots = match &upstream.ca_file {
@@ -363,11 +368,12 @@ fn upstream(settings: &Settings) -> Result<Upstream> {
 }
 
 fn client_certificate(settings: &Settings) -> Result<Option<ClientCertificate>> {
+    let gateway = &settings.gateway;
     let options = ClientCertificateOptions {
-        mode: settings.client_certificate,
+        mode: gateway.client_certificate,
         key_name: settings.device_key.name.clone(),
-        source: match &settings.client_cert_file {
-            _ if settings.self_signed_client_cert => CertificateSource::SelfSigned,
+        source: match &gateway.client_cert_file {
+            _ if gateway.self_signed_client_cert => CertificateSource::SelfSigned,
             Some(path) => CertificateSource::File(path.clone()),
             None => CertificateSource::Store,
         },
@@ -379,11 +385,13 @@ fn client_certificate(settings: &Settings) -> Result<Option<ClientCertificate>> 
 }
 
 async fn check_upstream(args: CheckUpstreamArgs) -> Result {
-    let settings = args.upstream.settings(|_| {})?;
+    let settings = args.upstream.settings(|overrides| {
+        overrides.gateway = args.gateway.clone();
+    })?;
     init_logging("warn");
     let options = CheckOptions {
         upstream: upstream(&settings)?,
-        tls_mode: settings.tls_mode,
+        tls_mode: settings.gateway.tls_mode,
         client_certificate: client_certificate(&settings)?,
         target: args.target,
         timeout: Duration::from_secs(settings.limits.connect_timeout_seconds),
@@ -399,7 +407,7 @@ async fn check_upstream(args: CheckUpstreamArgs) -> Result {
 
 async fn proxy(args: ProxyArgs) -> Result {
     let settings = args.upstream.settings(|overrides| {
-        overrides.listen.address = args.listen;
+        overrides.listen = args.listen;
         let limits = &mut overrides.limits;
         limits.max_concurrent_tunnels = args.max_tunnels.and_then(NonZeroU32::new);
         limits.header_max_bytes = args.max_header_bytes.and_then(NonZeroU32::new);
@@ -412,7 +420,7 @@ async fn proxy(args: ProxyArgs) -> Result {
         listen: settings.listen,
         allow_non_loopback: args.unsafe_allow_non_loopback_listen,
         upstream: upstream(&settings)?,
-        tls_mode: settings.tls_mode,
+        tls_mode: settings.gateway.tls_mode,
         client_certificate: client_certificate(&settings)?,
         limits: Limits {
             max_header_bytes: limits.header_max_bytes as usize,

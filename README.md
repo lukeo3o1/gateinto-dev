@@ -56,9 +56,9 @@ in a [configuration file](#configuration-file). Clients then use
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--config` | none | TOML configuration file. Flags given on the command line override its values. |
-| `--listen` | `127.0.0.1:18736` | Local listen address. Must be loopback. |
+| `--listen` | `127.0.0.1:18736` | Local listen address of the device session. Must be loopback. |
 | `--unsafe-allow-non-loopback-listen` | off | Allow a non-loopback listen address. This exposes the proxy, and the upstream identity behind it, to the network. |
-| `--upstream-host` | required (flag or config) | Upstream HTTPS proxy host name or IP address. |
+| `--upstream-host` | required (flag or config) | Upstream HTTPS proxy host name or IP address. This and the following upstream, TLS and client certificate flags override the device session's [gateway](#configuration-file). |
 | `--upstream-port` | required (flag or config) | Upstream HTTPS proxy port. |
 | `--upstream-server-name` | upstream host | Name verified against the upstream certificate. |
 | `--ca-file` | Mozilla roots | PEM bundle of CAs trusted for the upstream. Replaces the default roots. |
@@ -112,6 +112,7 @@ proxy with a private CA needs `--ca-file`.
 ```sh
 gateinto check-upstream --upstream-host proxy.example.com --upstream-port 443
 gateinto check-upstream --config gateinto.toml --target example.com:443
+gateinto check-upstream --config gateinto.toml --gateway office
 ```
 
 `check-upstream` takes the same upstream, TLS and client certificate options as
@@ -127,6 +128,11 @@ cipher-suite: TLS13_AES_256_GCM_SHA384
 server-certificate-subject: CN=proxy.example.com
 client-certificate: not requested
 ```
+
+`--gateway <name>` checks that gateway from the configuration file instead
+of the device session's (by default the gateway named by `[device_session]
+gateway`, or the only one configured); the upstream, TLS and client
+certificate flags then override that gateway.
 
 `client-certificate` is `not requested`, `requested by the upstream, none sent`
 or `sent`. With `--self-signed-client-cert` three more lines follow it:
@@ -228,43 +234,53 @@ are in [docs/tpm-verification.md](docs/tpm-verification.md).
 [config.example.toml](config.example.toml).
 
 ```toml
-[listen]
-address = "127.0.0.1:18736"
+[device_session]
+gateway = "default"              # optional when exactly one gateway is configured
+listen = "127.0.0.1:18736"
 
-[upstream]
+[gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
 port = 443                       # required, here or with --upstream-port
 server_name = "proxy.example.invalid"
 ca_file = "upstream-ca.pem"
-
-[tls]
-mode = "hybrid_preferred"        # hybrid_preferred | hybrid_required | classical_only
+tls_mode = "hybrid_preferred"    # hybrid_preferred | hybrid_required | classical_only
 client_certificate = "optional"  # optional | required | off
 client_cert_file = "client.pem"
-self_signed_client_cert = false  # true: issue a self-signed certificate instead of client_cert_file
+self_signed_client_cert = false  # true: issue self-signed certificates instead of client_cert_file
 
 [device_key]
 name = "gateinto-device-v1"
 preferred = "tpm"                # tpm | software
 software_fallback_on_first_create = true
 
-[limits]
+[limits]                         # applies to each session separately
 max_concurrent_tunnels = 64
 connect_timeout_seconds = 10
 idle_timeout_seconds = 300
 header_max_bytes = 16384
 ```
 
-Every key is optional except the upstream `host` and `port`, which must come
+A gateway profile (`[gateways.<name>]`) holds everything about one upstream
+HTTPS proxy: its address, the name and CAs its certificate is verified
+against, the TLS mode and the client certificate settings. The device session
+(`[device_session]`) names the gateway it relays
+through and its listen address. Without `[device_session] gateway`, the device
+session uses the only configured gateway; with several gateways it must be
+set.
+
+Every key is optional except the gateway's `host` and `port`, which must come
 from the file or the command line; there is no default upstream. Missing keys
-take the defaults of the matching flags.
+take the defaults of the matching flags. Without any `[gateways.<name>]`
+table, the flags alone describe the upstream, as an unnamed gateway
+(`command-line` in logs).
 
 | Key | Flag that overrides it |
 | --- | --- |
-| `[listen] address` | `--listen` |
-| `[upstream] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
-| `[tls] mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
-| `[tls] self_signed_client_cert` | `--self-signed-client-cert` (can only turn it on) |
+| `[device_session] gateway` | `--gateway` (`check-upstream` only) |
+| `[device_session] listen` | `--listen` (`proxy`) |
+| `[gateways.<name>] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
+| `[gateways.<name>] tls_mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
+| `[gateways.<name>] self_signed_client_cert` | `--self-signed-client-cert` (can only turn it on) |
 | `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
@@ -272,16 +288,21 @@ take the defaults of the matching flags.
 
 Rules:
 
-- Command line flags override the file, key by key.
+- Command line flags override the file, key by key. Gateway flags apply only
+  to the gateway in use: the device session's for `proxy`, the one selected
+  with `--gateway` for `check-upstream`. Other gateways are not changed.
 - Unknown sections and keys are errors, as are values of the wrong type, zero
-  limits, ports or timeouts, and an empty key name. Errors name the file, line
-  and key.
+  limits, ports or timeouts, an empty key name and an invalid gateway name.
+  The earlier `[listen]`, `[upstream]` and `[tls]` sections are unknown
+  sections. Errors name the file and, where it applies, the gateway, line and
+  key; a `[device_session] gateway` or `--gateway` that names no configured
+  gateway is an error that lists the configured ones.
 - `self_signed_client_cert = true` and a `client_cert_file` cannot be
   combined, wherever each comes from.
 - Relative `ca_file` and `client_cert_file` paths are resolved against the
   directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
-- A non-loopback `[listen] address` still requires the
+- A non-loopback `[device_session] listen` address still requires the
   `--unsafe-allow-non-loopback-listen` command line flag. There is no key for
   it, so a configuration file alone can never expose the proxy to the network.
 - `[device_key] preferred` and `software_fallback_on_first_create` only affect
@@ -291,7 +312,7 @@ Rules:
 
 The upstream connection is always TLS 1.3 only, and the upstream certificate
 and name are always verified with WebPKI as described above. `--tls-mode` (or
-`[tls] mode`) only decides which key exchange groups are offered:
+`[gateways.<name>] tls_mode`) only decides which key exchange groups are offered:
 
 | Mode | Offered groups, in order | Upstream without `X25519MLKEM768` |
 | --- | --- | --- |
@@ -356,7 +377,7 @@ enabled, the subject, thumbprint, NotAfter, source and key backend are logged at
 
 ### Self-signed client certificate
 
-With `--self-signed-client-cert` (or `[tls] self_signed_client_cert = true`),
+With `--self-signed-client-cert` (or `[gateways.<name>] self_signed_client_cert = true`),
 `proxy` and `check-upstream` issue a new certificate at startup:
 `CN=Gateinto device` as subject and issuer, a random 16-byte serial number,
 valid from 5 minutes before issuance until 1 hour after it, critical basic
