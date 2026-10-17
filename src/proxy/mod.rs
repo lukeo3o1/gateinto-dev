@@ -289,7 +289,7 @@ impl Shared {
         let _ = client.set_nodelay(true);
         let limits = &self.limits;
         let request = read_head(&mut client, limits.max_header_bytes, parse_connect_request);
-        let (target, client_early) = match timeout(limits.handshake_timeout, request).await {
+        let (request, client_early) = match timeout(limits.handshake_timeout, request).await {
             Err(_) => return reject(client, Status::RequestTimeout, limits.reject_linger).await,
             Ok(Err(error)) => {
                 debug!(?error, "invalid request");
@@ -300,6 +300,7 @@ impl Shared {
         match self.local_auth {
             LocalAuth::None => {}
         }
+        let target = request.target;
         debug!(%target, "opening tunnel");
         let opening = timeout(limits.handshake_timeout, self.open_upstream(&target));
         let (mut upstream, upstream_early) = match opening.await {
