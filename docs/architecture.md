@@ -1,6 +1,7 @@
 # Architecture
 
-This describes the current code. Items marked **Planned** do not exist yet.
+This describes the current code. [Not implemented](#not-implemented) lists
+what does not exist.
 
 ## Data path
 
@@ -109,19 +110,14 @@ default. See the README for the schema.
   certificate bound to the device key is sent and `CertificateVerify` is signed
   through CNG.
 
-## Planned
+## Not implemented
 
-Implemented: the device key lifecycle (`key init`, `key info`, TPM preferred
-with software fallback), mutual TLS with the device key, TLS modes with
-`check-upstream`, and the TOML configuration file.
+Do not rely on these; they do not exist.
 
-These components are designed but not implemented. Do not rely on them.
+- **Enrollment.** Obtaining the client certificate for the device key
+  (certificate request or enrollment protocol) instead of issuing and
+  installing it by hand.
+- **Key rotation and deletion.** Commands to replace or delete the device key.
 
-- **Planned: enrollment.** Obtaining the client certificate for the device key
-  (certificate request or enrollment protocol) instead of installing it by
-  hand.
-- **Planned: key rotation and deletion.** Commands to replace or delete the
-  device key.
-
-See also [threat-model.md](threat-model.md) and
-[compatibility.md](compatibility.md).
+See also [security-model.md](security-model.md),
+[threat-model.md](threat-model.md) and [verification.md](verification.md).

@@ -54,6 +54,13 @@ you could do.
 artifact. For tag pushes it also creates a draft GitHub release with these
 files. A maintainer reviews and publishes the draft.
 
+The files are `gateinto-<version>-x86_64-pc-windows-msvc.zip` and
+`gateinto-<version>-x86_64-pc-windows-msvc.zip.sha256`, where `<version>` is
+the tag, or the first 12 characters of the commit for a manual run. The only
+release target is Windows 10/11 x64; Windows 7 is not a release target (see
+[docs/windows7-feasibility.md](docs/windows7-feasibility.md)). The workflow has
+not been run yet.
+
 Not done yet: an SBOM, code signing of `gateinto.exe`, and build provenance
 attestations.
 

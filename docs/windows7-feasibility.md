@@ -114,7 +114,7 @@ are listed, plus `getrandom`.
 | `rustls`, `rustls-webpki`, `tokio-rustls`, `webpki-roots` | 0.23.46, 0.103.15, 0.26.6, 1.0.9 | No OS API; TLS does not use SChannel, so no Windows TLS updates are needed. | ok | Source has no Windows FFI |
 | `rustls-cng` | 0.7.1 | `NCryptSignHash`, `NCryptGetProperty`, `NCryptSetProperty`, `NCryptFreeObject`, `Cert*`, `CryptAcquireCertificatePrivateKey`, `BCryptHash`: all Vista or later. | ok | `rustls-cng-0.7.1/src` |
 | `windows-sys`, `windows-link` | 0.61.2, 0.2.1 | `raw-dylib` imports by DLL name. Every function used by the crates above maps to `kernel32`, `ntdll`, `ws2_32`, `ncrypt`, `crypt32` or `bcrypt`, not to API-set DLLs. | ok | `windows-link-0.2.1/src/lib.rs`, `link!` lines in `windows-sys-0.61.2/src` |
-| `gateinto` CNG key code | 0.1.0 | Software KSP (`Microsoft Software Key Storage Provider`) and `NCryptCreatePersistedKey` and related functions exist on Windows 7. The planned TPM key needs the `Microsoft Platform Crypto Provider`, which first shipped with Windows 8. | risk (TPM not available) | `src/identity/windows_cng.rs` |
+| `gateinto` CNG key code | 0.1.0 | Software KSP (`Microsoft Software Key Storage Provider`) and `NCryptCreatePersistedKey` and related functions exist on Windows 7. The TPM key backend needs the `Microsoft Platform Crypto Provider`, which first shipped with Windows 8. | risk (TPM not available) | `src/identity/windows_cng.rs` |
 | `anstyle-query`, `anstyle-wincon` (clap) | 1.1.5, 3.0.11 | `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is rejected on Windows 7; the failure is handled and only disables colors. | ok | `anstyle-query-1.1.5/src/windows.rs` |
 | `getrandom` | 0.4.3, 0.2.17 | 0.4.3 is only a build-script dependency on the host (`jobserver` from `cc` from `aws-lc-sys`); 0.2.17 is in `Cargo.lock` but in no build graph. Neither reaches the binary. 0.4.3 would pick `windows_legacy` (`RtlGenRandom`) on win7. | ok | `cargo tree --target all -e all -i getrandom@…`, `getrandom-0.4.3/src/backends.rs:161` |
 
@@ -159,6 +159,6 @@ To reach `working`:
    TLS 1.3 handshake to the upstream proxy exercises AWS-LC's `BCryptGenRandom`
    entropy path at runtime. Confirm in the upstream proxy's TLS log that
    `X25519MLKEM768` was negotiated.
-4. Once the CLI has it, run `gateinto key init --backend software` and confirm
-   that a software KSP key is created and used. This command does not exist yet.
+4. Run `gateinto key init --backend software` and `gateinto key info`, and
+   confirm that a software KSP key is created and reused.
 5. Record the results here and replace the label above.

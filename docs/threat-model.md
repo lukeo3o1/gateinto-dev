@@ -1,10 +1,9 @@
 # Threat model
 
 Gateinto is a pre-release proof of concept. This document states what it is
-meant to protect, against whom, and what it does not protect. Items marked
-**Planned** are not implemented yet; see
-[architecture.md](architecture.md#planned). The device key, mutual TLS, TLS
-modes and the configuration file are implemented.
+meant to protect, against whom, and what it does not protect.
+[security-model.md](security-model.md) summarizes the mechanisms;
+[verification.md](verification.md) says which of them are tested.
 
 ## Assets
 
