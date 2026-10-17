@@ -1,7 +1,7 @@
 # Self-signed client certificates
 
 This page describes exactly which client certificate Gateinto sends when
-`--self-signed-client-cert` or `[tls] self_signed_client_cert = true` is set,
+`--self-signed-client-cert` or the gateway's `self_signed_client_cert = true` is set,
 how it is signed, and what an upstream has to do to accept it. Other sources
 (a `--client-cert-file` or `CurrentUser\My`) are described in the
 [README](../../README.md#client-certificate-mtls).
@@ -16,7 +16,7 @@ Gateinto cannot make an upstream trust it.
   startup, before the proxy listens or the check connects. Nothing is read from
   a file or from `CurrentUser\My`, and the certificate is never written to disk
   or to a certificate store; it exists only in memory.
-- `--client-certificate` (`[tls] client_certificate`) applies as for the other
+- `--client-certificate` (the gateway's `client_certificate`) applies as for the other
   sources: with `required`, failing to open the device key or to issue the
   certificate is a startup error; with `optional` (the default) it is logged
   as a warning and the upstream connection is made without client

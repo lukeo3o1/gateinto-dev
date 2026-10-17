@@ -60,7 +60,7 @@ impl Fixture {
         write_config(
             &self.dir,
             &format!(
-                "[upstream]\nhost = \"127.0.0.1\"\nport = {port}\nserver_name = \"{PROXY_NAME}\"\nca_file = \"ca.pem\"\n{extra}"
+                "[gateways.main]\nhost = \"127.0.0.1\"\nport = {port}\nserver_name = \"{PROXY_NAME}\"\nca_file = \"ca.pem\"\n{extra}"
             ),
         )
     }
@@ -82,7 +82,7 @@ fn args(args: &[&str]) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn check_upstream_reads_the_config_file() {
     let fixture = Fixture::new().await;
-    let config = fixture.config("[tls]\nmode = \"classical_only\"\nclient_certificate = \"off\"\n");
+    let config = fixture.config("tls_mode = \"classical_only\"\nclient_certificate = \"off\"\n");
 
     let output = run(args(&["check-upstream"]), config).await;
 
@@ -102,7 +102,7 @@ async fn command_line_flags_override_the_config_file() {
     let real_port = fixture.upstream.addr.port().to_string();
     let config = write_config(
         &fixture.dir,
-        "[upstream]\nhost = \"127.0.0.1\"\nport = 9\nserver_name = \"other.test\"\nca_file = \"missing.pem\"\n[tls]\nmode = \"classical_only\"\nclient_certificate = \"required\"\n",
+        "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\nserver_name = \"other.test\"\nca_file = \"missing.pem\"\ntls_mode = \"classical_only\"\nclient_certificate = \"required\"\n",
     );
     let ca_file = fixture.dir.join("ca.pem").display().to_string();
 
@@ -136,12 +136,18 @@ async fn command_line_flags_override_the_config_file() {
 #[test]
 fn missing_upstream_is_a_clear_error() {
     let dir = temp_dir();
-    let config = write_config(&dir, "[tls]\nmode = \"hybrid_required\"\n");
+    let config = write_config(&dir, "[gateways.main]\ntls_mode = \"hybrid_required\"\n");
     for command in ["proxy", "check-upstream"] {
         let output = gateinto(&[command], &config);
         assert!(!output.status.success());
         let stderr = stderr(&output);
-        assert!(stderr.contains("no upstream configured"), "{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "config file {}: gateway \"main\": no upstream configured",
+                config.display()
+            )),
+            "{stderr}"
+        );
         assert!(stderr.contains("--upstream-host"), "{stderr}");
     }
 }
@@ -151,7 +157,7 @@ fn unknown_keys_and_unreadable_files_name_the_file() {
     let dir = temp_dir();
     let config = write_config(
         &dir,
-        "[upstream]\nhost = \"127.0.0.1\"\nport = 9\nproxy_password = \"x\"\n",
+        "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\nproxy_password = \"x\"\n",
     );
     let missing = dir.join("missing.toml");
     for command in [
@@ -165,6 +171,7 @@ fn unknown_keys_and_unreadable_files_name_the_file() {
         let error = stderr(&output);
         assert!(error.contains(&config.display().to_string()), "{error}");
         assert!(error.contains("unknown field `proxy_password`"), "{error}");
+        assert!(error.contains("gateway \"main\""), "{error}");
 
         let output = gateinto(command, &missing);
         assert!(!output.status.success());
@@ -249,7 +256,7 @@ async fn proxy_reads_listen_tls_and_limits_from_the_config_file() {
     let fixture = Fixture::new().await;
     let target = echo_server().await;
     let config = fixture.config(
-        "[listen]\naddress = \"127.0.0.1:0\"\n[tls]\nclient_certificate = \"off\"\n[limits]\nmax_concurrent_tunnels = 1\n",
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\n[limits]\nmax_concurrent_tunnels = 1\n",
     );
 
     let (_child, agent) = spawn_proxy(config.clone(), &[]).await;
@@ -267,7 +274,7 @@ async fn proxy_reads_listen_tls_and_limits_from_the_config_file() {
 async fn non_loopback_listen_from_the_config_file_still_needs_the_flag() {
     let fixture = Fixture::new().await;
     let config =
-        fixture.config("[listen]\naddress = \"0.0.0.0:0\"\n[tls]\nclient_certificate = \"off\"\n");
+        fixture.config("client_certificate = \"off\"\n[device_session]\nlisten = \"0.0.0.0:0\"\n");
 
     let output = run(args(&["proxy"]), config.clone()).await;
     assert!(!output.status.success());
@@ -306,7 +313,7 @@ async fn example_config_is_accepted_up_to_the_network() {
 #[tokio::test(flavor = "multi_thread")]
 async fn self_signed_flag_conflicts_with_a_client_cert_file_from_the_config_file() {
     let fixture = Fixture::new().await;
-    let config = fixture.config("[tls]\nclient_cert_file = \"client.pem\"\n");
+    let config = fixture.config("client_cert_file = \"client.pem\"\n");
 
     let output = run(
         args(&["check-upstream", "--self-signed-client-cert"]),
@@ -320,6 +327,124 @@ async fn self_signed_flag_conflicts_with_a_client_cert_file_from_the_config_file
         error.contains(
             "a client certificate file and a self-signed client certificate cannot be combined"
         ),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_upstream_selects_a_gateway_by_name() {
+    let fixture = Fixture::new().await;
+    let closed = unused_port().await.port();
+    let config = fixture.config(&format!(
+        "tls_mode = \"classical_only\"\nclient_certificate = \"off\"\n\
+         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n\
+         [device_session]\ngateway = \"closed\"\n"
+    ));
+
+    let output = run(args(&["check-upstream"]), config.clone()).await;
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("connect failed"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run(
+        args(&["check-upstream", "--gateway", "main"]),
+        config.clone(),
+    )
+    .await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains(&format!(
+            "upstream: 127.0.0.1:{}\n",
+            fixture.upstream.addr.port()
+        )),
+        "{printed}"
+    );
+    assert!(printed.contains("tls-mode: classical_only\n"), "{printed}");
+
+    let output = run(
+        args(&[
+            "check-upstream",
+            "--gateway",
+            "main",
+            "--tls-mode",
+            "hybrid_required",
+        ]),
+        config.clone(),
+    )
+    .await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("key-exchange-group: X25519MLKEM768\n"),
+        "{}",
+        stdout(&output)
+    );
+
+    let output = run(
+        args(&["check-upstream", "--gateway", "missing"]),
+        config.clone(),
+    )
+    .await;
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "config file {}: --gateway names the unknown gateway \"missing\"; configured \
+             gateways: closed, main",
+            config.display()
+        )),
+        "{error}"
+    );
+
+    let output = run(args(&["check-upstream", "--gateway", "not valid"]), config).await;
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("invalid gateway name \"not valid\""),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_uses_the_device_session_gateway() {
+    let fixture = Fixture::new().await;
+    let target = echo_server().await;
+    let closed = unused_port().await.port();
+    let config = fixture.config(&format!(
+        "client_certificate = \"off\"\n\
+         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\n\
+         [device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n"
+    ));
+
+    let (_child, agent) = spawn_proxy(config, &[]).await;
+    let mut stream = open_tunnel(agent, target).await;
+    stream.write_all(b"gateway").await.unwrap();
+    stream.shutdown().await.unwrap();
+    assert_eq!(
+        read_to_end_within(&mut stream, std::time::Duration::from_secs(5)).await,
+        b"gateway"
+    );
+    assert_eq!(fixture.upstream.requests().len(), 1);
+}
+
+#[test]
+fn proxy_refuses_several_gateways_without_a_device_session_gateway() {
+    let dir = temp_dir();
+    let config = write_config(
+        &dir,
+        "[gateways.a]\nhost = \"127.0.0.1\"\nport = 9\n[gateways.b]\nhost = \"127.0.0.1\"\nport = 9\n",
+    );
+    let output = gateinto(&["proxy"], &config);
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "config file {}: 2 gateways are configured (a, b)",
+            config.display()
+        )),
         "{error}"
     );
 }

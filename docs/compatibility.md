@@ -62,7 +62,7 @@ Locally on Linux:
 | Upstream connections never resume a session or send early data: `enable_early_data` is off, and a second handshake with the same client configuration against a fixture that issues session tickets is full on both sides. Temporarily removing `Resumption::disabled()` made the test fail with `HandshakeKind::Resumed`. | `tests/session_resumption.rs`. |
 | The negotiated version and group are logged once per tunnel at `debug` and not at `info`, for the default and each `--tls-mode`. | `tests/proxy.rs` (spawning the binary). |
 | `check-upstream` reports TLS 1.3, the negotiated group (`X25519MLKEM768` or `X25519` per fixture and mode), a `TLS13_*` cipher suite, the server certificate subject and whether a client certificate was not requested, requested but not sent, or sent; with `--target` the upstream status line only (no headers or body). The binary prints the group for each fixture and mode and exits nonzero for `hybrid_required` against the classical fixture, an unreachable upstream, an untrusted CA, a non-`2xx` `CONNECT` reply and a malformed `--target`. | `tests/check_upstream.rs` (library calls and the binary). |
-| Configuration file: every section and key, defaults, unknown keys and sections rejected, invalid values rejected, missing or incomplete upstream is an error naming `--upstream-host`/`--upstream-port`, flags override the file key by key, relative paths resolve against the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[listen] address` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`. |
+| Configuration file: every section and key, defaults, unknown keys and sections (including the earlier `[listen]`, `[upstream]` and `[tls]`) rejected, invalid values rejected, gateway names limited to 1 to 64 characters from `[A-Za-z0-9_-]` (as table keys, in `[device_session] gateway` and for `--gateway`), a missing or incomplete upstream is an error naming the gateway and `--upstream-host`/`--upstream-port`, the device session uses `[device_session] gateway` or the only gateway, several gateways without `[device_session] gateway` and a reference to an unknown gateway are errors listing the configured gateways, gateway lookup by name reads only the loaded file, flags override the selected gateway key by key and leave the others unchanged, relative paths in every gateway resolve against the file, errors name the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `proxy` relays through the device session's gateway; `check-upstream --gateway` checks the named gateway, applies flags to it and names the file and the configured gateways for an unknown one; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[device_session] listen` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`; `tests/cli.rs`. |
 | `key init` flags override `[device_key] software_fallback_on_first_create` in both directions (`--no-software-fallback` over `true`, `--software-fallback` over `false`), the default allows fallback, and the two flags cannot be combined. | Unit tests in `src/main.rs`. |
 | The `[default: ...]` values in `--help` match `DEFAULT_LISTEN`, the limit defaults, `DEFAULT_KEY_NAME`, the default backend, TLS mode and client certificate mode. Temporarily changing `DEFAULT_KEY_NAME` made the test fail. | `tests/cli.rs`: `help_defaults_match_the_real_defaults`. |
 | The crate, including `serde` and `toml`, builds and all tests pass with Rust 1.88.0. | `cargo +1.88 test --all-targets --all-features --locked`. |
@@ -185,12 +185,14 @@ that the handshake itself failed).
 
 ### Configuration file
 
-The schema keeps the draft names (`[listen] address`, `[upstream] host`,
-`port`, `server_name`, `ca_file`, `[tls] mode`, `client_certificate`,
-`client_cert_file`, `[device_key] name`, `preferred`,
-`software_fallback_on_first_create`, `[limits] max_concurrent_tunnels`,
-`connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes`).
-Adaptations:
+The schema has gateway profiles (`[gateways.<name>]` with `host`, `port`,
+`server_name`, `ca_file`, `tls_mode`, `client_certificate`,
+`client_cert_file`, `self_signed_client_cert`), the device session
+(`[device_session] gateway`, `listen`), `[device_key] name`, `preferred`,
+`software_fallback_on_first_create` and `[limits] max_concurrent_tunnels`,
+`connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes`. The
+earlier `[listen]`, `[upstream]` and `[tls]` sections were replaced, not kept
+as aliases, since no release used them. Adaptations:
 
 - Relative `ca_file` and `client_cert_file` are resolved against the
   directory of the configuration file.
@@ -198,7 +200,7 @@ Adaptations:
   `key init` only; the proxy only opens `[device_key] name`.
 - `check-upstream` uses `[limits] connect_timeout_seconds` as the limit for the
   whole check and `header_max_bytes` for the `CONNECT` reply; other limits and
-  `[listen]` are ignored there.
+  `[device_session] listen` are ignored there.
 - There is deliberately no key for `--unsafe-allow-non-loopback-listen`.
 
 The suites for TLS modes, `check-upstream` and the configuration file

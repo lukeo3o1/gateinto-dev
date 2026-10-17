@@ -58,7 +58,7 @@ gateinto proxy --upstream-host proxy.example.com --upstream-port 443 --ca-file c
 
 ## hybrid_required fails
 
-With `--tls-mode hybrid_required` (or `[tls] mode = "hybrid_required"`) only
+With `--tls-mode hybrid_required` (or `tls_mode = "hybrid_required"` in the gateway table) only
 `X25519MLKEM768` is offered. An upstream that does not support it cannot
 complete the handshake: every tunnel gets `502`, and the log shows
 
@@ -82,28 +82,41 @@ mode hybrid_required allows key exchange X25519MLKEM768 but ... was negotiated`.
 ## Configuration file errors
 
 Errors from `--config` name the file and, for syntax and value errors, the line
-and key:
+and key. Inside a `[gateways.<name>]` table they name the gateway and point at
+its table header:
 
 ```text
-error: config file gateinto.toml: TOML parse error at line 2, column 1
+error: config file gateinto.toml: TOML parse error at line 1, column 2
   |
-2 | hostname = "x"
-  | ^^^^^^^^
-unknown field `hostname`, expected one of `host`, `port`, `server_name`, `ca_file`
+1 | [gateways.default]
+  |  ^^^^^^^^
+gateway "default": unknown field `hostname`, expected one of `host`, `port`, `server_name`, `ca_file`, `tls_mode`, `client_certificate`, `client_cert_file`, `self_signed_client_cert` in `default`
 ```
 
 - Unknown sections or keys are errors; check the spelling against
   [config.example.toml](../config.example.toml).
-- `no upstream configured; pass --upstream-host and --upstream-port, or set
-  host and port in the [upstream] section of the --config file`: there is no
-  default upstream. Both host and port are needed.
+- `gateway "<name>": no upstream configured; set host and port in
+  [gateways.<name>] or pass --upstream-host and --upstream-port` (or, without
+  any gateway table, `no upstream configured; pass --upstream-host and
+  --upstream-port, ...`): there is no default upstream. Both host and port are
+  needed.
+- `[device_session] gateway names the unknown gateway "<name>"` (or
+  `--gateway names ...`): the name must match a `[gateways.<name>]` table; the
+  message lists the configured ones. With several gateways and no
+  `[device_session] gateway`, the device session cannot pick one and you must
+  set it.
+- The `[listen]`, `[upstream]` and `[tls]` sections of earlier development builds are
+  unknown sections: move their keys to `[device_session] listen` and a
+  `[gateways.<name>]` table (`[tls] mode` becomes `tls_mode`).
 - Zero limits, ports or timeouts, an empty `[device_key] name`, and unknown
-  values for `mode`, `client_certificate` or `preferred` are rejected.
+  values for `tls_mode`, `client_certificate` or `preferred` are rejected, as
+  are gateway names other than 1 to 64 characters from `A-Z`, `a-z`, `0-9`,
+  `_` and `-`.
 - Relative `ca_file` and `client_cert_file` paths are relative to the
   configuration file, not to the current directory.
 - Command line flags override the file. If a value seems ignored, check that
   the same flag is not also given.
-- A non-loopback `[listen] address` is refused unless
+- A non-loopback `[device_session] listen` address is refused unless
   `--unsafe-allow-non-loopback-listen` is passed on the command line; see below.
 
 ## Non-loopback listen address refused
@@ -112,7 +125,7 @@ unknown field `hostname`, expected one of `host`, `port`, `server_name`, `ca_fil
 error: refusing to listen on non-loopback address 0.0.0.0:18736; pass --unsafe-allow-non-loopback-listen to override
 ```
 
-The same error appears for a non-loopback `[listen] address` in a
+The same error appears for a non-loopback `[device_session] listen` in a
 configuration file; the opt-in exists only as a command line flag.
 
 The listener has no authentication, so on a non-loopback address anyone on the

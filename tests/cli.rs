@@ -287,3 +287,23 @@ fn help_defaults_match_the_real_defaults() {
     }
     assert_flag_default(&help(&["key", "init"]), "--backend", device_key.preferred);
 }
+
+#[test]
+fn check_upstream_gateway_needs_a_configured_gateway() {
+    let (success, stderr) = gateinto(&[
+        "check-upstream",
+        "--gateway",
+        "office",
+        "--upstream-host",
+        "127.0.0.1",
+        "--upstream-port",
+        "9",
+    ]);
+    assert!(!success);
+    assert!(
+        stderr.contains(
+            "error: --gateway names the unknown gateway \"office\"; configured gateways: none"
+        ),
+        "{stderr}"
+    );
+}

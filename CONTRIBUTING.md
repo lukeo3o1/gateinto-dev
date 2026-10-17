@@ -43,7 +43,7 @@ you could do.
 - For manual checks, `cargo run --example test_upstream -- --port 18443
   --ca-out upstream-ca.pem` runs that fixture as a standalone HTTPS `CONNECT`
   upstream on loopback with a throwaway test CA (server name `localhost`,
-  change it with `--name`). Point `[upstream]` at `127.0.0.1:18443` with
+  change it with `--name`). Point a `[gateways.<name>]` table at `127.0.0.1:18443` with
   `server_name = "localhost"` and `ca_file = "upstream-ca.pem"`. It is for
   development only and is not shipped; the `quickstart` CI job uses it.
 - Tests must not disable TLS certificate verification. Issue test certificates
