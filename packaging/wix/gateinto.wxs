@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Gateinto"
+      Manufacturer="Gateinto"
+      Version="$(var.Version)"
+      UpgradeCode="2C50F196-F9CD-4535-A997-0687BEB31CDE"
+      Scope="perUser"
+      Language="1033"
+      Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Gateinto is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Gateinto" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Gateinto" Level="1" AllowAbsent="no">
+      <Component Id="Executable" Directory="INSTALLFOLDER" Guid="D0BAAB5A-B9FF-4F34-9BBE-8F2E399F5E34">
+        <File Id="GateintoExe" Name="gateinto.exe" Source="$(var.BinaryPath)" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveLocalProgramsFolder" Directory="LocalProgramsFolder" On="uninstall" />
+      </Component>
+
+      <Component Id="UriHandler" Directory="INSTALLFOLDER" Guid="7AFE4CDF-3B66-4F54-88E4-A3929B2B22E6">
+        <RegistryKey Root="HKCU" Key="Software\Classes\gateinto" ForceDeleteOnUninstall="yes">
+          <RegistryValue Type="string" Value="URL:Gateinto launch link" KeyPath="yes" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]gateinto.exe&quot; open -- &quot;%1&quot;" />
+        </RegistryKey>
+      </Component>
+
+      <Feature Id="Autostart" Title="Start the Gateinto agent at logon" Level="2">
+        <Level Value="1" Condition="AUTOSTART = &quot;1&quot;" />
+        <Component Id="Autostart" Directory="INSTALLFOLDER" Guid="3A1DFF58-BAE5-4BDB-A96C-0D54E6AB6039">
+          <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Gateinto" Type="string" Value="&quot;[INSTALLFOLDER]gateinto.exe&quot; agent" KeyPath="yes" />
+        </Component>
+      </Feature>
+    </Feature>
+
+    <CustomAction
+        Id="StopAgent"
+        FileRef="GateintoExe"
+        ExeCommand="stop --remove-stale-profiles"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopAgent" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
