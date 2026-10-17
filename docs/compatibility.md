@@ -98,8 +98,15 @@ runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features
 --locked -- -D warnings` and `cargo test --all-targets --all-features --locked`
 in two jobs, `ubuntu-latest` and `windows-latest`.
 
-A third job, `quickstart`, runs the [quickstart](quickstart.md) commands on
-`windows-latest` with the release build: `key init` and `key info` (asserting
+A `build-windows-release` job runs the quickstart's
+`cargo build --release --locked` on `windows-latest`, builds the
+`test_upstream` example, checks the release `gateinto.exe` with the static C
+runtime check below and uploads both executables; the `quickstart` and `msi`
+jobs download them instead of compiling. This split has not run in CI yet;
+the results below were recorded when each job built its own binary. The
+`quickstart` job runs the
+[quickstart](quickstart.md) commands on `windows-latest` with that release
+build: `key init` and `key info` (asserting
 the software key created after the TPM fallback, or printing the backend if a
 TPM is ever present), `check-upstream` with a configuration file derived from
 `config.example.toml` (asserting `TLSv1_3` and `X25519MLKEM768`), and `proxy`
@@ -144,7 +151,9 @@ environment they got `-MD`.
 `MSVCP*.dll`, `MSVCR*.dll`, `CONCRT*.dll`, `VCOMP*.dll`, `VCCORLIB*.dll`,
 `ucrtbase*.dll` or `api-ms-win-crt-*.dll`, or if the list lacks
 `KERNEL32.dll`. The `windows-latest` CI job runs it on the debug binary that
-`cargo test` builds, the release workflow on the release binary before
+`cargo test` builds, the `build-windows-release` CI job on the release binary
+used by the `quickstart` and `msi` jobs, the release workflow on the release
+binary before
 packaging, and the Windows 7 workflow on the `x86_64-win7-windows-msvc` build,
 whose import table names `kernel32.dll` in lower case; the `KERNEL32.dll` check
 is case-insensitive. Whether the binary starts on a Windows 10 machine without
