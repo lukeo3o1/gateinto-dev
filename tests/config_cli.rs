@@ -450,10 +450,29 @@ fn proxy_refuses_several_gateways_without_a_device_session_gateway() {
 }
 
 struct BrowserSession {
-    _child: Child,
+    child: Child,
     agent: SocketAddr,
     realm: String,
     stdout: Vec<String>,
+    rest: std::thread::JoinHandle<String>,
+}
+
+impl BrowserSession {
+    fn stop(self) -> String {
+        drop(self.child);
+        let mut output = self.stdout.join("\n");
+        output.push('\n');
+        output.push_str(&self.rest.join().unwrap());
+        output
+    }
+}
+
+fn read_all(mut reader: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSession {
@@ -464,19 +483,21 @@ async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSessio
                 .args(["session", "browser", "--config"])
                 .arg(&config)
                 .args(&extra)
+                .env("RUST_LOG", "trace")
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
-        let mut lines = std::io::BufReader::new(child.0.stdout.take().unwrap()).lines();
+        let stderr = read_all(child.0.stderr.take().unwrap());
+        let mut reader = std::io::BufReader::new(child.0.stdout.take().unwrap());
         let mut stdout = Vec::new();
         let (mut agent, mut realm) = (None, None);
         while agent.is_none() || realm.is_none() {
-            let line = lines
-                .next()
-                .expect("session exited before printing its listener")
-                .unwrap();
+            let mut line = String::new();
+            let read = reader.read_line(&mut line).unwrap();
+            assert_ne!(read, 0, "session exited before printing its listener");
+            let line = line.trim_end().to_owned();
             if let Some(addr) = line.strip_prefix("listen: ") {
                 agent = Some(addr.parse().unwrap());
             }
@@ -485,12 +506,15 @@ async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSessio
             }
             stdout.push(line);
         }
-        std::thread::spawn(move || lines.for_each(drop));
+        let stdout_rest = read_all(reader);
         BrowserSession {
-            _child: child,
+            child,
             agent: agent.unwrap(),
             realm: realm.unwrap(),
             stdout,
+            rest: std::thread::spawn(move || {
+                stdout_rest.join().unwrap() + "\n" + &stderr.join().unwrap()
+            }),
         }
     })
     .await
@@ -551,8 +575,14 @@ async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
     )
     .await;
     assert_eq!(fresh.status, 200, "{}", fresh.head);
-    for line in first.stdout.iter().chain(&second.stdout) {
-        assert!(!line.contains("browser secret"), "{line}");
+    let token = mine.strip_prefix("Basic ").unwrap();
+    for output in [first.stop(), second.stop()] {
+        assert!(
+            output.contains("TRACE") || output.contains("DEBUG"),
+            "{output}"
+        );
+        assert!(!output.contains("browser secret"), "{output}");
+        assert!(!output.contains(token), "{output}");
     }
 }
 
