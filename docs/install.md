@@ -250,8 +250,10 @@ command until the next uninstall or repair.
 
 ## Verification
 
-The CI job `msi` on `windows-latest` builds the MSI and checks the following, with the Microsoft
-Software Key Storage Provider (the runner has no TPM):
+The CI job `msi` on `windows-latest`, and the `msi` jobs of the compatibility workflow on
+`windows-2022` and `windows-2025`, build the MSI and run
+[.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), which checks the
+following with the Microsoft Software Key Storage Provider (the runners have no TPM):
 
 - a silent per-user install writes the exe, the user `PATH` entry, the exact handler command
   and the uninstall entry, and creates no device key (`key info` fails until `setup` runs);
@@ -264,6 +266,6 @@ Software Key Storage Provider (the runner has no TPM):
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
-Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 versions other than
-the runner's, and a `gateinto://` link clicked in a real browser. See
+Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
+runners are Windows Server), and a `gateinto://` link clicked in a real browser. See
 [verification.md](verification.md).
