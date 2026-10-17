@@ -212,7 +212,7 @@ fn parse_field(line: &[u8]) -> Result<Field<'_>, ParseError> {
     })
 }
 
-fn is_token(bytes: &[u8]) -> bool {
+pub(crate) fn is_token(bytes: &[u8]) -> bool {
     !bytes.is_empty()
         && bytes
             .iter()

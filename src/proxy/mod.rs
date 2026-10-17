@@ -24,7 +24,10 @@ use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
 use crate::tls::{self, NegotiationError, TlsMode};
 
+mod basic_tofu;
 mod relay;
+
+pub use basic_tofu::FailureLimit;
 
 pub const DEFAULT_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18736));
