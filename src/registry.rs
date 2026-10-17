@@ -1,6 +1,8 @@
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_SUCCESS, WIN32_ERROR,
+};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
     REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW,
@@ -54,7 +56,7 @@ impl Key {
         let value = wide(value);
         let bytes = u32::try_from(value.len() * 2).map_err(|_| RegistrationError::Registry {
             operation: "RegSetValueExW",
-            code: 0,
+            code: ERROR_INVALID_PARAMETER,
         })?;
         // SAFETY: both strings are NUL-terminated and bytes is the size of value in bytes.
         let code = unsafe {
