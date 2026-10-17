@@ -4,9 +4,9 @@ use windows_sys::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_SUCCESS, WIN32_ERROR,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW,
-    RegOpenKeyExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, KEY_WRITE,
+    REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 
 use crate::registration::RegistrationError;
@@ -84,7 +84,8 @@ pub fn key_exists(root: HKEY, path: &str) -> Result<bool, RegistrationError> {
     let path = wide(path);
     let mut key = null_mut();
     // SAFETY: path is NUL-terminated and an opened key is closed by Key's Drop.
-    let code = unsafe { RegOpenKeyExW(root, path.as_ptr(), 0, KEY_READ, &mut key) };
+    let code =
+        unsafe { RegOpenKeyExW(root, path.as_ptr(), 0, KEY_READ | KEY_WOW64_64KEY, &mut key) };
     if code == ERROR_FILE_NOT_FOUND {
         return Ok(false);
     }
@@ -108,7 +109,7 @@ pub fn read_string(
             root,
             path.as_ptr(),
             name,
-            RRF_RT_REG_SZ,
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
             null_mut(),
             null_mut(),
             &mut size,
@@ -125,7 +126,7 @@ pub fn read_string(
             root,
             path.as_ptr(),
             name,
-            RRF_RT_REG_SZ,
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
             null_mut(),
             buffer.as_mut_ptr().cast(),
             &mut size,
@@ -156,4 +157,56 @@ pub fn app_path(executable: &str) -> Option<std::path::PathBuf> {
         .into_iter()
         .find_map(|root| read_string(root, &path, None).ok().flatten())
         .map(|value| std::path::PathBuf::from(value.trim_matches('"')))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::System::Registry::{KEY_WOW64_64KEY, RegDeleteKeyExW};
+
+    struct NativeLocalMachineKey(Vec<u16>);
+
+    impl Drop for NativeLocalMachineKey {
+        fn drop(&mut self) {
+            // SAFETY: the path is NUL-terminated.
+            unsafe { RegDeleteKeyExW(HKEY_LOCAL_MACHINE, self.0.as_ptr(), KEY_WOW64_64KEY, 0) };
+        }
+    }
+
+    #[test]
+    fn local_machine_keys_are_read_from_the_native_view() {
+        let path = format!(r"SOFTWARE\Gateinto-test-{}", std::process::id());
+        let wide_path = wide(&path);
+        let mut key = null_mut();
+        // SAFETY: the path is NUL-terminated and key receives an owned handle closed by Key's Drop.
+        let code = unsafe {
+            RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                wide_path.as_ptr(),
+                0,
+                null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE | KEY_WOW64_64KEY,
+                null(),
+                &mut key,
+                null_mut(),
+            )
+        };
+        if code == ERROR_ACCESS_DENIED && std::env::var_os("GITHUB_ACTIONS").is_none() {
+            eprintln!("skipped: creating a key under HKLM needs an elevated process");
+            return;
+        }
+        check("RegCreateKeyExW", code).unwrap();
+        let _cleanup = NativeLocalMachineKey(wide_path);
+        Key(key).set_string(None, "native").unwrap();
+
+        assert!(key_exists(HKEY_LOCAL_MACHINE, &path).unwrap());
+        assert_eq!(
+            read_string(HKEY_LOCAL_MACHINE, &path, None)
+                .unwrap()
+                .as_deref(),
+            Some("native")
+        );
+    }
 }
