@@ -1,0 +1,64 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+  pull_request:
+    paths:
+      - src/http.rs
+      - src/proxy/**
+      - src/uri.rs
+      - src/ipc.rs
+      - src/config.rs
+      - src/sessions.rs
+      - src/identity/x509.rs
+      - fuzz/**
+      - .github/workflows/fuzz.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY_TOOLCHAIN: nightly-2026-09-15
+  CARGO_FUZZ_VERSION: '0.13.2'
+  MAX_TOTAL_TIME: '60'
+
+jobs:
+  fuzz:
+    name: cargo fuzz, every target
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz-nightly
+          workspaces: fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} install cargo-fuzz --version ${{ env.CARGO_FUZZ_VERSION }} --locked
+      - run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} fuzz build
+      - name: Run every target
+        run: |
+          targets=$(cargo +"$NIGHTLY_TOOLCHAIN" fuzz list)
+          if [ -z "$targets" ]; then echo "no fuzz targets"; exit 1; fi
+          for target in $targets; do
+            echo "::group::$target"
+            cargo +"$NIGHTLY_TOOLCHAIN" fuzz run "$target" -- -max_total_time="$MAX_TOTAL_TIME"
+            echo "::endgroup::"
+          done
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
