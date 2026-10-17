@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod lifecycle;
 pub mod link;
 pub mod process;
+pub mod prompt;
 pub mod proxy;
 pub mod registration;
 #[cfg(windows)]

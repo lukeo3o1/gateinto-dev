@@ -371,8 +371,8 @@ fn reset_deletes_a_config_file_only_when_named_or_at_the_default_location() {
     assert!(!success);
     assert!(
         stderr.contains(&format!(
-            "--purge-config found no config file named with --config or at {}; nothing was \
-             deleted",
+            "--purge-config found no config file named with --config or at {}, and no gateways \
+             added from links; nothing was deleted",
             default_config(&no_config_home()).display()
         )),
         "{stderr}"
@@ -439,10 +439,14 @@ fn status_is_read_only_and_reports_what_it_can() {
             "key-name: gateinto-device-v1\n\
              device-key: unavailable: device keys are only supported on Windows\n\
              config: none (no file at {}; pass --config to use another file)\n\
+             linked-gateways: none (no file at {})\n\
              device-session: none\n\
              agent: not running\n\
              uri-handler: not supported on this platform\n",
-            default_config(&no_config_home()).display()
+            default_config(&no_config_home()).display(),
+            default_config(&no_config_home())
+                .with_file_name("linked-gateways.toml")
+                .display()
         )
     );
 }
@@ -479,7 +483,7 @@ fn status_reads_the_config_file_at_the_default_location() {
     assert!(output.status.success(), "{stdout}");
     assert!(
         stdout.contains(&format!(
-            "config: {} (default location)\ngateway: main: proxy.example.com:443\n",
+            "config: {} (default location)\ngateway: main: proxy.example.com:443 (config)\n",
             path.display()
         )),
         "{stdout}"
@@ -620,4 +624,129 @@ fn reset_with_yes_and_no_terminal_keeps_an_existing_key() {
     assert!(kept_config);
     let (still, _) = device_key::info(&CngStore, &key.0).unwrap();
     assert_eq!(still.fingerprint(), created.fingerprint());
+}
+
+struct Home(PathBuf);
+
+impl Home {
+    fn new(name: &str) -> Self {
+        let home = std::env::temp_dir().join(format!("gateinto-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let config = default_config(&home);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "[gateways.main]\nhost = \"proxy.example.com\"\nport = 443\n\
+             portal_url = \"https://portal.example.com/?token=secret\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config.with_file_name("linked-gateways.toml"),
+            "[gateways.newco]\nhost = \"proxy.newco.example\"\nport = 8443\n\
+             portal_url = \"https://portal.newco.example/home\"\napproved_at = 1\n\
+             [gateways.other]\nhost = \"10.0.0.1\"\nport = 443\n\
+             portal_url = \"https://other.example/\"\n",
+        )
+        .unwrap();
+        Self(home)
+    }
+
+    fn linked(&self) -> PathBuf {
+        default_config(&self.0).with_file_name("linked-gateways.toml")
+    }
+
+    fn run(&self, args: &[&str]) -> (bool, String, String) {
+        let output = isolated::gateinto()
+            .args(args)
+            .env("XDG_CONFIG_HOME", &self.0)
+            .env("APPDATA", &self.0)
+            .env("GATEINTO_INSTANCE", format!("cli-{}", std::process::id()))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn gateway_list_shows_where_each_gateway_comes_from() {
+    let home = Home::new("gateway-list");
+    let (success, stdout, stderr) = home.run(&["gateway", "list"]);
+    assert!(success, "{stderr}");
+    assert_eq!(
+        stdout,
+        "main: proxy.example.com:443, portal https://portal.example.com (config)\n\
+         newco: proxy.newco.example:8443, portal https://portal.newco.example (linked)\n\
+         other: 10.0.0.1:443, portal https://other.example (linked)\n"
+    );
+}
+
+#[test]
+fn status_marks_linked_gateways() {
+    let home = Home::new("status-linked");
+    let (success, stdout, stderr) = home.run(&["status"]);
+    assert!(success, "{stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "gateway: main: proxy.example.com:443 (config)\nlinked-gateways: {}\n\
+             gateway: newco: proxy.newco.example:8443 (linked)\n\
+             gateway: other: 10.0.0.1:443 (linked)\n",
+            home.linked().display()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("secret") && !stdout.contains("/home"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn gateway_forget_removes_only_gateways_added_from_links() {
+    let home = Home::new("gateway-forget");
+
+    let (success, _, stderr) = home.run(&["gateway", "forget", "main"]);
+    assert!(!success);
+    assert!(stderr.contains("config file"), "{stderr}");
+    let (success, _, stderr) = home.run(&["gateway", "forget", "nope"]);
+    assert!(!success);
+    assert!(
+        stderr.contains("no gateway added from a link named \"nope\""),
+        "{stderr}"
+    );
+
+    let (success, stdout, stderr) = home.run(&["gateway", "forget", "newco"]);
+    assert!(success, "{stderr}");
+    assert!(stdout.contains("removed the gateway \"newco\""), "{stdout}");
+    let (_, stdout, _) = home.run(&["gateway", "list"]);
+    assert_eq!(
+        stdout,
+        "main: proxy.example.com:443, portal https://portal.example.com (config)\n\
+         other: 10.0.0.1:443, portal https://other.example (linked)\n"
+    );
+    let config = std::fs::read_to_string(default_config(&home.0)).unwrap();
+    assert!(config.contains("[gateways.main]"), "{config}");
+}
+
+#[test]
+fn a_damaged_linked_gateways_file_is_reported() {
+    let home = Home::new("gateway-damaged");
+    std::fs::write(
+        home.linked(),
+        "[gateways.x]\nhost = \"x\"\nport = 1\nca_file = \"y\"\n",
+    )
+    .unwrap();
+    let (success, _, stderr) = home.run(&["gateway", "list"]);
+    assert!(!success);
+    assert!(stderr.contains("linked-gateways.toml"), "{stderr}");
 }
