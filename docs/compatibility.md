@@ -188,11 +188,14 @@ key after the TPM fallback and `key info` matched it; `check-upstream` reported
 Every job that compiles Rust uses `Swatinem/rust-cache@v2` with its own
 `shared-key`. The CI jobs save their cache only on `master`, so pull requests
 restore the `master` cache without evicting it with their own. The release
-workflow restores the cache of the `windows-latest` CI job (`shared-key:
-check-windows-latest`, `save-if: false`): that cache holds the debug build of
-`cargo test` and the crate downloads, which speed up the release's tests, but
-no `target\<target>\release` directory, so the shipped `gateinto.exe` is
-always compiled from scratch, and a release never writes a cache.
+workflow only restores caches (`save-if: false`): the x64 build restores the
+`windows-latest` CI job's cache (`shared-key: check-windows-latest`), whose
+crate downloads it reuses (its tests run with `--target`, so most of that
+job's debug build lands in another directory), and the i686 build restores the
+`windows-i686` CI job's cache, whose debug build of the same
+`cargo test --target i686-pc-windows-msvc` it reuses. Neither cache contains a
+`target\<target>\release` directory, so each shipped `gateinto.exe` is
+compiled from scratch, and a release never writes a cache.
 
 The release workflow
 ([.github/workflows/release.yml](../.github/workflows/release.yml)) ran once
