@@ -64,8 +64,7 @@ fuzz_target!(|data: &[u8]| {
                 failures += 1;
             }
             (None, _) => {
-                let status = rejected(&outcome, &realm);
-                assert!(status == 400 || status == 407, "{status}");
+                assert_eq!(rejected(&outcome, &realm), refused_status(&authorization));
                 failures += 1;
             }
         }
@@ -110,6 +109,22 @@ fn rejected(outcome: &Outcome, realm: &str) -> u16 {
         "the response is not fixed by its status and the session realm"
     );
     status
+}
+
+fn refused_status(authorization: &[u8]) -> u16 {
+    let scheme = authorization
+        .split(|&b| b == b' ')
+        .next()
+        .unwrap_or_default();
+    let token = !scheme.is_empty()
+        && scheme
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    if token && !scheme.eq_ignore_ascii_case(b"basic") {
+        407
+    } else {
+        400
+    }
 }
 
 fn check_credential_parser(value: &[u8]) {
