@@ -242,7 +242,7 @@ fn parse_authority(target: &[u8]) -> Option<Authority> {
     Some(Authority { host, port })
 }
 
-fn parse_host(host: &str) -> Option<Host> {
+pub(crate) fn parse_host(host: &str) -> Option<Host> {
     if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
         return host.parse().ok().map(Host::Ipv4);
     }
