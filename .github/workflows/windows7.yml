@@ -6,7 +6,12 @@ on:
     paths:
       - .github/workflows/windows7.yml
       - .github/scripts/assert-static-crt.ps1
+      - .github/scripts/assert-win7-imports.ps1
+      - .github/scripts/win7-imports.txt
       - .cargo/config.toml
+      - Cargo.toml
+      - Cargo.lock
+      - src/identity/**
       - docs/windows7-feasibility.md
 
 permissions:
@@ -19,16 +24,23 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   NIGHTLY_TOOLCHAIN: nightly-2026-09-15
-  WIN7_TARGET: x86_64-win7-windows-msvc
+  NASM_VERSION: '2.16.03'
+  AWS_LC_SYS_CMAKE_BUILDER: '0'
 
 jobs:
   build:
-    name: x86_64-win7-windows-msvc
+    name: ${{ matrix.target }}
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-win7-windows-msvc, i686-win7-windows-msvc]
     defaults:
       run:
         shell: pwsh
+    env:
+      WIN7_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -37,8 +49,13 @@ jobs:
           components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: win7-nightly
+          shared-key: win7-nightly-${{ matrix.target }}
           save-if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Install NASM ${{ env.NASM_VERSION }}
+        if: ${{ startsWith(matrix.target, 'i686-') }}
+        uses: ilammy/setup-nasm@v1
+        with:
+          version: ${{ env.NASM_VERSION }}
       - run: rustc +${{ env.NIGHTLY_TOOLCHAIN }} -vV
       - name: Build
         id: build
@@ -53,29 +70,13 @@ jobs:
           if (-not $dumpbin) { throw 'dumpbin.exe not found' }
           & $dumpbin /nologo /imports $exe | Tee-Object -FilePath imports.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Audit imports
-        run: |
-          $exe = "target\${{ env.WIN7_TARGET }}\release\gateinto.exe"
-          $imports = Get-Content imports.txt
-          Write-Output '== Imported DLLs'
-          $imports | Select-String -Pattern '^\s+\S+\.dll$' | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique
-          $win8 = 'ProcessPrng|GetSystemTimePreciseAsFileTime|WaitOnAddress|WakeByAddressSingle|WakeByAddressAll|CreateFile2|GetCurrentThreadStackLimits|SetThreadDescription|GetThreadDescription|GetTempPath2W|bcryptprimitives|api-ms-win-core-synch-l1-2-0'
-          $static = $imports | Select-String -Pattern "\b($win8)\b"
-          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
-          $dynamic = [regex]::Matches($text, "($win8)") | ForEach-Object { $_.Value } | Sort-Object -Unique
-          Write-Output '== Names of Windows 8+ APIs present as strings in the binary (possible GetProcAddress lookups)'
-          $dynamic
-          if ($dynamic -contains 'ProcessPrng') {
-            Write-Output '::warning title=ProcessPrng found::AWS-LC loads ProcessPrng from bcryptprimitives.dll at runtime and calls abort() when it is missing, so this binary would abort on Windows 7. A green job is not evidence of Windows 7 compatibility.'
-          }
-          Write-Output '== Windows 8+ APIs in the static import table'
-          $static | ForEach-Object { $_.Line.Trim() }
-          if ($static) { throw 'Static imports that do not exist on Windows 7' }
+      - name: Audit imports against the Windows 7 allow-list
+        run: .github/scripts/assert-win7-imports.ps1 -Path "target\${{ env.WIN7_TARGET }}\release\gateinto.exe" -Imports imports.txt
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         with:
-          name: gateinto-${{ env.WIN7_TARGET }}
+          name: gateinto-${{ matrix.target }}
           path: |
-            target/${{ env.WIN7_TARGET }}/release/gateinto.exe
+            target/${{ matrix.target }}/release/gateinto.exe
             imports.txt
           if-no-files-found: error
