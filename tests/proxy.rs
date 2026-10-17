@@ -13,6 +13,9 @@ const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTIVITY_EVERY: Duration = Duration::from_millis(200);
 const ACTIVE_ROUNDS: usize = 12;
+const KEEP_OPEN_IDLE_TIMEOUT: Duration = Duration::from_secs(3);
+const KEEP_OPEN_EVERY: Duration = Duration::from_millis(500);
+const KEEP_OPEN_ROUNDS: usize = 12;
 
 struct Setup {
     ca: TestCa,
@@ -401,19 +404,19 @@ async fn idle_tunnels_are_closed() {
 async fn upload_only_traffic_keeps_the_tunnel_open() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
-    config.limits.idle_timeout = IDLE_TIMEOUT;
+    config.limits.idle_timeout = KEEP_OPEN_IDLE_TIMEOUT;
     let agent = start_agent(config).await;
     let mut stream = open_tunnel(agent, reply_after_eof_server().await).await;
 
-    for _ in 0..ACTIVE_ROUNDS {
-        tokio::time::sleep(ACTIVITY_EVERY).await;
+    for _ in 0..KEEP_OPEN_ROUNDS {
+        tokio::time::sleep(KEEP_OPEN_EVERY).await;
         stream.write_all(b"ab").await.unwrap();
     }
     stream.shutdown().await.unwrap();
 
     assert_eq!(
         read_to_end_within(&mut stream, CLOSE_WITHIN).await,
-        b"ba".repeat(ACTIVE_ROUNDS)
+        b"ba".repeat(KEEP_OPEN_ROUNDS)
     );
 }
 
@@ -421,15 +424,16 @@ async fn upload_only_traffic_keeps_the_tunnel_open() {
 async fn download_only_traffic_keeps_the_tunnel_open() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
-    config.limits.idle_timeout = IDLE_TIMEOUT;
+    config.limits.idle_timeout = KEEP_OPEN_IDLE_TIMEOUT;
     let agent = start_agent(config).await;
-    let target = drip_server(b"tick", ACTIVE_ROUNDS, ACTIVITY_EVERY).await;
-    let mut stream = open_tunnel(agent, target).await;
+    let target = drip_server(b"tick", KEEP_OPEN_ROUNDS, KEEP_OPEN_EVERY).await;
+    let (mut stream, response) = send(agent, &connect_request(&target.to_string())).await;
+    assert_eq!(response.status, 200, "{}", response.head);
 
-    assert_eq!(
-        read_to_end_within(&mut stream, CLOSE_WITHIN).await,
-        b"tick".repeat(ACTIVE_ROUNDS)
-    );
+    let dripping = KEEP_OPEN_EVERY * u32::try_from(KEEP_OPEN_ROUNDS).unwrap();
+    let mut received = response.rest;
+    received.extend(read_to_end_within(&mut stream, dripping + CLOSE_WITHIN).await);
+    assert_eq!(received, b"tick".repeat(KEEP_OPEN_ROUNDS));
 }
 
 #[tokio::test(flavor = "multi_thread")]
