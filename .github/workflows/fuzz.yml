@@ -6,6 +6,8 @@ on:
     - cron: '23 4 * * 1'
   pull_request:
     paths:
+      - Cargo.toml
+      - Cargo.lock
       - src/http.rs
       - src/proxy/**
       - src/uri.rs
@@ -39,11 +41,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fuzz-nightly
           workspaces: fuzz -> target
           save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Check formatting and lints of the fuzz workspace
+        working-directory: fuzz
+        env:
+          RUSTFLAGS: --cfg fuzzing
+        run: |
+          cargo +"$NIGHTLY_TOOLCHAIN" fmt --all -- --check
+          cargo +"$NIGHTLY_TOOLCHAIN" clippy --all-targets --locked -- -D warnings
       - run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} install cargo-fuzz --version ${{ env.CARGO_FUZZ_VERSION }} --locked
       - run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} fuzz build
       - name: Run every target
