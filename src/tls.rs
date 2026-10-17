@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rustls::client::ResolvesClientCert;
+use rustls::client::{ResolvesClientCert, Resumption};
 use rustls::crypto::aws_lc_rs::{self, kx_group};
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 use rustls::pki_types::CertificateDer;
@@ -129,12 +129,13 @@ pub fn client_config(
     roots: RootCertStore,
     client_certificate: Arc<ClientCertificateResolver>,
 ) -> Result<ClientConfig, rustls::Error> {
-    Ok(
-        ClientConfig::builder_with_provider(Arc::new(mode.crypto_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])?
-            .with_root_certificates(roots)
-            .with_client_cert_resolver(client_certificate),
-    )
+    let mut config = ClientConfig::builder_with_provider(Arc::new(mode.crypto_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_root_certificates(roots)
+        .with_client_cert_resolver(client_certificate);
+    config.resumption = Resumption::disabled();
+    config.enable_early_data = false;
+    Ok(config)
 }
 
 #[derive(Debug, Default)]

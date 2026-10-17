@@ -36,6 +36,9 @@ it. Which of these mechanisms are covered by tests is in
   key's; Gateinto never sends a certificate whose private key it does not
   hold. `--client-certificate required` makes a missing or mismatched
   certificate a startup error instead of a warning.
+- **No session resumption or early data.** Every upstream connection performs
+  a full TLS 1.3 handshake, so a connection never reuses a session, or the
+  client certificate identity, established by an earlier one.
 
 ### The tunnel content
 
