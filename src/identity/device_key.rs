@@ -862,7 +862,9 @@ mod tests {
         );
     }
 
-    fn device_not_ready_with_tpm_probe(probe: Result<(), u32>) -> StoreError {
+    fn device_not_ready_with_tpm_probe(
+        probe: Result<(), crate::identity::cng_status::TpmProbeError>,
+    ) -> StoreError {
         crate::identity::cng_status::tpm_provider_error(
             crate::identity::cng_status::store_error(0x8009_0030),
             || probe,
@@ -870,7 +872,9 @@ mod tests {
     }
 
     fn device_not_ready_without_a_tpm(store: FakeStore) -> FakeStore {
-        let error = device_not_ready_with_tpm_probe(Err(0x8028_400F));
+        let error = device_not_ready_with_tpm_probe(Err(
+            crate::identity::cng_status::TpmProbeError::Status(0x8028_400F),
+        ));
         store
             .open_error(Backend::Tpm, error.clone())
             .create_error(Backend::Tpm, error)
@@ -901,6 +905,29 @@ mod tests {
         let (shown, duplicate_keys) = info(&store, &name()).unwrap();
         assert_eq!(shown.fingerprint(), created.fingerprint());
         assert_eq!(duplicate_keys, None);
+    }
+
+    #[test]
+    fn device_not_ready_without_tpm_device_info_falls_back_to_software() {
+        let error = device_not_ready_with_tpm_probe(Err(
+            crate::identity::cng_status::TpmProbeError::DeviceInfoUnavailable,
+        ));
+        let store = FakeStore::default()
+            .open_error(Backend::Tpm, error.clone())
+            .create_error(Backend::Tpm, error);
+
+        let (created, provenance) = init(&store, &name(), InitOptions::default()).unwrap();
+
+        assert_eq!(created.backend, Backend::Software);
+        let Provenance::CreatedAfterFallback(problem) = provenance else {
+            panic!("expected a software fallback, got {provenance:?}");
+        };
+        assert!(
+            problem
+                .to_string()
+                .ends_with("TPM Base Services device info unavailable (Windows 7 or earlier)"),
+            "{problem}"
+        );
     }
 
     #[test]
