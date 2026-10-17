@@ -23,9 +23,11 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             cache-key: check-windows-latest
+            test-args: ''
             msi: true
           - target: i686-pc-windows-msvc
             cache-key: windows-i686
+            test-args: --target i686-pc-windows-msvc
             nasm: true
     env:
       RELEASE_TARGET: ${{ matrix.target }}
@@ -46,7 +48,7 @@ jobs:
         uses: ilammy/setup-nasm@v1
         with:
           version: ${{ env.NASM_VERSION }}
-      - run: cargo test --target $env:RELEASE_TARGET --all-targets --all-features --locked
+      - run: cargo test ${{ matrix.test-args }} --all-targets --all-features --locked
       - run: cargo build --locked --release --target $env:RELEASE_TARGET --bin gateinto
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe"

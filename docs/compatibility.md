@@ -193,11 +193,11 @@ Every job that compiles Rust uses `Swatinem/rust-cache@v2` with its own
 `shared-key`. The CI jobs save their cache only on `master`, so pull requests
 restore the `master` cache without evicting it with their own. The release
 workflow only restores caches (`save-if: false`): the x64 build restores the
-`windows-latest` CI job's cache (`shared-key: check-windows-latest`), whose
-crate downloads it reuses (its tests run with `--target`, so most of that
-job's debug build lands in another directory), and the i686 build restores the
-`windows-i686` CI job's cache, whose debug build of the same
-`cargo test --target i686-pc-windows-msvc` it reuses. Neither cache contains a
+`windows-latest` CI job's cache (`shared-key: check-windows-latest`) and runs
+the same `cargo test --all-targets --all-features --locked` without `--target`
+(the runner's host is `x86_64-pc-windows-msvc`), so it reuses that job's debug
+build; the i686 build restores the `windows-i686` CI job's cache and reuses its
+debug build of the same `cargo test --target i686-pc-windows-msvc`. Neither cache contains a
 `target\<target>\release` directory, so each shipped `gateinto.exe` is
 compiled from scratch, and a release never writes a cache.
 
