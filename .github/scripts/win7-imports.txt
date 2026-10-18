@@ -116,6 +116,7 @@ kernel32.dll LoadLibraryExW
 kernel32.dll LoadLibraryW
 kernel32.dll LocalFree
 kernel32.dll lstrlenW
+kernel32.dll MoveFileExW
 kernel32.dll MultiByteToWideChar
 kernel32.dll OpenProcess
 kernel32.dll OutputDebugStringW

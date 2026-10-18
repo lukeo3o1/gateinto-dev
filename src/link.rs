@@ -516,6 +516,9 @@ pub fn resolve(
     {
         return Err(damaged(entry));
     }
+    if let Some(entry) = all.invalid.iter().find(|entry| entry.name.is_none()) {
+        return Err(damaged(entry));
+    }
     if let Some(similar) = known
         .iter()
         .find(|known| known.name.as_str().eq_ignore_ascii_case(profile.as_str()))
@@ -750,6 +753,51 @@ mod tests {
             "{resolution:?}"
         );
         assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn while_a_damaged_file_has_no_readable_name_unknown_profiles_fail_closed() {
+        let mut known = damaged();
+        known.invalid.push(store::InvalidEntry {
+            file: std::path::PathBuf::from("/c/gateways/garbage.toml"),
+            name: None,
+            addresses: Vec::new(),
+            reason: "not toml".to_owned(),
+        });
+        known.gateways.push(KnownGateway {
+            name: name("newer"),
+            host: Some("newer.example".to_owned()),
+            port: Some(443),
+            portal_url: Some("https://newer.example/".parse().unwrap()),
+            source: Source::Linked,
+        });
+        for request in [
+            link("nope", None, None, None),
+            link(
+                "newco",
+                None,
+                Some("other.example"),
+                Some("https://new.example/"),
+            ),
+        ] {
+            let (resolution, asked) = resolve_in(&known, &request);
+            assert_eq!(
+                resolution,
+                Err(LinkError::Damaged {
+                    profile: request.profile.clone(),
+                    file: "/c/gateways/garbage.toml".to_owned(),
+                }),
+                "{request}"
+            );
+            assert_eq!(asked, 0);
+        }
+        let (resolution, _) = resolve_in(&known, &link("corp", None, None, None));
+        assert_eq!(resolution, Ok(launch("corp", Some(PORTAL))));
+        let (resolution, _) = resolve_in(&known, &link("newer", None, None, None));
+        assert_eq!(
+            resolution,
+            Ok(launch("newer", Some("https://newer.example/")))
+        );
     }
 
     #[test]
