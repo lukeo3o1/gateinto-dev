@@ -6,9 +6,10 @@ unsupported. Recorded on 2026-10-16, updated on 2026-10-17.
 The regular releases, `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc`,
 require Windows 10 or later: Rust std for those targets needs Windows 10. They
 do not start on Windows 7. The only Windows 7 candidates are the experimental
-`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` artifacts of
-[windows7.yml](../.github/workflows/windows7.yml), and neither has been run on
-Windows 7.
+`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` builds of
+[windows7.yml](../.github/workflows/windows7.yml), which the `alpha` and `beta`
+releases also attach as `gateinto-<commit>-<target>-experimental.exe` (see
+[install.md](install.md#releases)); neither has been run on Windows 7.
 
 ## Observed failure on Windows 7
 
