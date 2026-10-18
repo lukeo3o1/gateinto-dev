@@ -10,7 +10,10 @@ fn prints_version() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("gateinto {}\n", env!("CARGO_PKG_VERSION"))
+        format!(
+            "gateinto {}\n",
+            option_env!("GATEINTO_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        )
     );
 }
 
