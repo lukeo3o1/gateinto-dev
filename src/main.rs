@@ -19,7 +19,8 @@ use gateinto::identity::device_key::{
 };
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
 use gateinto::lifecycle::{self, Purge};
-use gateinto::link::{self, Confirmation, KnownGateway, LinkedGateway, LinkedStore, Source};
+use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
+use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
 use gateinto::registration;
@@ -723,11 +724,14 @@ struct ConfigProfiles {
     linked: Option<LinkedStore>,
 }
 
+fn load_linked(store: Option<&LinkedStore>) -> Result<Loaded, StoreError> {
+    store.map_or(Ok(Loaded::default()), LinkedStore::load)
+}
+
 impl ConfigProfiles {
     fn linked(&self) -> Result<Vec<LinkedGateway>, String> {
-        self.linked
-            .as_ref()
-            .map_or(Ok(Vec::new()), LinkedStore::load)
+        load_linked(self.linked.as_ref())
+            .map(|loaded| loaded.gateways)
             .map_err(|error| error.to_string())
     }
 }
@@ -743,8 +747,8 @@ fn linked_test_ca() -> Option<PathBuf> {
 }
 
 impl Profiles for ConfigProfiles {
-    fn known(&self) -> Result<Vec<KnownGateway>, String> {
-        Ok(link::known_gateways(&self.file, &self.linked()?))
+    fn known(&self) -> Result<Known, String> {
+        Ok(Known::new(&self.file, load_linked(self.linked.as_ref())))
     }
 
     fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
@@ -752,6 +756,7 @@ impl Profiles for ConfigProfiles {
             .as_ref()
             .ok_or("cannot find the per-user config directory to store the gateway in")?
             .add(gateway)
+            .map(drop)
             .map_err(|error| error.to_string())
     }
 
@@ -792,7 +797,7 @@ async fn agent(args: ConfigArg) -> Result {
     let device_session = file.device_session.gateway.is_some();
     let profiles = ConfigProfiles {
         file: file.clone(),
-        linked: link::default_store_path().map(LinkedStore::new),
+        linked: linked_store(),
     };
     let agent = Agent::new(options, profiles);
     if device_session {
@@ -1049,24 +1054,15 @@ fn uri(command: UriCommand) -> Result {
 }
 
 fn linked_store() -> Option<LinkedStore> {
-    link::default_store_path().map(LinkedStore::new)
-}
-
-fn known_gateways(file: &ConfigFile) -> Result<Vec<KnownGateway>> {
-    let linked = linked_store().map_or(Ok(Vec::new()), |store| store.load())?;
-    Ok(link::known_gateways(file, &linked))
+    store::default_dir().map(LinkedStore::new)
 }
 
 fn print_config(args: &ConfigArg, file: &ConfigFile) {
     let store = linked_store();
-    let linked = store.as_ref().map(|store| store.load());
-    let usable = match &linked {
-        Some(Ok(linked)) => linked.as_slice(),
-        _ => &[],
-    };
-    let known = link::known_gateways(file, usable);
+    let known = Known::new(file, load_linked(store.as_ref()));
     let lines = |source| {
         let known: Vec<KnownGateway> = known
+            .gateways
             .iter()
             .filter(|gateway| gateway.source == source)
             .cloned()
@@ -1086,26 +1082,34 @@ fn print_config(args: &ConfigArg, file: &ConfigFile) {
             default_config_display()
         ),
     }
-    match (store, linked) {
-        (_, Some(Err(error))) => println!("linked-gateways: error: {error}"),
-        (Some(store), _) if store.path().is_file() => {
-            println!("linked-gateways: {}", store.path().display());
+    match store {
+        _ if known.unavailable.is_some() => {}
+        Some(store) if store.dir().is_dir() => {
+            println!("linked-gateways: {}", store.dir().display());
             lines(Source::Linked);
         }
-        (Some(store), _) => {
-            println!(
-                "linked-gateways: none (no file at {})",
-                store.path().display()
-            )
-        }
-        (None, _) => println!("linked-gateways: none (no default location)"),
+        Some(store) => println!(
+            "linked-gateways: none (no directory at {})",
+            store.dir().display()
+        ),
+        None => println!("linked-gateways: none (no default location)"),
+    }
+    for line in known.error_lines() {
+        println!("{line}");
     }
 }
 
 fn gateway(command: GatewayCommand) -> Result {
     match command {
         GatewayCommand::List(args) => {
-            for line in lifecycle::gateway_list(&known_gateways(&args.load()?)?) {
+            let known = Known::new(&args.load()?, load_linked(linked_store().as_ref()));
+            if let Some(error) = &known.unavailable {
+                return Err(error.clone().into());
+            }
+            for line in lifecycle::gateway_list(&known.gateways) {
+                println!("{line}");
+            }
+            for line in known.error_lines() {
                 println!("{line}");
             }
         }
@@ -1113,12 +1117,26 @@ fn gateway(command: GatewayCommand) -> Result {
             let file = config.load()?;
             let store = linked_store().ok_or("cannot find the per-user config directory")?;
             let configured = file.gateways.iter().any(|(known, _)| *known == name);
-            if store.forget(&name)? {
-                println!("removed the gateway \"{name}\" added from a link");
+            if let Some(path) = store.forget(&name)? {
+                println!(
+                    "removed the gateway \"{name}\" added from a link ({})",
+                    path.display()
+                );
                 if configured {
                     println!("the config file still defines a gateway \"{name}\"");
                 }
                 println!("open browser sessions of this gateway stay open until closed");
+            } else if let Some(entry) = store
+                .load()?
+                .invalid
+                .into_iter()
+                .find(|entry| entry.name.as_ref() == Some(&name))
+            {
+                return Err(format!(
+                    "the gateway \"{name}\" is in a damaged file ({entry}); delete that file to \
+                     remove it"
+                )
+                .into());
             } else if configured {
                 return Err(format!(
                     "the gateway \"{name}\" is defined in the config file, not added from a \
@@ -1220,8 +1238,7 @@ fn files_to_purge(args: &ResetArgs) -> Result<Option<Purge>> {
         return Ok(None);
     }
     let config = args.config.path().map(|(path, _)| path);
-    let linked = link::default_store_path();
-    let purge = lifecycle::files_to_purge(config.as_deref(), linked.as_deref())?;
+    let purge = lifecycle::files_to_purge(config.as_deref(), linked_store().as_ref())?;
     if purge == Purge::default() {
         return Err(format!(
             "--purge-config found no config file named with --config or at {}, and no gateways \
@@ -1243,12 +1260,12 @@ fn delete_files(files: &Purge) -> Result {
             .map_err(|error| format!("deleting {}: {error}", path.display()))?;
         println!("deleted config file {}", path.display());
     }
-    if let Some(path) = &files.linked {
-        std::fs::remove_file(path)
-            .map_err(|error| format!("deleting {}: {error}", path.display()))?;
+    if let Some(dir) = &files.linked_dir {
+        LinkedStore::new(dir.clone()).remove(&files.linked)?;
         println!(
-            "deleted the gateways added from links in {}",
-            path.display()
+            "deleted the {} gateways added from links in {}",
+            files.linked.len(),
+            dir.display()
         );
     }
     Ok(())

@@ -13,7 +13,7 @@ use tracing::{Instrument, info, info_span, warn};
 use crate::browser::{self, ProfileDir};
 use crate::config::GatewayName;
 use crate::ipc::{self, ConfirmToken, Connection, Request, Response, Server};
-use crate::link::{self, Decision, KnownGateway, Launch, LinkedGateway, Resolution};
+use crate::link::{self, Decision, Known, Launch, LinkedGateway, Resolution};
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionError, SessionId, SessionKind, SessionManager};
 use crate::uri::LaunchRequest;
@@ -51,7 +51,7 @@ pub struct BrowserSessionPlan {
 }
 
 pub trait Profiles: Send + Sync + 'static {
-    fn known(&self) -> Result<Vec<KnownGateway>, String>;
+    fn known(&self) -> Result<Known, String>;
     fn link(&self, gateway: &LinkedGateway) -> Result<(), String>;
     fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String>;
 }
@@ -242,7 +242,9 @@ impl Agent {
         let resolution = link::resolve(&request, &known, &mut Decision::Defer, unix_now())
             .map_err(|error| error.to_string())?;
         let confirmation = match resolution {
-            Resolution::Launch(launch) => return self.start(launch).await,
+            Resolution::Launch(launch) => {
+                return self.start(launch).await.map(|lines| warned(lines, &known));
+            }
             Resolution::Confirm(confirmation) => confirmation,
         };
         let now = Instant::now();
@@ -269,7 +271,7 @@ impl Agent {
         );
         let mut lines = vec![ipc::confirm_line(&token)];
         lines.extend(confirmation.echo());
-        Ok(lines)
+        Ok(warned(lines, &known))
     }
 
     fn answered(pending: &mut Option<Pending>, token: ConfirmToken) -> Result<Pending, String> {
@@ -316,7 +318,7 @@ impl Agent {
                 None => error,
             });
         }
-        self.start(launch).await
+        self.start(launch).await.map(|lines| warned(lines, &known))
     }
 
     async fn deny(&self, token: ConfirmToken) -> Result<(), String> {
@@ -442,6 +444,14 @@ impl Agent {
         }
         self.inner.sessions.lock().await.close_all().await;
     }
+}
+
+fn warned(mut lines: Vec<String>, known: &Known) -> Vec<String> {
+    for line in known.error_lines() {
+        warn!("{line}");
+        lines.push(line);
+    }
+    lines
 }
 
 fn unix_now() -> u64 {
