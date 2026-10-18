@@ -227,8 +227,9 @@ linked entry is ignored.
   `10.0.0.1_3128.toml`.
 - The name must contain only `a-z`, `0-9`, `.`, `_` and `-`, no `..`, be a
   single path component and at most 255 bytes; otherwise the gateway is
-  refused before the user is asked (a host of more than 250 characters
-  cannot be stored). Gateway hosts whose first label is a Windows device
+  refused before the user is asked: with `.toml`, a host can have at most 250
+  characters on port 443, and fewer with another port because the name adds
+  `_<port>` (at most 244 characters with a five-digit port). Gateway hosts whose first label is a Windows device
   name (`CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, any
   case) are refused in the link on every platform, and so are DNS names that
   would read as an IPv6 address with `-` for `:` (such as `fe80--1`), since
@@ -239,27 +240,37 @@ linked entry is ignored.
   reparse point or not a directory, it is refused: launches of gateways that
   are not in the configuration file fail, and `gateinto status` reports
   `linked-gateways: error: ...`.
-- A new file is written to a temporary file in the directory (created new,
-  synced), then published with a hard link, which never replaces an
-  existing file, and the directory is synced. Approving never overwrites a
-  file.
+- A new file is written to a temporary file `.<pid>.<32 hex digits>.tmp` in
+  the directory (created new, synced) and then published without ever
+  replacing a file: on Windows with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`
+  but without `MOVEFILE_REPLACE_EXISTING`; on Unix with a hard link, or, on a
+  filesystem without hard links, by creating the final file new in place.
+  The directory is then synced and the temporary file removed on every
+  path. Approving never overwrites a file.
 - Loading reads only regular `*.toml` files directly in the directory, never
-  links or reparse points and never subdirectories; at most 32 files and
+  links or reparse points (on Windows the file is opened with
+  `FILE_FLAG_OPEN_REPARSE_POINT` and its handle checked) and never
+  subdirectories; at most 32 files and
   16 KiB each. A file is valid only if it parses, has no other keys, a valid
   host, port and portal, and its file name is exactly the one its own host
-  and port give; a profile name used by two files makes both invalid.
+  and port give; a profile name used by two files makes both invalid, also
+  when one of them is damaged.
 - An invalid file disables only its own entry; the other gateways keep
   working. `gateinto status`, `gateinto gateway list` and every launch
   answer list it as `linked-gateway: error: <file>: <reason>`. A link whose
   profile or gateway address is held by an invalid file is refused without
-  asking, and the file is left as it is.
+  asking, and the file is left as it is. While a damaged file has no
+  readable name, every link for a profile that is neither configured nor a
+  valid linked gateway is refused the same way, since it could be that
+  file's.
 - `gateinto gateway list` shows every gateway with its source;
   `gateinto gateway forget <name>` deletes the file whose valid content
   carries that name, after checking again that it is a regular file in the
   directory (sessions that are open stay open until closed). A damaged file
   is removed by deleting it. `gateinto reset --purge-device-identity
-  --purge-config` deletes the regular `*.toml` files of the directory, and
-  the directory if it is then empty, together with the configuration file.
+  --purge-config` deletes the regular `*.toml` files of the directory and
+  Gateinto's own leftover temporary files, and the directory if it is then
+  empty, together with the configuration file.
 
 ## What a gateway added from a link gets
 
