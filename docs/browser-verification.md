@@ -232,9 +232,11 @@ portal_url = "https://example.com/"
     (rate limit after 5 a minute). Clicking `offsite` opens no browser: the
     agent refuses a start page outside the portal's origin. Clicking `new`
     shows the Gateinto warning dialog naming `newco`,
-    `proxy.newco.example:443` and `https://example.com`, with OK and Cancel
-    and Cancel selected; record that Cancel is the default, that Enter,
-    Space, `Y` and `O` do not choose OK, that the dialog is on top, that
+    `proxy.newco.example:443` and `https://example.com`, with the buttons OK
+    and Cancel; record that Cancel is selected by default, that Enter,
+    Space, `Y` and `O` do not choose OK, that Tab and the arrow keys move
+    the focus to OK (after which Enter or Space would approve; do not press
+    them then), that the dialog is on top, that
     Cancel (and closing it) stores nothing (`gateinto gateway list`) and that
     clicking `new` again while the dialog is open is refused. Do not choose OK
     unless the host is a gateway you control; then record that the gateway

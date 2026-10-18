@@ -160,8 +160,9 @@ How it is bounded:
 
 - **Explicit first-time confirmation.** Only `gateinto open`, running on the
   user's desktop, asks. On Windows it shows a top-most warning dialog with OK
-  and Cancel, Cancel as the default button and no access keys, so only a
-  deliberate click on OK approves; it names the profile, the gateway `host:port` and
+  and Cancel, Cancel as the default button and no access keys, so no single
+  keystroke approves (moving the focus to OK and pressing Enter or Space, or
+  clicking OK, does); it names the profile, the gateway `host:port` and
   the portal origin; elsewhere it needs `yes` typed on a terminal; without a
   desktop or terminal it refuses. The agent never prompts, applies the rate
   limit before a confirmation is handed out, keeps one open at a time, and

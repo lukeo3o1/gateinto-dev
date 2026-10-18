@@ -320,9 +320,9 @@ The format, its limits and everything it can never do are specified in
 - A link whose `gateway` or `portal` differs from a known gateway of the same
   name is refused; known gateways are never changed. For an unknown name with
   `gateway` and `portal`, `gateinto open` asks the user first: a Windows
-  dialog naming the profile, gateway and portal origin, with OK and Cancel
-  and Cancel as the default (a `yes` prompt on a terminal elsewhere; no desktop or terminal
-  means refusal). On approval the gateway is stored in
+  dialog naming the profile, gateway and portal origin, with Cancel as the
+  default button (a `yes` prompt on a terminal elsewhere; no desktop or
+  terminal means refusal). On approval the gateway is stored in
   `%APPDATA%\Gateinto\linked-gateways.toml` with only its host, port and
   portal, and later links to it do not ask again. It uses the default TLS
   settings: public roots, `hybrid_preferred`, `client_certificate =

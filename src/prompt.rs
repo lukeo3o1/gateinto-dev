@@ -68,7 +68,8 @@ mod windows {
         MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW, WSF_VISIBLE,
     };
 
-    // OK and Cancel have no access keys, so typing cannot answer the dialog.
+    // OK and Cancel have no access keys and Cancel has the focus, so no single keystroke
+    // approves; moving the focus to OK first still does.
     pub const STYLE: MESSAGEBOX_STYLE =
         MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST;
 
