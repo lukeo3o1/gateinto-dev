@@ -229,11 +229,12 @@ linked entry is ignored.
   single path component and at most 255 bytes; otherwise the gateway is
   refused before the user is asked: with `.toml`, a host can have at most 250
   characters on port 443, and fewer with another port because the name adds
-  `_<port>` (at most 244 characters with a five-digit port). Gateway hosts whose first label is a Windows device
-  name (`CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, any
-  case) are refused in the link on every platform, and so are DNS names that
-  would read as an IPv6 address with `-` for `:` (such as `fe80--1`), since
-  their file name would be ambiguous.
+  `_<port>` (at most 244 characters with a five-digit port). Gateway hosts
+  whose first label is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`,
+  `COM0` to `COM9`, `LPT0` to `LPT9`, any case) are refused in the link on
+  every platform, and so are DNS names that would read as an IPv6 address
+  with `-` for `:` (such as `fe80--1`), since their file name would be
+  ambiguous.
 - A file holds `name` (the profile), `host`, `port`, `portal_url` and
   `approved_at` (Unix seconds), and nothing else.
 - The directory is created owner-only (`0700` on Unix). If it is a link, a
@@ -243,10 +244,12 @@ linked entry is ignored.
 - A new file is written to a temporary file `.<pid>.<32 hex digits>.tmp` in
   the directory (created new, synced) and then published without ever
   replacing a file: on Windows with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`
-  but without `MOVEFILE_REPLACE_EXISTING`; on Unix with a hard link, or, on a
-  filesystem without hard links, by creating the final file new in place.
-  The directory is then synced and the temporary file removed on every
-  path. Approving never overwrites a file.
+  but without `MOVEFILE_REPLACE_EXISTING`, using `\\?\` (`\\?\UNC\` for a
+  redirected `%APPDATA%` on a share) so long names fit; on Unix with a hard
+  link, or, on a filesystem without hard links, by creating the final file
+  new in place, removed again only if that write fails after this call
+  created it. The directory is then synced and the temporary file removed on
+  every path. Approving never overwrites a file.
 - Loading reads only regular `*.toml` files directly in the directory, never
   links or reparse points (on Windows the file is opened with
   `FILE_FLAG_OPEN_REPARSE_POINT` and its handle checked) and never
@@ -266,11 +269,13 @@ linked entry is ignored.
 - `gateinto gateway list` shows every gateway with its source;
   `gateinto gateway forget <name>` deletes the file whose valid content
   carries that name, after checking again that it is a regular file in the
-  directory (sessions that are open stay open until closed). A damaged file
-  is removed by deleting it. `gateinto reset --purge-device-identity
+  directory (sessions that are open stay open until closed). If several
+  files carry the name, for example a valid and a damaged one, it deletes
+  nothing and lists them all. A damaged file is removed by deleting it. `gateinto reset --purge-device-identity
   --purge-config` deletes the regular `*.toml` files of the directory and
   Gateinto's own leftover temporary files, and the directory if it is then
-  empty, together with the configuration file.
+  empty, together with the configuration file. Its messages count the
+  gateway files and the temporary files separately.
 
 ## What a gateway added from a link gets
 
