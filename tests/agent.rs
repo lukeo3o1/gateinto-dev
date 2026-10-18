@@ -874,3 +874,42 @@ async fn the_rate_limit_applies_before_any_confirmation_is_asked() {
     );
     agent.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_is_kept_when_the_session_cap_is_reached_meanwhile() {
+    let agent = TestAgent::start(AgentLimits {
+        launches: 100,
+        max_browser_sessions: 1,
+        ..limits()
+    })
+    .await;
+    let (_, token) = agent.asks(agent.new_link(None)).await;
+    let (_, browser) = agent.launched("main").await;
+
+    let response = agent.send(Request::Approve(token)).await;
+    assert!(refused(&response, "was added"), "{response:?}");
+    assert!(refused(&response, "already open"), "{response:?}");
+    assert_eq!(agent.linked().len(), 1);
+    assert_eq!(browsers(&agent.profiles_root).len(), 1);
+
+    browser.exit();
+    let deadline = std::time::Instant::now() + WAIT;
+    let lines = loop {
+        match agent.send(Request::Launch(agent.new_link(None))).await {
+            Response::Ok(lines) => break lines,
+            Response::Error(error) if error.contains("already open") => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the session never closed"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Response::Error(error) => panic!("launch failed: {error}"),
+        }
+    };
+    assert_eq!(ipc::confirm_token(&lines), None, "{lines:?}");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let again = wait_for_browser(&agent.profiles_root, listen).await;
+    assert_eq!(again.start_page(), NEW_PORTAL);
+    agent.stop().await;
+}

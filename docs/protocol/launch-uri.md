@@ -139,7 +139,9 @@ Error messages say which rule was broken and never repeat the URI.
    answers `open` with a one-time confirmation token. `open`, which runs on
    the user's desktop, asks the user (see [Confirmation](#confirmation)) and
    sends `approve <token>` or `deny <token>`. On `approve` the agent stores
-   the gateway and continues with step 5.
+   the gateway and continues with step 5. If the session cap was reached in
+   the meantime, the gateway stays stored and the answer says so; the next
+   link to it starts a session without asking.
 
 ## Resolution
 
