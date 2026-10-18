@@ -826,11 +826,23 @@ async fn a_linked_gateway_trusts_only_the_public_roots() {
         .env
         .retain(|(name, _)| *name != "GATEINTO_TEST_LINKED_CA_FILE");
     let config = launcher.config.to_str().unwrap().to_owned();
-    launcher
-        .run(&["agent", "--detach", "--config", &config])
-        .await
-        .success();
+    let log = launcher.dir.join("agent.log");
+    let mut agent = launcher
+        .command(&["agent", "--config", &config])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
     let endpoint = launcher.endpoint();
+    let deadline = std::time::Instant::now() + WAIT;
+    while ipc::send(&endpoint, &Request::List).await.is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent did not start"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     let uri = link_uri(
         "newco",
         None,
@@ -854,4 +866,16 @@ async fn a_linked_gateway_trusts_only_the_public_roots() {
     let target = echo_server().await.to_string();
     let (_, response) = send(listen, &connect_with(&target, Some(&basic("me", "pw")))).await;
     assert_eq!(response.status, 502, "{}", response.head);
+
+    launcher.run(&["stop"]).await.success();
+    tokio::task::spawn_blocking(move || agent.wait().unwrap())
+        .await
+        .unwrap();
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        log.lines()
+            .any(|line| line.contains("upstream refused tunnel")
+                && line.contains("invalid peer certificate: UnknownIssuer")),
+        "{log}"
+    );
 }
