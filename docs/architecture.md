@@ -137,7 +137,7 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
         v
  gateinto agent ---- agent::Agent
         |  parse again, rate limit, session cap
-        |  link::resolve against the config file + linked-gateways.toml
+        |  link::resolve against the config file + gateways/*.toml
         |    known gateway ----------------------------------------------.
         |    new gateway: answer "confirm: <token>", keep the request     |
         |       <- gateinto open asks the user (MessageBoxW / terminal)   |
@@ -163,8 +163,11 @@ The full protocol, limits and guarantees are in
 - `link` holds the strict `GatewayAddress` (`host[:port]`) and `Origin`
   parsers, `resolve`, a pure function from a request, the known gateways and
   a `Confirm` decision (approve, deny or defer) to a launch, a confirmation
-  to ask for, or an error, and `LinkedStore`, the `linked-gateways.toml` file
-  with atomic writes. `ConfigFile::with_linked` turns linked entries into
+  to ask for, or an error. `link::store::LinkedStore` keeps one file per
+  approved gateway in `gateways/`, named only from the canonical address,
+  loads them with per-file failure isolation into `Known` (valid gateways,
+  invalid entries that still block their name and address, or a store that
+  cannot be read), and writes new files atomically without replacing any. `ConfigFile::with_linked` turns linked entries into
   minimal `[gateways.<name>]` tables, so they get exactly the defaults of a
   configured gateway with only `host`, `port` and `portal_url`.
 - `prompt` asks the user in `gateinto open`: `MessageBoxW` on an interactive
@@ -217,7 +220,8 @@ The full protocol, limits and guarantees are in
 | `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
-| `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, the confirmation text, and the linked-gateways file. |
+| `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
+| `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting and purging. |
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |

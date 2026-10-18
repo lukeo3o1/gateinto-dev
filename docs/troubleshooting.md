@@ -174,12 +174,16 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
 - `no gateway confirmation is waiting for this answer`: the dialog was
   answered after its 120 seconds, or the agent restarted in between. Open
   the link again.
-- `linked gateways <path>: ...`: the gateways added from links file is
-  damaged or was edited by hand with a key other than `host`, `port`,
-  `portal_url` and `approved_at`. Launches and `gateinto gateway list` fail
-  until it is fixed; `gateinto status` and `gateinto setup` show it as
-  `linked-gateways: error: ...` and carry on. Delete it to remove every
-  gateway added from links.
+- `linked-gateway: error: <file>: ...`: one file in `gateways/` is damaged,
+  was edited by hand (only `name`, `host`, `port`, `portal_url` and
+  `approved_at` are allowed), was renamed (its name must match its own host
+  and port), is not a regular file, or uses a profile name that another
+  file uses too. Only that gateway is disabled, and links to its name or
+  address are refused until the file is fixed or deleted; delete it to
+  remove that gateway.
+- `linked-gateways: error: ... not a directory`: `gateways/` is a file, a
+  link or a reparse point. Only gateways of the configuration file work
+  until it is replaced by a plain directory or removed.
 - `no agent is running`: from `session list`, `session close` or `stop`.
   `gateinto open` starts one by itself.
 - `an agent is already running for this user at ...`: only one agent per user
