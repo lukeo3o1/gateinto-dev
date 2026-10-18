@@ -750,3 +750,35 @@ fn a_damaged_linked_gateways_file_is_reported() {
     assert!(!success);
     assert!(stderr.contains("linked-gateways.toml"), "{stderr}");
 }
+
+#[test]
+fn status_reports_a_damaged_linked_gateways_file_and_continues() {
+    let home = Home::new("status-damaged");
+    std::fs::write(home.linked(), "[gateways.x]\nca_file = \"y\"\n").unwrap();
+    let (success, stdout, stderr) = home.run(&["status"]);
+    assert!(success, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "gateway: main: proxy.example.com:443 (config)\nlinked-gateways: error: linked \
+             gateways {}: ",
+            home.linked().display()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\ndevice-session: none\n"), "{stdout}");
+    assert!(stdout.contains("\nagent: "), "{stdout}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn setup_reports_a_damaged_linked_gateways_file_and_continues() {
+    let home = Home::new("setup-damaged");
+    std::fs::write(home.linked(), "not toml").unwrap();
+    let (success, stdout, stderr) = home.run(&["setup"]);
+    assert!(stdout.contains("linked-gateways: error: "), "{stdout}");
+    assert!(!success);
+    assert!(
+        stderr.contains("device keys are only supported on Windows"),
+        "{stderr}"
+    );
+}
