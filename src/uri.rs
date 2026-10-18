@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::config::{GatewayName, PortalUrl};
-use crate::link::{GatewayAddress, Origin};
+use crate::link::{GatewayAddress, InvalidGatewayAddress, Origin};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
@@ -57,6 +57,7 @@ pub enum UriError {
     GatewayWithoutPortal,
     PortalWithoutGateway,
     UrlOutsidePortal,
+    ReservedGateway,
 }
 
 impl fmt::Display for UriError {
@@ -100,6 +101,10 @@ impl fmt::Display for UriError {
             Self::PortalWithoutGateway => {
                 f.write_str("portal is allowed only together with gateway")
             }
+            Self::ReservedGateway => f.write_str(
+                "the gateway host must not start with a Windows device name (CON, PRN, AUX, \
+                 NUL, COM0 to COM9, LPT0 to LPT9)",
+            ),
             Self::UrlOutsidePortal => {
                 f.write_str("url must have the same origin (https, host and port) as the portal")
             }
@@ -210,9 +215,10 @@ impl LaunchRequest {
         let url = url.map(|url| https(url, "url")).transpose()?;
         let gateway = gateway
             .map(|gateway| {
-                gateway
-                    .parse()
-                    .map_err(|_| UriError::InvalidValue("gateway"))
+                gateway.parse().map_err(|error| match error {
+                    InvalidGatewayAddress::Reserved => UriError::ReservedGateway,
+                    InvalidGatewayAddress::Syntax => UriError::InvalidValue("gateway"),
+                })
             })
             .transpose()?;
         let portal = portal.map(|portal| https(portal, "portal")).transpose()?;
@@ -547,6 +553,10 @@ mod tests {
                 UriError::InvalidValue("portal"),
             ),
             ("profile=a&gateway=x", UriError::GatewayWithoutPortal),
+            (
+                "profile=a&gateway=nul.example&portal=https%3A%2F%2Fx",
+                UriError::ReservedGateway,
+            ),
             (
                 "profile=a&portal=https%3A%2F%2Fx",
                 UriError::PortalWithoutGateway,
