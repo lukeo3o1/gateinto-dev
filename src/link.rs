@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -116,26 +116,60 @@ impl GatewayAddress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidGatewayAddress;
+pub enum InvalidGatewayAddress {
+    Syntax,
+    Reserved,
+}
 
 impl fmt::Display for InvalidGatewayAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(
-            "gateway must be host[:port]: a DNS name, an IPv4 address or a bracketed IPv6 \
-             address, and a port from 1 to 65535",
-        )
+        f.write_str(match self {
+            Self::Syntax => {
+                "gateway must be host[:port]: a DNS name, an IPv4 address or a bracketed IPv6 \
+                 address, and a port from 1 to 65535"
+            }
+            Self::Reserved => {
+                "the gateway host must not start with a Windows device name (CON, PRN, AUX, \
+                 NUL, COM0 to COM9, LPT0 to LPT9)"
+            }
+        })
     }
 }
 
 impl std::error::Error for InvalidGatewayAddress {}
 
+fn reserved_device_name(name: &str) -> bool {
+    let first = name.split('.').next().unwrap_or_default();
+    match first.len() {
+        3 => ["con", "prn", "aux", "nul"].contains(&first),
+        4 => {
+            (first.starts_with("com") || first.starts_with("lpt"))
+                && first.as_bytes()[3].is_ascii_digit()
+        }
+        _ => false,
+    }
+}
+
 impl FromStr for GatewayAddress {
     type Err = InvalidGatewayAddress;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        host_and_port(text, false)
-            .map(|(host, port)| Self(Authority { host, port }))
-            .ok_or(InvalidGatewayAddress)
+        let (host, port) = host_and_port(text, false).ok_or(InvalidGatewayAddress::Syntax)?;
+        let host = match host {
+            Host::Ipv6(ip) => match IpAddr::V6(ip).to_canonical() {
+                IpAddr::V4(ip) => Host::Ipv4(ip),
+                IpAddr::V6(ip) => Host::Ipv6(ip),
+            },
+            // Its file name, with '-' for ':', would be the same as an IPv6 address's.
+            Host::Name(name) if name.replace('-', ":").parse::<Ipv6Addr>().is_ok() => {
+                return Err(InvalidGatewayAddress::Syntax);
+            }
+            Host::Name(name) if reserved_device_name(&name) => {
+                return Err(InvalidGatewayAddress::Reserved);
+            }
+            host => host,
+        };
+        Ok(Self(Authority { host, port }))
     }
 }
 
@@ -1386,6 +1420,58 @@ mod tests {
         ] {
             assert_eq!(address(text), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn windows_device_names_are_refused_as_gateway_hosts() {
+        let mut reserved = vec![
+            "con",
+            "CON.example",
+            "Nul.example",
+            "aux",
+            "prn.corp.example",
+        ];
+        let numbered: Vec<String> = (0..10)
+            .flat_map(|n| [format!("com{n}.example"), format!("LPT{n}")])
+            .collect();
+        reserved.extend(numbered.iter().map(String::as_str));
+        for host in reserved {
+            assert_eq!(
+                host.parse::<GatewayAddress>(),
+                Err(InvalidGatewayAddress::Reserved),
+                "{host}"
+            );
+        }
+        for host in [
+            "console.example",
+            "com10.example",
+            "lpt.example",
+            "a.con",
+            "nul-1.example",
+        ] {
+            assert!(host.parse::<GatewayAddress>().is_ok(), "{host}");
+        }
+    }
+
+    #[test]
+    fn names_that_read_as_ipv6_with_dashes_are_refused() {
+        for host in ["fe80--1", "a-b-c-d-e-f-1-2", "abcd--ef", "fe80--1:8443"] {
+            assert_eq!(
+                host.parse::<GatewayAddress>(),
+                Err(InvalidGatewayAddress::Syntax),
+                "{host}"
+            );
+        }
+        for host in ["proxy-a.example", "a-b", "face-b00c.example"] {
+            assert!(host.parse::<GatewayAddress>().is_ok(), "{host}");
+        }
+    }
+
+    #[test]
+    fn ipv4_mapped_gateways_are_stored_as_ipv4() {
+        let address: GatewayAddress = "[::ffff:10.0.0.1]:3128".parse().unwrap();
+        assert_eq!(address.to_string(), "10.0.0.1:3128");
+        assert_eq!(address.host(), "10.0.0.1");
     }
 
     #[test]
