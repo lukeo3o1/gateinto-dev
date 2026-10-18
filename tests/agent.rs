@@ -797,9 +797,9 @@ async fn a_denied_gateway_is_not_stored_and_cannot_be_approved_afterwards() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn only_one_confirmation_waits_at_a_time_until_it_is_answered_or_expires() {
+async fn only_one_confirmation_waits_at_a_time_until_it_is_answered() {
     let agent = TestAgent::start(AgentLimits {
-        confirm_timeout: Duration::from_millis(500),
+        confirm_timeout: Duration::from_secs(30),
         ..limits()
     })
     .await;
@@ -828,14 +828,29 @@ async fn only_one_confirmation_waits_at_a_time_until_it_is_answered_or_expires()
     );
 
     let (_, second) = agent.asks(other).await;
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_ne!(second, first);
+    assert!(agent.linked().is_empty());
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_confirmation_expires() {
+    let agent = TestAgent::start(AgentLimits {
+        confirm_timeout: Duration::from_millis(300),
+        ..limits()
+    })
+    .await;
+    let (_, first) = agent.asks(agent.new_link(None)).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
     assert!(refused(
-        &agent.send(Request::Approve(second)).await,
+        &agent.send(Request::Approve(first)).await,
         "no gateway confirmation"
     ));
-    let (_, third) = agent.asks(agent.new_link(None)).await;
-    assert_ne!(third, second);
+    let (_, second) = agent.asks(agent.new_link(None)).await;
+    assert_ne!(second, first);
     assert!(agent.linked().is_empty());
+    assert!(browsers(&agent.profiles_root).is_empty());
     agent.stop().await;
 }
 
