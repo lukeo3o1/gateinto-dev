@@ -188,14 +188,15 @@ linked entry is ignored.
   device's identity and the traffic of the isolated browser, so the user
   should allow it only if they trust the organisation that runs it, and ends
   with `Choose OK to allow this gateway, or Cancel to refuse.`
-- When the gateway is `localhost`, a `*.localhost` name, or a loopback,
-  private, link-local, unique-local or unspecified IP address (IPv4-mapped
-  addresses included), the text adds `This address is on your computer or
-  local network.` under the gateway line.
 - Otherwise, with a terminal on standard input and standard error, the same
   text and a prompt that accepts only `yes`.
 - Without either, `open` refuses: `no desktop or terminal to ask on; nothing
   was stored`.
+- In the dialog and the prompt alike, when the gateway is `localhost`, a
+  `*.localhost` name, or a loopback, private, link-local, unique-local or
+  unspecified IP address (IPv4-mapped addresses included), the text adds
+  `This address is on your computer or local network.` under the gateway
+  line.
 - Any answer other than OK (or `yes`), and every error, sends `deny`.
 - The dialog and the prompt are covered by unit tests of their text, style
   and answer handling; the Windows dialog itself has not been checked by hand
