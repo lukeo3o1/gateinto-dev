@@ -1,5 +1,5 @@
 use std::fmt;
-use std::fs::{File, Metadata};
+use std::fs::Metadata;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv6Addr};
 use std::num::NonZeroU16;
@@ -437,7 +437,7 @@ impl LinkedStore {
 
     fn sync_dir(&self) -> Result<(), StoreError> {
         #[cfg(unix)]
-        File::open(&self.dir)
+        std::fs::File::open(&self.dir)
             .and_then(|dir| dir.sync_all())
             .map_err(self.io(&self.dir))?;
         Ok(())
