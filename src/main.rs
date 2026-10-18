@@ -1049,8 +1049,14 @@ fn known_gateways(file: &ConfigFile) -> Result<Vec<KnownGateway>> {
     Ok(link::known_gateways(file, &linked))
 }
 
-fn print_config(args: &ConfigArg, file: &ConfigFile) -> Result {
-    let known = known_gateways(file)?;
+fn print_config(args: &ConfigArg, file: &ConfigFile) {
+    let store = linked_store();
+    let linked = store.as_ref().map(|store| store.load());
+    let usable = match &linked {
+        Some(Ok(linked)) => linked.as_slice(),
+        _ => &[],
+    };
+    let known = link::known_gateways(file, usable);
     let lines = |source| {
         let known: Vec<KnownGateway> = known
             .iter()
@@ -1072,18 +1078,20 @@ fn print_config(args: &ConfigArg, file: &ConfigFile) -> Result {
             default_config_display()
         ),
     }
-    match linked_store() {
-        Some(store) if store.path().is_file() => {
+    match (store, linked) {
+        (_, Some(Err(error))) => println!("linked-gateways: error: {error}"),
+        (Some(store), _) if store.path().is_file() => {
             println!("linked-gateways: {}", store.path().display());
             lines(Source::Linked);
         }
-        Some(store) => println!(
-            "linked-gateways: none (no file at {})",
-            store.path().display()
-        ),
-        None => println!("linked-gateways: none (no default location)"),
+        (Some(store), _) => {
+            println!(
+                "linked-gateways: none (no file at {})",
+                store.path().display()
+            )
+        }
+        (None, _) => println!("linked-gateways: none (no default location)"),
     }
-    Ok(())
 }
 
 fn gateway(command: GatewayCommand) -> Result {
@@ -1130,7 +1138,7 @@ fn setup(args: KeyInitArgs) -> Result {
     }
     let file = args.config.load()?;
     let settings = args.settings()?;
-    print_config(&args.config, &file)?;
+    print_config(&args.config, &file);
     let store = gateinto::identity::system_store()?;
     let options = InitOptions {
         backend: settings.preferred,
@@ -1174,7 +1182,7 @@ async fn status(args: StatusArgs) -> Result {
             Err(error) => println!("device-key: error: {error}"),
         },
     }
-    print_config(&args.config, &file)?;
+    print_config(&args.config, &file);
     println!("device-session: {}", lifecycle::device_session_line(&file));
     let agent = match Endpoint::for_current_user() {
         Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,

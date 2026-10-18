@@ -202,7 +202,9 @@ linked entry is ignored.
 - Each entry is `[gateways.<name>]` with `host`, `port`, `portal_url` and
   `approved_at` (Unix seconds). Any other key, an invalid host or port, or a
   portal without an `https` origin makes the file invalid, and the agent then
-  refuses launches until it is fixed or removed.
+  refuses launches until it is fixed or removed (it fails closed);
+  `gateinto status` and `gateinto setup` report `linked-gateways: error: ...`
+  and carry on.
 - `gateinto gateway list` shows every gateway with its source;
   `gateinto gateway forget <name>` removes a linked entry (sessions that are
   open stay open until closed). `gateinto reset --purge-device-identity

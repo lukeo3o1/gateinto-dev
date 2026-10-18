@@ -176,8 +176,10 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   the link again.
 - `linked gateways <path>: ...`: the gateways added from links file is
   damaged or was edited by hand with a key other than `host`, `port`,
-  `portal_url` and `approved_at`. Launches fail until it is fixed; delete it
-  to remove every gateway added from links.
+  `portal_url` and `approved_at`. Launches and `gateinto gateway list` fail
+  until it is fixed; `gateinto status` and `gateinto setup` show it as
+  `linked-gateways: error: ...` and carry on. Delete it to remove every
+  gateway added from links.
 - `no agent is running`: from `session list`, `session close` or `stop`.
   `gateinto open` starts one by itself.
 - `an agent is already running for this user at ...`: only one agent per user
