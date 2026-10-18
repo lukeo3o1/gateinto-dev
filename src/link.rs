@@ -68,14 +68,38 @@ impl GatewayAddress {
         self.0.port
     }
 
+    fn ip(&self) -> Option<IpAddr> {
+        match self.0.host {
+            Host::Name(_) => None,
+            Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+            Host::Ipv6(ip) => Some(IpAddr::V6(ip).to_canonical()),
+        }
+    }
+
     pub fn matches(&self, host: &str, port: u16) -> bool {
         let same_host = match (&self.0.host, host.parse::<IpAddr>()) {
             (Host::Name(name), Err(_)) => name.eq_ignore_ascii_case(host),
-            (Host::Ipv4(ip), Ok(other)) => IpAddr::from(*ip) == other,
-            (Host::Ipv6(ip), Ok(other)) => IpAddr::from(*ip) == other,
-            _ => false,
+            (Host::Name(_), Ok(_)) => false,
+            (_, Ok(other)) => self.ip() == Some(other.to_canonical()),
+            (_, Err(_)) => false,
         };
         same_host && self.0.port == port
+    }
+
+    pub fn is_local(&self) -> bool {
+        match (&self.0.host, self.ip()) {
+            (Host::Name(name), _) => name == "localhost" || name.ends_with(".localhost"),
+            (_, Some(IpAddr::V4(ip))) => {
+                ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+            }
+            (_, Some(IpAddr::V6(ip))) => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+            }
+            (_, None) => false,
+        }
     }
 }
 
@@ -217,10 +241,15 @@ impl Confirmation {
     }
 
     pub fn message(&self) -> String {
+        let local = if self.gateway.is_local() {
+            "\nThis address is on your computer or local network."
+        } else {
+            ""
+        };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
              session through it.\n\n\
-             Gateway: {}\n\
+             Gateway: {}{local}\n\
              Portal: {}\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
              installed) and all traffic of the isolated browser. Allow it only if you trust \
@@ -273,6 +302,10 @@ pub enum LinkError {
         existing: GatewayName,
     },
     Denied(GatewayName),
+    LookAlikeProfile {
+        profile: GatewayName,
+        existing: GatewayName,
+    },
 }
 
 impl fmt::Display for LinkError {
@@ -303,6 +336,12 @@ impl fmt::Display for LinkError {
                 f,
                 "the link names the gateway \"{profile}\", but its address is already set up as \
                  \"{existing}\"; use profile={existing} in the link"
+            ),
+            Self::LookAlikeProfile { profile, existing } => write!(
+                f,
+                "the link names the gateway \"{profile}\", which differs only in letter case \
+                 from the gateway \"{existing}\" set up on this device; use \
+                 profile={existing} in the link"
             ),
             Self::Denied(name) => write!(
                 f,
@@ -343,6 +382,15 @@ pub fn resolve(
             start_page,
             add: None,
         }));
+    }
+    if let Some(similar) = known
+        .iter()
+        .find(|known| known.name.as_str().eq_ignore_ascii_case(profile.as_str()))
+    {
+        return Err(LinkError::LookAlikeProfile {
+            profile: profile.clone(),
+            existing: similar.name.clone(),
+        });
     }
     let (Some(gateway), Some(portal)) = (&link.gateway, &link.portal) else {
         return Err(LinkError::UnknownProfile(profile.clone()));
@@ -861,6 +909,7 @@ mod tests {
         for (gateway, existing) in [
             ("proxy.corp.example:443", "corp"),
             ("10.0.0.1:3128", "partner"),
+            ("[::ffff:10.0.0.1]:3128", "partner"),
         ] {
             let (resolution, asked) = resolve_with(
                 &link("other", None, Some(gateway), Some("https://other.example/")),
@@ -874,6 +923,76 @@ mod tests {
                 })
             );
             assert!(asked.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_profile_that_differs_from_a_known_one_only_by_case_is_refused() {
+        for (profile, gateway, existing) in [
+            ("Corp", None, "corp"),
+            ("CORP", Some("other.example"), "corp"),
+            ("Partner", Some("10.0.0.9"), "partner"),
+        ] {
+            let portal = gateway.map(|_| "https://other.example/");
+            let (resolution, asked) = resolve_with(
+                &link(profile, None, gateway, portal),
+                Some(Decision::Approve),
+            );
+            let error = resolution.unwrap_err();
+            assert_eq!(
+                error,
+                LinkError::LookAlikeProfile {
+                    profile: name(profile),
+                    existing: name(existing)
+                }
+            );
+            assert!(asked.is_empty());
+            let text = error.to_string();
+            assert!(text.contains(&format!("\"{existing}\"")), "{text}");
+            assert!(text.contains("case"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_confirmation_warns_about_local_and_private_addresses() {
+        const LOCAL: &str = "This address is on your computer or local network.";
+        let with = |gateway: &str| {
+            Confirmation {
+                gateway: gateway.parse().unwrap(),
+                ..confirmation()
+            }
+            .message()
+        };
+        for gateway in [
+            "127.0.0.1",
+            "127.8.9.1:8443",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "[::1]",
+            "[::]",
+            "[fe80::1]",
+            "[fd12:3456::1]",
+            "[fc00::1]",
+            "[::ffff:192.168.1.1]",
+            "[::ffff:127.0.0.1]",
+            "localhost",
+            "app.localhost",
+        ] {
+            assert!(with(gateway).contains(LOCAL), "{gateway}");
+        }
+        for gateway in [
+            "proxy.example",
+            "8.8.8.8",
+            "172.32.0.1",
+            "[2001:db8::1]",
+            "[::ffff:8.8.8.8]",
+            "localhost.example",
+        ] {
+            assert!(!with(gateway).contains(LOCAL), "{gateway}");
         }
     }
 
@@ -1193,6 +1312,17 @@ mod tests {
         assert!(address.matches("::1", 443));
         assert!(address.matches("0:0:0:0:0:0:0:1", 443));
         assert!(!address.matches("127.0.0.1", 443));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_addresses_match_their_ipv4_address() {
+        let mapped: GatewayAddress = "[::ffff:10.0.0.1]:3128".parse().unwrap();
+        assert!(mapped.matches("10.0.0.1", 3128));
+        assert!(mapped.matches("::ffff:10.0.0.1", 3128));
+        assert!(!mapped.matches("10.0.0.2", 3128));
+        let plain: GatewayAddress = "10.0.0.1:3128".parse().unwrap();
+        assert!(plain.matches("::ffff:10.0.0.1", 3128));
+        assert!(plain.matches("::ffff:a00:1", 3128));
     }
 
     fn origin(url: &str) -> Option<String> {

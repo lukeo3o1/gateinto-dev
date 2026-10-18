@@ -149,19 +149,22 @@ linked entry is ignored.
 
 1. **The profile is known.** If the link has `gateway` and `portal`, they
    must equal the known gateway's host (case-insensitive, IP addresses by
-   value), port and portal URL (exact string); otherwise the link is refused
+   value, an IPv4-mapped IPv6 address equal to its IPv4 address), port and
+   portal URL (exact string); otherwise the link is refused
    and nothing changes. A `url` must have the origin of the gateway's portal;
    a gateway without a portal refuses every `url`.
-2. **The profile is unknown and the link has no `gateway`.** Refused: the
+2. **The profile differs from a known one only in letter case.** Refused,
+   with the known name, so that no look-alike gateway is created.
+3. **The profile is unknown and the link has no `gateway`.** Refused: the
    portal must put the gateway in its link, or an administrator must add it
    to the configuration file.
-3. **The profile is unknown and the link has `gateway` and `portal`.** If the
+4. **The profile is unknown and the link has `gateway` and `portal`.** If the
    same host and port are already known under another name, the link is
    refused with that name. Otherwise the user is asked; on approval the
    gateway is stored and the session starts, on refusal nothing is stored.
    Later links with the same name, gateway and portal start sessions without
    asking.
-4. **Start page.** The link's `url` for this launch only, otherwise the
+5. **Start page.** The link's `url` for this launch only, otherwise the
    gateway's portal, otherwise `about:blank`.
 
 ## Confirmation
@@ -185,6 +188,10 @@ linked entry is ignored.
   device's identity and the traffic of the isolated browser, so the user
   should allow it only if they trust the organisation that runs it, and ends
   with `Choose OK to allow this gateway, or Cancel to refuse.`
+- When the gateway is `localhost`, a `*.localhost` name, or a loopback,
+  private, link-local, unique-local or unspecified IP address (IPv4-mapped
+  addresses included), the text adds `This address is on your computer or
+  local network.` under the gateway line.
 - Otherwise, with a terminal on standard input and standard error, the same
   text and a prompt that accepts only `yes`.
 - Without either, `open` refuses: `no desktop or terminal to ask on; nothing
