@@ -1,18 +1,13 @@
-use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
-use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU16;
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use serde::Deserialize;
-
-use crate::config::{self, ConfigFile, GatewayName, PortalUrl};
+use crate::config::{ConfigFile, GatewayName, PortalUrl};
 use crate::http::{self, Authority, Host};
-use crate::ipc::ConfirmToken;
 use crate::uri::LaunchRequest;
+
+pub mod store;
 
 pub const DEFAULT_PORT: u16 = 443;
 
@@ -274,6 +269,44 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
     known
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Known {
+    pub gateways: Vec<KnownGateway>,
+    pub invalid: Vec<store::InvalidEntry>,
+    pub unavailable: Option<String>,
+}
+
+impl Known {
+    pub fn new(config: &ConfigFile, loaded: Result<store::Loaded, store::StoreError>) -> Self {
+        match loaded {
+            Ok(loaded) => Self {
+                gateways: known_gateways(config, &loaded.gateways),
+                invalid: loaded.invalid,
+                unavailable: None,
+            },
+            Err(error) => Self {
+                gateways: known_gateways(config, &[]),
+                invalid: Vec::new(),
+                unavailable: Some(error.to_string()),
+            },
+        }
+    }
+
+    pub fn error_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .unavailable
+            .iter()
+            .map(|error| format!("linked-gateways: error: {error}"))
+            .collect();
+        lines.extend(
+            self.invalid
+                .iter()
+                .map(|entry| format!("linked-gateway: error: {entry}")),
+        );
+        lines
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
     pub profile: GatewayName,
@@ -297,7 +330,11 @@ impl Confirmation {
     pub fn echoed_by(&self, lines: &[String]) -> bool {
         let echoed: Vec<&String> = lines
             .iter()
-            .filter(|line| !line.starts_with(crate::ipc::CONFIRM))
+            .filter(|line| {
+                !line.starts_with(crate::ipc::CONFIRM)
+                    && !line.starts_with("linked-gateway: error: ")
+                    && !line.starts_with("linked-gateways: error: ")
+            })
             .collect();
         echoed.into_iter().eq(self.echo().iter())
     }
@@ -368,6 +405,15 @@ pub enum LinkError {
         profile: GatewayName,
         existing: GatewayName,
     },
+    Damaged {
+        profile: GatewayName,
+        file: String,
+    },
+    StoreUnavailable(String),
+    Unstorable {
+        profile: GatewayName,
+        reason: String,
+    },
 }
 
 impl fmt::Display for LinkError {
@@ -405,6 +451,19 @@ impl fmt::Display for LinkError {
                  from the gateway \"{existing}\" set up on this device; use \
                  profile={existing} in the link"
             ),
+            Self::Damaged { profile, file } => write!(
+                f,
+                "the gateway \"{profile}\" is held by the damaged file {file}; fix or delete \
+                 it (`gateinto gateway list` shows why); nothing was changed"
+            ),
+            Self::StoreUnavailable(error) => write!(
+                f,
+                "the gateways added from links cannot be read: {error}; only gateways of the \
+                 config file can be used until this is fixed"
+            ),
+            Self::Unstorable { profile, reason } => {
+                write!(f, "the gateway \"{profile}\" cannot be added: {reason}")
+            }
             Self::Denied(name) => write!(
                 f,
                 "adding the gateway \"{name}\" was not allowed; nothing was stored"
@@ -421,11 +480,16 @@ fn same_origin(url: &PortalUrl, portal: &PortalUrl) -> bool {
 
 pub fn resolve(
     link: &LaunchRequest,
-    known: &[KnownGateway],
+    all: &Known,
     confirm: &mut dyn Confirm,
     now: u64,
 ) -> Result<Resolution, LinkError> {
     let profile = &link.profile;
+    let known = all.gateways.as_slice();
+    let damaged = |entry: &store::InvalidEntry| LinkError::Damaged {
+        profile: profile.clone(),
+        file: entry.file.display().to_string(),
+    };
     if let Some(local) = known.iter().find(|known| &known.name == profile) {
         if let Some(gateway) = &link.gateway {
             let matches = local.is_at(gateway) && link.portal == local.portal_url;
@@ -445,6 +509,13 @@ pub fn resolve(
             add: None,
         }));
     }
+    if let Some(entry) = all
+        .invalid
+        .iter()
+        .find(|entry| entry.name.as_ref() == Some(profile))
+    {
+        return Err(damaged(entry));
+    }
     if let Some(similar) = known
         .iter()
         .find(|known| known.name.as_str().eq_ignore_ascii_case(profile.as_str()))
@@ -454,9 +525,20 @@ pub fn resolve(
             existing: similar.name.clone(),
         });
     }
+    if let Some(error) = &all.unavailable {
+        return Err(LinkError::StoreUnavailable(error.clone()));
+    }
     let (Some(gateway), Some(portal)) = (&link.gateway, &link.portal) else {
         return Err(LinkError::UnknownProfile(profile.clone()));
     };
+    if let Some(entry) = all.invalid.iter().find(|entry| {
+        entry
+            .addresses
+            .iter()
+            .any(|address| address.matches(&gateway.host(), gateway.port()))
+    }) {
+        return Err(damaged(entry));
+    }
     if let Some(existing) = known.iter().find(|known| known.is_at(gateway)) {
         return Err(LinkError::KnownGateway {
             profile: profile.clone(),
@@ -469,6 +551,12 @@ pub fn resolve(
         .is_some_and(|url| !same_origin(url, portal))
     {
         return Err(LinkError::UrlOutsidePortal(profile.clone()));
+    }
+    if let Err(error) = store::file_name(gateway) {
+        return Err(LinkError::Unstorable {
+            profile: profile.clone(),
+            reason: error.to_string(),
+        });
     }
     let confirmation = Confirmation {
         profile: profile.clone(),
@@ -489,188 +577,6 @@ pub fn resolve(
             }),
         })),
     }
-}
-
-pub const STORE_FILE: &str = "linked-gateways.toml";
-pub const MAX_LINKED: usize = 32;
-const MAX_STORE_BYTES: u64 = 256 * 1024;
-
-pub fn default_store_path() -> Option<PathBuf> {
-    Some(config::default_path()?.with_file_name(STORE_FILE))
-}
-
-#[derive(Debug)]
-pub enum StoreError {
-    Io(PathBuf, io::Error),
-    Invalid(PathBuf, String),
-    Exists(GatewayName),
-    Full,
-}
-
-impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(path, error) => write!(f, "linked gateways {}: {error}", path.display()),
-            Self::Invalid(path, error) => {
-                write!(f, "linked gateways {}: {error}", path.display())
-            }
-            Self::Exists(name) => write!(f, "a linked gateway \"{name}\" already exists"),
-            Self::Full => write!(
-                f,
-                "{MAX_LINKED} linked gateways are stored already; remove one with \
-                 `gateinto gateway forget <name>`"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreFile {
-    #[serde(default)]
-    gateways: BTreeMap<GatewayName, StoreEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreEntry {
-    host: String,
-    port: NonZeroU16,
-    portal_url: PortalUrl,
-    approved_at: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct LinkedStore {
-    path: PathBuf,
-}
-
-impl LinkedStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn invalid(&self, error: impl fmt::Display) -> StoreError {
-        StoreError::Invalid(self.path.clone(), error.to_string())
-    }
-
-    pub fn load(&self) -> Result<Vec<LinkedGateway>, StoreError> {
-        let io = |error| StoreError::Io(self.path.clone(), error);
-        let file = match File::open(&self.path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(io(error)),
-        };
-        let mut text = String::new();
-        file.take(MAX_STORE_BYTES + 1)
-            .read_to_string(&mut text)
-            .map_err(io)?;
-        if text.len() as u64 > MAX_STORE_BYTES {
-            return Err(self.invalid(format!("larger than {MAX_STORE_BYTES} bytes")));
-        }
-        let file: StoreFile = toml::from_str(&text)
-            .map_err(|error| self.invalid(error.to_string().trim_end().replace('\n', " ")))?;
-        file.gateways
-            .into_iter()
-            .map(|(name, entry)| {
-                let address = if entry.host.contains(':') {
-                    format!("[{}]:{}", entry.host, entry.port)
-                } else {
-                    format!("{}:{}", entry.host, entry.port)
-                };
-                let address: GatewayAddress = address
-                    .parse()
-                    .map_err(|error| self.invalid(format!("gateway \"{name}\": {error}")))?;
-                if Origin::of(&entry.portal_url).is_none() {
-                    return Err(self.invalid(format!(
-                        "gateway \"{name}\": portal_url has no https origin"
-                    )));
-                }
-                Ok(LinkedGateway {
-                    name,
-                    address,
-                    portal_url: entry.portal_url,
-                    approved_at: entry.approved_at,
-                })
-            })
-            .collect()
-    }
-
-    pub fn add(&self, gateway: &LinkedGateway) -> Result<(), StoreError> {
-        let mut gateways = self.load()?;
-        if gateways.iter().any(|known| known.name == gateway.name) {
-            return Err(StoreError::Exists(gateway.name.clone()));
-        }
-        if gateways.len() >= MAX_LINKED {
-            return Err(StoreError::Full);
-        }
-        gateways.push(gateway.clone());
-        gateways.sort_by(|a, b| a.name.cmp(&b.name));
-        self.save(&gateways)
-    }
-
-    pub fn forget(&self, name: &GatewayName) -> Result<bool, StoreError> {
-        let mut gateways = self.load()?;
-        let before = gateways.len();
-        gateways.retain(|gateway| &gateway.name != name);
-        if gateways.len() == before {
-            return Ok(false);
-        }
-        self.save(&gateways)?;
-        Ok(true)
-    }
-
-    fn save(&self, gateways: &[LinkedGateway]) -> Result<(), StoreError> {
-        let io = |error| StoreError::Io(self.path.clone(), error);
-        let mut text = String::from(
-            "# Gateways added from gateinto:// links after confirmation.\n\
-             # Remove one with `gateinto gateway forget <name>`.\n",
-        );
-        for gateway in gateways {
-            text.push_str(&format!(
-                "\n[gateways.{}]\nhost = \"{}\"\nport = {}\nportal_url = \"{}\"\n",
-                gateway.name,
-                gateway.address.host(),
-                gateway.address.port(),
-                gateway.portal_url
-            ));
-            if let Some(approved_at) = gateway.approved_at {
-                text.push_str(&format!("approved_at = {approved_at}\n"));
-            }
-        }
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).map_err(io)?;
-        let temp = dir.join(format!(
-            ".{STORE_FILE}.{}.{}.tmp",
-            std::process::id(),
-            ConfirmToken::random().map_err(io)?
-        ));
-        let written =
-            write_new(&temp, text.as_bytes()).and_then(|()| std::fs::rename(&temp, &self.path));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
-        written.map_err(io)?;
-        #[cfg(unix)]
-        File::open(dir).and_then(|dir| dir.sync_all()).map_err(io)?;
-        Ok(())
-    }
-}
-
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
 }
 
 #[cfg(test)]
@@ -760,8 +666,149 @@ mod tests {
             decision,
             asked: Vec::new(),
         };
-        let resolution = resolve(link, &profiles(), &mut confirm, NOW);
+        let known = Known {
+            gateways: profiles(),
+            ..Known::default()
+        };
+        let resolution = resolve(link, &known, &mut confirm, NOW);
         (resolution, confirm.asked)
+    }
+
+    fn damaged() -> Known {
+        Known {
+            gateways: profiles(),
+            invalid: vec![store::InvalidEntry {
+                file: std::path::PathBuf::from("/c/gateways/held.example.toml"),
+                name: Some(name("held")),
+                addresses: vec!["held.example".parse().unwrap()],
+                reason: "broken".to_owned(),
+            }],
+            unavailable: None,
+        }
+    }
+
+    fn resolve_in(known: &Known, link: &LaunchRequest) -> (Result<Resolution, LinkError>, usize) {
+        let mut confirm = Recorder {
+            decision: Some(Decision::Approve),
+            asked: Vec::new(),
+        };
+        let resolution = resolve(link, known, &mut confirm, NOW);
+        (resolution, confirm.asked.len())
+    }
+
+    #[test]
+    fn a_link_to_a_gateway_held_by_an_invalid_file_fails_closed() {
+        let held = || LinkError::Damaged {
+            profile: name("held"),
+            file: "/c/gateways/held.example.toml".to_owned(),
+        };
+        for (request, expected) in [
+            (link("held", None, None, None), held()),
+            (
+                link(
+                    "held",
+                    None,
+                    Some("new.example"),
+                    Some("https://new.example/"),
+                ),
+                held(),
+            ),
+            (
+                link(
+                    "newco",
+                    None,
+                    Some("Held.Example:443"),
+                    Some("https://new.example/"),
+                ),
+                LinkError::Damaged {
+                    profile: name("newco"),
+                    file: "/c/gateways/held.example.toml".to_owned(),
+                },
+            ),
+        ] {
+            let (resolution, asked) = resolve_in(&damaged(), &request);
+            assert_eq!(resolution, Err(expected), "{request}");
+            assert_eq!(asked, 0);
+        }
+        let error = resolve_in(&damaged(), &link("held", None, None, None))
+            .0
+            .unwrap_err();
+        assert!(error.to_string().contains("held.example.toml"), "{error}");
+        let (resolution, _) = resolve_in(&damaged(), &link("corp", None, None, None));
+        assert_eq!(resolution, Ok(launch("corp", Some(PORTAL))));
+        let (resolution, asked) = resolve_in(
+            &damaged(),
+            &link(
+                "newco",
+                None,
+                Some("other.example"),
+                Some("https://new.example/"),
+            ),
+        );
+        assert!(
+            matches!(resolution, Ok(Resolution::Launch(_))),
+            "{resolution:?}"
+        );
+        assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn without_a_usable_store_only_known_gateways_launch() {
+        let known = Known {
+            gateways: profiles(),
+            invalid: Vec::new(),
+            unavailable: Some("not a directory".to_owned()),
+        };
+        let (resolution, _) = resolve_in(&known, &link("corp", None, None, None));
+        assert_eq!(resolution, Ok(launch("corp", Some(PORTAL))));
+        for request in [
+            link("nope", None, None, None),
+            link(
+                "newco",
+                None,
+                Some("new.example"),
+                Some("https://new.example/"),
+            ),
+        ] {
+            let (resolution, asked) = resolve_in(&known, &request);
+            let error = resolution.unwrap_err();
+            assert!(matches!(error, LinkError::StoreUnavailable(_)), "{error}");
+            assert!(error.to_string().contains("not a directory"), "{error}");
+            assert_eq!(asked, 0);
+        }
+    }
+
+    #[test]
+    fn a_gateway_whose_file_name_would_be_too_long_is_refused_before_asking() {
+        let host = format!("{}example", "a.".repeat(123));
+        let (resolution, asked) = resolve_with(
+            &link("newco", None, Some(&host), Some("https://new.example/")),
+            Some(Decision::Approve),
+        );
+        let error = resolution.unwrap_err();
+        assert!(matches!(error, LinkError::Unstorable { .. }), "{error}");
+        assert!(error.to_string().contains("too long"), "{error}");
+        assert!(asked.is_empty());
+    }
+
+    #[test]
+    fn known_gateways_carry_the_invalid_files_and_store_errors() {
+        let config = config_file("[gateways.corp]\nhost = \"proxy.corp.example\"\nport = 443\n");
+        let invalid = damaged().invalid;
+        let loaded = store::Loaded {
+            gateways: vec![linked("newco", "new.example")],
+            invalid: invalid.clone(),
+        };
+        let known = Known::new(&config, Ok(loaded));
+        assert_eq!(known.gateways.len(), 2);
+        assert_eq!(known.invalid, invalid);
+        assert_eq!(known.unavailable, None);
+        let known = Known::new(
+            &config,
+            Err(store::StoreError::NotADirectory("/c/gateways".into())),
+        );
+        assert_eq!(known.gateways.len(), 1);
+        assert!(known.unavailable.unwrap().contains("not a directory"));
     }
 
     fn launch(profile: &str, start: Option<&str>) -> Resolution {
@@ -1229,93 +1276,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    fn store() -> LinkedStore {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("gateinto-linked-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        LinkedStore::new(dir.join("sub").join(STORE_FILE))
-    }
-
-    #[test]
-    fn a_missing_store_is_empty_and_adding_creates_it() {
-        let store = store();
-        assert_eq!(store.load().unwrap(), Vec::new());
-        let mut gateway = linked("newco", "Proxy.Newco.Example:8443");
-        gateway.approved_at = Some(NOW);
-        store.add(&gateway).unwrap();
-        store.add(&linked("other", "[2001:db8::1]")).unwrap();
-        assert_eq!(
-            store.load().unwrap(),
-            vec![gateway.clone(), linked("other", "[2001:db8::1]")]
-        );
-        let text = std::fs::read_to_string(store.path()).unwrap();
-        assert!(text.contains("[gateways.newco]\nhost = \"proxy.newco.example\"\nport = 8443\nportal_url = \"https://newco.example/\"\napproved_at = 1760000000\n"), "{text}");
-        let leftovers: Vec<_> = std::fs::read_dir(store.path().parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(leftovers, vec![std::ffi::OsString::from(STORE_FILE)]);
-    }
-
-    #[test]
-    fn adding_never_replaces_an_entry() {
-        let store = store();
-        store.add(&linked("newco", "a.example")).unwrap();
-        let error = store.add(&linked("newco", "b.example")).unwrap_err();
-        assert!(error.to_string().contains("\"newco\""), "{error}");
-        assert_eq!(store.load().unwrap(), vec![linked("newco", "a.example")]);
-    }
-
-    #[test]
-    fn the_store_holds_a_bounded_number_of_gateways() {
-        let store = store();
-        for n in 0..MAX_LINKED {
-            store
-                .add(&linked(&format!("g{n}"), &format!("g{n}.example")))
-                .unwrap();
-        }
-        let error = store.add(&linked("more", "more.example")).unwrap_err();
-        assert!(error.to_string().contains("gateway forget"), "{error}");
-        assert_eq!(store.load().unwrap().len(), MAX_LINKED);
-    }
-
-    #[test]
-    fn forgetting_removes_only_the_named_gateway() {
-        let store = store();
-        assert!(!store.forget(&name("newco")).unwrap());
-        store.add(&linked("newco", "a.example")).unwrap();
-        store.add(&linked("other", "b.example")).unwrap();
-        assert!(store.forget(&name("newco")).unwrap());
-        assert!(!store.forget(&name("newco")).unwrap());
-        assert_eq!(store.load().unwrap(), vec![linked("other", "b.example")]);
-    }
-
-    #[test]
-    fn a_store_with_anything_but_host_port_and_portal_is_rejected() {
-        let store = store();
-        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
-        for text in [
-            "[gateways.a]\nhost = \"a.example\"\nport = 443\nportal_url = \"https://a.example/\"\nca_file = \"x.pem\"\n",
-            "[gateways.a]\nhost = \"a.example\"\nport = 443\nportal_url = \"https://a.example/\"\ntls_mode = \"classical\"\n",
-            "[gateways.a]\nhost = \"a.example\"\nport = 443\nportal_url = \"https://a.example/\"\nclient_cert_file = \"c.pem\"\n",
-            "[gateways.a]\nhost = \"a.example\"\nport = 443\nportal_url = \"https://a.example/\"\n[device_session]\ngateway = \"a\"\n",
-            "[gateways.a]\nhost = \"user@a.example\"\nport = 443\nportal_url = \"https://a.example/\"\n",
-            "[gateways.a]\nhost = \"a.example\"\nport = 0\nportal_url = \"https://a.example/\"\n",
-            "[gateways.a]\nhost = \"a.example\"\nport = 443\nportal_url = \"http://a.example/\"\n",
-            "[gateways.a]\nhost = \"a.example\"\nport = 443\n",
-            "[gateways.\"a b\"]\nhost = \"a.example\"\nport = 443\nportal_url = \"https://a.example/\"\n",
-            "not toml",
-        ] {
-            std::fs::write(store.path(), text).unwrap();
-            let error = store.load().unwrap_err().to_string();
-            assert!(
-                error.contains(&store.path().display().to_string()),
-                "{text}: {error}"
-            );
-        }
     }
 
     #[test]

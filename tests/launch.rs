@@ -105,7 +105,7 @@ impl Launcher {
         } else {
             self.dir.join("config").join("gateinto")
         };
-        base.join("linked-gateways.toml")
+        base.join("gateways")
     }
 
     fn endpoint(&self) -> gateinto::ipc::Endpoint {
@@ -796,13 +796,20 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
     assert_eq!(browser.start_page(), start);
     tunnel_echoes(listen).await;
 
-    let stored = std::fs::read_to_string(launcher.linked_store()).unwrap();
+    let file = launcher
+        .linked_store()
+        .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
+    let stored = std::fs::read_to_string(&file).unwrap();
     assert!(
         stored.contains(&format!(
-            "[gateways.newco]\nhost = \"127.0.0.1\"\nport = {}\nportal_url = \"{portal}\"\n",
+            "name = \"newco\"\nhost = \"127.0.0.1\"\nport = {}\nportal_url = \"{portal}\"\n",
             launcher.upstream_port
         )),
         "{stored}"
+    );
+    assert_eq!(
+        std::fs::read_dir(launcher.linked_store()).unwrap().count(),
+        1
     );
     let output = launcher.open(&uri).await;
     let listen: SocketAddr = field(&output.success().lines(), "listen").parse().unwrap();
@@ -878,4 +885,50 @@ async fn a_linked_gateway_trusts_only_the_public_roots() {
                 && line.contains("invalid peer certificate: UnknownIssuer")),
         "{log}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_gateway_file_blocks_only_its_own_gateway() {
+    let launcher = Launcher::new("").await;
+    let dir = launcher.linked_store();
+    std::fs::create_dir_all(&dir).unwrap();
+    let broken = dir.join("held.example.toml");
+    let damaged = "name = \"held\"\nhost = \"held.example\"\nport = 443\nca_file = \"x\"\n";
+    std::fs::write(&broken, damaged).unwrap();
+
+    let output = launcher.open(&link_uri("main", None, None, None)).await;
+    let lines = output.success().lines();
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    wait_for_browser(&launcher.profiles_root, listen).await;
+    let error = format!("linked-gateway: error: {}: ", broken.display());
+    assert!(
+        lines.iter().any(|line| line.starts_with(&error)),
+        "{lines:?}"
+    );
+
+    for uri in [
+        link_uri("held", None, None, None),
+        link_uri(
+            "held",
+            None,
+            Some("new.example"),
+            Some("https://new.example/"),
+        ),
+        link_uri(
+            "other",
+            None,
+            Some("held.example"),
+            Some("https://new.example/"),
+        ),
+    ] {
+        let output = launcher.open(&uri).await;
+        assert!(
+            output.failure().stderr.contains("damaged file"),
+            "{uri}: {}",
+            output.stderr
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), damaged);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    assert_eq!(browsers(&launcher.profiles_root).len(), 1);
 }

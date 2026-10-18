@@ -196,7 +196,7 @@ impl ProfileDir {
     }
 }
 
-fn create_private_dir(path: &Path, recursive: bool) -> io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path, recursive: bool) -> io::Result<()> {
     let mut builder = DirBuilder::new();
     builder.recursive(recursive);
     #[cfg(unix)]

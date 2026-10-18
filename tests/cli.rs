@@ -439,13 +439,13 @@ fn status_is_read_only_and_reports_what_it_can() {
             "key-name: gateinto-device-v1\n\
              device-key: unavailable: device keys are only supported on Windows\n\
              config: none (no file at {}; pass --config to use another file)\n\
-             linked-gateways: none (no file at {})\n\
+             linked-gateways: none (no directory at {})\n\
              device-session: none\n\
              agent: not running\n\
              uri-handler: not supported on this platform\n",
             default_config(&no_config_home()).display(),
             default_config(&no_config_home())
-                .with_file_name("linked-gateways.toml")
+                .with_file_name("gateways")
                 .display()
         )
     );
@@ -640,19 +640,29 @@ impl Home {
              portal_url = \"https://portal.example.com/?token=secret\"\n",
         )
         .unwrap();
-        std::fs::write(
-            config.with_file_name("linked-gateways.toml"),
-            "[gateways.newco]\nhost = \"proxy.newco.example\"\nport = 8443\n\
-             portal_url = \"https://portal.newco.example/home\"\napproved_at = 1\n\
-             [gateways.other]\nhost = \"10.0.0.1\"\nport = 443\n\
+        let home = Self(home);
+        std::fs::create_dir(home.linked()).unwrap();
+        home.plant(
+            "proxy.newco.example_8443.toml",
+            "name = \"newco\"\nhost = \"proxy.newco.example\"\nport = 8443\n\
+             portal_url = \"https://portal.newco.example/home\"\napproved_at = 1\n",
+        );
+        home.plant(
+            "10.0.0.1.toml",
+            "name = \"other\"\nhost = \"10.0.0.1\"\nport = 443\n\
              portal_url = \"https://other.example/\"\n",
-        )
-        .unwrap();
-        Self(home)
+        );
+        home
     }
 
     fn linked(&self) -> PathBuf {
-        default_config(&self.0).with_file_name("linked-gateways.toml")
+        default_config(&self.0).with_file_name("gateways")
+    }
+
+    fn plant(&self, file: &str, text: &str) -> PathBuf {
+        let path = self.linked().join(file);
+        std::fs::write(&path, text).unwrap();
+        path
     }
 
     fn run(&self, args: &[&str]) -> (bool, String, String) {
@@ -738,44 +748,79 @@ fn gateway_forget_removes_only_gateways_added_from_links() {
     assert!(config.contains("[gateways.main]"), "{config}");
 }
 
+const DAMAGED: &str = "name = \"broken\"\nhost = \"x.example\"\nport = 443\n\
+                       portal_url = \"https://x.example/\"\nca_file = \"y\"\n";
+
 #[test]
-fn a_damaged_linked_gateways_file_is_reported() {
+fn a_damaged_gateway_file_disables_only_its_own_gateway() {
     let home = Home::new("gateway-damaged");
-    std::fs::write(
-        home.linked(),
-        "[gateways.x]\nhost = \"x\"\nport = 1\nca_file = \"y\"\n",
-    )
-    .unwrap();
-    let (success, _, stderr) = home.run(&["gateway", "list"]);
+    let broken = home.plant("x.example.toml", DAMAGED);
+    let (success, stdout, stderr) = home.run(&["gateway", "list"]);
+    assert!(success, "{stderr}");
+    assert!(
+        stdout.starts_with(
+            "main: proxy.example.com:443, portal https://portal.example.com (config)\n\
+             newco: proxy.newco.example:8443, portal https://portal.newco.example (linked)\n\
+             other: 10.0.0.1:443, portal https://other.example (linked)\n"
+        ),
+        "{stdout}"
+    );
+    let error = format!("linked-gateway: error: {}: ", broken.display());
+    assert!(stdout.contains(&error), "{stdout}");
+    assert!(stdout.contains("ca_file"), "{stdout}");
+
+    let (success, _, stderr) = home.run(&["gateway", "forget", "broken"]);
     assert!(!success);
-    assert!(stderr.contains("linked-gateways.toml"), "{stderr}");
+    assert!(stderr.contains("damaged file"), "{stderr}");
+    assert!(broken.exists());
 }
 
 #[test]
-fn status_reports_a_damaged_linked_gateways_file_and_continues() {
+fn status_reports_a_damaged_gateway_file_and_continues() {
     let home = Home::new("status-damaged");
-    std::fs::write(home.linked(), "[gateways.x]\nca_file = \"y\"\n").unwrap();
+    let broken = home.plant("x.example.toml", DAMAGED);
+    let (success, stdout, stderr) = home.run(&["status"]);
+    assert!(success, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "linked-gateways: {}\ngateway: newco: proxy.newco.example:8443 (linked)\n\
+             gateway: other: 10.0.0.1:443 (linked)\nlinked-gateway: error: {}: ",
+            home.linked().display(),
+            broken.display()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\ndevice-session: none\n"), "{stdout}");
+}
+
+#[test]
+fn an_unusable_gateways_directory_is_reported_by_status_and_refused_by_list() {
+    let home = Home::new("status-unusable");
+    std::fs::remove_dir_all(home.linked()).unwrap();
+    std::fs::write(home.linked(), "").unwrap();
     let (success, stdout, stderr) = home.run(&["status"]);
     assert!(success, "{stdout}{stderr}");
     assert!(
         stdout.contains(&format!(
             "gateway: main: proxy.example.com:443 (config)\nlinked-gateways: error: linked \
-             gateways {}: ",
+             gateways {}: not a directory",
             home.linked().display()
         )),
         "{stdout}"
     );
-    assert!(stdout.contains("\ndevice-session: none\n"), "{stdout}");
     assert!(stdout.contains("\nagent: "), "{stdout}");
+    let (success, _, stderr) = home.run(&["gateway", "list"]);
+    assert!(!success);
+    assert!(stderr.contains("not a directory"), "{stderr}");
 }
 
 #[cfg(not(windows))]
 #[test]
-fn setup_reports_a_damaged_linked_gateways_file_and_continues() {
+fn setup_reports_a_damaged_gateway_file_and_continues() {
     let home = Home::new("setup-damaged");
-    std::fs::write(home.linked(), "not toml").unwrap();
+    home.plant("x.example.toml", "not toml");
     let (success, stdout, stderr) = home.run(&["setup"]);
-    assert!(stdout.contains("linked-gateways: error: "), "{stdout}");
+    assert!(stdout.contains("linked-gateway: error: "), "{stdout}");
     assert!(!success);
     assert!(
         stderr.contains("device keys are only supported on Windows"),

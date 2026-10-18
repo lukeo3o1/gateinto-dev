@@ -6,6 +6,7 @@ use crate::config::ConfigFile;
 use crate::identity::device_key::{
     self, Backend, KeyName, KeyStore, PurgeError, PurgedKey, SpkiConfirmation,
 };
+use crate::link::store::LinkedStore;
 use crate::link::{KnownGateway, Origin};
 use crate::proxy::DEFAULT_LISTEN;
 use crate::registration::{self, RegistrationError};
@@ -156,7 +157,8 @@ pub fn gateway_list(known: &[KnownGateway]) -> Vec<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Purge {
     pub config: Option<PathBuf>,
-    pub linked: Option<PathBuf>,
+    pub linked: Vec<PathBuf>,
+    pub linked_dir: Option<PathBuf>,
 }
 
 impl Purge {
@@ -165,10 +167,11 @@ impl Purge {
         if let Some(path) = &self.config {
             items.push(format!("the Gateinto config file {}", path.display()));
         }
-        if let Some(path) = &self.linked {
+        if let (false, Some(dir)) = (self.linked.is_empty(), &self.linked_dir) {
             items.push(format!(
-                "the gateways added from links in {}",
-                path.display()
+                "the {} gateways added from links in {}",
+                self.linked.len(),
+                dir.display()
             ));
         }
         items
@@ -182,30 +185,36 @@ impl Purge {
     }
 }
 
-fn regular_file(path: &Path, optional: bool) -> Result<Option<PathBuf>, String> {
+fn regular_file(path: &Path) -> Result<PathBuf, String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => std::path::absolute(path)
-            .map(Some)
             .map_err(|error| format!("reading {}: {error}", path.display())),
         Ok(_) => Err(format!(
             "{} is not a regular file; --purge-config deletes only Gateinto files",
             path.display()
         )),
-        Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("reading {}: {error}", path.display())),
     }
 }
 
-pub fn files_to_purge(config: Option<&Path>, linked: Option<&Path>) -> Result<Purge, String> {
+pub fn files_to_purge(config: Option<&Path>, store: Option<&LinkedStore>) -> Result<Purge, String> {
+    let config = match config {
+        Some(path) => Some(regular_file(path)?),
+        None => None,
+    };
+    let linked = match store {
+        Some(store) => store
+            .purge_candidates()
+            .map_err(|error| error.to_string())?,
+        None => Vec::new(),
+    };
+    let linked_dir = store
+        .filter(|_| !linked.is_empty())
+        .map(|store| store.dir().to_owned());
     Ok(Purge {
-        config: config
-            .map(|path| regular_file(path, false))
-            .transpose()?
-            .flatten(),
-        linked: linked
-            .map(|path| regular_file(path, true))
-            .transpose()?
-            .flatten(),
+        config,
+        linked,
+        linked_dir,
     })
 }
 
@@ -283,6 +292,7 @@ pub async fn purge_device_identity<S: KeyStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::store::{self, LinkedStore};
     use crate::link::{self, LinkedGateway};
 
     #[test]
@@ -394,38 +404,41 @@ mod tests {
     }
 
     #[test]
-    fn purging_the_config_also_takes_the_linked_gateways_file() {
+    fn purging_the_config_also_takes_the_gateway_files() {
         let dir = temp_dir("purge");
-        let (config, linked) = (dir.join("gateinto.toml"), dir.join(link::STORE_FILE));
+        let config = dir.join("gateinto.toml");
+        let store = LinkedStore::new(dir.join(store::DIR_NAME));
         let missing = dir.join("missing.toml");
         std::fs::write(&config, "").unwrap();
+        let config_only = Purge {
+            config: Some(std::path::absolute(&config).unwrap()),
+            ..Purge::default()
+        };
         assert_eq!(
-            files_to_purge(Some(&config), Some(&missing)).unwrap(),
-            Purge {
-                config: Some(std::path::absolute(&config).unwrap()),
-                linked: None
-            }
+            files_to_purge(Some(&config), Some(&store)).unwrap(),
+            config_only
         );
-        std::fs::write(&linked, "").unwrap();
+        assert_eq!(files_to_purge(Some(&config), None).unwrap(), config_only);
+        std::fs::create_dir(store.dir()).unwrap();
+        let gateway = store.dir().join("a.example.toml");
+        std::fs::write(&gateway, "garbage").unwrap();
+        std::fs::write(store.dir().join("notes.txt"), "").unwrap();
+        let both = Purge {
+            config: Some(std::path::absolute(&config).unwrap()),
+            linked: vec![gateway.clone()],
+            linked_dir: Some(store.dir().to_owned()),
+        };
+        assert_eq!(files_to_purge(Some(&config), Some(&store)).unwrap(), both);
         assert_eq!(
-            files_to_purge(Some(&config), Some(&linked)).unwrap(),
-            Purge {
-                config: Some(std::path::absolute(&config).unwrap()),
-                linked: Some(std::path::absolute(&linked).unwrap()),
-            }
-        );
-        assert_eq!(
-            files_to_purge(None, Some(&linked)).unwrap(),
+            files_to_purge(None, Some(&store)).unwrap(),
             Purge {
                 config: None,
-                linked: Some(std::path::absolute(&linked).unwrap())
+                ..both.clone()
             }
         );
-        assert_eq!(files_to_purge(None, Some(&missing)), Ok(Purge::default()));
-        let error = files_to_purge(Some(&missing), Some(&linked)).unwrap_err();
+        let error = files_to_purge(Some(&missing), Some(&store)).unwrap_err();
         assert!(error.contains("missing.toml"), "{error}");
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        let error = files_to_purge(Some(&config), Some(&dir.join("sub"))).unwrap_err();
+        let error = files_to_purge(Some(store.dir()), None).unwrap_err();
         assert!(error.contains("not a regular file"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -459,7 +472,11 @@ mod tests {
             &fingerprint,
             &Purge {
                 config: Some(PathBuf::from("/home/me/gateinto.toml")),
-                linked: Some(PathBuf::from("/home/me/linked-gateways.toml")),
+                linked: vec![
+                    PathBuf::from("/home/me/gateways/a.example.toml"),
+                    PathBuf::from("/home/me/gateways/b.example.toml"),
+                ],
+                linked_dir: Some(PathBuf::from("/home/me/gateways")),
             },
         );
         assert_eq!(
@@ -470,7 +487,7 @@ mod tests {
                  \x20 key name: gateinto-device-v1 (current Windows user)\n\
                  \x20 spki-sha256: {fingerprint}\n\
                  and the Gateinto config file /home/me/gateinto.toml.\n\
-                 and the gateways added from links in /home/me/linked-gateways.toml.\n\
+                 and the 2 gateways added from links in /home/me/gateways.\n\
                  \n\
                  - The device identity becomes invalid. Gateways that enrolled this key will not \
                  recognise the device; a new key may need to be enrolled again.\n\

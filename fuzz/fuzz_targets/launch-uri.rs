@@ -2,11 +2,11 @@
 
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::Request;
-use gateinto::link::{self, Decision, KnownGateway, Origin, Resolution, Source};
+use gateinto::link::{self, Decision, Known, KnownGateway, Origin, Resolution, Source};
 use gateinto::uri::{LaunchRequest, MAX_LEN, UriError};
 use libfuzzer_sys::fuzz_target;
 
-fn known() -> Vec<KnownGateway> {
+fn known() -> Known {
     let gateway = |name: &str, host: &str, portal: Option<&str>| KnownGateway {
         name: name.parse().unwrap(),
         host: Some(host.to_owned()),
@@ -14,11 +14,14 @@ fn known() -> Vec<KnownGateway> {
         portal_url: portal.map(|portal| portal.parse().unwrap()),
         source: Source::Config,
     };
-    vec![
-        gateway("a", "proxy.example", Some("https://portal.example/start")),
-        gateway("b", "10.0.0.1", None),
-        gateway("c", "::1", Some("https://[::1]:8443/")),
-    ]
+    Known {
+        gateways: vec![
+            gateway("a", "proxy.example", Some("https://portal.example/start")),
+            gateway("b", "10.0.0.1", None),
+            gateway("c", "::1", Some("https://[::1]:8443/")),
+        ],
+        ..Known::default()
+    }
 }
 
 fn origin(url: &PortalUrl) -> Origin {
@@ -53,6 +56,11 @@ fuzz_target!(|data: &[u8]| {
     if let Some(gateway) = &request.gateway {
         let host = gateway.host();
         assert!(!host.is_empty());
+        let file = link::store::file_name(gateway);
+        if let Ok(file) = &file {
+            assert!(link::store::safe_file_name(file));
+            assert_eq!(link::store::address_of_file(file).as_ref(), Some(gateway));
+        }
         assert!(
             !host
                 .chars()
@@ -83,6 +91,7 @@ fuzz_target!(|data: &[u8]| {
             continue;
         };
         let portal = known
+            .gateways
             .iter()
             .find(|known| known.name == launch.profile)
             .map(|known| known.portal_url.clone())

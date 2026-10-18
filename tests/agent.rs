@@ -16,7 +16,7 @@ use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::{
     self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server,
 };
-use gateinto::link::{KnownGateway, LinkedGateway, Source};
+use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
 use gateinto::proxy::Config;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
@@ -32,7 +32,7 @@ struct TestProfiles {
 }
 
 impl Profiles for TestProfiles {
-    fn known(&self) -> Result<Vec<KnownGateway>, String> {
+    fn known(&self) -> Result<Known, String> {
         let configured = self
             .plans
             .iter()
@@ -51,7 +51,10 @@ impl Profiles for TestProfiles {
             portal_url: Some(gateway.portal_url),
             source: Source::Linked,
         });
-        Ok(configured.chain(linked).collect())
+        Ok(Known {
+            gateways: configured.chain(linked).collect(),
+            ..Known::default()
+        })
     }
 
     fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
