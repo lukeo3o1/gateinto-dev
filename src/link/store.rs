@@ -174,7 +174,7 @@ fn plain(metadata: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return false;
         }
@@ -273,7 +273,26 @@ impl LinkedStore {
             }
         }
         let gateways = std::mem::take(&mut loaded.gateways);
+        let damaged = loaded.invalid.clone();
         for gateway in &gateways {
+            if let Some(entry) = damaged
+                .iter()
+                .find(|entry| entry.name.as_ref() == Some(&gateway.name))
+            {
+                loaded.invalid.push(InvalidEntry {
+                    file: self
+                        .dir
+                        .join(file_name(&gateway.address).unwrap_or_default()),
+                    name: Some(gateway.name.clone()),
+                    addresses: vec![gateway.address.clone()],
+                    reason: format!(
+                        "the profile name \"{}\" is also used by the damaged file {}",
+                        gateway.name,
+                        entry.file.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                });
+                continue;
+            }
             let others: Vec<&LinkedGateway> = gateways
                 .iter()
                 .filter(|other| other.name == gateway.name && other.address != gateway.address)
@@ -304,6 +323,14 @@ impl LinkedStore {
     }
 
     pub fn add(&self, gateway: &LinkedGateway) -> Result<PathBuf, StoreError> {
+        self.add_with(gateway, |_| {})
+    }
+
+    fn add_with(
+        &self,
+        gateway: &LinkedGateway,
+        before_publish: impl FnOnce(&Path),
+    ) -> Result<PathBuf, StoreError> {
         let file = file_name(&gateway.address).map_err(StoreError::Unstorable)?;
         self.ensure_dir()?;
         let loaded = self.load()?;
@@ -343,10 +370,11 @@ impl LinkedStore {
             std::process::id(),
             ConfirmToken::random().map_err(self.io(&self.dir))?
         ));
-        // A hard link publishes the complete file atomically and, unlike a rename, never
-        // replaces a file that appeared in the meantime.
-        let published =
-            write_new(&temp, text.as_bytes()).and_then(|()| std::fs::hard_link(&temp, &path));
+        let written = write_new(&temp, text.as_bytes());
+        if written.is_ok() {
+            before_publish(&path);
+        }
+        let published = written.and_then(|()| publish(&temp, &path, text.as_bytes()));
         let _ = std::fs::remove_file(&temp);
         match published {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -374,12 +402,20 @@ impl LinkedStore {
     }
 
     pub fn purge_candidates(&self) -> Result<Vec<PathBuf>, StoreError> {
+        if !self.existing_dir()? {
+            return Ok(Vec::new());
+        }
         let mut files = Vec::new();
-        for (_, path) in self.toml_files()? {
-            if regular(&path).map_err(self.io(&path))? {
+        for entry in std::fs::read_dir(&self.dir).map_err(self.io(&self.dir))? {
+            let entry = entry.map_err(self.io(&self.dir))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            let ours = name.ends_with(SUFFIX) || temp_file_name(&name);
+            if ours && regular(&path).map_err(self.io(&path))? {
                 files.push(path);
             }
         }
+        files.sort();
         Ok(files)
     }
 
@@ -423,8 +459,16 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
     if !metadata.is_file() || !plain(&metadata) {
         return Err(not_regular());
     }
-    let opened =
-        File::open(path).map_err(|error| invalid(None, hint.clone(), error.to_string()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+    );
+    let opened = options
+        .open(path)
+        .map_err(|error| invalid(None, hint.clone(), error.to_string()))?;
     let same = opened.metadata().is_ok_and(|now| {
         #[cfg(unix)]
         {
@@ -433,7 +477,7 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
         }
         #[cfg(not(unix))]
         {
-            now.is_file()
+            now.is_file() && plain(&now)
         }
     });
     if !same {
@@ -494,6 +538,78 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
         portal_url: entry.portal_url,
         approved_at: entry.approved_at,
     })
+}
+
+fn temp_file_name(name: &str) -> bool {
+    let Some(middle) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    middle.split_once('.').is_some_and(|(pid, random)| {
+        !pid.is_empty()
+            && pid.bytes().all(|b| b.is_ascii_digit())
+            && random.len() == 32
+            && random
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+#[cfg(unix)]
+fn publish(temp: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    publish_with(temp, path, bytes, |from, to| std::fs::hard_link(from, to))
+}
+
+// A hard link publishes the complete file atomically and, unlike a rename, never replaces a
+// file that appeared after the check; without hard links the file is created new in place.
+#[cfg(unix)]
+fn publish_with(
+    temp: &Path,
+    path: &Path,
+    bytes: &[u8],
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match link(temp, path) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => write_new(path, bytes)
+            .inspect_err(|error| {
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    let _ = std::fs::remove_file(path);
+                }
+            }),
+        result => result,
+    }
+}
+
+#[cfg(windows)]
+fn publish(temp: &Path, path: &Path, _bytes: &[u8]) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Prefix;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let wide = |path: &Path| {
+        let verbatim = match path.components().next() {
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => {
+                let mut verbatim = std::ffi::OsString::from(r"\\?\");
+                verbatim.push(path.as_os_str());
+                PathBuf::from(verbatim)
+            }
+            _ => path.to_owned(),
+        };
+        verbatim
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let (from, to) = (wide(temp), wide(path));
+    // Without MOVEFILE_REPLACE_EXISTING the move fails instead of replacing a file.
+    // SAFETY: both buffers are NUL-terminated UTF-16 paths that outlive the call.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -709,6 +825,100 @@ mod tests {
         ));
         assert_eq!(std::fs::read_to_string(&planted).unwrap(), "garbage");
         assert_eq!(files(&store), vec!["a.example.toml", "c.example.toml"]);
+    }
+
+    #[test]
+    fn the_publish_step_never_overwrites_a_file_that_appears_late() {
+        let store = store();
+        let late = store.add_with(&gateway("newco", "a.example"), |path| {
+            std::fs::write(path, "planted").unwrap();
+        });
+        let path = store.dir().join("a.example.toml");
+        assert!(
+            matches!(&late, Err(StoreError::AddressTaken(taken)) if *taken == path),
+            "{late:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "planted");
+        assert_eq!(files(&store), vec!["a.example.toml"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_hard_links_the_file_is_created_new_in_place() {
+        let store = store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let (temp, path) = (
+            store.dir().join(".1.ab.tmp"),
+            store.dir().join("a.example.toml"),
+        );
+        let unsupported = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+        std::fs::write(&temp, "content").unwrap();
+        publish_with(&temp, &path, b"content", unsupported).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
+        let again = publish_with(&temp, &path, b"other", unsupported).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
+        let linked = publish_with(&temp, &path, b"other", |from, to| {
+            std::fs::hard_link(from, to)
+        });
+        assert_eq!(linked.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn a_valid_file_sharing_its_name_with_a_damaged_one_is_disabled_too() {
+        let store = store();
+        store.add(&gateway("same", "a.example")).unwrap();
+        plant(
+            &store,
+            "b.example.toml",
+            &format!("{}ca_file = \"x\"\n", entry("same", "b.example", 443)),
+        );
+        store.add(&gateway("other", "c.example")).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.gateways, vec![gateway("other", "c.example")]);
+        assert_eq!(loaded.invalid.len(), 2);
+        let disabled = loaded
+            .invalid
+            .iter()
+            .find(|entry| entry.file == store.dir().join("a.example.toml"))
+            .unwrap();
+        assert!(
+            disabled.reason.contains("b.example.toml"),
+            "{}",
+            disabled.reason
+        );
+    }
+
+    #[test]
+    fn purging_also_takes_leftover_temporary_files() {
+        let store = store();
+        store.add(&gateway("a", "a.example")).unwrap();
+        let temp = plant(
+            &store,
+            &format!(".{}.{}.tmp", 4242, "0123456789abcdef0123456789abcdef"),
+            "partial",
+        );
+        plant(&store, ".x.tmp", "foreign");
+        plant(&store, ".1.0123.tmp", "short");
+        std::fs::create_dir(store.dir().join(".2.0123456789abcdef0123456789abcdef.tmp")).unwrap();
+        let candidates = store.purge_candidates().unwrap();
+        assert_eq!(candidates, vec![temp, store.dir().join("a.example.toml")]);
+        store.remove(&candidates).unwrap();
+        assert_eq!(
+            files(&store),
+            vec![
+                ".1.0123.tmp",
+                ".2.0123456789abcdef0123456789abcdef.tmp",
+                ".x.tmp"
+            ]
+        );
+
+        let store = self::store();
+        store.add(&gateway("a", "a.example")).unwrap();
+        plant(&store, ".7.0123456789abcdef0123456789abcdef.tmp", "partial");
+        let candidates = store.purge_candidates().unwrap();
+        store.remove(&candidates).unwrap();
+        assert!(!store.dir().exists());
     }
 
     #[test]
