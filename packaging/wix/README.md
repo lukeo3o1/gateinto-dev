@@ -40,12 +40,13 @@ installed. Uninstall it first, then install this one." `AllowSameVersionUpgrades
 MSI with the same version replace the installed one too: every alpha, beta and latest build has
 version `0.0.0`, so without it a second build would be installed next to the first as another
 product. Between builds of the same version any MSI replaces any other, including an older
-commit, and the x64 and x86 MSIs replace each other because they share the `UpgradeCode` and the
-install folder. A release MSI (`0.0.0`) over a local build with the `Cargo.toml` version (for
-example `0.1.0`) is a downgrade and is refused; uninstall the local build first. ICE validation
-can report ICE61 ("This product should remove only older versions of itself") as a warning for
-this; it is expected, and `build.ps1` does not treat warnings as errors. CI does not yet install
-one build over another of the same version or of the other architecture.
+commit. The x64 and x86 MSIs share the `UpgradeCode`, the component GUIDs and the install
+folder, so each is expected to replace the other; swapping between them is untested. A release
+MSI (`0.0.0`) over a local build with the `Cargo.toml` version (for example `0.1.0`) is a
+downgrade and is refused; uninstall the local build first. ICE validation can report ICE61
+("This product should remove only older versions of itself") as a warning for this; it is
+expected, and `build.ps1` does not treat warnings as errors. CI does not yet install one build
+over another of the same version or of the other architecture.
 
 ## Build
 
