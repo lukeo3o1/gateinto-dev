@@ -1,12 +1,28 @@
 name: Release
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
   workflow_dispatch:
-  push:
-    tags: ['v*']
+    inputs:
+      channel:
+        description: Release to replace
+        type: choice
+        options: [beta, latest]
+        required: true
+      ref:
+        description: Branch, tag or full commit SHA to build
+        default: master
+        required: true
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'alpha' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,8 +30,35 @@ env:
   NASM_VERSION: '2.16.03'
 
 jobs:
+  resolve:
+    name: Resolve the commit
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      short: ${{ steps.resolve.outputs.short }}
+      built: ${{ steps.resolve.outputs.built }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.workflow_run.head_sha }}
+      - id: resolve
+        env:
+          CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'alpha' }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          {
+            echo "channel=$CHANNEL"
+            echo "sha=$sha"
+            echo "short=${sha:0:12}"
+            echo "built=$(date -u '+%Y-%m-%d %H:%M UTC')"
+          } | tee -a "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: resolve
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -31,11 +74,14 @@ jobs:
             nasm: true
     env:
       RELEASE_TARGET: ${{ matrix.target }}
+      SHORT_SHA: ${{ needs.resolve.outputs.short }}
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.RELEASE_TARGET }}
@@ -52,25 +98,12 @@ jobs:
       - run: cargo build --locked --release --target $env:RELEASE_TARGET --bin gateinto
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe"
-      - name: Package
-        id: package
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
+      - name: Stage gateinto.exe
         run: |
-          $version = if ($env:REF_TYPE -eq 'tag') { $env:REF_NAME } else { $env:COMMIT.Substring(0, 12) }
-          $package = "gateinto-$version-$env:RELEASE_TARGET"
-          $stage = Join-Path 'stage' $package
-          New-Item -ItemType Directory -Path $stage, 'dist' | Out-Null
-          Copy-Item "target\$env:RELEASE_TARGET\release\gateinto.exe", LICENSE-MIT, LICENSE-APACHE, README.md, SECURITY.md -Destination $stage
-          $zip = "$package.zip"
-          Compress-Archive -Path $stage -DestinationPath (Join-Path 'dist' $zip)
-          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path 'dist' $zip)).Hash.ToLowerInvariant()
-          [System.IO.File]::WriteAllText((Join-Path 'dist' "$zip.sha256"), "$hash  $zip`n")
-          Get-ChildItem dist
-          Get-Content (Join-Path 'dist' "$zip.sha256")
-          "package=$package" >> $env:GITHUB_OUTPUT
+          $exe = Join-Path 'dist' "gateinto-$env:SHORT_SHA-$env:RELEASE_TARGET.exe"
+          New-Item -ItemType Directory -Path 'dist' | Out-Null
+          Copy-Item "target\$env:RELEASE_TARGET\release\gateinto.exe" -Destination $exe
+          .github/scripts/write-sha256.ps1 -Path $exe
       - name: Install WiX ${{ env.WIX_VERSION }}
         if: matrix.msi
         run: |
@@ -79,40 +112,96 @@ jobs:
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
       - name: Build the MSI
         if: matrix.msi
-        env:
-          PACKAGE: ${{ steps.package.outputs.package }}
         run: |
-          $msi = "$env:PACKAGE.msi"
-          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" -Output (Join-Path $PWD "dist\$msi")
+          $msi = Join-Path $PWD "dist\gateinto-$env:SHORT_SHA-$env:RELEASE_TARGET.msi"
+          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" -Output $msi
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
-          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path 'dist' $msi)).Hash.ToLowerInvariant()
-          [System.IO.File]::WriteAllText((Join-Path 'dist' "$msi.sha256"), "$hash  $msi`n")
-          Get-ChildItem dist
-          Get-Content (Join-Path 'dist' "$msi.sha256")
+          .github/scripts/write-sha256.ps1 -Path $msi
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package.outputs.package }}
+          name: release-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
 
-  release:
-    name: Draft GitHub release
-    needs: build
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+  win7:
+    name: Build ${{ matrix.target }} (experimental)
+    needs: resolve
+    if: needs.resolve.outputs.channel != 'latest'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        target: [x86_64-win7-windows-msvc, i686-win7-windows-msvc]
+    env:
+      WIN7_TARGET: ${{ matrix.target }}
+      SHORT_SHA: ${{ needs.resolve.outputs.short }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Build
+        id: build
+        uses: ./.github/actions/win7-build
+        with:
+          target: ${{ matrix.target }}
+          nasm-version: ${{ env.NASM_VERSION }}
+      - uses: ./.github/actions/win7-audit
+        with:
+          target: ${{ matrix.target }}
+      - name: Stage gateinto.exe
+        shell: pwsh
+        env:
+          EXE: ${{ steps.build.outputs.exe }}
+        run: |
+          $exe = Join-Path 'dist' "gateinto-$env:SHORT_SHA-$env:WIN7_TARGET-experimental.exe"
+          New-Item -ItemType Directory -Path 'dist' | Out-Null
+          Copy-Item $env:EXE -Destination $exe
+          .github/scripts/write-sha256.ps1 -Path $exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish the ${{ needs.resolve.outputs.channel }} release
+    needs: [resolve, build, win7]
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.win7.result == 'success' || (needs.resolve.outputs.channel == 'latest' && needs.win7.result == 'skipped'))
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
-      actions: read
+    env:
+      CHANNEL: ${{ needs.resolve.outputs.channel }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      BUILT: ${{ needs.resolve.outputs.built }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Download packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'gateinto-*' --dir dist
-      - name: Create draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Check the files and add copies without the commit in their names
+        run: .github/scripts/release-assets.sh "$CHANNEL" "$SHA" dist
+      - run: .github/scripts/release-notes.sh "$CHANNEL" "$SHA" "$BUILT" | tee "$RUNNER_TEMP/notes.md"
+      - name: Replace the ${{ needs.resolve.outputs.channel }} release and move its tag to the commit
         run: |
-          ls -lR dist
-          gh release create "$TAG" dist/*/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
+          if gh release view "$CHANNEL" > /dev/null 2>&1; then
+            gh release delete "$CHANNEL" --cleanup-tag --yes
+          fi
+          if gh api "repos/$GH_REPO/git/ref/tags/$CHANNEL" > /dev/null 2>&1; then
+            gh api --method DELETE "repos/$GH_REPO/git/refs/tags/$CHANNEL"
+          fi
+          if [[ $CHANNEL == latest ]]; then
+            flags=(--latest)
+          else
+            flags=(--prerelease --latest=false)
+          fi
+          gh release create "$CHANNEL" dist/* --target "$SHA" --title "Gateinto $CHANNEL $SHA ($BUILT)" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+          gh release view "$CHANNEL"
