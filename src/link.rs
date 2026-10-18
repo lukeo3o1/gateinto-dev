@@ -610,7 +610,10 @@ impl LinkedStore {
         if written.is_err() {
             let _ = std::fs::remove_file(&temp);
         }
-        written.map_err(io)
+        written.map_err(io)?;
+        #[cfg(unix)]
+        File::open(dir).and_then(|dir| dir.sync_all()).map_err(io)?;
+        Ok(())
     }
 }
 
