@@ -1,0 +1,32 @@
+name: Audit a Windows 7 gateinto build
+description: Checks the static C runtime and audits the imports of a -win7-windows-msvc gateinto.exe against .github/scripts/win7-imports.txt, writing imports.txt.
+
+inputs:
+  target:
+    description: x86_64-win7-windows-msvc or i686-win7-windows-msvc
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check that gateinto.exe links the C runtime statically
+      shell: pwsh
+      env:
+        WIN7_TARGET: ${{ inputs.target }}
+      run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:WIN7_TARGET\release\gateinto.exe"
+    - name: List imports
+      shell: pwsh
+      env:
+        WIN7_TARGET: ${{ inputs.target }}
+      run: |
+        $exe = "target\$env:WIN7_TARGET\release\gateinto.exe"
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+        if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+        & $dumpbin /nologo /imports $exe | Tee-Object -FilePath imports.txt
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Audit imports against the Windows 7 allow-list
+      shell: pwsh
+      env:
+        WIN7_TARGET: ${{ inputs.target }}
+      run: .github/scripts/assert-win7-imports.ps1 -Path "target\$env:WIN7_TARGET\release\gateinto.exe" -Imports imports.txt

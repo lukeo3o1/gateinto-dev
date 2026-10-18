@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/windows7.yml
+      - .github/actions/win7-build/**
+      - .github/actions/win7-audit/**
       - .github/scripts/assert-static-crt.ps1
       - .github/scripts/assert-win7-imports.ps1
       - .github/scripts/win7-imports.txt
@@ -23,9 +25,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NIGHTLY_TOOLCHAIN: nightly-2026-09-15
   NASM_VERSION: '2.16.03'
-  AWS_LC_SYS_CMAKE_BUILDER: '0'
 
 jobs:
   build:
@@ -36,42 +36,18 @@ jobs:
       fail-fast: false
       matrix:
         target: [x86_64-win7-windows-msvc, i686-win7-windows-msvc]
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      WIN7_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
-          components: rust-src
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: win7-nightly-${{ matrix.target }}
-          save-if: ${{ github.event_name == 'workflow_dispatch' }}
-      - name: Install NASM ${{ env.NASM_VERSION }}
-        if: ${{ startsWith(matrix.target, 'i686-') }}
-        uses: ilammy/setup-nasm@v1
-        with:
-          version: ${{ env.NASM_VERSION }}
-      - run: rustc +${{ env.NIGHTLY_TOOLCHAIN }} -vV
       - name: Build
         id: build
-        run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} build -Z build-std=std,panic_abort --target ${{ env.WIN7_TARGET }} --locked --release --bin gateinto
-      - name: Check that gateinto.exe links the C runtime statically
-        run: .github/scripts/assert-static-crt.ps1 -Path "target\${{ env.WIN7_TARGET }}\release\gateinto.exe"
-      - name: List imports
-        run: |
-          $exe = "target\${{ env.WIN7_TARGET }}\release\gateinto.exe"
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
-          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
-          & $dumpbin /nologo /imports $exe | Tee-Object -FilePath imports.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Audit imports against the Windows 7 allow-list
-        run: .github/scripts/assert-win7-imports.ps1 -Path "target\${{ env.WIN7_TARGET }}\release\gateinto.exe" -Imports imports.txt
+        uses: ./.github/actions/win7-build
+        with:
+          target: ${{ matrix.target }}
+          nasm-version: ${{ env.NASM_VERSION }}
+          cache-save: ${{ github.event_name == 'workflow_dispatch' }}
+      - uses: ./.github/actions/win7-audit
+        with:
+          target: ${{ matrix.target }}
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         with:

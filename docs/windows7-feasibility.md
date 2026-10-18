@@ -115,11 +115,17 @@ without it the binary uses `ProcessPrng` (see below).
 CI: [.github/workflows/windows7.yml](../.github/workflows/windows7.yml) runs the
 same build for both `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` on
 `windows-latest`. It runs on `workflow_dispatch` and on pull requests that
-change the workflow, its scripts, `.cargo/config.toml`, `Cargo.toml`,
-`Cargo.lock`, anything under `src/` or this document. The i686 job installs NASM
-2.16.03 with `ilammy/setup-nasm@v1`, as `ci.yml` does. Both jobs set
-`AWS_LC_SYS_CMAKE_BUILDER=0`: only the `cc` builder defines `_WIN32_WINNT=0x0601`
-for `-win7-windows-msvc` targets. Each job checks the static C runtime and runs
+change the workflow, its actions, its scripts, `.cargo/config.toml`,
+`Cargo.toml`, `Cargo.lock`, anything under `src/` or this document. The steps
+live in two composite actions,
+[win7-build](../.github/actions/win7-build/action.yml) and
+[win7-audit](../.github/actions/win7-audit/action.yml), which the
+[release workflow](../.github/workflows/release.yml) also uses for the alpha
+and beta releases. The i686 job installs NASM 2.16.03 with
+`ilammy/setup-nasm@v1`, as `ci.yml` does. Both jobs set
+`AWS_LC_SYS_CMAKE_BUILDER=0`: only the `cc` builder defines
+`_WIN32_WINNT=0x0601` for `-win7-windows-msvc` targets. Each job checks the
+static C runtime and runs
 `dumpbin /imports`. Then
 [assert-win7-imports.ps1](../.github/scripts/assert-win7-imports.ps1) fails the
 job in two cases:
@@ -148,7 +154,7 @@ or removes the import.
 `Tbsi_GetDeviceInfo` now appears in the string scan for both targets. That is
 expected: it is the name passed to `GetProcAddress`, not a static import.
 
-The workflow names its variables `NIGHTLY_TOOLCHAIN` and `WIN7_TARGET` because
+The actions name their variables `NIGHTLY_TOOLCHAIN` and `WIN7_TARGET` because
 Windows environment variable names are case-insensitive: a workflow-level
 `TOOLCHAIN` overrides the `toolchain` variable that `dtolnay/rust-toolchain`
 sets from its input, and the action then fails with `'toolchain' is a required
