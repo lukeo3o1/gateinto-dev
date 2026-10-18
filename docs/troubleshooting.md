@@ -181,6 +181,13 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   file uses too. Only that gateway is disabled, and links to its name or
   address are refused until the file is fixed or deleted; delete it to
   remove that gateway.
+- `linked gateways <folder>: ...` after the dialog was answered OK (for
+  example `Access is denied` or `Read-only file system`): the `gateways`
+  folder next to the config file could not be created or written. Nothing
+  was stored and no session was started. Fix the folder's permissions and
+  open the link again, or have an administrator add the gateway to the
+  config file. A `.<pid>.<hex>.tmp` file left there by a crash is never read
+  and is removed by `reset --purge-config`.
 - `linked-gateways: error: ... not a directory`: `gateways/` is a file, a
   link or a reparse point. Only gateways of the configuration file work
   until it is replaced by a plain directory or removed.
