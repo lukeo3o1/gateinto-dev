@@ -170,12 +170,17 @@ How it is bounded:
   confirmation within 120 seconds. The token ties an answer to the exact
   request the agent validated; it does not prove that a person answered. A
   program running as the user can send `launch` and then `approve` itself,
-  but such a program can just as well write `linked-gateways.toml`, so this
+  but such a program can just as well write a file in `gateways/`, so this
   gives it nothing new. The confirmation protects against websites, not
   against software of the same user.
-- **Stored once, never overwritten.** An approved gateway is stored in a
-  separate file (`linked-gateways.toml`, at most 32 entries, written
-  atomically) with only host, port, portal and approval time. Later links
+- **Stored once, never overwritten.** An approved gateway is stored in its
+  own file in a separate owner-only directory (`gateways/`, at most 32
+  files), named only from its canonical address, written atomically and
+  never over an existing file, with only its name, host, port, portal and
+  approval time. File names are checked to be single plain components; hosts
+  that are Windows device names are refused; links and reparse points are
+  never followed. A damaged file disables only its own entry and still
+  blocks links that name its profile or address. Later links
   with the same values start sessions without asking; links with other
   values for that name are refused. `gateinto gateway forget` removes an
   entry; `gateinto gateway list` and `gateinto status` show the source of
@@ -205,7 +210,7 @@ What remains:
   anything else for them.
 - **Programs of the same user.** Any program running as the user can add a
   gateway without a dialog, through the agent's IPC endpoint or by editing
-  the linked-gateways file, as it can edit the configuration file.
+  the files in `gateways/`, as it can edit the configuration file.
 - **Approval is permanent until forgotten.** An approved gateway stays
   usable by later links of any site that knows its name, gateway and portal.
 

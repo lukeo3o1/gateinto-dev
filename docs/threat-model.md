@@ -38,7 +38,7 @@ meant to protect, against whom, and what it does not protect.
   running as the user can send requests to the agent, including `approve`
   for a confirmation it requested itself, so it can add a gateway without
   the dialog. That is no new privilege: it could also write
-  `linked-gateways.toml` or the configuration file directly. The
+  a file in `gateways/` or the configuration file directly. The
   confirmation token only ties an answer to the request the agent
   validated; it does not prove that a person answered. Other users and
   remote machines cannot write to the endpoint.

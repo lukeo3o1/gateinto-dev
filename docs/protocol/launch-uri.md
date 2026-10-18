@@ -148,7 +148,7 @@ Error messages say which rule was broken and never repeat the URI.
 ## Resolution
 
 The agent knows the gateways of its configuration file and those in the
-linked-gateways file. On a name collision the configuration file wins and the
+gateway files. On a name collision the configuration file wins and the
 linked entry is ignored.
 
 1. **The profile is known.** If the link has `gateway` and `portal`, they
@@ -181,7 +181,7 @@ linked entry is ignored.
   with the confirmation. It binds an answer to the request the agent
   validated; it does not prove that a person answered, since any program of
   the same user can send `launch` and `approve` (it could equally write the
-  linked-gateways file).
+  gateway files).
 - Windows, on an interactive desktop (the window station of `open` is
   visible): a `MessageBoxW` titled `Gateinto` with OK and Cancel, Cancel as
   the default button (`MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 |
@@ -212,22 +212,54 @@ linked entry is ignored.
 
 ## Linked gateways
 
-- Stored in `linked-gateways.toml` next to the default configuration file
-  (`%APPDATA%\Gateinto\linked-gateways.toml`; `$XDG_CONFIG_HOME/gateinto` or
-  `~/.config/gateinto` elsewhere), also when `--config` names another file.
-  The configuration file itself is never written.
-- Written to a temporary file in the same directory and renamed over the old
-  one. At most 32 entries; at most 256 KiB are read.
-- Each entry is `[gateways.<name>]` with `host`, `port`, `portal_url` and
-  `approved_at` (Unix seconds). Any other key, an invalid host or port, or a
-  portal without an `https` origin makes the file invalid, and the agent then
-  refuses launches until it is fixed or removed (it fails closed);
-  `gateinto status` and `gateinto setup` report `linked-gateways: error: ...`
-  and carry on.
+- Each approved gateway is one file in the `gateways` directory next to the
+  default configuration file (`%APPDATA%\Gateinto\gateways\`;
+  `$XDG_CONFIG_HOME/gateinto/gateways` or `~/.config/gateinto/gateways`
+  elsewhere), also when `--config` names another file. The configuration
+  file itself is never written.
+- The file name comes only from the validated, canonical gateway address,
+  never from the profile name or other link text: `<host>.toml` for port
+  443, otherwise `<host>_<port>.toml` (`_` never occurs in a host). DNS names
+  are lowercase; IPv4 addresses are dotted decimal; IPv6 addresses use the
+  compressed form with `-` for `:` and no brackets (`2001-db8--1_3128.toml`),
+  and IPv4-mapped IPv6 addresses become IPv4 first. Examples:
+  `proxy.corp.example.toml`, `proxy.corp.example_8443.toml`,
+  `10.0.0.1_3128.toml`.
+- The name must contain only `a-z`, `0-9`, `.`, `_` and `-`, no `..`, be a
+  single path component and at most 255 bytes; otherwise the gateway is
+  refused before the user is asked (a host of more than 250 characters
+  cannot be stored). Gateway hosts whose first label is a Windows device
+  name (`CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, any
+  case) are refused in the link on every platform, and so are DNS names that
+  would read as an IPv6 address with `-` for `:` (such as `fe80--1`), since
+  their file name would be ambiguous.
+- A file holds `name` (the profile), `host`, `port`, `portal_url` and
+  `approved_at` (Unix seconds), and nothing else.
+- The directory is created owner-only (`0700` on Unix). If it is a link, a
+  reparse point or not a directory, it is refused: launches of gateways that
+  are not in the configuration file fail, and `gateinto status` reports
+  `linked-gateways: error: ...`.
+- A new file is written to a temporary file in the directory (created new,
+  synced), then published with a hard link, which never replaces an
+  existing file, and the directory is synced. Approving never overwrites a
+  file.
+- Loading reads only regular `*.toml` files directly in the directory, never
+  links or reparse points and never subdirectories; at most 32 files and
+  16 KiB each. A file is valid only if it parses, has no other keys, a valid
+  host, port and portal, and its file name is exactly the one its own host
+  and port give; a profile name used by two files makes both invalid.
+- An invalid file disables only its own entry; the other gateways keep
+  working. `gateinto status`, `gateinto gateway list` and every launch
+  answer list it as `linked-gateway: error: <file>: <reason>`. A link whose
+  profile or gateway address is held by an invalid file is refused without
+  asking, and the file is left as it is.
 - `gateinto gateway list` shows every gateway with its source;
-  `gateinto gateway forget <name>` removes a linked entry (sessions that are
-  open stay open until closed). `gateinto reset --purge-device-identity
-  --purge-config` deletes the file together with the configuration file.
+  `gateinto gateway forget <name>` deletes the file whose valid content
+  carries that name, after checking again that it is a regular file in the
+  directory (sessions that are open stay open until closed). A damaged file
+  is removed by deleting it. `gateinto reset --purge-device-identity
+  --purge-config` deletes the regular `*.toml` files of the directory, and
+  the directory if it is then empty, together with the configuration file.
 
 ## What a gateway added from a link gets
 

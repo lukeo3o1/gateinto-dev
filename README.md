@@ -322,9 +322,10 @@ The format, its limits and everything it can never do are specified in
   `gateway` and `portal`, `gateinto open` asks the user first: a Windows
   dialog naming the profile, gateway and portal origin, with Cancel as the
   default button (a `yes` prompt on a terminal elsewhere; no desktop or
-  terminal means refusal). On approval the gateway is stored in
-  `%APPDATA%\Gateinto\linked-gateways.toml` with only its host, port and
-  portal, and later links to it do not ask again. It uses the default TLS
+  terminal means refusal). On approval the gateway is stored in its own
+  file under `%APPDATA%\Gateinto\gateways\`, named after its address, with
+  only its name, host, port and portal, and later links to it do not ask
+  again. A damaged file there disables only its own gateway. It uses the default TLS
   settings: public roots, `hybrid_preferred`, `client_certificate =
   "optional"`. The configuration file is never written, and its gateways win
   over linked ones of the same name.
