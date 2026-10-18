@@ -267,12 +267,9 @@ impl Agent {
             address = %confirmation.gateway,
             "a link asks to add a gateway; waiting for the user's confirmation"
         );
-        Ok(vec![
-            ipc::confirm_line(&token),
-            format!("gateway: {}", confirmation.profile),
-            format!("address: {}", confirmation.gateway),
-            format!("portal: {}", confirmation.portal_origin()),
-        ])
+        let mut lines = vec![ipc::confirm_line(&token)];
+        lines.extend(confirmation.echo());
+        Ok(lines)
     }
 
     fn answered(pending: &mut Option<Pending>, token: ConfirmToken) -> Result<Pending, String> {
