@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -15,6 +15,17 @@ use crate::ipc::ConfirmToken;
 use crate::uri::LaunchRequest;
 
 pub const DEFAULT_PORT: u16 = 443;
+
+fn local_ipv4(ip: Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    let shared = first == 100 && second & 0xc0 == 64;
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || first == 0
+        || shared
+}
 
 fn strict_host(text: &str) -> Option<Host> {
     if let Some(ip) = text.strip_prefix('[') {
@@ -89,14 +100,15 @@ impl GatewayAddress {
     pub fn is_local(&self) -> bool {
         match (&self.0.host, self.ip()) {
             (Host::Name(name), _) => name == "localhost" || name.ends_with(".localhost"),
-            (_, Some(IpAddr::V4(ip))) => {
-                ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-            }
+            (_, Some(IpAddr::V4(ip))) => local_ipv4(ip),
             (_, Some(IpAddr::V6(ip))) => {
+                let [a, b, c, d, e, f, ..] = ip.segments();
+                let nat64 = [a, b, c, d, e, f] == [0x64, 0xff9b, 0, 0, 0, 0];
                 ip.is_loopback()
                     || ip.is_unspecified()
                     || ip.is_unique_local()
                     || ip.is_unicast_link_local()
+                    || nat64 && local_ipv4(Ipv4Addr::from_bits(ip.to_bits() as u32))
             }
             (_, None) => false,
         }
@@ -1050,6 +1062,15 @@ mod tests {
             "[::ffff:127.0.0.1]",
             "localhost",
             "app.localhost",
+            "100.64.0.1",
+            "100.127.255.254",
+            "0.1.2.3",
+            "0.255.255.255",
+            "255.255.255.255",
+            "[64:ff9b::7f00:1]",
+            "[64:ff9b::192.168.1.1]",
+            "[64:ff9b::a00:1]",
+            "[64:ff9b::100.64.0.1]",
         ] {
             assert!(with(gateway).contains(LOCAL), "{gateway}");
         }
@@ -1060,6 +1081,12 @@ mod tests {
             "[2001:db8::1]",
             "[::ffff:8.8.8.8]",
             "localhost.example",
+            "100.63.255.255",
+            "100.128.0.1",
+            "1.0.0.1",
+            "255.255.255.254",
+            "[64:ff9b::808:808]",
+            "[64:ff9b:1::7f00:1]",
         ] {
             assert!(!with(gateway).contains(LOCAL), "{gateway}");
         }

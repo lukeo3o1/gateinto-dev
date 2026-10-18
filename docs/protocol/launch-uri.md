@@ -200,8 +200,9 @@ linked entry is ignored.
 - Without either, `open` refuses: `no desktop or terminal to ask on; nothing
   was stored`.
 - In the dialog and the prompt alike, when the gateway is `localhost`, a
-  `*.localhost` name, or a loopback, private, link-local, unique-local or
-  unspecified IP address (IPv4-mapped addresses included), the text adds
+  `*.localhost` name, or a loopback, private, link-local, unique-local,
+  shared (`100.64.0.0/10`), `0.0.0.0/8` or broadcast IP address
+  (IPv4-mapped and NAT64 `64:ff9b::/96` forms of these included), the text adds
   `This address is on your computer or local network.` under the gateway
   line.
 - Any answer other than OK (or `yes`), and every error, sends `deny`.
