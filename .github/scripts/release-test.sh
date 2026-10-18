@@ -21,7 +21,8 @@ payloads() {
   printf '%s\n' \
     "gateinto-$short-x86_64-pc-windows-msvc.exe" \
     "gateinto-$short-x86_64-pc-windows-msvc.msi" \
-    "gateinto-$short-i686-pc-windows-msvc.exe"
+    "gateinto-$short-i686-pc-windows-msvc.exe" \
+    "gateinto-$short-i686-pc-windows-msvc.msi"
   if [[ $channel != latest ]]; then
     printf '%s\n' \
       "gateinto-$short-x86_64-win7-windows-msvc-experimental.exe" \
@@ -100,6 +101,10 @@ dir=$(dist latest)
 printf '%s  %s\n' "$(sha256sum "$dir/gateinto-$short-i686-pc-windows-msvc.exe" | cut -d ' ' -f 1)" other.exe \
   > "$dir/gateinto-$short-i686-pc-windows-msvc.exe.sha256"
 expect_assets_fail 'checksum line names another file' latest "$sha" "$dir" 'does not match'
+
+dir=$(dist latest)
+rm "$dir/gateinto-$short-i686-pc-windows-msvc.msi" "$dir/gateinto-$short-i686-pc-windows-msvc.msi.sha256"
+expect_assets_fail 'missing x86 MSI' latest "$sha" "$dir" 'gateinto-0123456789ab-i686-pc-windows-msvc.msi is missing'
 
 dir=$(dist latest)
 other=fedcba9876543210fedcba9876543210fedcba98

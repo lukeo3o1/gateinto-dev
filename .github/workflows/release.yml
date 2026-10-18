@@ -28,6 +28,7 @@ env:
   CARGO_TERM_COLOR: always
   WIX_VERSION: '5.0.2'
   NASM_VERSION: '2.16.03'
+  RELEASE_VERSION: '0.0.0'
 
 jobs:
   resolve:
@@ -40,6 +41,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       short: ${{ steps.resolve.outputs.short }}
       built: ${{ steps.resolve.outputs.built }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,6 +55,7 @@ jobs:
             echo "channel=$CHANNEL"
             echo "sha=$sha"
             echo "short=${sha:0:12}"
+            echo "version=$RELEASE_VERSION-${sha:0:12}"
             echo "built=$(date -u '+%Y-%m-%d %H:%M UTC')"
           } | tee -a "$GITHUB_OUTPUT"
 
@@ -67,14 +70,16 @@ jobs:
           - target: x86_64-pc-windows-msvc
             cache-key: check-windows-latest
             test-args: ''
-            msi: true
+            msi-arch: x64
           - target: i686-pc-windows-msvc
             cache-key: windows-i686
             test-args: --target i686-pc-windows-msvc
+            msi-arch: x86
             nasm: true
     env:
       RELEASE_TARGET: ${{ matrix.target }}
       SHORT_SHA: ${{ needs.resolve.outputs.short }}
+      GATEINTO_BUILD_VERSION: ${{ needs.resolve.outputs.version }}
     defaults:
       run:
         shell: pwsh
@@ -98,6 +103,8 @@ jobs:
       - run: cargo build --locked --release --target $env:RELEASE_TARGET --bin gateinto
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe"
+      - name: Check that gateinto.exe prints the build version
+        run: .github/scripts/assert-version.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe" -Version $env:GATEINTO_BUILD_VERSION
       - name: Stage gateinto.exe
         run: |
           $exe = Join-Path 'dist' "gateinto-$env:SHORT_SHA-$env:RELEASE_TARGET.exe"
@@ -105,16 +112,17 @@ jobs:
           Copy-Item "target\$env:RELEASE_TARGET\release\gateinto.exe" -Destination $exe
           .github/scripts/write-sha256.ps1 -Path $exe
       - name: Install WiX ${{ env.WIX_VERSION }}
-        if: matrix.msi
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
           if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix exited with $LASTEXITCODE" }
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
-      - name: Build the MSI
-        if: matrix.msi
+      - name: Build the ${{ matrix.msi-arch }} MSI
+        env:
+          MSI_ARCH: ${{ matrix.msi-arch }}
         run: |
           $msi = Join-Path $PWD "dist\gateinto-$env:SHORT_SHA-$env:RELEASE_TARGET.msi"
-          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" -Output $msi
+          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" -Output $msi `
+            -Arch $env:MSI_ARCH -Version $env:RELEASE_VERSION -DisplayVersion $env:GATEINTO_BUILD_VERSION
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
           .github/scripts/write-sha256.ps1 -Path $msi
       - uses: actions/upload-artifact@v7
@@ -135,6 +143,7 @@ jobs:
     env:
       WIN7_TARGET: ${{ matrix.target }}
       SHORT_SHA: ${{ needs.resolve.outputs.short }}
+      GATEINTO_BUILD_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -148,6 +157,11 @@ jobs:
       - uses: ./.github/actions/win7-audit
         with:
           target: ${{ matrix.target }}
+      - name: Check that gateinto.exe prints the build version
+        shell: pwsh
+        env:
+          EXE: ${{ steps.build.outputs.exe }}
+        run: .github/scripts/assert-version.ps1 -Path $env:EXE -Version $env:GATEINTO_BUILD_VERSION
       - name: Stage gateinto.exe
         shell: pwsh
         env:
