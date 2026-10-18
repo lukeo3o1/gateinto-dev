@@ -35,20 +35,25 @@ Gateinto's. Without `--config`, `gateinto open` and the agent read the per-user 
 file `%APPDATA%\Gateinto\gateinto.toml`.
 
 The package creates no shortcuts. `MajorUpgrade` replaces an older version in place, and a
-downgrade to a lower `major.minor.patch` is refused. `AllowSameVersionUpgrades="yes"` makes an
-MSI with the same version replace the installed one too: every alpha, beta and latest build of a
-commit has the `Cargo.toml` version, so without it a second build would be installed next to the
-first as another product. Windows Installer compares only `major.minor.patch`, so between builds
-of the same version any MSI replaces any other, including an older commit. ICE validation can
-report ICE61 ("This product should remove only older versions of itself") as a warning for this;
-it is expected, and `build.ps1` does not treat warnings as errors. CI does not yet install one
-build over another of the same version.
+downgrade to a lower `major.minor.patch` is refused with "A newer version of Gateinto is already
+installed. Uninstall it first, then install this one." `AllowSameVersionUpgrades="yes"` makes an
+MSI with the same version replace the installed one too: every alpha, beta and latest build has
+version `0.0.0`, so without it a second build would be installed next to the first as another
+product. Between builds of the same version any MSI replaces any other, including an older
+commit, and the x64 and x86 MSIs replace each other because they share the `UpgradeCode` and the
+install folder. A release MSI (`0.0.0`) over a local build with the `Cargo.toml` version (for
+example `0.1.0`) is a downgrade and is refused; uninstall the local build first. ICE validation
+can report ICE61 ("This product should remove only older versions of itself") as a warning for
+this; it is expected, and `build.ps1` does not treat warnings as errors. CI does not yet install
+one build over another of the same version or of the other architecture.
 
 ## Build
 
 The release workflow builds the MSI from the release's `gateinto.exe` with the same `build.ps1` and
-WiX 5.0.2 and attaches it to each release (see [install](../../docs/install.md#releases)). The MSI
-is x64 only (`-arch x64`); the 32-bit build ships as a bare executable only. To build it from a checkout instead you need the Rust toolchain, the .NET SDK and WiX v5:
+WiX 5.0.2 and attaches an x64 MSI and an x86 MSI to each release (see
+[install](../../docs/install.md#releases)). It passes `-Version 0.0.0 -DisplayVersion
+0.0.0-<commit>`. To build it from a checkout instead you need the Rust toolchain, the .NET SDK
+and WiX v5:
 
 ```powershell
 dotnet tool install --global wix --version 5.0.2
@@ -57,7 +62,15 @@ pwsh packaging/wix/build.ps1
 ```
 
 `build.ps1` reads the version from `Cargo.toml`, takes `target\release\gateinto.exe` and writes
-`target\wix\gateinto.msi`. Use `-Binary` and `-Output` to choose other paths.
+`target\wix\gateinto.msi`. Use `-Binary` and `-Output` to choose other paths. Other parameters:
+
+- `-Arch x64` (default) or `-Arch x86`, passed to `wix build -arch`. The package is per-user,
+  installs into `%LOCALAPPDATA%\Programs\Gateinto` and writes only `HKCU` keys that both
+  registry views share, so nothing in `gateinto.wxs` depends on the architecture. Build the x86
+  MSI from an `i686-pc-windows-msvc` `gateinto.exe`.
+- `-Version X.Y.Z` sets the MSI version instead of the `Cargo.toml` one.
+- `-DisplayVersion <text>` names the product `Gateinto <text>` in **Installed apps**; without it
+  the name is `Gateinto`.
 
 ## Install
 
@@ -112,9 +125,10 @@ See [docs/install.md](../../docs/install.md).
 
 ## Verification status
 
-CI (`windows-latest`, Microsoft Software Key Storage Provider) builds the MSI, installs and
-uninstalls it silently, and checks that the SPKI survives a reinstall and changes only after a
+CI (`windows-latest`, Microsoft Software Key Storage Provider) builds an x64 MSI and an x86 MSI
+(the latter with the i686 debug build, run under WOW64), installs and uninstalls each silently, and checks that the SPKI survives a reinstall and changes only after a
 purge. The following are not verified by CI and need manual testing: TPM keys, interactive
-install, the Windows 10/11 matrix and clicking a real `gateinto://` link.
+install, the Windows 10/11 matrix, the x86 MSI on real 32-bit Windows (it is untested on Windows
+7, where the i686 executable does not start) and clicking a real `gateinto://` link.
 
 No WinGet package exists, so `winget install` does not install Gateinto.
