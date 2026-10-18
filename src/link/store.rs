@@ -572,14 +572,27 @@ fn publish_with(
     link: impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     match link(temp, path) {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => write_new(path, bytes)
-            .inspect_err(|error| {
-                if error.kind() != io::ErrorKind::AlreadyExists {
-                    let _ = std::fs::remove_file(path);
-                }
-            }),
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+            create_in_place_with(path, bytes, open_new, |file, bytes| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            })
+        }
         result => result,
     }
+}
+
+#[cfg(unix)]
+fn create_in_place_with(
+    path: &Path,
+    bytes: &[u8],
+    open: impl FnOnce(&Path) -> io::Result<std::fs::File>,
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut file = open(path)?;
+    write(&mut file, bytes).inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
 }
 
 // A `\\?\` path is not normalised by Windows and may exceed MAX_PATH; only absolute
@@ -633,12 +646,16 @@ fn publish(temp: &Path, path: &Path, _bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn open_new(path: &Path) -> io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
+    options.open(path)
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = open_new(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -914,6 +931,30 @@ mod tests {
             std::fs::hard_link(from, to)
         });
         assert_eq!(linked.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_removes_only_a_file_it_created() {
+        let store = store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let path = store.dir().join("a.example.toml");
+        std::fs::write(&path, "keep").unwrap();
+        let refused = create_in_place_with(
+            &path,
+            b"new",
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |file, bytes| file.write_all(bytes),
+        );
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
+
+        let created = store.dir().join("b.example.toml");
+        let failed = create_in_place_with(&created, b"new", open_new, |_, _| {
+            Err(io::Error::from(io::ErrorKind::WriteZero))
+        });
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::WriteZero);
+        assert!(!created.exists());
     }
 
     #[test]
