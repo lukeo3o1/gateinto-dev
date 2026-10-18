@@ -176,10 +176,7 @@ impl Purge {
         let gateways = self
             .linked
             .iter()
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "toml")
-            })
+            .filter(|path| path.to_string_lossy().ends_with(".toml"))
             .count();
         let temps = self.linked.len() - gateways;
         let temps_text = |count: usize| {
@@ -190,11 +187,11 @@ impl Purge {
             (0, 0) => None,
             (0, temps) => Some(format!("{} in {}", temps_text(temps), dir.display())),
             (gateways, temps) => {
-                let noun = if gateways == 1 { "gateway" } else { "gateways" };
-                let mut text = format!(
-                    "the {gateways} {noun} added from links in {}",
-                    dir.display()
-                );
+                let what = match gateways {
+                    1 => "the gateway".to_owned(),
+                    count => format!("the {count} gateways"),
+                };
+                let mut text = format!("{what} added from links in {}", dir.display());
                 if temps > 0 {
                     text.push_str(&format!(" (and {})", temps_text(temps)));
                 }
@@ -553,7 +550,12 @@ mod tests {
             ),
             (
                 vec!["a.example.toml"],
-                "the 1 gateway added from links in /home/me/gateways",
+                "the gateway added from links in /home/me/gateways",
+            ),
+            (
+                vec![".toml", temp],
+                "the gateway added from links in /home/me/gateways (and 1 leftover temporary \
+                 file)",
             ),
             (
                 vec![temp, temp],

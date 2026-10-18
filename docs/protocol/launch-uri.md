@@ -271,8 +271,9 @@ linked entry is ignored.
   carries that name, after checking again that it is a regular file in the
   directory (sessions that are open stay open until closed). If several
   files carry the name, for example a valid and a damaged one, it deletes
-  nothing and lists them all. A damaged file is removed by deleting it. `gateinto reset --purge-device-identity
-  --purge-config` deletes the regular `*.toml` files of the directory and
+  nothing and lists them all. A damaged file is removed by deleting it.
+  `gateinto reset --purge-device-identity --purge-config` deletes the
+  regular `*.toml` files of the directory and
   Gateinto's own leftover temporary files, and the directory if it is then
   empty, together with the configuration file. Its messages count the
   gateway files and the temporary files separately.
