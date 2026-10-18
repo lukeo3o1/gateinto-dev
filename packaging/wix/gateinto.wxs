@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
-      Name="Gateinto"
+      Name="$(var.ProductName)"
       Manufacturer="Gateinto"
       Version="$(var.Version)"
       UpgradeCode="2C50F196-F9CD-4535-A997-0687BEB31CDE"
@@ -9,7 +9,7 @@
       Language="1033"
       Compressed="yes">
 
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Gateinto is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Gateinto is already installed. Uninstall it first, then install this one." />
     <MediaTemplate EmbedCab="yes" />
 
     <Property Id="ARPNOMODIFY" Value="1" />
