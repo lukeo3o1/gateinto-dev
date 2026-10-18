@@ -49,7 +49,7 @@ expect_assets() {
   expected=$(while IFS= read -r file; do
     printf '%s\n%s.sha256\n%s\n%s.sha256\n' "$file" "$file" "${file/-$short/}" "${file/-$short/}"
   done < <(payloads "$channel") | sort)
-  actual=$(ls "$dir" | sort)
+  actual=$(find "$dir" -mindepth 1 -printf '%f\n' | sort)
   if [[ "$actual" != "$expected" ]]; then
     fail "$name" "files are"$'\n'"$actual"$'\n'"expected"$'\n'"$expected"
     return

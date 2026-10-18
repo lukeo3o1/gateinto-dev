@@ -47,6 +47,15 @@ jobs:
         shell: pwsh
         run: .github/scripts/assert-static-crt.ps1 -Path target\debug\gateinto.exe
 
+  release-scripts:
+    name: release scripts (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: shellcheck .github/scripts/*.sh
+      - run: .github/scripts/release-test.sh
+
   windows-i686:
     name: windows-latest, i686-pc-windows-msvc under WOW64
     runs-on: windows-latest
