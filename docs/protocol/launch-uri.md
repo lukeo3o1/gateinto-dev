@@ -136,8 +136,10 @@ Error messages say which rule was broken and never repeat the URI.
    and starts Chrome or Edge with that profile, that session's proxy and the
    start page.
 6. For a new gateway it starts nothing. It keeps the validated request and
-   answers `open` with a one-time confirmation token. `open`, which runs on
-   the user's desktop, asks the user (see [Confirmation](#confirmation)) and
+   answers `open` with a one-time confirmation token and the gateway name,
+   address and portal origin it validated. `open` checks that these equal
+   its own parse of the link (it denies and stops otherwise), then, running
+   on the user's desktop, asks the user (see [Confirmation](#confirmation)) and
    sends `approve <token>` or `deny <token>`. On `approve` the agent stores
    the gateway and continues with step 5. If the session cap was reached in
    the meantime, the gateway stays stored and the answer says so; the next

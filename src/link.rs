@@ -240,6 +240,22 @@ impl Confirmation {
         Origin::of(&self.portal).map_or_else(String::new, |origin| origin.to_string())
     }
 
+    pub fn echo(&self) -> Vec<String> {
+        vec![
+            format!("gateway: {}", self.profile),
+            format!("address: {}", self.gateway),
+            format!("portal: {}", self.portal_origin()),
+        ]
+    }
+
+    pub fn echoed_by(&self, lines: &[String]) -> bool {
+        let echoed: Vec<&String> = lines
+            .iter()
+            .filter(|line| !line.starts_with(crate::ipc::CONFIRM))
+            .collect();
+        echoed.into_iter().eq(self.echo().iter())
+    }
+
     pub fn message(&self) -> String {
         let local = if self.gateway.is_local() {
             "\nThis address is on your computer or local network."
@@ -950,6 +966,56 @@ mod tests {
             let text = error.to_string();
             assert!(text.contains(&format!("\"{existing}\"")), "{text}");
             assert!(text.contains("case"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_agent_echo_must_name_the_same_gateway_as_the_link() {
+        let echo = confirmation().echo();
+        assert_eq!(
+            echo,
+            vec![
+                "gateway: newco",
+                "address: proxy.newco.example:443",
+                "portal: https://portal.newco.example",
+            ]
+        );
+        let token = "confirm: 0123456789abcdef0123456789abcdef".to_owned();
+        let with_token = |lines: &[&str]| {
+            std::iter::once(token.clone())
+                .chain(lines.iter().map(|line| (*line).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        assert!(confirmation().echoed_by(&with_token(&[
+            "gateway: newco",
+            "address: proxy.newco.example:443",
+            "portal: https://portal.newco.example",
+        ])));
+        for lines in [
+            vec![
+                "gateway: newco",
+                "address: evil.example:443",
+                "portal: https://portal.newco.example",
+            ],
+            vec![
+                "gateway: other",
+                "address: proxy.newco.example:443",
+                "portal: https://portal.newco.example",
+            ],
+            vec![
+                "gateway: newco",
+                "address: proxy.newco.example:443",
+                "portal: https://evil.example",
+            ],
+            vec!["gateway: newco", "address: proxy.newco.example:443"],
+            vec![
+                "gateway: newco",
+                "address: proxy.newco.example:443",
+                "portal: https://portal.newco.example",
+                "extra: x",
+            ],
+        ] {
+            assert!(!confirmation().echoed_by(&with_token(&lines)), "{lines:?}");
         }
     }
 

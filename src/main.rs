@@ -843,11 +843,11 @@ async fn open(args: OpenArgs) -> Result {
         }
         result => result?,
     };
-    let token = match &response {
-        Response::Ok(lines) => ipc::confirm_token(lines),
-        Response::Error(_) => None,
+    let lines = match &response {
+        Response::Ok(lines) => lines.clone(),
+        Response::Error(_) => Vec::new(),
     };
-    let Some(token) = token else {
+    let Some(token) = ipc::confirm_token(&lines) else {
         return print_response(response);
     };
     let (Some(gateway), Some(portal)) = (launch.gateway, launch.portal) else {
@@ -859,6 +859,14 @@ async fn open(args: OpenArgs) -> Result {
         gateway,
         portal,
     };
+    if !confirmation.echoed_by(&lines) {
+        ipc::send(&endpoint, &Request::Deny(token)).await?;
+        return Err(
+            "the agent asked to confirm another gateway than the link names; nothing \
+                    was stored"
+                .into(),
+        );
+    }
     let answer = tokio::task::spawn_blocking(move || {
         prompt::ask(&confirmation).map_err(|error| error.to_string())
     })
