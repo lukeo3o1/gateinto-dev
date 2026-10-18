@@ -185,9 +185,12 @@ linked entry is ignored.
 - Windows, on an interactive desktop (the window station of `open` is
   visible): a `MessageBoxW` titled `Gateinto` with OK and Cancel, Cancel as
   the default button (`MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 |
-  MB_SETFOREGROUND | MB_TOPMOST`). OK and Cancel have no access keys, and
-  Enter and Space choose the default, so typing into a page that opens the
-  link cannot approve it. The text names the profile, the gateway
+  MB_SETFOREGROUND | MB_TOPMOST`). OK and Cancel have no access keys and
+  Enter and Space choose the focused button, Cancel at first, so no single
+  keystroke approves. Moving the focus to OK (Tab or an arrow key) and then
+  pressing Enter or Space, or clicking OK, does approve, so a page that
+  coaches the user ("press Tab, then Enter") remains a social-engineering
+  risk. The text names the profile, the gateway
   `host:port` and the portal origin, warns that the gateway will see this
   device's identity and the traffic of the isolated browser, so the user
   should allow it only if they trust the organisation that runs it, and ends
