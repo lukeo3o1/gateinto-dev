@@ -173,17 +173,20 @@ linked entry is ignored.
   is already waiting`. The token is 128 random bits, valid once, and expires
   with the confirmation.
 - Windows, on an interactive desktop (the window station of `open` is
-  visible): a `MessageBoxW` titled `Gateinto` with Yes and No, No as the
-  default button (`MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 |
-  MB_SETFOREGROUND | MB_TOPMOST`). The text names the profile, the gateway
-  `host:port` and the portal origin, and warns that the gateway will see
-  this device's identity and the traffic of the isolated browser, so the user
-  should allow it only if they trust the organisation that runs it.
+  visible): a `MessageBoxW` titled `Gateinto` with OK and Cancel, Cancel as
+  the default button (`MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 |
+  MB_SETFOREGROUND | MB_TOPMOST`). OK and Cancel have no access keys, and
+  Enter and Space choose the default, so typing into a page that opens the
+  link cannot approve it. The text names the profile, the gateway
+  `host:port` and the portal origin, warns that the gateway will see this
+  device's identity and the traffic of the isolated browser, so the user
+  should allow it only if they trust the organisation that runs it, and ends
+  with `Choose OK to allow this gateway, or Cancel to refuse.`
 - Otherwise, with a terminal on standard input and standard error, the same
   text and a prompt that accepts only `yes`.
 - Without either, `open` refuses: `no desktop or terminal to ask on; nothing
   was stored`.
-- Any answer other than Yes, and every error, sends `deny`.
+- Any answer other than OK (or `yes`), and every error, sends `deny`.
 - The dialog and the prompt are covered by unit tests of their text, style
   and answer handling; the Windows dialog itself has not been checked by hand
   yet.

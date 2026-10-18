@@ -320,8 +320,8 @@ The format, its limits and everything it can never do are specified in
 - A link whose `gateway` or `portal` differs from a known gateway of the same
   name is refused; known gateways are never changed. For an unknown name with
   `gateway` and `portal`, `gateinto open` asks the user first: a Windows
-  dialog naming the profile, gateway and portal origin, with No as the
-  default (a `yes` prompt on a terminal elsewhere; no desktop or terminal
+  dialog naming the profile, gateway and portal origin, with OK and Cancel
+  and Cancel as the default (a `yes` prompt on a terminal elsewhere; no desktop or terminal
   means refusal). On approval the gateway is stored in
   `%APPDATA%\Gateinto\linked-gateways.toml` with only its host, port and
   portal, and later links to it do not ask again. It uses the default TLS
@@ -657,7 +657,7 @@ only if the browser is first. Do not run it on shared hosts you do not trust.
 Any website can open a `gateinto://` link. With the handler registered, such a
 link can at most make the agent start a browser session for a known gateway
 on a page of that gateway's portal origin, at most 5 times a minute and 4
-sessions at a time, or ask the user, in a dialog that defaults to No, to add
+sessions at a time, or ask the user, in a dialog that defaults to Cancel, to add
 the gateway it names. It cannot change a known gateway, set a trust setting or
 a credential, or run anything else. A gateway the user approves sees the
 isolated browser's connections and, if it asks for one, the device

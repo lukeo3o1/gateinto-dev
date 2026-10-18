@@ -167,7 +167,7 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   could not ask. Click the link in a desktop session, or run `gateinto open
   -- "<link>"` in a terminal and type `yes`.
 - `adding the gateway "<name>" was not allowed; nothing was stored`: the
-  dialog was answered No or closed, or something other than `yes` was typed.
+  dialog was answered Cancel or closed, or something other than `yes` was typed.
 - `another gateway confirmation is already waiting for an answer`: answer
   the open dialog first; an unanswered confirmation expires after 120
   seconds.
