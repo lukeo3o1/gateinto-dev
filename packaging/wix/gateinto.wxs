@@ -9,7 +9,7 @@
       Language="1033"
       Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Gateinto is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Gateinto is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Property Id="ARPNOMODIFY" Value="1" />
