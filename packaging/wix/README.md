@@ -35,12 +35,20 @@ Gateinto's. Without `--config`, `gateinto open` and the agent read the per-user 
 file `%APPDATA%\Gateinto\gateinto.toml`.
 
 The package creates no shortcuts. `MajorUpgrade` replaces an older version in place, and a
-downgrade is refused.
+downgrade to a lower `major.minor.patch` is refused. `AllowSameVersionUpgrades="yes"` makes an
+MSI with the same version replace the installed one too: every alpha, beta and latest build of a
+commit has the `Cargo.toml` version, so without it a second build would be installed next to the
+first as another product. Windows Installer compares only `major.minor.patch`, so between builds
+of the same version any MSI replaces any other, including an older commit. ICE validation can
+report ICE61 ("This product should remove only older versions of itself") as a warning for this;
+it is expected, and `build.ps1` does not treat warnings as errors. CI does not yet install one
+build over another of the same version.
 
 ## Build
 
 The release workflow builds the MSI from the release's `gateinto.exe` with the same `build.ps1` and
-WiX 5.0.2 and attaches it to the release. The MSI is x64 only (`-arch x64`); the 32-bit build ships as a zip only. To build it from a checkout instead you need the Rust toolchain, the .NET SDK and WiX v5:
+WiX 5.0.2 and attaches it to each release (see [install](../../docs/install.md#releases)). The MSI
+is x64 only (`-arch x64`); the 32-bit build ships as a bare executable only. To build it from a checkout instead you need the Rust toolchain, the .NET SDK and WiX v5:
 
 ```powershell
 dotnet tool install --global wix --version 5.0.2
