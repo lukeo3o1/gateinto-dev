@@ -298,10 +298,14 @@ jobs:
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
       - name: Build the MSI
         run: |
-          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -Output "$env:RUNNER_TEMP\gateinto.msi"
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
+      - name: Check that the MSI build writes only the MSI
+        run: |
+          $files = @(Get-ChildItem -Force -Name "$env:RUNNER_TEMP\msi-build")
+          if ($files.Count -ne 1 -or $files[0] -ne 'gateinto.msi') { throw "build.ps1 wrote $($files -join ', ')" }
       - name: Install, set up, uninstall, reinstall and purge (Software KSP)
-        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi"
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\msi-build\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi"
       - name: Upload the installer logs
         if: failure()
         uses: actions/upload-artifact@v7
