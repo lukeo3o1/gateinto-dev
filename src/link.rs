@@ -224,8 +224,7 @@ impl Confirmation {
              Portal: {}\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
              installed) and all traffic of the isolated browser. Allow it only if you trust \
-             the organisation that runs this gateway.\n\n\
-             Add this gateway?",
+             the organisation that runs this gateway.",
             self.profile,
             self.gateway,
             self.portal_origin()

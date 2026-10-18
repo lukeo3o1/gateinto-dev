@@ -16,6 +16,13 @@ impl std::fmt::Display for Unavailable {
 
 impl std::error::Error for Unavailable {}
 
+pub fn dialog_text(confirmation: &Confirmation) -> String {
+    format!(
+        "{}\n\nChoose OK to allow this gateway, or Cancel to refuse.",
+        confirmation.message()
+    )
+}
+
 pub fn ask_on(
     confirmation: &Confirmation,
     input: &mut impl BufRead,
@@ -37,7 +44,7 @@ pub fn ask(confirmation: &Confirmation) -> Result<bool, Box<dyn std::error::Erro
 
     #[cfg(windows)]
     if windows::interactive_desktop() {
-        return Ok(windows::message_box(&confirmation.message()));
+        return Ok(windows::message_box(&dialog_text(confirmation)));
     }
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
         return Ok(ask_on(
@@ -57,12 +64,17 @@ mod windows {
         GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-        MESSAGEBOX_STYLE, MessageBoxW, WSF_VISIBLE,
+        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MB_TOPMOST,
+        MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW, WSF_VISIBLE,
     };
 
+    // OK and Cancel have no access keys, so typing cannot answer the dialog.
     pub const STYLE: MESSAGEBOX_STYLE =
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST;
+        MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST;
+
+    pub fn approved(result: MESSAGEBOX_RESULT) -> bool {
+        result == IDOK
+    }
 
     pub fn interactive_desktop() -> bool {
         // SAFETY: the window station handle belongs to the process and is not closed here.
@@ -89,20 +101,31 @@ mod windows {
         let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
         let (text, title) = (wide(text), wide("Gateinto"));
         // SAFETY: both buffers are NUL-terminated UTF-16 strings that outlive the call.
-        unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), STYLE) == IDYES }
+        approved(unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), STYLE) })
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IDABORT, IDCANCEL, IDNO, IDYES, MB_TYPEMASK,
+        };
 
         #[test]
-        fn the_dialog_defaults_to_no_and_stays_on_top() {
-            assert_eq!(STYLE & MB_DEFBUTTON2, MB_DEFBUTTON2);
-            assert_eq!(STYLE & MB_YESNO, MB_YESNO);
-            assert_eq!(STYLE & MB_ICONWARNING, MB_ICONWARNING);
-            assert_eq!(STYLE & MB_TOPMOST, MB_TOPMOST);
-            assert_eq!(STYLE & MB_SETFOREGROUND, MB_SETFOREGROUND);
+        fn the_dialog_has_no_access_keys_and_defaults_to_cancel() {
+            assert_eq!(
+                STYLE,
+                MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST
+            );
+            assert_eq!(STYLE & MB_TYPEMASK, MB_OKCANCEL);
+        }
+
+        #[test]
+        fn only_ok_approves() {
+            assert!(approved(IDOK));
+            for result in [IDCANCEL, IDYES, IDNO, IDABORT, 0] {
+                assert!(!approved(result), "{result}");
+            }
         }
     }
 }
@@ -142,6 +165,17 @@ mod tests {
                 "{output}"
             );
         }
+    }
+
+    #[test]
+    fn the_dialog_text_says_that_ok_allows_and_cancel_refuses() {
+        let text = dialog_text(&confirmation());
+        assert!(text.starts_with(&confirmation().message()), "{text}");
+        assert!(
+            text.ends_with("\n\nChoose OK to allow this gateway, or Cancel to refuse."),
+            "{text}"
+        );
+        assert!(!text.contains("Yes") && !text.contains('?'), "{text}");
     }
 
     #[test]

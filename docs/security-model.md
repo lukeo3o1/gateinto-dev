@@ -159,8 +159,9 @@ is not silent: nothing is stored or connected before the user approves.
 How it is bounded:
 
 - **Explicit first-time confirmation.** Only `gateinto open`, running on the
-  user's desktop, asks. On Windows it shows a top-most warning dialog with No
-  as the default button that names the profile, the gateway `host:port` and
+  user's desktop, asks. On Windows it shows a top-most warning dialog with OK
+  and Cancel, Cancel as the default button and no access keys, so only a
+  deliberate click on OK approves; it names the profile, the gateway `host:port` and
   the portal origin; elsewhere it needs `yes` typed on a terminal; without a
   desktop or terminal it refuses. The agent never prompts, applies the rate
   limit before a confirmation is handed out, keeps one open at a time, and
@@ -199,7 +200,7 @@ What remains:
 - **Approval is permanent until forgotten.** An approved gateway stays
   usable by later links of any site that knows its name, gateway and portal.
 
-Mitigations: the confirmation is opt-in per gateway and defaults to No; the
+Mitigations: the confirmation is opt-in per gateway and defaults to Cancel; the
 link cannot weaken TLS or change a known gateway; every session is isolated
 in a fresh profile; `gateinto gateway list`/`status` make linked gateways
 visible and `gateinto gateway forget` removes them. There is no setting yet
