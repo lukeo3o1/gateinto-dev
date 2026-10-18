@@ -67,9 +67,14 @@ you could do.
 [docs/install.md](docs/install.md#releases). `alpha` is replaced after the
 `CI` workflow succeeds on a push to `master`. To replace `beta` or `latest`,
 run the workflow by hand (Actions, Release, Run workflow) with the channel and
-a branch, tag or full commit SHA; the commit must contain this workflow's
-`.github/actions` and `.github/scripts`. Runs for the same channel queue
-instead of overlapping; a newer queued run replaces an older queued one.
+a full commit SHA (recommended; a branch or tag also works). The commit must
+contain this workflow's `.github/actions` and `.github/scripts`, so commits
+from before the release channels were added cannot be released. Runs for the
+same channel queue instead of overlapping; a newer queued run replaces an
+older queued one. An `alpha` run whose commit is no longer the tip of `master`
+builds and publishes nothing, and a run started by a failed CI run uses its own
+concurrency group, so neither replaces a queued `alpha` run. A failed publish
+can leave the channel missing until a later run succeeds; rerun it.
 
 Each run tests and builds `gateinto.exe` for `x86_64-pc-windows-msvc` and
 `i686-pc-windows-msvc` with `GATEINTO_BUILD_VERSION=0.0.0-<commit>` (which

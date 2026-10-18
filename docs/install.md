@@ -18,15 +18,25 @@ the same name that points at the commit it was built from:
 | Channel | Published | Marked on GitHub |
 | --- | --- | --- |
 | `alpha` | automatically, after CI passes on a push to `master` and the release workflow's own build and tests pass | prerelease |
-| `beta` | by hand: Actions → Release → Run workflow, channel `beta`, and a branch, tag or full commit SHA (default `master`) | prerelease |
+| `beta` | by hand: Actions → Release → Run workflow, channel `beta`, and a full commit SHA (recommended), branch or tag (default `master`) | prerelease |
 | `latest` | by hand, the same way with channel `latest` | latest release |
 
 Every publish replaces the whole release: the workflow deletes the release and its tag and
 creates both again at the built commit, so the files, the tag and the notes always describe one
-commit. While the new files upload, that release and its URLs are briefly missing. The release title and
-notes name the channel, the full commit SHA and the build date, followed by a notice that the
-files are not code-signed, that TPM keys, real browsers, physical Windows machines and Windows 7
-are not yet verified on real hardware
+commit. While the new files upload, that release and its URLs are briefly missing. If a publish
+fails after deleting the release, the channel stays missing until a later run publishes it:
+rerun the failed run, or for `alpha` wait for the next push to `master` (a rerun of an `alpha`
+run whose commit is no longer the tip of `master` publishes nothing). A rerun of an older
+`alpha` run never moves `alpha` back to an older commit.
+
+Give the manual run a full commit SHA, so that the release is built from exactly the commit you
+checked; a branch is resolved when the run starts. Only commits that contain this release
+workflow's `.github/actions` and `.github/scripts` can be released, so commits from before the
+release channels were added cannot be published.
+
+The release title and notes name the channel, the full commit SHA and the build date, followed
+by a notice that the files are not code-signed, that TPM keys, real browsers, physical Windows
+machines and Windows 7 are not yet verified on real hardware
 ([#23](https://github.com/lukeo3o1/gateinto-dev/issues/23)), and, for `alpha` and `beta`, that
 the Windows 7 builds are experimental and can use only the Microsoft Software Key Storage
 Provider.
