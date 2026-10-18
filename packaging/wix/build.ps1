@@ -32,6 +32,7 @@ wix build (Join-Path $PSScriptRoot 'gateinto.wxs') `
     -d "Version=$Version" `
     -d "ProductName=$name" `
     -d "BinaryPath=$binary" `
+    -pdbtype none `
     -o $Output
 if ($LASTEXITCODE -ne 0) { throw "wix build exited with $LASTEXITCODE" }
 

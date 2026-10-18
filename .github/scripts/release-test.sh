@@ -90,6 +90,10 @@ expect_assets_fail 'latest with Windows 7 builds' latest "$sha" "$(dist alpha)" 
 expect_assets_fail 'beta without Windows 7 builds' beta "$sha" "$(dist latest)" 'missing'
 
 dir=$(dist alpha)
+printf 'pdb\n' > "$dir/gateinto-$short-x86_64-pc-windows-msvc.wixpdb"
+expect_assets_fail 'WiX debug file' alpha "$sha" "$dir" "unexpected file gateinto-$short-x86_64-pc-windows-msvc.wixpdb"
+
+dir=$(dist alpha)
 rm "$dir/gateinto-$short-x86_64-pc-windows-msvc.msi.sha256"
 expect_assets_fail 'missing checksum file' alpha "$sha" "$dir" 'missing'
 
