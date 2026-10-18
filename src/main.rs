@@ -1260,13 +1260,9 @@ fn delete_files(files: &Purge) -> Result {
             .map_err(|error| format!("deleting {}: {error}", path.display()))?;
         println!("deleted config file {}", path.display());
     }
-    if let Some(dir) = &files.linked_dir {
+    if let (Some(dir), Some(summary)) = (&files.linked_dir, files.linked_summary()) {
         LinkedStore::new(dir.clone()).remove(&files.linked)?;
-        println!(
-            "deleted the {} gateways added from links in {}",
-            files.linked.len(),
-            dir.display()
-        );
+        println!("deleted {summary}");
     }
     Ok(())
 }
