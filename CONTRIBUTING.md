@@ -71,10 +71,14 @@ a full commit SHA (recommended; a branch or tag also works). The commit must
 contain this workflow's `.github/actions` and `.github/scripts`, so commits
 from before the release channels were added cannot be released. Runs for the
 same channel queue instead of overlapping; a newer queued run replaces an
-older queued one. An `alpha` run whose commit is no longer the tip of `master`
-builds and publishes nothing, and a run started by a failed CI run uses its own
-concurrency group, so neither replaces a queued `alpha` run. A failed publish
-can leave the channel missing until a later run succeeds; rerun it.
+older queued one. A run started by a failed CI run uses its own concurrency
+group, so it never replaces a queued `alpha` run. An `alpha` run whose commit
+is no longer the tip of `master`, such as one started by rerunning an older
+successful `master` CI run, builds and publishes nothing, but it still queues
+in the `alpha` group and can replace a queued `alpha` run for a newer commit.
+`alpha` then stays at its current commit until the next push to `master`, or
+until the CI run of the tip of `master` is rerun. A failed publish can leave
+the channel missing until a later run succeeds; rerun it.
 
 Each run tests and builds `gateinto.exe` for `x86_64-pc-windows-msvc` and
 `i686-pc-windows-msvc` with `GATEINTO_BUILD_VERSION=0.0.0-<commit>` (which
