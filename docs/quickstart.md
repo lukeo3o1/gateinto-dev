@@ -18,31 +18,24 @@ You need:
 
 ### From a GitHub release
 
-Releases are built by
-[.github/workflows/release.yml](../.github/workflows/release.yml) for
-`x86_64-pc-windows-msvc` (64-bit) and `i686-pc-windows-msvc` (32-bit). On
-64-bit Windows use the `x86_64` files. Each release has these files, and the
-same zip and `.zip.sha256` for `i686-pc-windows-msvc` (there is no 32-bit
-MSI):
-
-- `gateinto-<tag>-x86_64-pc-windows-msvc.zip`, containing a folder of the same
-  name with `gateinto.exe`, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md` and
-  `SECURITY.md`;
-- `gateinto-<tag>-x86_64-pc-windows-msvc.zip.sha256`, one line with the
-  lowercase SHA-256 of the zip, two spaces and the zip name;
-- `gateinto-<tag>-x86_64-pc-windows-msvc.msi` and its `.msi.sha256`, the
-  per-user installer with the same `gateinto.exe` (see [install](install.md)).
-  This guide uses the zip.
-
-Download both into the same folder and verify the zip in PowerShell before
-extracting it:
+The repository is private; its releases are the owner's own downloads.
+[install.md](install.md#releases) describes the three channels (`alpha`,
+`beta` and `latest`), their files and their stable URLs. On 64-bit Windows 10
+or 11 download `gateinto-x86_64-pc-windows-msvc.exe` and
+`gateinto-x86_64-pc-windows-msvc.exe.sha256` from the `latest` release (or
+`alpha` or `beta` for a newer, less tested commit) into one folder, then
+verify the executable in PowerShell and rename it:
 
 ```powershell
-$zip = "gateinto-v0.1.0-x86_64-pc-windows-msvc.zip"   # use the name you downloaded
-$expected = (Get-Content "$zip.sha256").Split(" ")[0]
-$actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-if ($actual -eq $expected) { Expand-Archive $zip -DestinationPath . } else { throw "SHA-256 mismatch: do not use this file" }
+$exe = "gateinto-x86_64-pc-windows-msvc.exe"
+$expected = (Get-Content "$exe.sha256").Split(" ")[0]
+$actual = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+if ($actual -eq $expected) { Rename-Item $exe gateinto.exe } else { throw "SHA-256 mismatch: do not use this file" }
 ```
+
+32-bit Windows 10 uses `gateinto-i686-pc-windows-msvc.exe` the same way. The
+per-user MSI is `gateinto-x86_64-pc-windows-msvc.msi` (see
+[install](install.md)); this guide uses the executable.
 
 Notes:
 
@@ -54,8 +47,8 @@ Notes:
   [static C runtime](compatibility.md#static-c-runtime)). Older builds needed
   the Visual C++ Redistributable; see
   [troubleshooting](troubleshooting.md#vcruntime140dll-was-not-found).
-- No release has been published yet at the time of writing. Until one is,
-  build from source.
+- The release workflow has not published a release yet at the time of
+  writing. Until it has, build from source.
 
 ### From source
 

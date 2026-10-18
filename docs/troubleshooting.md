@@ -219,7 +219,7 @@ comes from an older build that linked the Microsoft C runtime dynamically and
 needed the Visual C++ Redistributable for x64. Current builds link the C
 runtime statically (`.cargo/config.toml` sets `+crt-static` for MSVC targets),
 so they need no redistributable: build from source or use a build made after
-this change (no release has been published yet). If you set `RUSTFLAGS` or
+this change. If you set `RUSTFLAGS` or
 `CARGO_ENCODED_RUSTFLAGS` when building, it replaces the flags from
 `.cargo/config.toml`; add `-C target-feature=+crt-static` to it.
 
@@ -273,8 +273,9 @@ Windows 7 is experimental and unsupported. See
   Windows 7, and those releases require Windows 10 or later. Newer builds
   no longer import this function, but the regular releases still do not run
   before Windows 10. Use Windows 10 or 11. The only Windows 7 candidates are the
-  experimental `gateinto-i686-win7-windows-msvc` (32-bit) and
-  `gateinto-x86_64-win7-windows-msvc` artifacts of the Windows 7 workflow, which
+  experimental `i686-win7-windows-msvc` (32-bit) and `x86_64-win7-windows-msvc`
+  executables attached to the `alpha` and `beta` releases (see
+  [install.md](install.md#releases)) and built by the Windows 7 workflow, which
   have not been verified on Windows 7.
 - On Windows 7 there is no TPM key storage provider, so keys are software keys.
   `Tbsi_GetDeviceInfo unavailable (expected on Windows 7)` in a warning or

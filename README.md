@@ -38,8 +38,8 @@ third-party upstream proxies and physical machines are not verified; see
 
 Start with [docs/quickstart.md](docs/quickstart.md): it goes from a fresh
 Windows 10/11 x64 machine (no TPM needed) to a working tunnel, including the
-upstream proxy you need to bring. Release builds are a zip for Windows 10/11
-x64 (`x86_64-pc-windows-msvc`) and a zip for 32-bit Windows 10
+upstream proxy you need to bring. Release builds are a bare `gateinto.exe` for
+Windows 10/11 x64 (`x86_64-pc-windows-msvc`) and one for 32-bit Windows 10
 (`i686-pc-windows-msvc`), each with a `.sha256` checksum file. Builds link the
 C runtime statically; CI checks that `gateinto.exe` imports no Visual C++
 runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
@@ -50,11 +50,31 @@ runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 [packaging/wix](packaging/wix/README.md): install, first run with
 `gateinto setup`, `gateinto status`, uninstall (which keeps the device key and
 the config file), reinstall with the same device identity, and the explicit
-purge. Each release attaches the MSI, built by the release workflow from the
-release's `gateinto.exe`, next to the zip; it can also be built with
-`packaging/wix/build.ps1`. There is no WinGet package; `winget install` does
-not install Gateinto. `packaging/winget` holds manifest templates that have not
-been submitted.
+purge. The MSI can also be built with `packaging/wix/build.ps1`. There is no
+WinGet package; `winget install` does not install Gateinto. `packaging/winget`
+holds manifest templates that have not been submitted.
+
+## Releases
+
+The repository is private, so its GitHub Releases are for the owner's own
+downloads. There are three rolling releases, each with a tag of the same name
+that moves to the commit it was built from
+([details](docs/install.md#releases)):
+
+- `alpha`: replaced automatically after CI passes on a push to `master` and
+  the release build and tests pass; a prerelease.
+- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref;
+  a prerelease.
+- `latest`: replaced by hand the same way; marked as the latest release.
+
+Every release has the x64 MSI, the x64 executable and the i686 executable;
+`alpha` and `beta` also have the experimental Windows 7 executables for
+`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`. Each file is attached
+with the short commit in its name and as a copy without it, each with a
+`.sha256`, so a URL such as
+`https://github.com/lukeo3o1/gateinto-dev/releases/download/latest/gateinto-x86_64-pc-windows-msvc.exe`
+stays the same from one publish to the next. Verify the `.sha256` before
+using a file; nothing is code-signed.
 
 ## Commands
 
@@ -675,17 +695,20 @@ with how it is verified, its current status and what is still needed.
 
 ## 32-bit Windows
 
-The `i686-pc-windows-msvc` build ships as a zip only; the MSI is x64 only. CI
-builds it and runs the full test suite as 32-bit processes under WOW64 on
-64-bit Windows, and checks that it links the C runtime statically. It has
+The `i686-pc-windows-msvc` build ships as an executable only; the MSI is x64
+only. CI builds it and runs the full test suite as 32-bit processes under
+WOW64 on 64-bit Windows, and checks that it links the C runtime statically. It has
 never run on a real 32-bit Windows 10 installation. See
 [docs/compatibility.md](docs/compatibility.md#32-bit-windows-i686).
 
 ## Windows 7
 
-Windows 7 is not supported and there is no Windows 7 release. A build for
-`x86_64-win7-windows-msvc` links and passes a static import audit in CI, but
-it has never been run on Windows 7; see
+Windows 7 is not supported and the `latest` release has no Windows 7 build.
+The `alpha` and `beta` releases attach experimental `x86_64-win7-windows-msvc`
+and `i686-win7-windows-msvc` executables that pass a static import audit in
+CI. On Windows 7 they can use only the Software Key Storage Provider, since
+Windows 7 has no TPM key storage provider. They have never been run on Windows
+7; see
 [docs/windows7-feasibility.md](docs/windows7-feasibility.md).
 
 ## Build and test

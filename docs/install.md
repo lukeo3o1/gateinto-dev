@@ -6,10 +6,72 @@ installs: `gateinto setup`, `gateinto status` and `gateinto reset`. The MSI is b
 
 No WinGet package exists. `winget install` and `winget uninstall` do not install or remove
 Gateinto; [packaging/winget](../packaging/winget/README.md) only holds unsubmitted manifest
-templates. Each release attaches `gateinto-<tag>-x86_64-pc-windows-msvc.msi` and its `.sha256`
-next to the zip (see the [quickstart](quickstart.md#from-a-github-release)); the MSI is not inside
-the zip. The MSI is x64 only; the 32-bit `i686-pc-windows-msvc` build ships as a zip only. To build it yourself, use `packaging/wix/build.ps1` as described in
+templates. To build the MSI yourself, use `packaging/wix/build.ps1` as described in
 [packaging/wix](../packaging/wix/README.md#build).
+
+## Releases
+
+The repository is private, so its GitHub Releases are for the owner's own downloads; nothing is
+published for anyone else. There are exactly three releases, one per channel, each with a tag of
+the same name that points at the commit it was built from:
+
+| Channel | Published | Marked on GitHub |
+| --- | --- | --- |
+| `alpha` | automatically, after CI passes on a push to `master` and the release workflow's own build and tests pass | prerelease |
+| `beta` | by hand: Actions → Release → Run workflow, channel `beta`, and a branch, tag or full commit SHA (default `master`) | prerelease |
+| `latest` | by hand, the same way with channel `latest` | latest release |
+
+Every publish replaces the whole release: the workflow deletes the release and its tag and
+creates both again at the built commit, so the files, the tag and the notes always describe one
+commit. While the new files upload, that release and its URLs are briefly missing. The release title and
+notes name the channel, the full commit SHA and the build date, followed by a notice that the
+files are not code-signed, that TPM keys, real browsers, physical Windows machines and Windows 7
+are not yet verified on real hardware
+([#23](https://github.com/lukeo3o1/gateinto-dev/issues/23)), and, for `alpha` and `beta`, that
+the Windows 7 builds are experimental and can use only the Microsoft Software Key Storage
+Provider.
+
+Each file is attached twice: with the first 12 characters of the commit in its name, and as a
+copy without it. The copy keeps the same download URL from one publish to the next:
+
+| File without the commit | `latest` | `alpha`, `beta` |
+| --- | --- | --- |
+| `gateinto-x86_64-pc-windows-msvc.exe`, Windows 10/11 x64 | yes | yes |
+| `gateinto-x86_64-pc-windows-msvc.msi`, the per-user installer below, x64 only | yes | yes |
+| `gateinto-i686-pc-windows-msvc.exe`, 32-bit Windows 10 | yes | yes |
+| `gateinto-x86_64-win7-windows-msvc-experimental.exe` | no | yes |
+| `gateinto-i686-win7-windows-msvc-experimental.exe` | no | yes |
+
+Each file has a `.sha256` next to it, one line with the lowercase SHA-256, two spaces and the
+file name. The names with the commit are `gateinto-<commit>-<target>.exe` and so on, for
+example `gateinto-0123456789ab-x86_64-pc-windows-msvc.exe`. The stable URLs are
+
+```text
+https://github.com/lukeo3o1/gateinto-dev/releases/download/<channel>/<file without the commit>
+https://github.com/lukeo3o1/gateinto-dev/releases/download/latest/gateinto-x86_64-pc-windows-msvc.msi
+```
+
+While the repository is private they work only when signed in to GitHub as someone with access,
+or through the GitHub CLI:
+
+```powershell
+gh release download latest --repo lukeo3o1/gateinto-dev --pattern 'gateinto-x86_64-pc-windows-msvc.msi*'
+```
+
+Verify a download in PowerShell before running or installing it:
+
+```powershell
+$file = "gateinto-x86_64-pc-windows-msvc.msi"   # the file you downloaded, with its .sha256 next to it
+$expected = (Get-Content "$file.sha256").Split(" ")[0]
+$actual = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 mismatch: do not use this file" }
+```
+
+The checksum only proves that the download matches the file the workflow published next to it;
+nothing is signed. Every build has the same `Cargo.toml` version, so the MSI version and
+**Installed apps** do not tell builds apart; the release notes and the file names with the
+commit do. Installing any channel's MSI replaces an installed Gateinto of the same version,
+including a build of a newer commit; see [packaging/wix](../packaging/wix/README.md).
 
 ## Install
 

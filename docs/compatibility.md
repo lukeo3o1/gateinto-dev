@@ -133,7 +133,7 @@ check.
 
 ### 32-bit Windows (i686)
 
-`i686-pc-windows-msvc` is built and released as a zip next to the x64 one.
+`i686-pc-windows-msvc` is built and released as an executable next to the x64 one.
 What is verified:
 
 - CI (`windows-i686` job in [.github/workflows/ci.yml](../.github/workflows/ci.yml))
@@ -242,10 +242,10 @@ compiled from scratch, and a release never writes a cache.
 The release workflow
 ([.github/workflows/release.yml](../.github/workflows/release.yml)) ran once
 via `workflow_dispatch` on a branch and produced the `x86_64-pc-windows-msvc`
-zip artifact. No release was created and no tag was pushed. The workflow now
-also builds the MSI from the release `gateinto.exe` with
-`packaging/wix/build.ps1` and WiX 5.0.2 and attaches it with its `.sha256`;
-this step has not run yet.
+zip artifact. No release was created and no tag was pushed. The workflow has
+since been changed to publish the rolling `alpha`, `beta` and `latest`
+releases with bare executables and the MSI (see
+[install.md](install.md#releases)); that version has not run yet.
 
 ### Static C runtime
 

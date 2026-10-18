@@ -62,20 +62,23 @@ you could do.
 
 ## Releases
 
-`.github/workflows/release.yml` runs on `v*` tags and on manual dispatch. On
-`windows-latest` it runs the test suite, builds `gateinto.exe` for
-`x86_64-pc-windows-msvc` and uploads a zip with the binary, the licenses,
-`README.md` and `SECURITY.md`, plus a SHA-256 checksum file, as a workflow
-artifact. For tag pushes it also creates a draft GitHub release with these
-files. A maintainer reviews and publishes the draft.
+`.github/workflows/release.yml` maintains three rolling GitHub releases,
+`alpha`, `beta` and `latest`, described in
+[docs/install.md](docs/install.md#releases). `alpha` is replaced after the
+`CI` workflow succeeds on a push to `master`. To replace `beta` or `latest`,
+run the workflow by hand (Actions, Release, Run workflow) with the channel and
+a branch, tag or full commit SHA; the commit must contain this workflow's
+`.github/actions` and `.github/scripts`. Runs for the same channel queue
+instead of overlapping; a newer queued run replaces an older queued one.
 
-The files are `gateinto-<version>-x86_64-pc-windows-msvc.zip` and
-`gateinto-<version>-x86_64-pc-windows-msvc.zip.sha256`, where `<version>` is
-the tag, or the first 12 characters of the commit for a manual run. The only
-release target is Windows 10/11 x64; Windows 7 is not a release target (see
-[docs/windows7-feasibility.md](docs/windows7-feasibility.md)). The workflow has
-run once via manual dispatch on a branch and produced the zip artifact; no
-release has been created and no tag has been pushed.
+Each run tests and builds `gateinto.exe` for `x86_64-pc-windows-msvc` and
+`i686-pc-windows-msvc`, builds the x64 MSI, and for `alpha` and `beta` also
+the experimental Windows 7 executables with the steps of the Windows 7
+workflow. The publish job then checks the file set with
+`.github/scripts/release-assets.sh`, writes the notes with
+`.github/scripts/release-notes.sh`, deletes the release and its tag, and
+creates them again at the built commit. Only that job has `contents: write`.
+`.github/scripts/release-test.sh` tests both scripts in CI.
 
 Not done yet: an SBOM, code signing of `gateinto.exe`, and build provenance
 attestations.
