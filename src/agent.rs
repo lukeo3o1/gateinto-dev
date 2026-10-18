@@ -291,7 +291,6 @@ impl Agent {
     async fn approve(&self, token: ConfirmToken) -> Result<Vec<String>, String> {
         let mut pending = self.inner.launching.lock().await;
         let answered = Self::answered(&mut pending, token)?;
-        self.check_capacity().await?;
         let known = self.inner.profiles.known()?;
         let resolution = link::resolve(
             &answered.request,
@@ -310,6 +309,15 @@ impl Agent {
                 address = %gateway.address,
                 "the user approved a gateway from a link; stored it"
             );
+        }
+        if let Err(error) = self.check_capacity().await {
+            return Err(match &launch.add {
+                Some(gateway) => format!(
+                    "the gateway \"{}\" was added, but {error}, then open the link again",
+                    gateway.name
+                ),
+                None => error,
+            });
         }
         self.start(launch).await
     }
