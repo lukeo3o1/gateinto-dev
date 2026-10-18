@@ -68,4 +68,4 @@ for name in "${payloads[@]}"; do
   printf '%s  %s\n' "$hash" "$fixed" > "$dir/$fixed.sha256"
 done
 
-ls -1 "$dir"
+find "$dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
