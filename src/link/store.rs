@@ -582,23 +582,44 @@ fn publish_with(
     }
 }
 
+// A `\\?\` path is not normalised by Windows and may exceed MAX_PATH; only absolute
+// paths without `/`, `.` or `..` keep their meaning with it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn verbatim(path: &str) -> String {
+    let normal = !path.contains('/')
+        && path
+            .split('\\')
+            .all(|component| component != "." && component != "..");
+    if path.starts_with(r"\\?\") || path.starts_with(r"\\.\") || !normal {
+        return path.to_owned();
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return format!(r"\\?\{path}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\") {
+        let mut parts = rest.split('\\');
+        if let (Some(server), Some(share)) = (parts.next(), parts.next())
+            && !server.is_empty()
+            && !share.is_empty()
+        {
+            return format!(r"\\?\UNC\{rest}");
+        }
+    }
+    path.to_owned()
+}
+
 #[cfg(windows)]
 fn publish(temp: &Path, path: &Path, _bytes: &[u8]) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use std::path::Prefix;
     use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
 
     let wide = |path: &Path| {
-        let verbatim = match path.components().next() {
-            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => {
-                let mut verbatim = std::ffi::OsString::from(r"\\?\");
-                verbatim.push(path.as_os_str());
-                PathBuf::from(verbatim)
-            }
-            _ => path.to_owned(),
+        let path = match path.to_str() {
+            Some(text) => PathBuf::from(verbatim(text)),
+            None => path.to_owned(),
         };
-        verbatim
-            .as_os_str()
+        path.as_os_str()
             .encode_wide()
             .chain(Some(0))
             .collect::<Vec<u16>>()
@@ -825,6 +846,37 @@ mod tests {
         ));
         assert_eq!(std::fs::read_to_string(&planted).unwrap(), "garbage");
         assert_eq!(files(&store), vec!["a.example.toml", "c.example.toml"]);
+    }
+
+    #[test]
+    fn windows_paths_get_the_verbatim_prefix_for_long_names() {
+        for (path, expected) in [
+            (
+                r"C:\Users\me\AppData\Roaming\Gateinto\gateways\a.toml",
+                r"\\?\C:\Users\me\AppData\Roaming\Gateinto\gateways\a.toml",
+            ),
+            (r"d:\g\a.toml", r"\\?\d:\g\a.toml"),
+            (
+                r"\\server\share\me\Gateinto\gateways\a.toml",
+                r"\\?\UNC\server\share\me\Gateinto\gateways\a.toml",
+            ),
+            (r"\\?\C:\g\a.toml", r"\\?\C:\g\a.toml"),
+            (
+                r"\\?\UNC\server\share\a.toml",
+                r"\\?\UNC\server\share\a.toml",
+            ),
+            (r"\\.\pipe\x", r"\\.\pipe\x"),
+            (r"C:/g/a.toml", r"C:/g/a.toml"),
+            (r"C:\g\..\a.toml", r"C:\g\..\a.toml"),
+            (r"C:\g\.\a.toml", r"C:\g\.\a.toml"),
+            (r"C:a.toml", r"C:a.toml"),
+            (r"\g\a.toml", r"\g\a.toml"),
+            (r"g\a.toml", r"g\a.toml"),
+            (r"\\server", r"\\server"),
+            (r"\\server\share", r"\\?\UNC\server\share"),
+        ] {
+            assert_eq!(verbatim(path), expected, "{path}");
+        }
     }
 
     #[test]
