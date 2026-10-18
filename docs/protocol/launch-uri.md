@@ -171,7 +171,10 @@ linked entry is ignored.
   at most one confirmation open: while one waits (up to 120 seconds), a
   further link that needs one is refused with `another gateway confirmation
   is already waiting`. The token is 128 random bits, valid once, and expires
-  with the confirmation.
+  with the confirmation. It binds an answer to the request the agent
+  validated; it does not prove that a person answered, since any program of
+  the same user can send `launch` and `approve` (it could equally write the
+  linked-gateways file).
 - Windows, on an interactive desktop (the window station of `open` is
   visible): a `MessageBoxW` titled `Gateinto` with OK and Cancel, Cancel as
   the default button (`MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 |
