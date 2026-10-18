@@ -167,14 +167,40 @@ impl Purge {
         if let Some(path) = &self.config {
             items.push(format!("the Gateinto config file {}", path.display()));
         }
-        if let (false, Some(dir)) = (self.linked.is_empty(), &self.linked_dir) {
-            items.push(format!(
-                "the {} gateways added from links in {}",
-                self.linked.len(),
-                dir.display()
-            ));
-        }
+        items.extend(self.linked_summary());
         items
+    }
+
+    pub fn linked_summary(&self) -> Option<String> {
+        let dir = self.linked_dir.as_ref()?;
+        let gateways = self
+            .linked
+            .iter()
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "toml")
+            })
+            .count();
+        let temps = self.linked.len() - gateways;
+        let temps_text = |count: usize| {
+            let plural = if count == 1 { "file" } else { "files" };
+            format!("{count} leftover temporary {plural}")
+        };
+        match (gateways, temps) {
+            (0, 0) => None,
+            (0, temps) => Some(format!("{} in {}", temps_text(temps), dir.display())),
+            (gateways, temps) => {
+                let noun = if gateways == 1 { "gateway" } else { "gateways" };
+                let mut text = format!(
+                    "the {gateways} {noun} added from links in {}",
+                    dir.display()
+                );
+                if temps > 0 {
+                    text.push_str(&format!(" (and {})", temps_text(temps)));
+                }
+                Some(text)
+            }
+        }
     }
 
     pub fn describe(&self) -> String {
@@ -508,6 +534,41 @@ mod tests {
         assert!(without_config.contains(&format!("spki-sha256: {fingerprint}\n\n")));
         assert!(!without_config.contains("config file"));
         assert!(!without_config.contains("links"));
+    }
+
+    #[test]
+    fn the_purge_counts_gateway_files_apart_from_leftover_temporary_files() {
+        let dir = PathBuf::from("/home/me/gateways");
+        let purge = |names: &[&str]| Purge {
+            config: None,
+            linked: names.iter().map(|name| dir.join(name)).collect(),
+            linked_dir: Some(dir.clone()),
+        };
+        let temp = ".42.0123456789abcdef0123456789abcdef.tmp";
+        for (names, expected) in [
+            (
+                vec!["a.example.toml", "b.example.toml", temp],
+                "the 2 gateways added from links in /home/me/gateways (and 1 leftover \
+                 temporary file)",
+            ),
+            (
+                vec!["a.example.toml"],
+                "the 1 gateway added from links in /home/me/gateways",
+            ),
+            (
+                vec![temp, temp],
+                "2 leftover temporary files in /home/me/gateways",
+            ),
+        ] {
+            assert_eq!(
+                purge(&names).items(),
+                vec![expected.to_owned()],
+                "{names:?}"
+            );
+            assert_eq!(purge(&names).linked_summary().as_deref(), Some(expected));
+        }
+        assert_eq!(purge(&[]).items(), Vec::<String>::new());
+        assert_eq!(purge(&[]).linked_summary(), None);
     }
 
     #[test]
