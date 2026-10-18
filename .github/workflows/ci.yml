@@ -81,6 +81,12 @@ jobs:
       - run: cargo test --target $env:TARGET --all-targets --all-features --locked
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto.exe"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-i686-debug
+          path: target/${{ env.TARGET }}/debug/gateinto.exe
+          if-no-files-found: error
+          retention-days: 1
 
   build-windows-release:
     name: release build (windows-latest)
@@ -258,21 +264,33 @@ jobs:
           exit 0
 
   msi:
-    name: msi install, uninstall and purge (windows-latest, Software KSP)
-    needs: build-windows-release
+    name: msi install, uninstall and purge (windows-latest${{ matrix.arch == 'x86' && ', x86 under WOW64' || '' }}, Software KSP)
+    needs: [build-windows-release, windows-i686]
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            artifact: windows-release
+            dir: target/release
+          - arch: x86
+            artifact: windows-i686-debug
+            dir: target/i686-pc-windows-msvc/debug
     defaults:
       run:
         shell: pwsh
     env:
       WIX_VERSION: '5.0.2'
+      MSI_ARCH: ${{ matrix.arch }}
+      EXE: ${{ matrix.dir }}/gateinto.exe
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: windows-release
-          path: target/release
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.dir }}
       - name: Install WiX ${{ env.WIX_VERSION }}
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
@@ -280,14 +298,14 @@ jobs:
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
       - name: Build the MSI
         run: |
-          pwsh packaging/wix/build.ps1 -Output "$env:RUNNER_TEMP\gateinto.msi"
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -Output "$env:RUNNER_TEMP\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
       - name: Install, set up, uninstall, reinstall and purge (Software KSP)
-        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -Exe target\release\gateinto.exe -LogDir "$env:RUNNER_TEMP\msi"
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi"
       - name: Upload the installer logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: msi-logs
+          name: msi-logs-${{ matrix.arch }}
           path: ${{ runner.temp }}/msi/*.log
           if-no-files-found: ignore
