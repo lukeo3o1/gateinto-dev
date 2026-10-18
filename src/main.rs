@@ -119,7 +119,7 @@ struct ResetArgs {
 
     /// Also delete the config file named with --config, or else the default
     /// %APPDATA%\Gateinto\gateinto.toml, and the gateways added from gateinto:// links
-    /// (%APPDATA%\Gateinto\linked-gateways.toml)
+    /// (the *.toml files in %APPDATA%\Gateinto\gateways)
     #[arg(long)]
     purge_config: bool,
 
