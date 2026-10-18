@@ -123,6 +123,7 @@ pub enum StoreError {
     AddressTaken(PathBuf),
     Full,
     Unstorable(Unstorable),
+    Ambiguous(GatewayName, Vec<PathBuf>),
 }
 
 impl fmt::Display for StoreError {
@@ -154,6 +155,18 @@ impl fmt::Display for StoreError {
                  `gateinto gateway forget <name>`"
             ),
             Self::Unstorable(error) => error.fmt(f),
+            Self::Ambiguous(name, files) => {
+                let files: Vec<String> = files
+                    .iter()
+                    .map(|file| file.display().to_string())
+                    .collect();
+                write!(
+                    f,
+                    "the gateway name \"{name}\" is held by several files: {}; nothing was \
+                     deleted, delete the ones you do not want",
+                    files.join(", ")
+                )
+            }
         }
     }
 }
@@ -388,6 +401,26 @@ impl LinkedStore {
 
     pub fn forget(&self, name: &GatewayName) -> Result<Option<PathBuf>, StoreError> {
         let loaded = self.load()?;
+        let mut involved: Vec<PathBuf> = loaded
+            .gateways
+            .iter()
+            .filter(|gateway| &gateway.name == name)
+            .map(|gateway| {
+                self.dir
+                    .join(file_name(&gateway.address).unwrap_or_default())
+            })
+            .chain(
+                loaded
+                    .invalid
+                    .iter()
+                    .filter(|entry| entry.name.as_ref() == Some(name))
+                    .map(|entry| entry.file.clone()),
+            )
+            .collect();
+        involved.sort();
+        if involved.len() > 1 {
+            return Err(StoreError::Ambiguous(name.clone(), involved));
+        }
         let Some(gateway) = loaded.gateways.iter().find(|gateway| &gateway.name == name) else {
             return Ok(None);
         };
@@ -1026,6 +1059,32 @@ mod tests {
         assert!(matches!(error, StoreError::Full), "{error}");
         assert!(error.to_string().contains("gateway forget"), "{error}");
         assert_eq!(store.load().unwrap().gateways.len(), MAX_LINKED);
+    }
+
+    #[test]
+    fn forgetting_a_name_held_by_several_files_is_refused_and_lists_them() {
+        let store = store();
+        let valid = store.add(&gateway("same", "a.example")).unwrap();
+        let damaged = plant(
+            &store,
+            "b.example.toml",
+            &format!("{}ca_file = \"x\"\n", entry("same", "b.example", 443)),
+        );
+        let twin_a = plant(&store, "c.example.toml", &entry("twin", "c.example", 443));
+        let twin_b = plant(&store, "d.example.toml", &entry("twin", "d.example", 443));
+        for (profile, involved) in [("same", [valid, damaged]), ("twin", [twin_a, twin_b])] {
+            let error = store.forget(&name(profile)).unwrap_err();
+            let StoreError::Ambiguous(held, files) = &error else {
+                panic!("{error}");
+            };
+            assert_eq!(held, &name(profile));
+            assert_eq!(files, &involved.to_vec());
+            let text = error.to_string();
+            for file in &involved {
+                assert!(text.contains(&file.display().to_string()), "{text}");
+                assert!(file.exists());
+            }
+        }
     }
 
     #[test]
