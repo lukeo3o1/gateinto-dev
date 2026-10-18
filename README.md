@@ -67,14 +67,16 @@ that moves to the commit it was built from
   a prerelease.
 - `latest`: replaced by hand the same way; marked as the latest release.
 
-Every release has the x64 MSI, the x64 executable and the i686 executable;
+Every release has the x64 and x86 MSIs and the x64 and i686 executables;
 `alpha` and `beta` also have the experimental Windows 7 executables for
 `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`. Each file is attached
 with the short commit in its name and as a copy without it, each with a
 `.sha256`, so a URL such as
 `https://github.com/lukeo3o1/gateinto-dev/releases/download/latest/gateinto-x86_64-pc-windows-msvc.exe`
 stays the same from one publish to the next. Verify the `.sha256` before
-using a file; nothing is code-signed.
+using a file; nothing is code-signed. Release builds report the version
+`0.0.0-<commit>`; an MSI built locally from an older `Cargo.toml` version must
+be uninstalled before a release MSI is installed.
 
 ## Commands
 
@@ -695,10 +697,12 @@ with how it is verified, its current status and what is still needed.
 
 ## 32-bit Windows
 
-The `i686-pc-windows-msvc` build ships as an executable only; the MSI is x64
-only. CI builds it and runs the full test suite as 32-bit processes under
-WOW64 on 64-bit Windows, and checks that it links the C runtime statically. It has
-never run on a real 32-bit Windows 10 installation. See
+The `i686-pc-windows-msvc` build ships as an executable and an x86 MSI. CI
+builds it, runs the full test suite as 32-bit processes under WOW64 on 64-bit
+Windows, checks that it links the C runtime statically, and installs,
+uninstalls and purges an x86 MSI with it under WOW64. Neither has ever run on
+a real 32-bit Windows 10 installation, and the x86 MSI is untested on
+Windows 7, where the i686 executable does not start. See
 [docs/compatibility.md](docs/compatibility.md#32-bit-windows-i686).
 
 ## Windows 7

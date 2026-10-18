@@ -37,8 +37,9 @@ copy without it. The copy keeps the same download URL from one publish to the ne
 | File without the commit | `latest` | `alpha`, `beta` |
 | --- | --- | --- |
 | `gateinto-x86_64-pc-windows-msvc.exe`, Windows 10/11 x64 | yes | yes |
-| `gateinto-x86_64-pc-windows-msvc.msi`, the per-user installer below, x64 only | yes | yes |
+| `gateinto-x86_64-pc-windows-msvc.msi`, the per-user installer below, 64-bit | yes | yes |
 | `gateinto-i686-pc-windows-msvc.exe`, 32-bit Windows 10 | yes | yes |
+| `gateinto-i686-pc-windows-msvc.msi`, the per-user installer below, 32-bit (x86) | yes | yes |
 | `gateinto-x86_64-win7-windows-msvc-experimental.exe` | no | yes |
 | `gateinto-i686-win7-windows-msvc-experimental.exe` | no | yes |
 
@@ -68,10 +69,24 @@ if ($actual -ne $expected) { throw "SHA-256 mismatch: do not use this file" }
 ```
 
 The checksum only proves that the download matches the file the workflow published next to it;
-nothing is signed. Every build has the same `Cargo.toml` version, so the MSI version and
-**Installed apps** do not tell builds apart; the release notes and the file names with the
-commit do. Installing any channel's MSI replaces an installed Gateinto of the same version,
-including a build of a newer commit; see [packaging/wix](../packaging/wix/README.md).
+nothing is signed.
+
+Release builds are versioned `0.0.0-<commit>`: `gateinto --version` prints for example
+`gateinto 0.0.0-0123456789ab`, and the MSI appears in **Installed apps** as
+`Gateinto 0.0.0-0123456789ab`. A Windows Installer version must be numeric, so the MSI's own
+version is `0.0.0` for every release build. Installing any release MSI, x64 or x86, from any
+channel therefore replaces whichever release build is installed, older or newer; see
+[packaging/wix](../packaging/wix/README.md).
+
+An MSI built locally with `packaging/wix/build.ps1` and no `-Version` has the `Cargo.toml`
+version, for example `0.1.0`, and is named plain `Gateinto`. Windows Installer sees a release
+MSI (`0.0.0`) over it as a downgrade and refuses with "A newer version of Gateinto is already
+installed. Uninstall it first, then install this one." Uninstall the local build first (see
+[Uninstall](#uninstall)); the device key and the config file are kept.
+
+The x86 MSI installs the `i686-pc-windows-msvc` executable, which needs Windows 10 or later. CI
+runs it only under WOW64 on 64-bit Windows Server; it has not been tested on a real 32-bit
+Windows 10 installation, and it is untested on Windows 7, where that executable does not start.
 
 ## Install
 
@@ -330,8 +345,10 @@ command until the next uninstall or repair.
 
 ## Verification
 
-The CI job `msi` on `windows-latest`, and the `msi` jobs of the compatibility workflow on
-`windows-2022` (and on `windows-2025` in its weekly and manual runs), build the MSI and run
+The CI job `msi` on `windows-latest` (once for an x64 MSI with the x64 release build, and once
+for an x86 MSI with the i686 debug build under WOW64), and the `msi` jobs of the compatibility
+workflow on `windows-2022` (and on `windows-2025` in its weekly and manual runs), build the MSI
+and run
 [.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), which checks the
 following with the Microsoft Software Key Storage Provider (the runners have no TPM):
 

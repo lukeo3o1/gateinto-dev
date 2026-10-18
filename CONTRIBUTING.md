@@ -72,7 +72,9 @@ a branch, tag or full commit SHA; the commit must contain this workflow's
 instead of overlapping; a newer queued run replaces an older queued one.
 
 Each run tests and builds `gateinto.exe` for `x86_64-pc-windows-msvc` and
-`i686-pc-windows-msvc`, builds the x64 MSI, and for `alpha` and `beta` also
+`i686-pc-windows-msvc` with `GATEINTO_BUILD_VERSION=0.0.0-<commit>` (which
+`gateinto --version` prints), builds an x64 and an x86 MSI with version `0.0.0`
+named `Gateinto 0.0.0-<commit>`, and for `alpha` and `beta` also
 the experimental Windows 7 executables with the steps of the Windows 7
 workflow. The publish job then checks the file set with
 `.github/scripts/release-assets.sh`, writes the notes with

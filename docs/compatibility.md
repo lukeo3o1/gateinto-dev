@@ -20,7 +20,7 @@ Storage Provider key. Recorded on 2026-10-17.
 | Windows 11 client | manual: not yet | manual: not yet | manual: not yet | manual: not yet ([tpm-verification.md](tpm-verification.md)) | manual: not yet ([browser-verification.md](browser-verification.md)) |
 | Windows Server 2022 | CI (windows-2022, `compat.yml`): not run yet | CI (windows-2022, `compat.yml`): not run yet | CI (windows-2022, `compat.yml`): not run yet | none: no TPM on hosted runners | not verified |
 | Windows Server 2025 | CI (windows-latest, `ci.yml`); CI (windows-2025, `compat.yml`): not run yet | CI (windows-latest, `ci.yml`); CI (windows-2025, `compat.yml`): not run yet | CI (windows-latest, `ci.yml` `msi` job): passed on 553b5ae before the PATH, autostart, StopAgent and no-key checks were added; CI (windows-2025, `compat.yml`): not run yet | none: no TPM on hosted runners | not verified |
-| 32-bit Windows 10 | CI (windows-latest, `ci.yml` `windows-i686`, 64-bit host): not run yet | CI under WOW64 on 64-bit Windows Server only (`ci.yml` `windows-i686`, `compat.yml` `i686`): not run yet; on 32-bit Windows 10: manual: not yet | not applicable: the MSI is x64 only | manual: not yet | manual: not yet |
+| 32-bit Windows 10 | CI (windows-latest, `ci.yml` `windows-i686`, 64-bit host): not run yet | CI under WOW64 on 64-bit Windows Server only (`ci.yml` `windows-i686`, `compat.yml` `i686`): not run yet; on 32-bit Windows 10: manual: not yet | CI under WOW64 (windows-latest, `ci.yml` `msi` x86 run): not run yet; on 32-bit Windows 10: manual: not yet | manual: not yet | manual: not yet |
 | Windows 7 SP1 | see [windows7-feasibility.md](windows7-feasibility.md) | manual: not yet | not verified | not verified | not verified |
 
 Windows Server is not client Windows. Windows Server 2022 shares the servicing
@@ -150,8 +150,9 @@ What is verified:
 - These jobs have not run yet.
 
 Not verified: running on a real 32-bit Windows 10 installation, a TPM key from a
-32-bit process, and Chrome or Edge launched by a 32-bit agent. There is no
-32-bit MSI; the MSI is x64 only.
+32-bit process, and Chrome or Edge launched by a 32-bit agent. The x86 MSI is
+installed only under WOW64 in CI (`ci.yml` `msi`, x86 run, with the i686 debug
+build) and is untested on Windows 7.
 
 `aws-lc-sys` 0.46.0 compiles the `generated-src/win-x86/*.asm` sources with
 NASM (`-f win32`). Its prebuilt NASM objects exist only for `x86_64`

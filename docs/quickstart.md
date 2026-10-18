@@ -34,8 +34,10 @@ if ($actual -eq $expected) { Rename-Item $exe gateinto.exe } else { throw "SHA-2
 ```
 
 32-bit Windows 10 uses `gateinto-i686-pc-windows-msvc.exe` the same way. The
-per-user MSI is `gateinto-x86_64-pc-windows-msvc.msi` (see
-[install](install.md)); this guide uses the executable.
+per-user MSIs are `gateinto-x86_64-pc-windows-msvc.msi` and
+`gateinto-i686-pc-windows-msvc.msi` (see [install](install.md)); this guide
+uses the executable. `gateinto --version` prints `gateinto 0.0.0-<commit>` for
+a release build.
 
 Notes:
 
