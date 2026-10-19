@@ -13,7 +13,7 @@ use crate::identity::encoding::{P256Point, p256_spki_der, sha256_fingerprint};
 use crate::identity::x509::{encode_time, format_utc};
 
 pub const SUBJECT_COMMON_NAME: &str = "Gateinto device";
-pub const VALIDITY: Duration = Duration::from_secs(60 * 60);
+pub const VALIDITY: Duration = Duration::from_secs(24 * 60 * 60);
 pub const BACKDATE: Duration = Duration::from_secs(5 * 60);
 pub const RENEW_AFTER: Duration = Duration::from_secs(VALIDITY.as_secs() / 2);
 pub const RENEW_RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -372,7 +372,7 @@ mod tests {
             ExtendedKeyUsage::Present { client_auth: true }
         );
         assert_eq!(parsed.not_before, NOW as i64 - 300);
-        assert_eq!(parsed.not_after, NOW as i64 + 3600);
+        assert_eq!(parsed.not_after, NOW as i64 + 86_400);
         assert_eq!(parsed.serial.len(), 16);
         assert_eq!(parsed.serial[0] & 0xc0, 0x40);
     }
@@ -415,7 +415,8 @@ mod tests {
         assert!(webpki_accepts_as_its_own_anchor(&der, at(NOW)));
         assert!(webpki_accepts_as_its_own_anchor(&der, at(NOW - 300)));
         assert!(!webpki_accepts_as_its_own_anchor(&der, at(NOW - 301)));
-        assert!(!webpki_accepts_as_its_own_anchor(&der, at(NOW + 3601)));
+        assert!(webpki_accepts_as_its_own_anchor(&der, at(NOW + 86_400)));
+        assert!(!webpki_accepts_as_its_own_anchor(&der, at(NOW + 86_401)));
     }
 
     #[test]
@@ -476,18 +477,19 @@ mod tests {
         let certificates = SelfSignedCertificates::new(software_signer(), at(NOW)).unwrap();
         let first = certificates.current();
 
-        let early = certificates.certified_key_at(at(NOW + 1799)).unwrap();
-        let renewed = certificates.certified_key_at(at(NOW + 1800)).unwrap();
+        let early = certificates.certified_key_at(at(NOW + 43_199)).unwrap();
+        let renewed = certificates.certified_key_at(at(NOW + 43_200)).unwrap();
 
         assert!(Arc::ptr_eq(&first, &early));
         assert_ne!(renewed.cert, first.cert);
         assert!(Arc::ptr_eq(&renewed, &certificates.current()));
         let parsed = parse_certificate(&renewed.cert[0]).unwrap();
-        assert_eq!(parsed.not_before, (NOW + 1800 - 300) as i64);
+        assert_eq!(parsed.not_before, (NOW + 43_200 - 300) as i64);
+        assert_eq!(parsed.not_after, (NOW + 43_200 + 86_400) as i64);
         assert_eq!(parsed.spki, certificates.spki());
         renewed.keys_match().unwrap();
         assert!(Arc::ptr_eq(
-            &certificates.certified_key_at(at(NOW + 1801)).unwrap(),
+            &certificates.certified_key_at(at(NOW + 43_201)).unwrap(),
             &renewed
         ));
     }
@@ -502,9 +504,9 @@ mod tests {
         assert_eq!(reissued.spki(), certificates.spki());
         let parsed = parse_certificate(&reissued.current().cert[0]).unwrap();
         assert_eq!(parsed.not_before, (NOW + 60 - 300) as i64);
-        let renewed = certificates.certified_key_at(at(NOW + 1800)).unwrap();
+        let renewed = certificates.certified_key_at(at(NOW + 43_200)).unwrap();
         assert!(Arc::ptr_eq(
-            &reissued.certified_key_at(at(NOW + 1800)).unwrap(),
+            &reissued.certified_key_at(at(NOW + 43_200)).unwrap(),
             &reissued.current()
         ));
         assert_ne!(renewed.cert, reissued.current().cert);
@@ -545,11 +547,11 @@ mod tests {
         let certificates = SelfSignedCertificates::new(signer, at(NOW)).unwrap();
         let first = certificates.current();
         failing.store(true, Ordering::Relaxed);
-        certificates.certified_key_at(at(NOW + 1800)).unwrap();
+        certificates.certified_key_at(at(NOW + 43_200)).unwrap();
         failing.store(false, Ordering::Relaxed);
 
-        let within_a_minute = certificates.certified_key_at(at(NOW + 1859)).unwrap();
-        let after_a_minute = certificates.certified_key_at(at(NOW + 1860)).unwrap();
+        let within_a_minute = certificates.certified_key_at(at(NOW + 43_259)).unwrap();
+        let after_a_minute = certificates.certified_key_at(at(NOW + 43_260)).unwrap();
 
         assert!(Arc::ptr_eq(&within_a_minute, &first));
         assert_ne!(after_a_minute.cert, first.cert);
@@ -560,11 +562,11 @@ mod tests {
         let (signer, failing) = switchable_signer();
         let certificates = SelfSignedCertificates::new(signer, at(NOW)).unwrap();
         failing.store(true, Ordering::Relaxed);
-        certificates.certified_key_at(at(NOW + 3600)).unwrap_err();
+        certificates.certified_key_at(at(NOW + 86_400)).unwrap_err();
         failing.store(false, Ordering::Relaxed);
 
-        let within_a_minute = certificates.certified_key_at(at(NOW + 3659)).unwrap_err();
-        let after_a_minute = certificates.certified_key_at(at(NOW + 3660)).unwrap();
+        let within_a_minute = certificates.certified_key_at(at(NOW + 86_459)).unwrap_err();
+        let after_a_minute = certificates.certified_key_at(at(NOW + 86_460)).unwrap();
 
         assert_eq!(within_a_minute.renewal, IssueError::NoScheme);
         assert!(Arc::ptr_eq(&after_a_minute, &certificates.current()));
@@ -577,26 +579,26 @@ mod tests {
         let first = certificates.current();
         failing.store(true, Ordering::Relaxed);
 
-        let after_failed_renewal = certificates.certified_key_at(at(NOW + 1800)).unwrap();
-        let last_valid_second = certificates.certified_key_at(at(NOW + 3599)).unwrap();
-        let expired = certificates.certified_key_at(at(NOW + 3600)).unwrap_err();
+        let after_failed_renewal = certificates.certified_key_at(at(NOW + 43_200)).unwrap();
+        let last_valid_second = certificates.certified_key_at(at(NOW + 86_399)).unwrap();
+        let expired = certificates.certified_key_at(at(NOW + 86_400)).unwrap_err();
 
         assert!(Arc::ptr_eq(&after_failed_renewal, &first));
         assert!(Arc::ptr_eq(&last_valid_second, &first));
         assert_eq!(
             expired,
             ExpiredCertificate {
-                not_after: (NOW + 3600) as i64,
+                not_after: (NOW + 86_400) as i64,
                 renewal: IssueError::NoScheme,
             }
         );
         assert_eq!(
             expired.to_string(),
-            "the self-signed client certificate expired at 2028-01-01T01:00:00Z and \
+            "the self-signed client certificate expired at 2028-01-02T00:00:00Z and \
              renewing it failed: the device key cannot sign with ECDSA P-256 SHA-256"
         );
         failing.store(false, Ordering::Relaxed);
-        let renewed = certificates.certified_key_at(at(NOW + 3700)).unwrap();
+        let renewed = certificates.certified_key_at(at(NOW + 86_500)).unwrap();
         assert_ne!(renewed.cert, first.cert);
         assert!(Arc::ptr_eq(&renewed, &certificates.current()));
     }

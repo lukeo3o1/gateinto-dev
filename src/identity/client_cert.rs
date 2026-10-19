@@ -995,7 +995,8 @@ mod tests {
         let leaf = &identity.binding.leaf;
         assert_eq!(leaf.subject, "CN=Gateinto device");
         assert_eq!(leaf.spki, store.spki());
-        assert_eq!(leaf.not_after, now().as_secs() as i64 + 3600);
+        assert_eq!(leaf.not_before, now().as_secs() as i64 - 300);
+        assert_eq!(leaf.not_after, now().as_secs() as i64 + 86_400);
         assert_eq!(identity.certified_key.cert, identity.binding.chain);
         identity.certified_key.keys_match().unwrap();
         assert!(!store.calls().contains(&"certificates".to_owned()));

@@ -603,12 +603,12 @@ With `--self-signed-client-cert` (or `[gateways.<name>] self_signed_client_cert 
 `check-upstream` issues a new certificate at startup, and `proxy` issues a new
 one for each session when it starts (and one at startup to check the key):
 `CN=Gateinto device` as subject and issuer, a random 16-byte serial number,
-valid from 5 minutes before issuance until 1 hour after it, critical basic
+valid from 5 minutes before issuance until 24 hours after it, critical basic
 constraints without CA, critical key usage `digitalSignature`, extended key
 usage `clientAuth`, and the device key's public key. The device key signs the
 certificate and the TLS `CertificateVerify` through CNG; there is no other
 private key, and the certificate is never written to disk or to a store. Once
-a session's current certificate is 30 minutes or older, the session issues a
+a session's current certificate is 12 hours or older, the session issues a
 new one for itself before the next upstream connection with `required`, or when the upstream next
 asks for one with `optional`. A failed renewal is retried at most once a
 minute. An expired certificate is never sent: if renewing fails after the
