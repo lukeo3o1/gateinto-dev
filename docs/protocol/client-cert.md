@@ -30,8 +30,8 @@ Gateinto cannot make an upstream trust it.
   `client_cert_file`, whether each comes from the configuration file or the
   command line; Gateinto exits with an error naming both.
 - Every start, and every session, issues a new certificate. A running session
-  also issues a new one for itself once its current certificate was issued 30
-  minutes or more earlier (half its
+  also issues a new one for itself once its current certificate was issued 12
+  hours or more earlier (half its
   validity): with `required`, before opening the next upstream connection,
   whether or not the upstream will ask for a certificate; with `optional`, when
   the upstream next asks for one. The renewal is logged at `info` with the
@@ -77,7 +77,7 @@ Gateinto cannot make an upstream trust it.
 | Issuer | `CN=Gateinto device` (UTF8String) |
 | Subject | `CN=Gateinto device` (UTF8String), identical to the issuer |
 | Not before | Issuance time minus 5 minutes, to tolerate clock skew |
-| Not after | Issuance time plus 1 hour |
+| Not after | Issuance time plus 24 hours |
 | Time encoding | UTCTime for years before 2050, GeneralizedTime from 2050 |
 | Subject public key info | `id-ecPublicKey` with `prime256v1` and the uncompressed device public key; byte-for-byte the DER that `gateinto key info --spki-out` writes, so its SHA-256 is the `spki-sha256` that `key info` prints |
 | Basic constraints | Critical; `cA` false (an empty sequence) |
@@ -88,7 +88,7 @@ There is no subject alternative name, subject or authority key identifier,
 CRL distribution point or authority information access extension. The chain
 sent in the TLS `Certificate` message is this one certificate.
 
-The 5-minute backdating and 1-hour validity are constants in
+The 5-minute backdating and 24-hour validity are constants in
 `src/identity/certificates.rs` (`BACKDATE`, `VALIDITY`) and cannot be
 configured.
 
@@ -158,8 +158,8 @@ one.
   field above, that two certificates share the SPKI and differ in DER,
   fingerprint and serial, that the signature verifies with `rustls-webpki`
   (validity boundaries included), that a key not matching the public key or
-  unable to sign ECDSA P-256 SHA-256 is refused, the renewal after 30
-  minutes, and that after failed renewals the previous certificate is used
+  unable to sign ECDSA P-256 SHA-256 is refused, the renewal after 12
+  hours, and that after failed renewals the previous certificate is used
   only until it expires. `tests/mtls.rs` runs the proxy twice against an
   upstream fixture that trusts the SPKI, with a software test key, and checks
   two different certificates with the same SPKI; an upstream trusting another

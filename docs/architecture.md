@@ -309,7 +309,7 @@ and port have no default. See the README for the schema.
   through CNG. With `--self-signed-client-cert` that certificate is issued in
   memory when a session starts, separately for each session, and signed by
   the same CNG key; the session's resolver issues a new one when the current
-  one is 30 minutes old
+  one is 12 hours old
   ([protocol/client-cert.md](protocol/client-cert.md)).
 
 ## Installation and the device identity

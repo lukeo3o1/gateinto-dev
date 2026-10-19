@@ -281,8 +281,9 @@ pub fn expired_self_signed_certificates(key: &KeyPair) -> Arc<SelfSignedCertific
             failing: failing.clone(),
         }),
     );
-    let issued_at =
-        UnixTime::since_unix_epoch(Duration::from_secs(UnixTime::now().as_secs() - 2 * 60 * 60));
+    let issued_at = UnixTime::since_unix_epoch(Duration::from_secs(
+        UnixTime::now().as_secs() - 25 * 60 * 60,
+    ));
     let certificates = SelfSignedCertificates::new(signer, issued_at).unwrap();
     failing.store(true, Ordering::Relaxed);
     Arc::new(certificates)

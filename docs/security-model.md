@@ -42,7 +42,7 @@ item to its code, its tests and where they run.
   a full TLS 1.3 handshake, so a connection never reuses a session, or the
   client certificate identity, established by an earlier one.
 - **Self-signed client certificates** (`--self-signed-client-cert`). Gateinto
-  issues a short-lived certificate (1 hour, renewed after 30 minutes) whose
+  issues a short-lived certificate (24 hours, renewed after 12 hours) whose
   public key is the device key and which the device key itself signs through
   CNG, as it signs `CertificateVerify`. No other private key is created, and
   the device key is never exported. The signature is verified against the
