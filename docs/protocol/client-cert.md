@@ -34,7 +34,8 @@ Gateinto cannot make an upstream trust it.
   hours or more earlier (half its
   validity): with `required`, before opening the next upstream connection,
   whether or not the upstream will ask for a certificate; with `optional`, when
-  the upstream next asks for one. The renewal is logged at `info` with the
+  the upstream next asks for one (or before a new HTTP/2 stream when its
+  existing connection requested one). The renewal is logged at `info` with the
   SHA-256 of the new certificate. If a renewal fails while the previous
   certificate is still valid, a warning is logged and the previous certificate
   is sent. A failed renewal is not retried until a minute has passed; until
@@ -47,6 +48,17 @@ Gateinto cannot make an upstream trust it.
   and `check-upstream` exits with it. With `optional`, a warning is logged and
   the handshake continues without a client certificate, as when none could be
   loaded at startup.
+
+With HTTP/2, a session shares one TLS connection for its tunnels. New CONNECTs
+check certificate renewal eligibility before submitting a stream, including
+after a wait for peer stream capacity. A renewed certificate moves new streams
+to a fresh TLS connection; accepted old streams can drain. If renewal fails,
+new streams keep the existing connection only while its certificate is valid.
+After expiry, required mode refuses new streams locally and optional mode
+opens a connection without a certificate, retaining the same one-minute retry
+throttle. A successful retry rotates optional mode back to an authenticated
+connection. A gateway that never requests optional client authentication does
+not trigger its certificate renewal. See [upstream HTTP CONNECT](http-connect.md).
 
 ## The key and the signatures
 

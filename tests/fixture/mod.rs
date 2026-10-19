@@ -96,7 +96,42 @@ impl TestCa {
         spki: Vec<u8>,
     ) -> Arc<ServerConfig> {
         let provider = Arc::new(aws_lc_rs::default_provider());
-        let verifier = Arc::new(SpkiClientVerifier { spki, provider });
+        let verifier = Arc::new(SpkiClientVerifier {
+            spki,
+            provider,
+            required: true,
+            schemes: None,
+        });
+        self.server_config_with_verifier(name, Some(verifier), HYBRID_GROUPS)
+    }
+
+    pub fn server_config_requesting_client_spki(
+        &self,
+        name: &str,
+        spki: Vec<u8>,
+    ) -> Arc<ServerConfig> {
+        let provider = Arc::new(aws_lc_rs::default_provider());
+        let verifier = Arc::new(SpkiClientVerifier {
+            spki,
+            provider,
+            required: false,
+            schemes: None,
+        });
+        self.server_config_with_verifier(name, Some(verifier), HYBRID_GROUPS)
+    }
+
+    pub fn server_config_requesting_unsupported_client_signature(
+        &self,
+        name: &str,
+        spki: Vec<u8>,
+    ) -> Arc<ServerConfig> {
+        let provider = Arc::new(aws_lc_rs::default_provider());
+        let verifier = Arc::new(SpkiClientVerifier {
+            spki,
+            provider,
+            required: false,
+            schemes: Some(vec![SignatureScheme::ED25519]),
+        });
         self.server_config_with_verifier(name, Some(verifier), HYBRID_GROUPS)
     }
 
@@ -180,11 +215,16 @@ fn provider(groups: &[&'static dyn SupportedKxGroup]) -> CryptoProvider {
 
 #[derive(Debug)]
 pub struct SpkiClientVerifier {
+    schemes: Option<Vec<SignatureScheme>>,
+    required: bool,
     spki: Vec<u8>,
     provider: Arc<CryptoProvider>,
 }
 
 impl ClientCertVerifier for SpkiClientVerifier {
+    fn client_auth_mandatory(&self) -> bool {
+        self.required
+    }
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         &[]
     }
@@ -239,6 +279,9 @@ impl ClientCertVerifier for SpkiClientVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        if let Some(schemes) = &self.schemes {
+            return schemes.clone();
+        }
         self.provider
             .signature_verification_algorithms
             .supported_schemes()

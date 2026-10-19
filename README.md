@@ -3,7 +3,9 @@
 Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows 10/11 x64. Clients on
 the same machine use it as their HTTPS proxy at `127.0.0.1:18736`; Gateinto
 opens a TLS 1.3 connection to a remote HTTPS forward proxy that you run and
-issues the `CONNECT` there. It can authenticate the device to that proxy with
+issues the `CONNECT` there. ALPN selects HTTP/2, sharing one connection per
+session, or HTTP/1.1 with a separate connection per tunnel. It can authenticate
+the device to that proxy with
 mutual TLS, using a non-exportable ECDSA P-256 key held by Windows CNG (TPM
 preferred, software key storage as fallback). Key exchange prefers the hybrid
 post-quantum group `X25519MLKEM768`.
@@ -160,7 +162,11 @@ The request parser accepts only `CONNECT host:port HTTP/1.1` with exactly one
 1 to 65535. It rejects bare LF, CR inside lines, NUL, obs-fold, control
 characters in field values, `Transfer-Encoding`, and a non-zero
 `Content-Length`. Bytes sent after the request header are forwarded once the
-tunnel is up. Upstream replies must use `HTTP/1.1`.
+tunnel is up. The upstream uses HTTP/2 when ALPN selects `h2`, otherwise
+HTTP/1.1. HTTP/2 tunnels share one TLS connection per session, with independent
+stream limits and timeouts; GOAWAY and certificate renewal let existing streams
+drain while new tunnels use a new connection. Details are in
+[the upstream protocol](docs/protocol/http-connect.md).
 
 Without `--ca-file` the upstream certificate is verified against the Mozilla
 root program as bundled by `webpki-roots`. This is deterministic and identical
@@ -183,6 +189,7 @@ upstream: proxy.example.com:443
 server-name: proxy.example.com
 tls-mode: hybrid_preferred
 tls-version: TLSv1_3
+alpn: h2
 key-exchange-group: X25519MLKEM768
 cipher-suite: TLS13_AES_256_GCM_SHA384
 server-certificate-subject: CN=proxy.example.com
@@ -200,8 +207,9 @@ or `sent`. With `--self-signed-client-cert` three more lines follow it:
 of the certificate sent in the handshake) and `device-key-spki-sha256` (SHA-256
 of the device key's SubjectPublicKeyInfo, the same value as `spki-sha256` in
 `key info`). With `--target host:port` it also sends `CONNECT` for that target
-and prints `connect-target` and the upstream's status line as
-`connect-status`; no upstream headers or body are printed, and the tunnel is
+and prints `connect-target` and the upstream status as `connect-status`
+(`HTTP/2 <code>` for h2, the original status line for HTTP/1.1). The `alpn`
+line is `h2`, `http/1.1`, or `none`. No upstream headers or body are printed, and the tunnel is
 closed right away. No keys or other secrets are printed.
 
 The command exits nonzero, with the reason on stderr, when the connection,
@@ -541,7 +549,7 @@ and name are always verified with WebPKI as described above. `--tls-mode` (or
 | `classical_only` | `X25519` | Uses `X25519` (also against hybrid-capable upstreams). |
 
 After every upstream handshake Gateinto reads the negotiated protocol version
-and key exchange group and logs them at `debug` per tunnel
+and key exchange group and logs them at `debug` per TLS connection
 (`upstream TLS established version=Some(TLSv1_3)
 key_exchange_group=Some(X25519MLKEM768)`). It also checks that the version is
 TLS 1.3 and that the group is one the mode offers, and refuses the tunnel with
@@ -610,7 +618,9 @@ certificate and the TLS `CertificateVerify` through CNG; there is no other
 private key, and the certificate is never written to disk or to a store. Once
 a session's current certificate is 12 hours or older, the session issues a
 new one for itself before the next upstream connection with `required`, or when the upstream next
-asks for one with `optional`. A failed renewal is retried at most once a
+asks for one with `optional`. With HTTP/2, new streams rotate to a fresh TLS
+connection after renewal and existing streams may drain on the old connection.
+A failed renewal is retried at most once a
 minute. An expired certificate is never sent: if renewing fails after the
 current one has expired, `required` fails each upstream connection locally and
 `optional` connects without a client certificate.

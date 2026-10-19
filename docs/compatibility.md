@@ -52,6 +52,9 @@ script the `ci.yml` `msi` job also runs.
 | `windows-sys` | 0.61.2 | NCrypt, TBS, registry, token and process FFI | Same major as `rustls-cng`, so key handles are the same type. Features `Win32_System_Registry` (URI handler registration and Chrome and Edge `App Paths`), `Win32_Security_Authorization`, `Win32_System_Threading` and `Win32_System_Pipes` (the user's SID for the agent's pipe name and its DACL, the pipe server's user check, detached agent process flags) were added for the launch URI. `Win32_System_LibraryLoader` loads `Tbsi_GetDeviceInfo` at runtime; `Win32_System_TpmBaseServices` is kept only for `TPM_DEVICE_INFO`. `Win32_UI_WindowsAndMessaging` (`MessageBoxW`) and `Win32_System_StationsAndDesktops` (`GetProcessWindowStation`, `GetUserObjectInformationW`) show the confirmation for a gateway from a link; all three exist on Windows 7 and are in the import allow-list. Features do not change `Cargo.lock`. |
 | `tokio` | 1.53.3 | Async runtime | Features: `rt-multi-thread`, `net`, `io-util`, `macros`, `time`, `sync`, `process` (starting and watching the browser), `signal` (Ctrl+C and SIGTERM). Named pipes come from `net` on Windows. `signal` adds `signal-hook-registry` 1.4.8 and `errno` 0.3.14 to `Cargo.lock`, built on Unix only. |
 | `tokio-rustls` | 0.26.6 | Async TLS | Requires `rustls ^0.23.27`, compatible with 0.23.46. Its default features enable `rustls/tls12`, so it is used with `default-features = false, features = ["aws_lc_rs"]`. |
+| `h2` | 0.4.20 | HTTP/2 CONNECT, HPACK and flow control | MIT; declared Rust 1.63. Stable release; uses the existing Tokio runtime and rustls TLS stream. Push disabled; no PING keepalive. |
+| `http` | 1.5.0 | HTTP/2 request and response types | MIT OR Apache-2.0; declared Rust 1.57. |
+| `bytes` | 1.12.1 | Bounded HTTP/2 DATA buffers | MIT; declared Rust 1.57. Already present through Tokio; now also direct. |
 | `webpki-roots` | 1.0.9 | Default upstream roots | Mozilla root program as static data. License CDLA-Permissive-2.0. Replaced entirely by `--ca-file`. |
 | `tracing` | 0.1.44 | Logging | |
 | `tracing-subscriber` | 0.3.23 | Log output | `default-features = false, features = ["fmt", "std", "env-filter"]`. |
@@ -59,6 +62,17 @@ script the `ci.yml` `msi` job also runs.
 | `clap` | 4.6.7 | CLI | `derive` feature. |
 | `serde` | 1.0.229 | Configuration file | `derive` feature. Latest stable; `rust-version` 1.56. Also pulls `serde_core` and `serde_derive` 1.0.229. |
 | `toml` | 1.1.8+spec-1.1.0 | Configuration file | `default-features = false, features = ["std", "serde", "parse"]` (no writer). Latest stable; `rust-version` 1.85. Pulls `toml_parser` 1.1.5, `toml_datetime` 1.1.2, `serde_spanned` 1.1.2 and `winnow` 1.0.4. `Cargo.lock` also lists `toml_writer`, `indexmap`, `hashbrown` and `equivalent` as entries of disabled optional features; they are not built (`cargo tree -p toml -e normal`). |
+
+The HTTP/2 dependencies add nine lockfile packages: `h2` 0.4.20, `http` 1.5.0,
+`atomic-waker` 1.1.2, `fnv` 1.0.7, `futures-core` and `futures-sink` 0.3.34,
+`itoa` 1.0.18, `slab` 0.4.12 and `tokio-util` 0.7.20. They use MIT or
+MIT/Apache-2.0 licenses and their declared MSRVs are at most 1.85 (`fnv` has
+no declared MSRV). Existing `indexmap` 2.14.2 and `hashbrown` 0.17.1 become
+active dependencies through `h2`; both declare Rust 1.85 and MIT/Apache-2.0
+licenses. Existing lockfile versions are retained. The project remains on
+Rust 1.88. HTTP/2 protocol and lifecycle decisions are in
+[protocol/http-connect.md](protocol/http-connect.md); a real gateway remains
+unverified.
 
 All of `rustls`, `rustls-cng` and `tokio-rustls` resolve to a single `rustls`
 0.23.46 in the dependency graph, and `rustls/tls12` is not enabled on any
@@ -94,7 +108,7 @@ Locally on Linux:
 | TLS modes offer `[X25519MLKEM768, X25519]` (`hybrid_preferred`), `[X25519MLKEM768]` (`hybrid_required`) and `[X25519]` (`classical_only`); the post-handshake check accepts only TLS 1.3 with a group the mode offers. | Unit tests in `src/tls.rs`. |
 | Through the proxy, against in-process upstream fixtures offering `[X25519MLKEM768, X25519]` (hybrid) or `[X25519]` (classical): `hybrid_preferred` negotiates `X25519MLKEM768` with the hybrid and `X25519` with the classical upstream and both tunnels relay data; `hybrid_required` negotiates `X25519MLKEM768` with the hybrid upstream, and with the classical one the upstream handshake fails with `NoKxGroupsInCommon` and the local client gets `502`, never `200`; `classical_only` negotiates `X25519` with the hybrid upstream; every mode still rejects an untrusted CA and a name mismatch with `502`. The negotiated group is recorded on the fixture's server side. | `tests/tls_modes.rs`. |
 | Upstream connections never resume a session or send early data: `enable_early_data` is off, and a second handshake with the same client configuration against a fixture that issues session tickets is full on both sides. Temporarily removing `Resumption::disabled()` made the test fail with `HandshakeKind::Resumed`. | `tests/session_resumption.rs`. |
-| The negotiated version and group are logged once per tunnel at `debug` and not at `info`, for the default and each `--tls-mode`. | `tests/proxy.rs` (spawning the binary). |
+| The negotiated version and group are logged once per TLS connection at `debug` and not at `info`, for the default and each `--tls-mode`. | `tests/proxy.rs` (spawning the binary). |
 | `check-upstream` reports TLS 1.3, the negotiated group (`X25519MLKEM768` or `X25519` per fixture and mode), a `TLS13_*` cipher suite, the server certificate subject and whether a client certificate was not requested, requested but not sent, or sent; with `--target` the upstream status line only (no headers or body). The binary prints the group for each fixture and mode and exits nonzero for `hybrid_required` against the classical fixture, an unreachable upstream, an untrusted CA, a non-`2xx` `CONNECT` reply and a malformed `--target`. | `tests/check_upstream.rs` (library calls and the binary). |
 | Configuration file: every section and key, defaults, unknown keys and sections (including the earlier `[listen]`, `[upstream]` and `[tls]`) rejected, invalid values rejected, gateway names limited to 1 to 64 characters from `[A-Za-z0-9_-]` (as table keys, in `[device_session] gateway` and for `--gateway`), a missing or incomplete upstream is an error naming the gateway and `--upstream-host`/`--upstream-port`, the device session uses `[device_session] gateway` or the only gateway, several gateways without `[device_session] gateway` and a reference to an unknown gateway are errors listing the configured gateways, gateway lookup by name reads only the loaded file, flags override the selected gateway key by key and leave the others unchanged, relative paths in every gateway resolve against the file, errors name the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `proxy` relays through the device session's gateway; `check-upstream --gateway` checks the named gateway, applies flags to it and names the file and the configured gateways for an unknown one; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[device_session] listen` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`; `tests/cli.rs`. |
 | Sessions: several sessions in one process each bind their own loopback listener (ephemeral ports differ), build their own TLS client configuration and resolver, and with a self-signed source issue their own certificate, so the upstream fixture sees one fingerprint per session over several alternating tunnels, the same SPKI for all, and never the source's or the other session's certificate, on one gateway and on two gateways (each session reaching only its own upstream). Closing a session refuses new connections on its port without reaching the upstream, aborts its established tunnels, and leaves the other session's tunnels and new tunnels working with their own certificate; closing every session refuses every port. A required self-signed certificate that cannot be issued for a session fails its start; an optional one starts the session without a client certificate. A non-loopback listen address still needs the opt-in. | `tests/sessions.rs`; unit tests `a_reissue_has_its_own_certificate_for_the_same_key` in `src/identity/certificates.rs` and `a_session_gets_its_own_self_signed_certificate_but_shares_a_fixed_one` in `src/identity/client_cert.rs`. |
@@ -378,6 +392,18 @@ the unit tests in `src/config.rs`) run in both CI jobs. Their first
 `/abs/client.pem` as absolute, which it is not on Windows. That was a bug in
 the test, fixed in the test; production code did not change. After the fix
 these suites passed in both jobs.
+
+## HTTP/2 upstream transport
+
+`tests/h2_connect.rs` uses a loopback TLS/HTTP/2 fixture with real certificate
+verification. It covers concurrent and sequential reuse, ALPN fallback and
+protocol changes, RFC 9113 CONNECT authorities, session isolation and shutdown,
+GOAWAY drain and reconnect, transport failure without replay, status/reset
+mapping, stream limits, flow control, per-stream timeouts, half-close and early
+bytes. Injected clocks test the 12-hour certificate rotation boundary, 24-hour
+expiry and 60-second retry, with required and optional modes and matching
+server-side certificate validation time. No real gateway has been tested with
+HTTP/2.
 
 ## Client certificate (mTLS)
 

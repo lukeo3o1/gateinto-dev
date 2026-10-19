@@ -12,12 +12,12 @@ what does not exist.
    v
 +------------------------------- gateinto ---------------------------------+
 |  1. read and parse the request head (limits, timeout)                    |
-|  2. TCP connect to the upstream proxy                                    |
+|  2. select the session's shared h2 connection, or open upstream TCP       |
 |  3. TLS 1.3 handshake, WebPKI verification of the upstream certificate,  |
 |     client certificate signed by the device key if configured;           |
 |     check the negotiated version and key exchange against the TLS mode   |
-|  4. send CONNECT target:443 HTTP/1.1 inside TLS                          |
-|  5. read the upstream status line and header block                       |
+|  4. send HTTP/2 CONNECT on a new stream, or HTTP/1.1 CONNECT inside TLS   |
+|  5. read the upstream response status and headers                        |
 |  6. upstream 2xx: send local 200, then relay bytes in both directions    |
 |     otherwise:    send a local error status and close                    |
 +--------------------------------------------------------------------------+
@@ -31,7 +31,11 @@ what does not exist.
 
 The client's own TLS session with the target (for example HTTPS to
 `example.com`) runs inside the tunnel. Gateinto does not terminate or inspect
-it; it relays bytes.
+it; it relays bytes. ALPN offers `h2`, then `http/1.1`; the selected protocol
+determines the upstream CONNECT encoding. HTTP/2 multiplexes streams on one
+lazy TLS connection per session. HTTP/1.1, including no ALPN, keeps one TLS
+connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
+for connection ownership, flow control, reconnect, draining and timeouts.
 
 ## Sessions and gateway profiles
 
@@ -62,7 +66,8 @@ setting.
 A session (`sessions::Session`) is one local entry point bound to one gateway.
 `SessionManager::start` builds everything the session uses and shares none of
 it with other sessions: its own listener (port `0` gives an ephemeral port),
-its own `rustls` client configuration and client certificate resolver, its own
+its own `rustls` client configuration, per-handshake certificate resolvers and
+HTTP/2 pool, its own
 connection and reject limits, and its own set of connection tasks. Its client
 certificate comes from the configured source through
 `ClientCertificate::for_session`: a self-signed source issues a new
@@ -78,7 +83,9 @@ state, created in `Proxy::bind` and owned by that session only (see below).
 accepts anything else, the listener is dropped so its port refuses new
 connections, and every connection task of the session, including established
 tunnels and connections still being answered, is aborted, which closes both
-its client and its upstream socket. `close` returns once all of that is done.
+its client and upstream stream. All current and draining HTTP/2 driver tasks
+are also aborted, including when the proxy run future itself is cancelled.
+`close` returns once the session tasks are stopped.
 The session's TLS configuration, resolver and self-signed certificates are
 dropped with it; no other session holds them, so no later `CONNECT` can use
 that certificate. Other sessions are not affected.
@@ -233,6 +240,7 @@ The full protocol, limits and guarantees are in
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/basic_tofu.rs` | `basic_tofu` local proxy authentication of one session: realm, strict Basic and base64 parsing, binding the first credential as a keyed hash, constant-time comparison, failure rate limit. |
+| `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, certificate rotation and owned connection drivers. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
@@ -310,7 +318,13 @@ and port have no default. See the README for the schema.
   memory when a session starts, separately for each session, and signed by
   the same CNG key; the session's resolver issues a new one when the current
   one is 12 hours old
-  ([protocol/client-cert.md](protocol/client-cert.md)).
+  ([protocol/client-cert.md](protocol/client-cert.md)). HTTP/2 stops using the
+  old connection for new streams after renewal; accepted old streams drain.
+- Every new upstream TLS connection performs a full handshake; resumption and
+  early data remain disabled. HTTP/2 reuses an already open TLS connection.
+- HTTP/2 transport and pooling live in `src/proxy/h2.rs` and
+  `src/proxy/pool.rs`; `relay.rs` applies the same half-close and idle behavior
+  to HTTP/1.1 TLS sockets and HTTP/2 streams.
 
 ## Installation and the device identity
 

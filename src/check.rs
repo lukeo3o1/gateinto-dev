@@ -50,6 +50,7 @@ pub struct Report {
     pub server_name: String,
     pub tls_mode: TlsMode,
     pub protocol_version: ProtocolVersion,
+    pub alpn: Option<String>,
     pub key_exchange_group: NamedGroup,
     pub cipher_suite: CipherSuite,
     pub server_certificate_subject: String,
@@ -74,6 +75,7 @@ impl fmt::Display for Report {
         writeln!(f, "server-name: {}", self.server_name)?;
         writeln!(f, "tls-mode: {}", self.tls_mode)?;
         writeln!(f, "tls-version: {:?}", self.protocol_version)?;
+        writeln!(f, "alpn: {}", self.alpn.as_deref().unwrap_or("none"))?;
         writeln!(f, "key-exchange-group: {:?}", self.key_exchange_group)?;
         writeln!(f, "cipher-suite: {:?}", self.cipher_suite)?;
         writeln!(
@@ -173,6 +175,9 @@ async fn check(options: CheckOptions) -> Result<Report, CheckError> {
         upstream,
         server_name,
         tls_mode: options.tls_mode,
+        alpn: connection
+            .alpn_protocol()
+            .map(|protocol| String::from_utf8_lossy(protocol).into_owned()),
         protocol_version: connection
             .protocol_version()
             .ok_or_else(|| incomplete("protocol version"))?,
@@ -202,15 +207,31 @@ async fn check(options: CheckOptions) -> Result<Report, CheckError> {
         connect_status: None,
     };
     if let Some(target) = &report.target {
-        let (status, _) = request_tunnel(
-            &mut tls,
-            target,
-            options.max_header_bytes,
-            parse_status_line,
-        )
-        .await
-        .map_err(upstream_error)?;
-        report.connect_status = Some(status);
+        if report.alpn.as_deref() == Some("h2") {
+            let (mut sender, _driver) = crate::proxy::h2::connect(tls, options.max_header_bytes)
+                .await
+                .map_err(upstream_error)?;
+            crate::proxy::h2::ready(&mut sender)
+                .await
+                .map_err(|error| upstream_error(UpstreamError::Http2(error)))?;
+            let (status, _stream) = crate::proxy::h2::request(&mut sender, target)
+                .map_err(upstream_error)?
+                .response()
+                .await
+                .map_err(upstream_error)?;
+            report.connect_status = Some((status, format!("HTTP/2 {status}")));
+        } else {
+            let (status, _) = request_tunnel(
+                &mut tls,
+                target,
+                options.max_header_bytes,
+                parse_status_line,
+            )
+            .await
+            .map_err(upstream_error)?;
+            report.connect_status = Some(status);
+        }
     }
+
     Ok(report)
 }

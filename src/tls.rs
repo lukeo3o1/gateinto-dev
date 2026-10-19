@@ -137,17 +137,33 @@ pub fn client_config(
     let mut config = ClientConfig::builder_with_provider(Arc::new(mode.crypto_provider()))
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
-        .with_client_cert_resolver(client_certificate);
+        .with_client_cert_resolver(client_certificate.clone());
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.time_provider = client_certificate.time_provider.clone();
     config.resumption = Resumption::disabled();
     config.enable_early_data = false;
     Ok(config)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClientCertificateResolver {
     certificate: Option<ClientCertificate>,
+    time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
     requested: AtomicBool,
     sent: Mutex<Option<CertificateDer<'static>>>,
+    attempted: Mutex<Option<CertificateDer<'static>>>,
+}
+
+impl Default for ClientCertificateResolver {
+    fn default() -> Self {
+        Self {
+            certificate: None,
+            requested: AtomicBool::new(false),
+            sent: Mutex::new(None),
+            attempted: Mutex::new(None),
+            time_provider: Arc::new(rustls::time_provider::DefaultTimeProvider),
+        }
+    }
 }
 
 impl ClientCertificateResolver {
@@ -155,6 +171,63 @@ impl ClientCertificateResolver {
         Self {
             certificate,
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_time_provider(
+        certificate: Option<ClientCertificate>,
+        time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
+    ) -> Self {
+        Self {
+            certificate,
+            time_provider,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn fresh(&self) -> Self {
+        Self::with_time_provider(self.certificate.clone(), self.time_provider.clone())
+    }
+
+    pub(crate) fn now(&self) -> UnixTime {
+        self.time_provider
+            .current_time()
+            .unwrap_or_else(UnixTime::now)
+    }
+
+    pub(crate) fn connection_certificate(&self) -> Option<CertificateDer<'static>> {
+        match &self.certificate {
+            Some(ClientCertificate::SelfSigned {
+                certificates,
+                required,
+            }) => self
+                .sent_certificate()
+                .or_else(|| {
+                    self.attempted
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone()
+                })
+                .or_else(|| required.then(|| certificates.current().cert[0].clone())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn refresh_connection_certificate(
+        &self,
+    ) -> Result<Option<CertificateDer<'static>>, ExpiredCertificate> {
+        match &self.certificate {
+            Some(ClientCertificate::SelfSigned {
+                certificates,
+                required,
+            }) if *required || self.requested() => {
+                match certificates.certified_key_at(self.now()) {
+                    Ok(key) => Ok(key.cert.first().cloned()),
+                    Err(error) if *required => Err(error),
+                    Err(_) => Ok(None),
+                }
+            }
+            _ => Ok(None),
         }
     }
 
@@ -183,13 +256,17 @@ impl ClientCertificateResolver {
 impl ResolvesClientCert for ClientCertificateResolver {
     fn resolve(&self, _: &[&[u8]], schemes: &[SignatureScheme]) -> Option<Arc<CertifiedKey>> {
         self.requested.store(true, Ordering::Relaxed);
-        let certified_key = match self.certificate.as_ref()?.certified_key(UnixTime::now()) {
+        let certified_key = match self.certificate.as_ref()?.certified_key(self.now()) {
             Ok(certified_key) => certified_key,
             Err(error) => {
                 warn!("{error}; no client certificate is sent");
                 return None;
             }
         };
+        *self
+            .attempted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = certified_key.cert.first().cloned();
         // rustls sends an empty certificate when the key offers none of the server's schemes.
         if certified_key.key.choose_scheme(schemes).is_some() {
             *self.sent.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -261,6 +338,20 @@ impl std::error::Error for RootsError {}
 mod tests {
     use super::*;
     use rustls::{NamedGroup, ProtocolVersion};
+
+    #[test]
+    fn alpn_prefers_http2_with_an_http11_fallback() {
+        let config = client_config(
+            TlsMode::default(),
+            RootCertStore::empty(),
+            Arc::new(ClientCertificateResolver::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            config.alpn_protocols,
+            [b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
 
     fn offered(mode: TlsMode) -> Vec<NamedGroup> {
         mode.crypto_provider()
