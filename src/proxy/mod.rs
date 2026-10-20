@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustls::RootCertStore;
-use rustls::pki_types::{ServerName, UnixTime};
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -18,7 +18,6 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::http::{
     Authority, DEFAULT_MAX_HEADER_BYTES, ParseError, ParseResult, parse_connect_request,
-    parse_response,
 };
 use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
@@ -28,6 +27,8 @@ mod basic_tofu;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
+pub(crate) mod h2;
+mod pool;
 mod relay;
 
 pub use basic_tofu::FailureLimit;
@@ -118,7 +119,7 @@ pub struct Proxy {
 }
 
 pub(crate) struct Endpoint {
-    connector: TlsConnector,
+    config: Arc<rustls::ClientConfig>,
     client_certificate: Arc<tls::ClientCertificateResolver>,
     host: String,
     port: u16,
@@ -134,7 +135,7 @@ impl Endpoint {
     ) -> Result<Self, rustls::Error> {
         let config = tls::client_config(tls_mode, upstream.roots, client_certificate.clone())?;
         Ok(Self {
-            connector: TlsConnector::from(Arc::new(config)),
+            config: Arc::new(config),
             client_certificate,
             host: upstream.host,
             port: upstream.port,
@@ -144,15 +145,23 @@ impl Endpoint {
     }
 
     pub(crate) async fn connect(&self) -> Result<TlsStream<TcpStream>, UpstreamError> {
-        self.client_certificate
-            .check_required(UnixTime::now())
+        self.connect_with(self.client_certificate.clone()).await
+    }
+
+    async fn connect_with(
+        &self,
+        resolver: Arc<tls::ClientCertificateResolver>,
+    ) -> Result<TlsStream<TcpStream>, UpstreamError> {
+        resolver
+            .check_required(resolver.now())
             .map_err(UpstreamError::ClientCertificate)?;
         let tcp = TcpStream::connect((self.host.as_str(), self.port))
             .await
             .map_err(UpstreamError::Connect)?;
         let _ = tcp.set_nodelay(true);
-        let tls = self
-            .connector
+        let mut config = (*self.config).clone();
+        config.client_auth_cert_resolver = resolver;
+        let tls = TlsConnector::from(Arc::new(config))
             .connect(self.server_name.clone(), tcp)
             .await
             .map_err(UpstreamError::Tls)?;
@@ -187,6 +196,7 @@ pub(crate) async fn request_tunnel<T>(
 
 struct Shared {
     endpoint: Endpoint,
+    pool: pool::Pool,
     basic_tofu: Option<BasicTofu>,
     limits: Limits,
     tunnels: Arc<Semaphore>,
@@ -195,14 +205,30 @@ struct Shared {
 
 impl Proxy {
     pub async fn bind(config: Config) -> Result<Self, Error> {
+        Self::bind_inner(config, Arc::new(rustls::time_provider::DefaultTimeProvider)).await
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub async fn bind_with_time_provider(
+        config: Config,
+        time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
+    ) -> Result<Self, Error> {
+        Self::bind_inner(config, time_provider).await
+    }
+
+    async fn bind_inner(
+        config: Config,
+        time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
+    ) -> Result<Self, Error> {
         if !config.listen.ip().is_loopback() && !config.allow_non_loopback {
             return Err(Error::NonLoopbackListen(config.listen));
         }
         let endpoint = Endpoint::new(
             config.upstream,
             config.tls_mode,
-            Arc::new(tls::ClientCertificateResolver::new(
+            Arc::new(tls::ClientCertificateResolver::with_time_provider(
                 config.client_certificate,
+                time_provider,
             )),
         )
         .map_err(Error::Tls)?;
@@ -224,6 +250,7 @@ impl Proxy {
         ));
         let shared = Shared {
             endpoint,
+            pool: pool::Pool::default(),
             basic_tofu,
             limits: config.limits,
             tunnels,
@@ -367,20 +394,10 @@ impl Shared {
     async fn open_upstream(
         &self,
         target: &Authority,
-    ) -> Result<(TlsStream<TcpStream>, Vec<u8>), UpstreamError> {
-        let mut tls = self.endpoint.connect().await?;
-        let (status, early) = request_tunnel(
-            &mut tls,
-            target,
-            self.limits.max_header_bytes,
-            parse_response,
-        )
-        .await?;
-        if (200..300).contains(&status) {
-            Ok((tls, early))
-        } else {
-            Err(UpstreamError::Status(status))
-        }
+    ) -> Result<(pool::Tunnel, Vec<u8>), UpstreamError> {
+        self.pool
+            .open(&self.endpoint, target, self.limits.max_header_bytes)
+            .await
     }
 }
 
@@ -465,6 +482,7 @@ pub(crate) enum UpstreamError {
     Request(io::Error),
     Head(HeadError),
     Status(u16),
+    Http2(::h2::Error),
 }
 
 impl UpstreamError {
@@ -488,6 +506,7 @@ impl fmt::Display for UpstreamError {
             Self::Request(error) => write!(f, "sending CONNECT failed: {error}"),
             Self::Head(error) => write!(f, "invalid CONNECT response: {error}"),
             Self::Status(status) => write!(f, "CONNECT answered with status {status}"),
+            Self::Http2(error) => write!(f, "HTTP/2 CONNECT failed: {error}"),
         }
     }
 }

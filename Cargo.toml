@@ -15,6 +15,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 test-hooks = []
 
 [dependencies]
+bytes = "1.12.1"
+h2 = "0.4.20"
+http = "1.5.0"
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys"] }
 clap = { version = "4.6.7", features = ["derive"] }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }

@@ -39,8 +39,12 @@ item to its code, its tests and where they run.
   hold. `--client-certificate required` makes a missing or mismatched
   certificate a startup error instead of a warning.
 - **No session resumption or early data.** Every upstream connection performs
-  a full TLS 1.3 handshake, so a connection never reuses a session, or the
-  client certificate identity, established by an earlier one.
+  a full TLS 1.3 handshake. HTTP/2 tunnels within one Gateinto session share
+  that open connection and its authenticated client identity. New TLS
+  connections do not resume an earlier TLS session. Self-signed certificate
+  renewal rotates new streams to a fresh connection while accepted old
+  streams can drain; expiry and renewal failure preserve required/optional
+  authentication behavior. See [upstream CONNECT](protocol/http-connect.md).
 - **Self-signed client certificates** (`--self-signed-client-cert`). Gateinto
   issues a short-lived certificate (24 hours, renewed after 12 hours) whose
   public key is the device key and which the device key itself signs through
@@ -64,7 +68,8 @@ item to its code, its tests and where they run.
   shared: it is the one identity of the machine.
 - **Closing a session.** Closing stops accepting at once, drops the listener so
   its port refuses connections, and aborts every tunnel the session has
-  established. The session's certificate is dropped with it and is not
+  established, including every current or draining HTTP/2 connection driver.
+  The session's certificate is dropped with it and is not
   reachable from another session, so no new `CONNECT` can use it.
   `gateinto proxy` and `gateinto session browser` run one session each and
   close it on Ctrl+C; the agent closes a browser session when its browser
@@ -290,7 +295,10 @@ Non-guarantees:
 - **Strict request parsing and limits** against request smuggling and resource
   exhaustion: only `CONNECT host:port HTTP/1.1` with exactly one `Host`
   header; header size limit, timeouts, idle timeout and a connection limit.
-  Details are in the [README](../README.md#proxy).
+  HTTP/2 adds decoded header limits, bounded flow-control windows and
+  per-stream cancellation; peer SETTINGS limits do not replace the local
+  connection limit. Details are in the [README](../README.md#proxy) and
+  [upstream protocol](protocol/http-connect.md).
 
 ### The device identity
 

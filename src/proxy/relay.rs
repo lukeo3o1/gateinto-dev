@@ -7,11 +7,10 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep_until};
-use tokio_rustls::client::TlsStream;
 
-pub(super) async fn relay(
+pub(super) async fn relay<S: AsyncRead + AsyncWrite + Unpin>(
     client: TcpStream,
-    mut upstream: TlsStream<TcpStream>,
+    mut upstream: S,
     idle_timeout: Duration,
 ) -> Option<io::Result<(u64, u64)>> {
     let activity = Activity::new();
