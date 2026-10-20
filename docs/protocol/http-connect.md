@@ -35,6 +35,14 @@ connection per tunnel; after fallback is known, those handshakes run in
 parallel. If several such handshakes discover HTTP/2 together, one connection
 is retained for streams and redundant handshakes are discarded.
 
+Before publishing a shared connection, Gateinto sends one initialization PING
+and waits for its PONG within the opening deadline. The `h2` client handshake
+only sends the client preface. For a protocol-compliant peer, PONG follows its
+mandatory initial SETTINGS, including a valid zero stream limit. Timeout or
+cancellation during this initialization aborts the driver and closes its TLS
+socket, so the next local CONNECT can establish a fresh connection. A timeout
+on an already initialized connection resets only that request's stream.
+
 The `h2` library applies the peer's SETTINGS_MAX_CONCURRENT_STREAMS and flow
 control, including a zero stream limit. Gateinto starts with zero provisional
 send streams until peer SETTINGS arrive. Waiting for stream capacity consumes
@@ -89,8 +97,10 @@ Each local request retains its opening timeout, including pool coordination,
 TCP/TLS, stream-capacity waits and the CONNECT reply. Timeout maps to `504`.
 Established streams retain independent bidirectional idle deadlines: traffic
 on another stream does not keep an idle tunnel alive. HTTP/2 PING keepalive is
-not enabled; opening and idle deadlines plus reconnect on a later request
-provide failure handling without background keepalive traffic.
+not enabled. The single initialization PING checks protocol setup, rather than
+keeping an established connection alive. Opening and idle deadlines plus
+reconnect on a later request provide failure handling without background
+keepalive traffic.
 
 TLS session resumption and TLS early data remain disabled. Reusing an open
 HTTP/2 connection shares its existing authenticated TLS transport; creating a

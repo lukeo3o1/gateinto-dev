@@ -30,7 +30,7 @@ pub(crate) async fn connect(
     tls: TlsStream<TcpStream>,
     max_header_bytes: usize,
 ) -> Result<(h2::client::SendRequest<Bytes>, Driver), UpstreamError> {
-    let (sender, connection) = h2::client::Builder::new()
+    let (sender, mut connection) = h2::client::Builder::new()
         .enable_push(false)
         .initial_max_send_streams(0)
         .initial_window_size(64 * 1024)
@@ -39,11 +39,19 @@ pub(crate) async fn connect(
         .handshake(tls)
         .await
         .map_err(UpstreamError::Http2)?;
+    let mut ping_pong = connection
+        .ping_pong()
+        .expect("a new HTTP/2 connection has its ping handle available");
     let driver = Driver(tokio::spawn(async move {
         if let Err(error) = connection.await {
             tracing::debug!(%error, "upstream HTTP/2 connection closed");
         }
     }));
+    // A compliant peer sends its initial SETTINGS before replying to this initialization PING.
+    ping_pong
+        .ping(h2::Ping::opaque())
+        .await
+        .map_err(UpstreamError::Http2)?;
     Ok((sender, driver))
 }
 

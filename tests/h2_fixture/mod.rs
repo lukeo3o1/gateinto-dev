@@ -33,9 +33,25 @@ impl Server {
     }
 
     pub async fn start_switching(
+        config: Arc<ServerConfig>,
+        max_streams: u32,
+        legacy_first: bool,
+    ) -> Self {
+        Self::start_inner(config, max_streams, legacy_first, None).await
+    }
+
+    pub async fn start_with_stalled_initialization(
+        config: Arc<ServerConfig>,
+        prefix: &'static [u8],
+    ) -> Self {
+        Self::start_inner(config, 10, false, Some(prefix)).await
+    }
+
+    async fn start_inner(
         mut config: Arc<ServerConfig>,
         max_streams: u32,
         legacy_first: bool,
+        stalled_initial_prefix: Option<&'static [u8]>,
     ) -> Self {
         Arc::make_mut(&mut config).alpn_protocols = vec![b"h2".to_vec()];
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -81,6 +97,15 @@ impl Server {
                         let Ok(mut tls) = acceptor.accept(tcp).await else {
                             return;
                         };
+                        if id == 0
+                            && let Some(prefix) = stalled_initial_prefix
+                        {
+                            use tokio::io::AsyncWriteExt;
+                            if tls.write_all(prefix).await.is_ok() {
+                                let _ = tokio::io::copy(&mut tls, &mut tokio::io::sink()).await;
+                            }
+                            return;
+                        }
                         if tls.get_ref().1.alpn_protocol() == Some(b"http/1.1") {
                             use tokio::io::AsyncWriteExt;
                             let _ = super::fixture::read_head(&mut tls).await;

@@ -198,9 +198,12 @@ async fn zero_peer_stream_limit_times_out_without_submitting_a_connect() {
     let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
     config.limits.handshake_timeout = Duration::from_millis(100);
     let agent = start_agent(config).await;
-    let (_, response) = send(agent, &connect_request("echo.test:443")).await;
-    assert_eq!(response.status, 504);
-    assert!(server.requests.lock().unwrap().is_empty());
+    for _ in 0..3 {
+        let (_, response) = send(agent, &connect_request("echo.test:443")).await;
+        assert_eq!(response.status, 504);
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -753,4 +756,43 @@ async fn a_slow_legacy_tls_handshake_does_not_delay_another_tunnel() {
     drop(fast);
     drop(slow.await.unwrap());
     server.abort();
+}
+
+async fn assert_initialization_timeout_recovers(prefix: &'static [u8]) {
+    let ca = TestCa::new();
+    let server =
+        h2_fixture::Server::start_with_stalled_initialization(ca.server_config(PROXY_NAME), prefix)
+            .await;
+    let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    config.limits.handshake_timeout = Duration::from_millis(200);
+    let agent = start_agent(config).await;
+    let (_, response) = send(agent, &connect_request("echo.test:443")).await;
+    assert_eq!(response.status, 504);
+    timeout(Duration::from_secs(3), async {
+        while server.active.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timed-out HTTP/2 initialization must close its TLS connection");
+    for _ in 0..2 {
+        echo(&mut tunnel(agent, "echo.test:443").await, b"recovered").await;
+    }
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn missing_initial_settings_timeout_closes_tls_and_allows_reconnect() {
+    assert_initialization_timeout_recovers(b"").await;
+}
+
+#[tokio::test]
+async fn partial_initial_settings_timeout_closes_tls_and_allows_reconnect() {
+    assert_initialization_timeout_recovers(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 3]).await;
+}
+
+#[tokio::test]
+async fn missing_initial_pong_timeout_closes_tls_and_allows_reconnect() {
+    assert_initialization_timeout_recovers(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await;
 }
