@@ -138,6 +138,21 @@ address. See [threat-model.md](threat-model.md).
 
 ## Launch links and the agent
 
+On Windows, when a link starts `gateinto open` with its own temporary console
+or no console on an interactive desktop, a failed launch shows the complete
+error in a Gateinto dialog until you choose OK; Ctrl+C copies a standard
+Windows message box's text. The same error is still written
+to stderr and the process exits nonzero. This also covers invalid command-line
+arguments to `open`; successful launches and help/version requests do not show
+an error dialog. Existing URI handler registrations work without re-registering.
+
+When run from an existing terminal, with stderr redirected to a file or pipe,
+or without an interactive desktop, `open` only reports through stderr. Run
+`gateinto open --config <file> -- "<link>"` in a terminal to inspect a launch
+there. An agent startup error names the selected configuration when one was
+supplied; run `gateinto agent` with that same `--config` to see the underlying
+startup failure. The detached agent's stderr is not retained in a log file.
+
 Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
 `gateinto session close` and `gateinto stop`
 ([protocol/launch-uri.md](protocol/launch-uri.md)):

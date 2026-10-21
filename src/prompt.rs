@@ -56,22 +56,73 @@ pub fn ask(confirmation: &Confirmation) -> Result<bool, Box<dyn std::error::Erro
     Err(Unavailable.into())
 }
 
+pub fn launch_error_text(error: &str) -> String {
+    format!("Gateinto could not open the link.\n\n{error}")
+}
+
+pub fn show_launch_error(error: &str) {
+    #[cfg(feature = "test-hooks")]
+    if let Some(path) = std::env::var_os("GATEINTO_TEST_OPEN_ERROR_FILE") {
+        if let Ok(mut output) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(output, "{}", launch_error_text(error));
+        }
+        return;
+    }
+    #[cfg(windows)]
+    windows::show_launch_error(&launch_error_text(error));
+    #[cfg(not(windows))]
+    let _ = error;
+}
+
+#[cfg(any(windows, test))]
+fn launch_error_dialog_needed(interactive: bool, console_processes: u32, redirected: bool) -> bool {
+    interactive && console_processes <= 1 && !redirected
+}
+
 #[cfg(windows)]
 mod windows {
     use std::ptr::null_mut;
 
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetConsoleProcessList, GetStdHandle, STD_ERROR_HANDLE,
+    };
     use windows_sys::Win32::System::StationsAndDesktops::{
         GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_SETFOREGROUND, MB_TOPMOST,
-        MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW, WSF_VISIBLE,
+        IDOK, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND,
+        MB_TOPMOST, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW, WSF_VISIBLE,
     };
 
     // OK and Cancel have no access keys and Cancel has the focus, so no single keystroke
     // approves; moving the focus to OK first still does.
     pub const STYLE: MESSAGEBOX_STYLE =
         MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST;
+
+    pub const ERROR_STYLE: MESSAGEBOX_STYLE = MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST;
+
+    pub fn show_launch_error(text: &str) {
+        use std::io::IsTerminal;
+
+        let mut processes = [0; 2];
+        // SAFETY: processes is a writable buffer of the passed length.
+        let console_processes =
+            unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+        // SAFETY: GetStdHandle returns a process-owned handle; GetFileType also accepts invalid handles.
+        let stderr_type = unsafe { GetFileType(GetStdHandle(STD_ERROR_HANDLE)) };
+        let redirected = matches!(stderr_type, FILE_TYPE_DISK | FILE_TYPE_PIPE)
+            || (stderr_type == FILE_TYPE_CHAR && !std::io::stderr().is_terminal());
+        if super::launch_error_dialog_needed(interactive_desktop(), console_processes, redirected) {
+            show(text, ERROR_STYLE);
+        }
+    }
 
     pub fn approved(result: MESSAGEBOX_RESULT) -> bool {
         result == IDOK
@@ -99,10 +150,14 @@ mod windows {
     }
 
     pub fn message_box(text: &str) -> bool {
+        approved(show(text, STYLE))
+    }
+
+    fn show(text: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
         let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
         let (text, title) = (wide(text), wide("Gateinto"));
         // SAFETY: both buffers are NUL-terminated UTF-16 strings that outlive the call.
-        approved(unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), STYLE) })
+        unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), style) }
     }
 
     #[cfg(test)]
@@ -119,6 +174,12 @@ mod windows {
                 MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST
             );
             assert_eq!(STYLE & MB_TYPEMASK, MB_OKCANCEL);
+        }
+
+        #[test]
+        fn error_notifications_have_one_ok_button_and_an_error_icon() {
+            assert_eq!(ERROR_STYLE & MB_TYPEMASK, MB_OK);
+            assert_ne!(ERROR_STYLE & MB_ICONERROR, 0);
         }
 
         #[test]
@@ -141,6 +202,28 @@ mod tests {
             gateway: "proxy.newco.example".parse().unwrap(),
             portal: "https://portal.newco.example/home".parse().unwrap(),
         }
+    }
+
+    #[test]
+    fn launch_errors_are_visible_only_without_a_persistent_console_or_redirected_stderr() {
+        for count in [0, 1] {
+            assert!(launch_error_dialog_needed(true, count, false));
+            assert!(!launch_error_dialog_needed(false, count, false));
+            assert!(!launch_error_dialog_needed(true, count, true));
+        }
+        for count in [2, 3, u32::MAX] {
+            assert!(!launch_error_dialog_needed(true, count, false));
+        }
+    }
+
+    #[test]
+    fn launch_error_dialog_keeps_the_full_error() {
+        let error = "error: browser executable C:\\Program Files\\Browser\\browser.exe not found";
+        let text = launch_error_text(error);
+        assert_eq!(
+            text,
+            format!("Gateinto could not open the link.\n\n{error}")
+        );
     }
 
     #[test]

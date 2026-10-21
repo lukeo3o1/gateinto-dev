@@ -932,3 +932,23 @@ async fn a_damaged_gateway_file_blocks_only_its_own_gateway() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     assert_eq!(browsers(&launcher.profiles_root).len(), 1);
 }
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_errors_notify_once_but_a_successful_launch_does_not() {
+    let mut launcher = Launcher::new("").await;
+    let notification = launcher.dir.join("launch-notification.txt");
+    launcher
+        .env
+        .push(("GATEINTO_TEST_OPEN_ERROR_FILE", notification.clone().into()));
+    let (_, browser) = launcher.opened("main").await;
+    assert!(!notification.exists());
+    let output = launcher
+        .open("gateinto://connect?profile=missing&auth=basic_tofu")
+        .await;
+    output.failure();
+    let text = std::fs::read_to_string(notification).unwrap();
+    assert!(text.contains(output.stderr.trim()), "{text}");
+    assert_eq!(text.matches("Gateinto could not open the link.").count(), 1);
+    browser.exit();
+}

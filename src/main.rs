@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
@@ -448,7 +449,19 @@ fn tls_mode_parser() -> impl clap::builder::TypedValueParser<Value = TlsMode> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            if error.use_stderr() && arguments.get(1).is_some_and(|arg| arg == "open") {
+                prompt::show_launch_error(&error.to_string());
+            }
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    let opening = matches!(&cli.command, Command::Open(_));
+    let result = match cli.command {
         Command::Proxy(args) => proxy(args).await,
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
@@ -468,7 +481,11 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            let message = format!("error: {error}");
+            let _ = writeln!(std::io::stderr(), "{message}");
+            if opening {
+                prompt::show_launch_error(&message);
+            }
             ExitCode::FAILURE
         }
     }
@@ -843,6 +860,16 @@ async fn agent_detach(config: Option<&Path>) -> Result {
 const AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_START_ATTEMPTS: u32 = 3;
 
+fn agent_start_help(config: Option<&Path>) -> String {
+    match config {
+        Some(path) => format!(
+            "run `gateinto agent` with `--config` set to {} to see why",
+            path.display()
+        ),
+        None => "run `gateinto agent` to see why".to_owned(),
+    }
+}
+
 async fn open(args: OpenArgs) -> Result {
     let launch = args.uri.parse::<LaunchRequest>()?;
     let request = Request::Launch(launch.clone());
@@ -955,8 +982,8 @@ async fn start_agent_and_send(
         if let Some(status) = exited {
             if started == AGENT_START_ATTEMPTS {
                 return Err(format!(
-                    "the agent exited ({status}) before accepting requests; run `gateinto agent` \
-                     to see why"
+                    "the agent exited ({status}) before accepting requests; {}",
+                    agent_start_help(config)
                 )
                 .into());
             }
@@ -965,8 +992,9 @@ async fn start_agent_and_send(
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "the agent did not accept requests within {} seconds",
-                AGENT_START_TIMEOUT.as_secs()
+                "the agent did not accept requests within {} seconds; {}",
+                AGENT_START_TIMEOUT.as_secs(),
+                agent_start_help(config)
             )
             .into());
         }

@@ -49,7 +49,7 @@ script the `ci.yml` `msi` job also runs.
 | `aws-lc-rs` | 1.18.2 | Crypto provider | Pulled in by `rustls/aws_lc_rs`. Also a direct dependency for SHA-256 fingerprints and the device key self-test signature check; this resolves to the same package, so `Cargo.lock` gains no new crate. |
 | `aws-lc-sys` | 0.46.0 | AWS-LC build | Transitive. |
 | `rustls-cng` | 0.7.1 | CNG key handle, certificate store | Requires `rustls ^0.23` and `windows-sys ^0.61`. Used with `default-features = false` so it does not enable `rustls/tls12`. `NCryptKey::sign` (`NCryptSignHash`) signs digests. `CertStore::open(CurrentUser, "My")` and `find_all` enumerate `CurrentUser\My`. Its `CngSigningKey` is not used, because it hashes with `BCryptHash` (Windows 10 or later, a static import). Gateinto's own `p256_signer::P256SigningKey` signs TLS 1.3 client authentication and certificates instead: it hashes with aws-lc-rs and DER-encodes the raw signature. That key does not implement `SigningKey::public_key`, so rustls' `CertifiedKey::keys_match` cannot be used; Gateinto compares the certificate's SPKI with the device key's itself. |
-| `windows-sys` | 0.61.2 | NCrypt, TBS, registry, token and process FFI | Same major as `rustls-cng`, so key handles are the same type. Features `Win32_System_Registry` (URI handler registration and Chrome and Edge `App Paths`), `Win32_Security_Authorization`, `Win32_System_Threading` and `Win32_System_Pipes` (the user's SID for the agent's pipe name and its DACL, the pipe server's user check, detached agent process flags) were added for the launch URI. `Win32_System_LibraryLoader` loads `Tbsi_GetDeviceInfo` at runtime; `Win32_System_TpmBaseServices` is kept only for `TPM_DEVICE_INFO`. `Win32_UI_WindowsAndMessaging` (`MessageBoxW`) and `Win32_System_StationsAndDesktops` (`GetProcessWindowStation`, `GetUserObjectInformationW`) show the confirmation for a gateway from a link; all three exist on Windows 7 and are in the import allow-list. Features do not change `Cargo.lock`. |
+| `windows-sys` | 0.61.2 | NCrypt, TBS, registry, token and process FFI | Same major as `rustls-cng`, so key handles are the same type. Features `Win32_System_Registry` (URI handler registration and Chrome and Edge `App Paths`), `Win32_Security_Authorization`, `Win32_System_Threading` and `Win32_System_Pipes` (the user's SID for the agent's pipe name and its DACL, the pipe server's user check, detached agent process flags) were added for the launch URI. `Win32_System_LibraryLoader` loads `Tbsi_GetDeviceInfo` at runtime; `Win32_System_TpmBaseServices` is kept only for `TPM_DEVICE_INFO`. `Win32_UI_WindowsAndMessaging` (`MessageBoxW`) and `Win32_System_StationsAndDesktops` (`GetProcessWindowStation`, `GetUserObjectInformationW`) show the confirmation for a gateway from a link; all three exist on Windows 7 and are in the import allow-list. `Win32_System_Console` adds `GetConsoleProcessList` to distinguish a temporary launch console from a shared terminal for error notifications; that API exists on Windows XP and later and is in the Windows 7 import allow-list. Features do not change `Cargo.lock`. |
 | `tokio` | 1.53.3 | Async runtime | Features: `rt-multi-thread`, `net`, `io-util`, `macros`, `time`, `sync`, `process` (starting and watching the browser), `signal` (Ctrl+C and SIGTERM). Named pipes come from `net` on Windows. `signal` adds `signal-hook-registry` 1.4.8 and `errno` 0.3.14 to `Cargo.lock`, built on Unix only. |
 | `tokio-rustls` | 0.26.6 | Async TLS | Requires `rustls ^0.23.27`, compatible with 0.23.46. Its default features enable `rustls/tls12`, so it is used with `default-features = false, features = ["aws_lc_rs"]`. |
 | `h2` | 0.4.20 | HTTP/2 CONNECT, HPACK and flow control | MIT; declared Rust 1.63. Stable release; uses the existing Tokio runtime and rustls TLS stream. Push disabled; one initialization PING/PONG barrier, no recurring PING keepalive. |
@@ -447,6 +447,23 @@ Where each check runs:
 | With a self-signed certificate from a software test key, two proxy starts tunnel through an upstream fixture whose test-only verifier accepts only the device SPKI and has `rustls-webpki` check the certificate with itself as anchor; the fixture recorded two different certificates with the same SPKI. A fixture trusting another SPKI rejects the handshake. `check-upstream` reports the source, the certificate SHA-256 and the device key SPKI SHA-256. `--self-signed-client-cert` and a certificate file are refused together. | `tests/mtls.rs`, `tests/check_upstream.rs`, `tests/cli.rs`, `tests/config_cli.rs`. | All. Ran locally on Linux. |
 | The same two self-signed certificates from a real Software KSP device key, so CNG signs the certificate and `CertificateVerify`. | `tests/mtls_windows.rs`: `self_signed_certificates_are_signed_by_the_cng_device_key`. | `windows-latest` only. Not run yet. |
 | TPM-backed device key signing the client authentication. | Manual steps in [tpm-verification.md](tpm-verification.md). | Not executed. |
+
+### URI launch error reporting
+
+Failed `gateinto open` calls show a Windows error dialog only on an interactive
+desktop with an unshared or absent console and without redirected stderr.
+`GetConsoleProcessList`, `GetFileType` and the existing window-station check
+make that decision; no URI handler command or MSI registration changed. The
+error is still written to stderr with a nonzero exit status, including `open`
+argument errors. Unrelated commands and successful launches do not notify.
+
+Unit tests cover the decision and complete dialog text. With `test-hooks`,
+`tests/open_errors.rs` and `tests/launch.rs` capture notifications without
+modals, covering argument errors, invalid URIs, agent startup errors, returned
+agent errors, success, help/version and unrelated commands. A Unix test also
+closes stderr before launching the binary. Real Windows console detection and
+MessageBox display are not runtime-verified locally; manual checks are in
+[browser-verification.md](browser-verification.md#launch-uri-and-agent).
 
 ### MSI installer
 
