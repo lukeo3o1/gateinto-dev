@@ -657,6 +657,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
         listen: settings.listen,
         allow_non_loopback: false,
         local_auth: LocalAuth::None,
+        route: gateinto::proxy::Route::Gateway,
         upstream: upstream(settings)?,
         tls_mode: settings.gateway.tls_mode,
         client_certificate: client_certificate(settings)?,
@@ -892,6 +893,7 @@ async fn open(args: OpenArgs) -> Result {
         return Err("the agent asked to confirm a gateway the link does not name".into());
     };
     let confirmation = Confirmation {
+        route: launch.route,
         profile: launch.profile.clone(),
         gateway,
         portal,

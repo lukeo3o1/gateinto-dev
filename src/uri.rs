@@ -3,11 +3,13 @@ use std::str::FromStr;
 
 use crate::config::{GatewayName, PortalUrl};
 use crate::link::{GatewayAddress, InvalidGatewayAddress, Origin};
+use crate::proxy::Route;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
     pub profile: GatewayName,
     pub auth: LaunchAuth,
+    pub route: Route,
     pub url: Option<PortalUrl>,
     pub gateway: Option<GatewayAddress>,
     pub portal: Option<PortalUrl>,
@@ -71,9 +73,9 @@ impl fmt::Display for UriError {
                  %-escapes, joined by = and &; field names and the profile, auth and v values \
                  may decode only to A-Z, a-z, 0-9, _ and -",
             ),
-            Self::UnknownField => {
-                f.write_str("only the fields profile, auth, v, url, gateway and portal are allowed")
-            }
+            Self::UnknownField => f.write_str(
+                "only the fields profile, auth, v, url, gateway, portal and route are allowed",
+            ),
             Self::DuplicateField(name) => write!(f, "the field {name} appears more than once"),
             Self::InvalidValue("profile") => write!(
                 f,
@@ -81,6 +83,7 @@ impl fmt::Display for UriError {
                 GatewayName::MAX_LEN
             ),
             Self::InvalidValue("auth") => f.write_str("auth must be basic_tofu"),
+            Self::InvalidValue("route") => f.write_str("route must be gateway or mixed"),
             Self::InvalidValue("v") => f.write_str("v must be 1"),
             Self::InvalidValue(name @ ("url" | "portal")) => write!(
                 f,
@@ -125,6 +128,7 @@ struct Fields {
     url: Option<String>,
     gateway: Option<String>,
     portal: Option<String>,
+    route: Option<String>,
 }
 
 impl FromStr for LaunchRequest {
@@ -150,6 +154,7 @@ impl FromStr for LaunchRequest {
                 "profile" => ("profile", &mut fields.profile, true),
                 "auth" => ("auth", &mut fields.auth, true),
                 "v" => ("v", &mut fields.version, true),
+                "route" => ("route", &mut fields.route, true),
                 "url" => ("url", &mut fields.url, false),
                 "gateway" => ("gateway", &mut fields.gateway, false),
                 "portal" => ("portal", &mut fields.portal, false),
@@ -175,6 +180,7 @@ impl FromStr for LaunchRequest {
                 .as_deref()
                 .unwrap_or(LaunchAuth::BasicTofu.as_str()),
         )?
+        .with_route(fields.route.as_deref().unwrap_or("gateway"))?
         .with_link(
             fields.url.as_deref(),
             fields.gateway.as_deref(),
@@ -193,10 +199,16 @@ impl LaunchRequest {
                 .parse()
                 .map_err(|_| UriError::InvalidValue("profile"))?,
             auth: auth.parse()?,
+            route: Route::Gateway,
             url: None,
             gateway: None,
             portal: None,
         })
+    }
+
+    pub fn with_route(mut self, route: &str) -> Result<Self, UriError> {
+        self.route = route.parse().map_err(|_| UriError::InvalidValue("route"))?;
+        Ok(self)
     }
 
     pub fn with_link(
@@ -248,6 +260,9 @@ impl fmt::Display for LaunchRequest {
             "gateinto://connect?profile={}&auth={}&v={VERSION}",
             self.profile, self.auth
         )?;
+        if self.route != Route::Gateway {
+            write!(f, "&route={}", self.route)?;
+        }
         if let Some(url) = &self.url {
             write!(f, "&url={}", Encoded(url.as_str()))?;
         }
@@ -334,6 +349,25 @@ mod tests {
 
     fn request(profile: &str) -> LaunchRequest {
         LaunchRequest::new(profile, "basic_tofu").unwrap()
+    }
+
+    #[test]
+    fn launch_route_defaults_to_gateway_and_mixed_round_trips() {
+        let default = request("corp");
+        assert_eq!(
+            parse("gateinto://connect?profile=corp&route=gateway"),
+            Ok(default)
+        );
+        let mixed = parse("gateinto://connect?profile=corp&route=mixed").unwrap();
+        assert!(mixed.to_string().contains("&route=mixed"));
+        assert_eq!(parse(&mixed.to_string()), Ok(mixed));
+    }
+
+    #[test]
+    fn launch_route_rejects_unknown_duplicate_or_empty_values() {
+        for value in ["", "direct", "Mixed", "mixed&route=gateway"] {
+            assert!(parse(&format!("gateinto://connect?profile=corp&route={value}")).is_err());
+        }
     }
 
     const PORTAL: &str = "https%3A%2F%2Fportal.corp.example%2F";

@@ -238,6 +238,41 @@ fn listed(list: &[String], lines: &[String]) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_session() {
+    let launcher = Launcher::new("").await;
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let output = launcher
+        .open("gateinto://connect?profile=main&route=mixed")
+        .await;
+    let mixed = output.success().lines();
+    assert_eq!(field(&mixed, "route"), "mixed");
+    let listen: SocketAddr = field(&mixed, "listen").parse().unwrap();
+    let mixed_browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    let (gateway, gateway_browser) = launcher.opened("main").await;
+    for browser in [&mixed_browser, &gateway_browser] {
+        let (mut stream, response) = send(
+            browser.proxy(),
+            &connect_with(&target.to_string(), Some(&basic("me", "pw"))),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        stream.write_all(b"isolated").await.unwrap();
+        stream.shutdown().await.unwrap();
+        assert_eq!(read_to_end_within(&mut stream, WAIT).await, b"isolated");
+    }
+    assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
+    let list = launcher.list().await;
+    assert!(list.contains(&format!(
+        "session: {} browser main {} route=mixed",
+        field(&mixed, "session"),
+        field(&mixed, "listen")
+    )));
+    assert!(listed(&list, &gateway));
+    mixed_browser.exit();
+    gateway_browser.exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn open_starts_the_agent_which_opens_the_configured_portal_in_a_browser_session() {
     let launcher = Launcher::new("").await;
 

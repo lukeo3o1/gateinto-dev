@@ -347,6 +347,7 @@ impl Agent {
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         proxy.allow_non_loopback = false;
         proxy.local_auth = LocalAuth::BasicTofu;
+        proxy.route = launch.route;
         let mut sessions = self.inner.sessions.lock().await;
         let id = sessions
             .start(SessionConfig {
@@ -389,7 +390,7 @@ impl Agent {
                 "started a browser for the session"
             )
         });
-        let lines = vec![
+        let mut lines = vec![
             format!("session: {id}"),
             format!("gateway: {profile}"),
             format!("listen: {listen}"),
@@ -397,6 +398,9 @@ impl Agent {
             format!("profile: {}", dir.path().display()),
             format!("browser: {}", executable.display()),
         ];
+        if launch.route != proxy::Route::Gateway {
+            lines.push(format!("route: {}", launch.route));
+        }
         let (close, closed) = oneshot::channel();
         let mut browsers = self.inner.browsers.lock().await;
         let task = tokio::spawn(watch(self.inner.clone(), id, child, dir, closed).instrument(span));
@@ -412,11 +416,16 @@ impl Agent {
             .sessions()
             .map(|session| {
                 format!(
-                    "session: {} {} {} {}",
+                    "session: {} {} {} {}{}",
                     session.id(),
                     session.kind(),
                     session.gateway(),
-                    session.local_addr()
+                    session.local_addr(),
+                    if session.route() == proxy::Route::Mixed {
+                        " route=mixed"
+                    } else {
+                        ""
+                    }
                 )
             })
             .collect()

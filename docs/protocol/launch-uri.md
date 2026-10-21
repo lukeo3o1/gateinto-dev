@@ -30,6 +30,48 @@ Bring the gateway and its portal, for users who do not have it yet (one line):
 gateinto://connect?profile=corp&gateway=proxy.corp.example%3A443&portal=https%3A%2F%2Fportal.corp.example%2F&url=https%3A%2F%2Fportal.corp.example%2Fapp
 ```
 
+## Session routing
+
+Links without `route`, or with `route=gateway`, send every CONNECT through
+that gateway. `route=mixed` opts only the new browser session into mixed
+routing:
+
+```text
+gateinto://connect?profile=office&route=mixed
+```
+
+Mixed routing resolves the target and gateway locally. No target addresses,
+a DNS error, no gateway addresses, or any shared target/gateway IP selects
+the gateway. Otherwise Gateinto tries direct TCP using the resolved target
+addresses and the requested port. A direct TCP error or timeout falls back to
+the gateway before replying to the browser. IPv4-mapped IPv6 addresses compare
+as IPv4. Routing discovery and direct connection together get at most half
+of the opening timeout; the original total deadline includes any gateway
+fallback. A gateway refusal or TLS failure is final, and an established
+tunnel is never retried through another route.
+
+This is an IP-based heuristic, not a gateway scope or authorization protocol.
+A service behind a different IP can be sent directly; a public service on a
+shared gateway IP can be sent through the gateway. Mixed mode exposes local
+DNS lookups and the user's source IP to direct destinations, and direct
+connections bypass gateway policy. It cannot distinguish address-bar
+navigation from subresources, redirects or background traffic. End-to-end
+TLS stays with the browser. Gateinto's upstream TLS mode and device client
+certificate apply only to connections through the gateway.
+
+The choice is not stored in the gateway configuration or linked gateway file;
+a subsequent link without `route` uses `gateway`. Other browser sessions and
+the device session are unchanged. A known gateway requires no new prompt for
+mixed mode. Its existing first-time gateway confirmation discloses mixed
+routing when selected and binds the confirmation token to that request.
+
+Mixed launches report `route: mixed`; `session list` and `status` append
+`route=mixed` to that session's line. Default gateway-mode output keeps its
+existing form. Canonical URI and IPC output omit `route=gateway`. Older
+agents reject `route=mixed` rather than silently using a different mode; after
+upgrading, run `gateinto stop` to close old sessions and restart the agent on
+the next launch.
+
 ## For gateway operators: writing links
 
 - Percent-encode every value except letters, digits, `-`, `.`, `_` and `~`.
@@ -62,13 +104,13 @@ gateinto://connect?profile=corp&gateway=proxy.corp.example%3A443&portal=https%3A
 launch-uri  = scheme "://connect" ["/"] "?" field *("&" field)
 scheme      = "gateinto"                   ; ASCII case-insensitive
 field       = name "=" value
-name        = 1*char                       ; after decoding: profile, auth, v, url, gateway or portal
+name        = 1*char                       ; after decoding: profile, auth, v, url, gateway, portal or route
 value       = 1*char
 char        = ALPHA / DIGIT / "-" / "." / "_" / "~" / pct-encoded
 pct-encoded = "%" HEXDIG HEXDIG
 ```
 
-After decoding, field names and the values of `profile`, `auth` and `v` may
+After decoding, field names and the values of `profile`, `auth`, `route` and `v` may
 contain only `A-Z`, `a-z`, `0-9`, `_` and `-`. The values of `url`,
 `gateway` and `portal` must decode to printable ASCII without spaces, then
 pass their own checks below.
@@ -79,6 +121,7 @@ Fields:
 | --- | --- | --- |
 | `profile` | yes | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
 | `auth` | no | `basic_tofu`, the only local proxy authentication a browser session uses. Default `basic_tofu`. |
+| `route` | no | `gateway` (default) or `mixed`; applies only to this browser session, as described above. |
 | `v` | no | `1`, the format version. Default `1`. |
 | `url` | no | Start page for this launch: an `https://` URL that passes the `portal_url` checks of the configuration file (at most 2048 characters, a host, no user information, no spaces, quotes, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) and whose host is a DNS name or an IP address (below). It must have the same origin (scheme, host, port; port 443 when omitted) as the gateway's portal. |
 | `gateway` | with `portal` | `host[:port]` of the gateway's HTTPS proxy, port 443 by default. The host is a DNS name (labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`, at most 253 characters, the last label starting with a letter, no trailing dot; stored in lowercase), an IPv4 address in dotted decimal, or an IPv6 address in brackets without a zone. The port is 1 to 65535 in decimal. No user information, path, query, fragment, wildcard or whitespace. |
@@ -90,14 +133,14 @@ Limits and rules:
 - The host is exactly `connect` (lowercase). It may be followed by one `/`,
   because some programs add it. No user information, port, other path,
   fragment (`#`) or empty query.
-- Only the six fields above, each at most once, in any order. Unknown and
+- Only the seven fields above, each at most once, in any order. Unknown and
   repeated fields, a field without `=`, an empty name or value, and empty
   pairs (`&&`, a leading or trailing `&`) are errors. There is no field for a
   CA file, TLS mode, client certificate, server name, listen address or any
   other setting.
 - `gateway` and `portal` come together or not at all. When the link has both
   `portal` and `url`, they must have the same origin.
-- Percent-encoding is decoded once. In `profile`, `auth`, `v` and the field
+- Percent-encoding is decoded once. In `profile`, `auth`, `route`, `v` and the field
   names it may only yield the allowed characters, so `%00`, `%20`, `%22`,
   `%26`, `%2F`, `%2E` and `%25` are errors there. In `url`, `gateway` and
   `portal`, an encoded control character, space, non-ASCII byte or invalid
@@ -124,7 +167,7 @@ Error messages say which rule was broken and never repeat the URI.
    command line parser.
 2. `gateinto open` parses the URI. An invalid URI ends here, before any
    process or file is touched.
-3. It sends `launch <profile> <auth> [url=...] [gateway=...] [portal=...]` to
+3. It sends `launch <profile> <auth> [route=mixed] [url=...] [gateway=...] [portal=...]` to
    the agent of the current user over a local IPC endpoint, starting the
    agent first if none is running (see [Agent and IPC](#agent-and-ipc)).
 4. The agent validates the request again, counts it against the launch rate
@@ -209,8 +252,10 @@ linked entry is ignored.
   coaches the user ("press Tab, then Enter") remains a social-engineering
   risk. The text names the profile, the gateway
   `host:port` and the portal origin, warns that the gateway will see this
-  device's identity and the traffic of the isolated browser, so the user
-  should allow it only if they trust the organisation that runs it, and ends
+  device's identity and the traffic routed to it (all CONNECT traffic by default), so the user
+  should allow it only if they trust the organisation that runs it. Mixed
+  requests additionally disclose direct connections, source IP and local DNS.
+  The text ends
   with `Choose OK to allow this gateway, or Cancel to refuse.`
 - Otherwise, with a terminal on standard input and standard error, the same
   text and a prompt that accepts only `yes`.
@@ -375,12 +420,16 @@ they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch <profile> basic_tofu [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin>` |
+| `launch <profile> basic_tofu [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin>` |
 | `approve <token>` | as for a started `launch` |
 | `deny <token>` | none |
-| `list` | `session: <id> <device or browser> <gateway> <listen address>` per session |
+| `list` | `session: <id> <device or browser> <gateway> <listen address>` per session, with ` route=mixed` appended for mixed sessions |
 | `close <id>` | none |
 | `stop` | none; the agent closes every session, then exits |
+
+Mixed launches and their first-time confirmations also include `route: mixed`.
+The token retains that route through approval; only the gateway address and
+portal are stored. Default gateway launches retain the previous wire format.
 
 An error is the single line `error: <message>`. Line breaks inside a message
 are replaced by spaces. Answers are at most 64 KiB. The agent serves at most
@@ -455,7 +504,8 @@ The agent starts the browser without a shell, with these arguments:
   that `localhost` and loopback addresses do not use the proxy, so pages on
   the gateway side cannot reach the gateway's own loopback through the
   session, and the browser reaches local addresses as it would without
-  Gateinto. Every other request goes through the session, and the session
+  Gateinto. Every other request reaches the session, whose route mode selects gateway or
+  direct TCP. The session
   only relays `CONNECT`, so plain `http://` pages other than loopback fail
   with `405`.
 - When the browser process exits, the agent closes the session (listener

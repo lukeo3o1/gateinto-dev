@@ -10,6 +10,31 @@ item to its code, its tests and where they run.
 
 ## What it protects
 
+### Routing scope
+
+All traffic received by a session uses the gateway by default. A launch URI
+may opt its new browser session into `route=mixed` without changing any other
+session or saved gateway. Mixed routing is an IP heuristic, not a policy or
+scope guarantee: locally resolved target addresses matching any gateway IP,
+empty answers and DNS errors use the gateway; other targets try direct TCP.
+Direct opening and DNS share half the total opening timeout before gateway
+fallback. A gateway refusal or TLS error never permits a direct retry, and
+routes never change after the local success response.
+
+Mixed mode exposes local DNS queries and the user's source IP, and direct
+connections bypass gateway authorization and inspection. Different service
+and gateway IPs or shared hosting can misclassify traffic. Any website can
+select mixed mode in a link for a known gateway; there is no additional
+routing confirmation or locally enforced gateway-only policy. The existing
+first-time gateway confirmation discloses mixed routing when requested.
+Operators needing all traffic through the gateway must use gateway-mode
+links and must not treat this client as an enforcement boundary. Full rules
+are in [session routing](protocol/launch-uri.md#session-routing).
+
+The following upstream TLS protections apply to the gateway route. A direct
+tunnel carries the browser's own TLS unchanged and uses no gateway client
+certificate or Gateinto outer TLS/key-exchange policy.
+
 ### The connection to the upstream proxy
 
 - **TLS 1.3 only.** `rustls` is built without its `tls12` feature, so no
@@ -93,7 +118,7 @@ format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 What a launch URI can do, at most:
 
 - make the user's agent start a new browser session for a known gateway,
-  which opens Chrome or Edge with a new, empty profile on that gateway's
+  selecting default gateway routing or mixed routing, which opens Chrome or Edge with a new, empty profile on that gateway's
   portal or on another page of the same origin;
 - for a gateway the device does not know, after the user approves it in a
   dialog that names it: store its host, port and portal, then do the above.
@@ -102,9 +127,9 @@ How that is bounded:
 
 - **Strict parsing, twice.** `gateinto open` accepts only
   `gateinto://connect?` with the fields `profile`, `auth`, `v`, `url`,
-  `gateway` and `portal`, each at most once, raw characters only from
+  `gateway`, `portal` and `route`, each at most once, raw characters only from
   `A-Z a-z 0-9 - . _ ~` and percent-escapes, at most 8192 bytes, no fragment,
-  user information, port or path. `profile`, `auth` and `v` decode only to
+  user information, port or path. `profile`, `auth`, `route` and `v` decode only to
   `A-Z a-z 0-9 _ -`; `url` and `portal` must be `https://` URLs with a DNS or
   IP host and the same origin; `gateway` must be a plain `host[:port]`. The
   agent parses the forwarded request again with the same rules.
@@ -203,8 +228,8 @@ What remains:
   approve its gateway. The dialog shows the real gateway host and portal
   origin, but a user who approves a hostile gateway sends that isolated
   browser's traffic through it. The browser's TLS still runs end to end to
-  each site, so the gateway cannot read HTTPS content, but it learns every
-  host the browser connects to, can block, delay or misroute connections, and
+  each site, so the gateway cannot read HTTPS content, but it learns hosts
+  routed to it, can block, delay or misroute those connections, and
   chooses the start page, where it can ask for credentials like any phishing
   site. The browser profile is new and empty, so the user's normal cookies
   and saved passwords are not exposed.
@@ -290,10 +315,11 @@ Non-guarantees:
 
 - **No MITM of the inner TLS.** Gateinto does not terminate, inspect or modify
   the client's own TLS session with the target. It relays bytes after the
-  upstream accepted the `CONNECT`.
-- **Local `200` only after upstream `2xx`.** A client never believes a tunnel
-  exists when the upstream refused it. Upstream error headers and bodies are
-  not forwarded.
+  upstream accepted the `CONNECT`, or after direct TCP connects in mixed mode.
+- **Local `200` only after route establishment.** Gateway routes require
+  upstream `2xx`; direct routes require a connected TCP socket. A client never
+  believes a gateway tunnel exists when the upstream refused it. Upstream
+  error headers and bodies are not forwarded.
 - **Strict request parsing and limits** against request smuggling and resource
   exhaustion: only `CONNECT host:port HTTP/1.1` with exactly one `Host`
   header; header size limit, timeouts, idle timeout and a connection limit.
@@ -382,7 +408,7 @@ Non-guarantees:
   the identity (a software key can be copied), read traffic before it enters
   the tunnel, change the configuration, add CAs or replace the binary.
 - **Traffic from the upstream proxy.** The upstream sees the source address,
-  every target `host:port`, the client certificate, and any traffic that is not
+  each gateway-routed target `host:port`, the client certificate, and any traffic that is not
   end-to-end encrypted inside the tunnel. It can block, log or redirect
   tunnels. Gateinto provides no anonymity.
 - **A wrong trust anchor.** `--ca-file` replaces the default roots entirely;

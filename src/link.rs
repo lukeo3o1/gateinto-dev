@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use crate::config::{ConfigFile, GatewayName, PortalUrl};
 use crate::http::{self, Authority, Host};
+use crate::proxy::Route;
 use crate::uri::LaunchRequest;
 
 pub mod store;
@@ -309,6 +310,7 @@ impl Known {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
+    pub route: Route,
     pub profile: GatewayName,
     pub gateway: GatewayAddress,
     pub portal: PortalUrl,
@@ -320,11 +322,15 @@ impl Confirmation {
     }
 
     pub fn echo(&self) -> Vec<String> {
-        vec![
+        let mut lines = vec![
             format!("gateway: {}", self.profile),
             format!("address: {}", self.gateway),
             format!("portal: {}", self.portal_origin()),
-        ]
+        ];
+        if self.route != Route::Gateway {
+            lines.push(format!("route: {}", self.route));
+        }
+        lines
     }
 
     pub fn echoed_by(&self, lines: &[String]) -> bool {
@@ -345,13 +351,19 @@ impl Confirmation {
         } else {
             ""
         };
+        let traffic = match self.route {
+            Route::Gateway => "all traffic of the isolated browser",
+            Route::Mixed => {
+                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups"
+            }
+        };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
-             installed) and all traffic of the isolated browser. Allow it only if you trust \
+             installed) and {traffic}. Allow it only if you trust \
              the organisation that runs this gateway.",
             self.profile,
             self.gateway,
@@ -379,6 +391,7 @@ impl Confirm for Decision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
+    pub route: Route,
     pub profile: GatewayName,
     pub start_page: Option<PortalUrl>,
     pub add: Option<LinkedGateway>,
@@ -504,6 +517,7 @@ pub fn resolve(
             (Some(_), Some(_)) => return Err(LinkError::UrlOutsidePortal(profile.clone())),
         };
         return Ok(Resolution::Launch(Launch {
+            route: link.route,
             profile: profile.clone(),
             start_page,
             add: None,
@@ -562,6 +576,7 @@ pub fn resolve(
         });
     }
     let confirmation = Confirmation {
+        route: link.route,
         profile: profile.clone(),
         gateway: gateway.clone(),
         portal: portal.clone(),
@@ -570,6 +585,7 @@ pub fn resolve(
         Decision::Defer => Ok(Resolution::Confirm(confirmation)),
         Decision::Deny => Err(LinkError::Denied(profile.clone())),
         Decision::Approve => Ok(Resolution::Launch(Launch {
+            route: link.route,
             profile: profile.clone(),
             start_page: Some(link.url.clone().unwrap_or_else(|| portal.clone())),
             add: Some(LinkedGateway {
@@ -861,6 +877,7 @@ mod tests {
 
     fn launch(profile: &str, start: Option<&str>) -> Resolution {
         Resolution::Launch(Launch {
+            route: Route::Gateway,
             profile: name(profile),
             start_page: start.map(|url| url.parse().unwrap()),
             add: None,
@@ -1017,10 +1034,26 @@ mod tests {
 
     fn confirmation() -> Confirmation {
         Confirmation {
+            route: Route::Gateway,
             profile: name("newco"),
             gateway: "proxy.newco.example:443".parse().unwrap(),
             portal: "https://portal.newco.example/home".parse().unwrap(),
         }
+    }
+
+    #[test]
+    fn mixed_confirmation_binds_the_route_and_discloses_direct_connections() {
+        let request = new_link(None).with_route("mixed").unwrap();
+        let (resolution, _) = resolve_with(&request, Some(Decision::Defer));
+        let Ok(Resolution::Confirm(mixed)) = resolution else {
+            panic!("missing confirmation")
+        };
+        assert_eq!(mixed.route, Route::Mixed);
+        assert!(mixed.message().contains("mixed mode"));
+        assert!(mixed.message().contains("IP address and local DNS"));
+        assert!(mixed.echoed_by(&mixed.echo()));
+        assert!(!mixed.echoed_by(&confirmation().echo()));
+        assert!(!confirmation().echoed_by(&mixed.echo()));
     }
 
     #[test]
@@ -1044,6 +1077,7 @@ mod tests {
             assert_eq!(
                 resolution,
                 Ok(Resolution::Launch(Launch {
+                    route: Route::Gateway,
                     profile: name("newco"),
                     start_page: Some(start.parse().unwrap()),
                     add: Some(LinkedGateway {

@@ -5,6 +5,8 @@ what does not exist.
 
 ## Data path
 
+The default `gateway` route follows this path:
+
 ```text
  client (browser, curl, ...)
    |  TCP to 127.0.0.1:18736
@@ -36,6 +38,18 @@ determines the upstream CONNECT encoding. HTTP/2 multiplexes streams on one
 lazy TLS connection per session. HTTP/1.1, including no ALPN, keeps one TLS
 connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
+
+A launch URI can select `route=mixed` only for its new browser session.
+`proxy::routing` resolves target and gateway concurrently, selects gateway on
+missing/error answers or a canonical IP intersection, and otherwise tries TCP
+to the resolved target addresses. Discovery and direct TCP share half the
+opening deadline; failure falls through to the ordinary gateway pool within
+the original total deadline. A direct success uses the same authenticated
+local CONNECT response and byte relay with no upstream TLS. Gateway failures
+and established tunnels cannot switch routes. The mode is held by the
+session and reported for mixed launches and session listings; gateway files
+never store it. See [session routing](protocol/launch-uri.md#session-routing)
+for the heuristic's limits and DNS/source-IP exposure.
 
 ## Sessions and gateway profiles
 
@@ -161,9 +175,9 @@ The full protocol, limits and guarantees are in
 [protocol/launch-uri.md](protocol/launch-uri.md).
 
 - `uri::LaunchRequest` parses `gateinto://connect?profile=...&auth=...&v=1`
-  with the optional `url`, `gateway` and `portal` into a `GatewayName`, a
+  with the optional `route`, `url`, `gateway` and `portal` into a `GatewayName`, a
   `LaunchAuth`, `PortalUrl`s and a `link::GatewayAddress`.
-  `LaunchRequest::new` and `LaunchRequest::with_link` hold the value rules
+  `LaunchRequest::new`, `LaunchRequest::with_route` and `LaunchRequest::with_link` hold the value rules
   and are also used by the agent to parse IPC requests, so the agent applies
   the same rules again instead of trusting `open`. Its `Display` prints the
   canonical URI.
@@ -241,6 +255,7 @@ The full protocol, limits and guarantees are in
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/basic_tofu.rs` | `basic_tofu` local proxy authentication of one session: realm, strict Basic and base64 parsing, binding the first credential as a keyed hash, constant-time comparison, failure rate limit. |
 | `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, certificate rotation and owned connection drivers. |
+| `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |

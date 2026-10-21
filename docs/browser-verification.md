@@ -288,3 +288,23 @@ fresh profile beside an already running browser, how reliably and how quickly
 closing the window closed the session and deleted the profile, and how the
 browsers handled the `gateinto://` link. Note anything that differs from the
 expectations above.
+
+## Mixed routing launch links
+
+Not verified with real Chrome or Edge. On an isolated test deployment:
+
+1. Launch a known profile without `route` and with `route=gateway`; verify
+   both send CONNECTs through the gateway.
+2. Launch the same profile with `route=mixed`. Verify a DNS target matching
+   a gateway IP uses the gateway, a distinct public target connects directly,
+   and missing local DNS answers use the gateway. Observe DNS and network
+   captures rather than treating an error page as proof of the route.
+3. Verify a failed direct TCP opening tries gateway CONNECT, while a gateway
+   refusal remains an error. A target TLS error after local CONNECT success
+   must not cause another route attempt.
+4. Check `gateinto session list` and `gateinto status` identify only the mixed
+   session with `route=mixed`. A subsequent link without a mode, the device
+   session and any already-open session keep their original routes.
+5. Add an unknown gateway using a mixed link. Verify the existing confirmation
+   discloses direct connections and local DNS/IP exposure, and approval starts
+   a mixed session. A subsequent mode-free link must use the gateway route.

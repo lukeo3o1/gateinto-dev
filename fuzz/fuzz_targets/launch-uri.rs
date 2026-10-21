@@ -3,6 +3,7 @@
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::Request;
 use gateinto::link::{self, Decision, Known, KnownGateway, Origin, Resolution, Source};
+use gateinto::proxy::Route;
 use gateinto::uri::{LaunchRequest, MAX_LEN, UriError};
 use libfuzzer_sys::fuzz_target;
 
@@ -90,6 +91,7 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(decision, Decision::Defer);
             continue;
         };
+        assert_eq!(launch.route, request.route);
         let portal = known
             .gateways
             .iter()
@@ -111,7 +113,8 @@ fuzz_target!(|data: &[u8]| {
         .into_iter()
         .flatten()
         .count()
-        + usize::from(request.gateway.is_some());
+        + usize::from(request.gateway.is_some())
+        + usize::from(request.route != Route::Gateway);
     assert_eq!(line.split(' ').count(), 3 + fields);
     assert_eq!(line.parse::<Request>(), Ok(Request::Launch(request)));
 });

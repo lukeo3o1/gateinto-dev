@@ -101,6 +101,9 @@ impl fmt::Display for Request {
         match self {
             Self::Launch(request) => {
                 write!(f, "launch {} {}", request.profile, request.auth)?;
+                if request.route != crate::proxy::Route::Gateway {
+                    write!(f, " route={}", request.route)?;
+                }
                 if let Some(url) = &request.url {
                     write!(f, " url={url}")?;
                 }
@@ -145,19 +148,21 @@ impl FromStr for Request {
 }
 
 fn launch(profile: &str, auth: &str, link: &[&str]) -> Option<Request> {
-    let mut values = [None; 3];
+    let mut values = [None; 4];
     let mut next = 0;
     for word in link {
         let (key, value) = word.split_once('=')?;
-        let index = ["url", "gateway", "portal"]
+        let index = ["route", "url", "gateway", "portal"]
             .iter()
             .position(|name| *name == key)
             .filter(|&index| index >= next)?;
         values[index] = Some(value);
         next = index + 1;
     }
-    let [url, gateway, portal] = values;
+    let [route, url, gateway, portal] = values;
     LaunchRequest::new(profile, auth)
+        .ok()?
+        .with_route(route.unwrap_or("gateway"))
         .ok()?
         .with_link(url, gateway, portal)
         .ok()
@@ -855,6 +860,31 @@ mod tests {
             assert_eq!(agent_pid(&[line.to_owned()]), None, "{line}");
         }
         assert_eq!(agent_pid(&[]), None);
+    }
+
+    #[test]
+    fn mixed_launch_route_round_trips_without_changing_legacy_requests() {
+        let line = "launch corp basic_tofu route=mixed";
+        let parsed: Request = line.parse().unwrap();
+        assert_eq!(parsed.to_string(), line);
+        let Request::Launch(link) = parsed else {
+            panic!("not a launch")
+        };
+        assert!(link.to_string().contains("&route=mixed"));
+        assert_eq!(
+            "launch corp basic_tofu"
+                .parse::<Request>()
+                .unwrap()
+                .to_string(),
+            "launch corp basic_tofu"
+        );
+        for invalid in [
+            "launch corp basic_tofu route=direct",
+            "launch corp basic_tofu route=mixed route=mixed",
+            "launch corp basic_tofu route=gateway",
+        ] {
+            assert!(invalid.parse::<Request>().is_err());
+        }
     }
 
     #[test]

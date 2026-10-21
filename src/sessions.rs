@@ -91,6 +91,7 @@ pub struct Session {
     id: SessionId,
     kind: SessionKind,
     gateway: GatewayName,
+    route: proxy::Route,
     local_addr: SocketAddr,
     realm: Option<String>,
     close: oneshot::Sender<()>,
@@ -108,6 +109,10 @@ impl Session {
 
     pub fn gateway(&self) -> &GatewayName {
         &self.gateway
+    }
+
+    pub fn route(&self) -> proxy::Route {
+        self.route
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -143,6 +148,7 @@ impl SessionManager {
         proxy_config.client_certificate = span.in_scope(|| {
             session_certificate(proxy_config.client_certificate.as_ref(), UnixTime::now())
         })?;
+        let route = proxy_config.route;
         let proxy = Proxy::bind(proxy_config)
             .await
             .map_err(SessionError::Proxy)?;
@@ -160,6 +166,7 @@ impl SessionManager {
             id,
             kind: config.kind,
             gateway: config.gateway,
+            route,
             local_addr,
             realm,
             close,
