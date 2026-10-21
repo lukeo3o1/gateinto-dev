@@ -56,6 +56,7 @@ kernel32.dll GetCommandLineA
 kernel32.dll GetCommandLineW
 kernel32.dll GetConsoleMode
 kernel32.dll GetConsoleOutputCP
+kernel32.dll GetConsoleProcessList
 kernel32.dll GetConsoleScreenBufferInfo
 kernel32.dll GetCPInfo
 kernel32.dll GetCurrentDirectoryW

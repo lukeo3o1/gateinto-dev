@@ -365,6 +365,11 @@ The format, its limits and everything it can never do are specified in
   development), starting the
   agent with the same `--config` if none runs. The agent validates the request
   again; it never shows a dialog itself.
+- On Windows, a failed `open` shows its error in a dialog when it has its own
+  console or no console on an interactive desktop, so a link's error stays
+  visible until dismissed. Existing terminal sessions and redirected stderr
+  keep errors in stderr without a dialog. Argument errors are included;
+  successful launches, help and version requests show no error notification.
 - The agent accepts at most 5 launches a minute (asking included), one open
   confirmation and 4 browser sessions at a time. Each launch is a new session
   with its own port, realm and `basic_tofu` state, and a new browser process

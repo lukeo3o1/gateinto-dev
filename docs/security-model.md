@@ -130,8 +130,10 @@ How that is bounded:
 - **Frequency and volume.** The agent accepts at most 5 launch requests per
   60 seconds (counted whether they succeed, ask for a confirmation or fail)
   and at most 4 open browser sessions, and keeps at most one confirmation
-  open at a time. A page that opens many links gets errors, not windows or
-  dialogs.
+  open at a time. Links beyond those limits cannot open more browser windows
+  or gateway confirmation dialogs. Failed Windows desktop URI launches can
+  each show a persistent error notification from `open`; those notifications
+  are outside the agent's rate and confirmation limits.
 - **Per-user endpoint.** The agent listens on a named pipe named after the
   user's SID, created as the first instance, rejecting remote clients, with a
   DACL that grants access only to the user and SYSTEM. Clients refuse a pipe

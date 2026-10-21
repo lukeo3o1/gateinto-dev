@@ -227,7 +227,11 @@ portal_url = "https://example.com/"
     `gateinto.exe` is a console program, so a console window may appear
     briefly while `open` runs; record whether it does. Clicking `bad` (after
     confirming) opens no browser: `open` rejects the URI before contacting
-    the agent. Record the confirmation dialogs, whether
+    the agent. Its Gateinto error dialog must remain visible until OK is
+    chosen, even if the temporary console disappears. Clicking `offsite`
+    must likewise leave the returned agent error visible in one error dialog.
+    A successful `office` launch must not show an error dialog. Record the
+    confirmation dialogs, whether
     "always allow" is offered, and what happens on repeated clicks
     (rate limit after 5 a minute). Clicking `offsite` opens no browser: the
     agent refuses a start page outside the portal's origin. Clicking `new`
@@ -247,6 +251,20 @@ portal_url = "https://example.com/"
     form; also add `<a href="gateinto://connect/?profile=office">slash</a>`
     and record whether it launches too, and if a link does not launch, run
     `gateinto open` by hand with the same URI to see the error.
+
+    Also run the invalid link from an existing PowerShell window. Expected:
+    stderr contains the error, `$LASTEXITCODE` is nonzero, and no error dialog
+    appears. Repeat with `2> launch-error.txt`: the file contains the error and
+    no dialog appears. Check an `open` argument error in its own console with:
+
+    ```powershell
+    Start-Process -FilePath (Get-Command gateinto).Source -ArgumentList 'open'
+    ```
+
+    Expected: one persistent Gateinto dialog contains the missing URI
+    argument error. Run `gateinto open --help` in a terminal: help succeeds
+    without an error dialog. These desktop checks have not been executed
+    locally; automated tests capture notifications without opening dialogs.
 
 22. Remove the handler and stop the agent:
 

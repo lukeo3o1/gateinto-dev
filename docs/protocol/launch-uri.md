@@ -145,6 +145,23 @@ Error messages say which rule was broken and never repeat the URI.
    the meantime, the gateway stays stored and the answer says so; the next
    link to it starts a session without asking.
 
+### Failed launches
+
+`open` writes errors to stderr and exits nonzero, including command-line
+argument errors. On an interactive Windows desktop, it also shows the full
+error in a `Gateinto` message box with one OK button and an error icon when
+stderr is not redirected and there is no shared console (no console, or at
+most one console process). The dialog remains until dismissed, so an error
+from a browser link stays visible when the temporary console closes. A shared console,
+redirected stderr or a noninteractive desktop uses stderr alone. Successful
+launches, help/version requests and other commands do not show error dialogs.
+
+Only `open` shows these notifications; the detached agent never does. Error
+notifications are outside the agent's rate and confirmation limits. Existing
+handler registrations keep working without any changes. Real Windows console
+detection and error-dialog display still need the manual checks in
+[browser-verification.md](../browser-verification.md#launch-uri-and-agent).
+
 ## Resolution
 
 The agent knows the gateways of its configuration file and those in the
@@ -382,10 +399,12 @@ connection closed without an answer (an agent that is stopping) are retried
 within that time; if a started agent exits while no agent answers, `open`
 starts another, at most three in all. If they all exit, for example because
 the configuration file is invalid, `open` says so; run `gateinto agent` in a
-console to see the reason. If two `open` commands race, one agent wins and
-the other exits; both requests reach the winner (a test runs two `open`
-commands at once without an agent). On `stop` the agent stops accepting
-connections before it closes its sessions.
+console to see the reason, using the same `--config` when one was selected.
+The startup error includes that configuration path when supplied; the
+detached agent's stderr is not retained. If two `open` commands race, one
+agent wins and the other exits; both requests reach the winner (a test runs
+two `open` commands at once without an agent). On `stop` the agent stops
+accepting connections before it closes its sessions.
 
 ## Launch policy
 
