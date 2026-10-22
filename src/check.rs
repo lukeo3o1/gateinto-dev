@@ -208,14 +208,14 @@ async fn check(options: CheckOptions) -> Result<Report, CheckError> {
     };
     if let Some(target) = &report.target {
         if report.alpn.as_deref() == Some("h2") {
-            let (mut sender, _driver, _) =
+            let (mut sender, _driver, liveness) =
                 crate::proxy::h2::connect(tls, options.max_header_bytes, 1)
                     .await
                     .map_err(upstream_error)?;
             crate::proxy::h2::ready(&mut sender)
                 .await
                 .map_err(|error| upstream_error(UpstreamError::Http2(error)))?;
-            let (status, _stream) = crate::proxy::h2::request(&mut sender, target)
+            let (status, _stream) = crate::proxy::h2::request(&mut sender, &liveness, target)
                 .map_err(upstream_error)?
                 .response()
                 .await

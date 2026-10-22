@@ -118,7 +118,7 @@ impl Pool {
                     state.current = None;
                     continue;
                 }
-                match h2::request(&mut current.sender, target) {
+                match h2::request(&mut current.sender, &current.liveness, target) {
                     Ok(pending) => {
                         let liveness = current.liveness.clone();
                         drop(state);
@@ -131,7 +131,6 @@ impl Pool {
                             response = pending.response() => response?,
                             never = watchdog => match never {},
                         };
-                        liveness.answered();
                         return if (200..300).contains(&status) {
                             Ok((Box::new(stream), Vec::new()))
                         } else {
