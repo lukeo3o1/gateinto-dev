@@ -637,6 +637,32 @@ async fn a_slow_receiver_applies_backpressure_without_blocking_other_streams() {
 }
 
 #[tokio::test]
+async fn many_unread_streams_cannot_exhaust_the_connection_window_for_a_new_tunnel() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 100).await;
+    let agent = start_agent(agent_config(server.addr, ca.roots(), PROXY_NAME)).await;
+    let mut stalled = Vec::new();
+    for _ in 0..20 {
+        let (stream, response) = send(agent, &connect_request("flood.test:443")).await;
+        assert_eq!(response.status, 200);
+        stalled.push(stream);
+    }
+    let mut previous = usize::MAX;
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let sent = server.sent_bytes.load(Ordering::SeqCst);
+        if sent == previous {
+            break;
+        }
+        previous = sent;
+    }
+    let mut healthy = tunnel(agent, "echo.test:443").await;
+    echo(&mut healthy, &payload(128 * 1024)).await;
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+    drop(stalled);
+}
+
+#[tokio::test]
 async fn sessions_use_separate_http2_connections_and_closing_one_leaves_the_other_working() {
     use gateinto::identity::certificates::SelfSignedCertificates;
     use gateinto::identity::client_cert::ClientCertificate;

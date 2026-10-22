@@ -26,15 +26,26 @@ impl Driver {
     }
 }
 
+const STREAM_WINDOW: u32 = 64 * 1024;
+const MAX_WINDOW: u32 = (1 << 31) - 1;
+
+fn connection_window(max_streams: usize) -> u32 {
+    u32::try_from(max_streams)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(STREAM_WINDOW)
+        .clamp(STREAM_WINDOW, MAX_WINDOW)
+}
+
 pub(crate) async fn connect(
     tls: TlsStream<TcpStream>,
     max_header_bytes: usize,
+    max_streams: usize,
 ) -> Result<(h2::client::SendRequest<Bytes>, Driver), UpstreamError> {
     let (sender, mut connection) = h2::client::Builder::new()
         .enable_push(false)
         .initial_max_send_streams(0)
-        .initial_window_size(64 * 1024)
-        .initial_connection_window_size(1024 * 1024)
+        .initial_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(connection_window(max_streams))
         .max_header_list_size(u32::try_from(max_header_bytes).unwrap_or(u32::MAX))
         .handshake(tls)
         .await
@@ -199,4 +210,17 @@ impl AsyncWrite for Stream {
 
 pub(crate) async fn ready(sender: &mut h2::client::SendRequest<Bytes>) -> Result<(), h2::Error> {
     poll_fn(|cx| sender.poll_ready(cx)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_window_covers_every_stream_window_up_to_the_protocol_maximum() {
+        assert_eq!(connection_window(64), 4 * 1024 * 1024);
+        assert_eq!(connection_window(1), STREAM_WINDOW);
+        assert_eq!(connection_window(0), STREAM_WINDOW);
+        assert_eq!(connection_window(usize::MAX), MAX_WINDOW);
+    }
 }

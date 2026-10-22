@@ -417,9 +417,7 @@ impl Shared {
             return Ok((Box::new(stream), Vec::new()));
         }
         info!(route = "gateway", "selected tunnel route");
-        self.pool
-            .open(&self.endpoint, target, self.limits.max_header_bytes)
-            .await
+        self.pool.open(&self.endpoint, target, &self.limits).await
     }
 }
 

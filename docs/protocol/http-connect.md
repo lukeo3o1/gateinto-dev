@@ -88,11 +88,17 @@ send streams until peer SETTINGS arrive. Waiting for stream capacity consumes
 the local tunnel's opening deadline and its existing
 `max_concurrent_tunnels` permit; excess local connections still get `503`.
 
-Receive windows are 64 KiB per stream and 1 MiB per connection. Receive credit
-is released only as bytes are consumed by the relay. Writes reserve available
-send capacity and copy at most 16 KiB at a time; they never enqueue an
-unbounded body. A slow stream therefore applies backpressure without requiring
-other streams to stop. Decoded response headers are limited by
+The receive window is 64 KiB per stream. Receive credit is released only as
+bytes are consumed by the relay, so a stream whose local client stops reading
+holds at most 64 KiB of the connection window. The connection window is the
+stream window multiplied by `max_concurrent_tunnels` (4 MiB for the default
+64), capped at the HTTP/2 maximum of 2^31-1 bytes. Every gateway stream holds
+a tunnel permit, so even when every other tunnel has stopped reading, the
+connection window still has credit for the remaining stream. A slow stream
+therefore applies backpressure to its own data only. Buffered receive data
+remains bounded by `max_concurrent_tunnels` times 64 KiB per session. Writes
+reserve available send capacity and copy at most 16 KiB at a time; they never
+enqueue an unbounded body. Decoded response headers are limited by
 `header_max_bytes`; server push is disabled.
 
 ## Reconnect, drain and shutdown
@@ -157,6 +163,7 @@ a target, the command checks TLS only.
 on loopback, including reuse, fallback, protocol changes, session isolation,
 shutdown, GOAWAY, connection errors without replay, statuses and resets,
 stream limits, independent timeouts, half-close, early bytes, IPv6 authorities,
-large transfers, slow-reader backpressure, and certificate rotation and retry
-with injected clocks and verified certificates. No real gateway has been
+large transfers, slow-reader backpressure, many unread streams beside a live
+one, and certificate rotation and retry with injected clocks and verified
+certificates. No real gateway has been
 verified with HTTP/2.
