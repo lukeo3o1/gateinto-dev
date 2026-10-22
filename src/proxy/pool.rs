@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 
-use super::{Endpoint, UpstreamError, h2, request_tunnel};
+use super::{Endpoint, Limits, UpstreamError, h2, request_tunnel};
 use crate::http::{Authority, parse_response};
 use crate::tls::ClientCertificateResolver;
 
@@ -43,14 +43,15 @@ impl State {
         &mut self,
         tls: TlsStream<TcpStream>,
         resolver: Arc<ClientCertificateResolver>,
-        max_header_bytes: usize,
+        limits: &Limits,
     ) -> Result<Option<TlsStream<TcpStream>>, UpstreamError> {
         if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
             self.legacy = true;
             return Ok(Some(tls));
         }
         let certificate = resolver.connection_certificate();
-        let (sender, driver) = h2::connect(tls, max_header_bytes).await?;
+        let (sender, driver) =
+            h2::connect(tls, limits.max_header_bytes, limits.max_tunnels).await?;
         self.drivers.push(driver);
         self.current = Some(Connection {
             sender,
@@ -70,8 +71,9 @@ impl Pool {
         &self,
         endpoint: &Endpoint,
         target: &Authority,
-        max_header_bytes: usize,
+        limits: &Limits,
     ) -> Result<(Tunnel, Vec<u8>), UpstreamError> {
+        let max_header_bytes = limits.max_header_bytes;
         let mut state = self.0.lock().await;
         state.drivers.retain(|driver| !driver.finished());
         let mut connected = false;
@@ -82,7 +84,7 @@ impl Pool {
             connected = true;
             state = self.0.lock().await;
             if state.current.is_none()
-                && let Some(tls) = state.register(tls, resolver, max_header_bytes).await?
+                && let Some(tls) = state.register(tls, resolver, limits).await?
             {
                 drop(state);
                 return Self::legacy(tls, target, max_header_bytes).await;
@@ -133,7 +135,7 @@ impl Pool {
             connected = true;
             let resolver = Arc::new(endpoint.client_certificate.fresh());
             let tls = endpoint.connect_with(resolver.clone()).await?;
-            if let Some(tls) = state.register(tls, resolver, max_header_bytes).await? {
+            if let Some(tls) = state.register(tls, resolver, limits).await? {
                 drop(state);
                 return Self::legacy(tls, target, max_header_bytes).await;
             }
