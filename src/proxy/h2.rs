@@ -46,8 +46,8 @@ impl LivenessState {
     }
 
     fn answered(&self) {
-        self.answered_nanos
-            .store(self.now_nanos(), Ordering::Relaxed);
+        let now = self.now_nanos();
+        self.answered_nanos.fetch_max(now, Ordering::Relaxed);
     }
 
     fn answered_since(&self, nanos: u64) -> bool {
