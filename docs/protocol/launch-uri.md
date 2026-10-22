@@ -484,8 +484,8 @@ An error is the single line `error: <message>`. Line breaks inside a message
 are replaced by spaces. Answers are at most 64 KiB. The agent serves at most
 8 connections at a time and drops a connection that sends no complete request
 within 10 seconds. A client gives up on an agent that does not answer within
-60 seconds; a connection that the agent closes without an answer is reported
-as such. The command line exposes the requests as `gateinto open`,
+60 seconds, and on Windows stops retrying a busy pipe after the same time; a
+connection that the agent closes without an answer is reported as such. The command line exposes the requests as `gateinto open`,
 `gateinto session list`, `gateinto session close <id>` and `gateinto stop`.
 
 `gateinto open` without a running agent starts `gateinto agent` with the same

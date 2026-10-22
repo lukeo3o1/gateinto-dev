@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -14,6 +14,7 @@ pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const INSTANCE_VARIABLE: &str = "GATEINTO_INSTANCE";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -353,6 +354,13 @@ impl fmt::Display for BindError {
 
 impl std::error::Error for BindError {}
 
+pub fn busy_retry_delay(deadline: Instant, now: Instant) -> Option<Duration> {
+    let remaining = deadline
+        .checked_duration_since(now)
+        .filter(|r| !r.is_zero())?;
+    Some(remaining.min(BUSY_RETRY_DELAY))
+}
+
 pub fn taken_pipe(endpoint: &Endpoint, owned_by_user: io::Result<bool>) -> BindError {
     match owned_by_user {
         Ok(true) => BindError::AlreadyRunning(endpoint.clone()),
@@ -643,7 +651,7 @@ mod windows {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::ptr::null_mut;
-    use std::time::Duration;
+    use std::time::Instant;
 
     use tokio::net::windows::named_pipe::{
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
@@ -662,9 +670,10 @@ mod windows {
     use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, SECURITY_IDENTIFICATION};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    use super::{BindError, Connection, Endpoint, RequestError, owner_only_sddl, taken_pipe};
-
-    const BUSY_DELAY: Duration = Duration::from_millis(20);
+    use super::{
+        BindError, Connection, Endpoint, REQUEST_TIMEOUT, RequestError, busy_retry_delay,
+        owner_only_sddl, taken_pipe,
+    };
 
     #[derive(Debug)]
     struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
@@ -760,6 +769,7 @@ mod windows {
     }
 
     pub async fn connect(endpoint: &Endpoint) -> Result<Connection, RequestError> {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             match ClientOptions::new().open(endpoint.path()) {
                 Ok(client) => {
@@ -767,7 +777,10 @@ mod windows {
                     return Ok(Box::new(client));
                 }
                 Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
-                    tokio::time::sleep(BUSY_DELAY).await;
+                    match busy_retry_delay(deadline, Instant::now()) {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => return Err(RequestError::TimedOut),
+                    }
                 }
                 Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
                     return Err(RequestError::NotRunning);
@@ -1282,6 +1295,21 @@ mod tests {
             taken(Ok(false)).to_string(),
             r"the agent endpoint \\.\pipe\gateinto-agent-S-1-5-21-1 is held by another user"
         );
+    }
+
+    #[test]
+    fn a_busy_pipe_is_retried_only_until_the_deadline() {
+        let start = std::time::Instant::now();
+        let deadline = start + REQUEST_TIMEOUT;
+        let delay = |now| busy_retry_delay(deadline, now);
+
+        assert_eq!(delay(start), Some(Duration::from_millis(20)));
+        assert_eq!(
+            delay(deadline - Duration::from_millis(5)),
+            Some(Duration::from_millis(5))
+        );
+        assert_eq!(delay(deadline), None);
+        assert_eq!(delay(deadline + Duration::from_secs(1)), None);
     }
 
     #[test]
