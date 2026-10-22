@@ -435,9 +435,12 @@ Endpoint:
   already taken, the agent opens the existing pipe with `READ_CONTROL` and
   checks its owner the same way: it reports `an agent is already running`
   only for a pipe the user owns, and `the agent endpoint ... is held by
-  another user` for a pipe it cannot open or that another user owns. Whether Windows enforces these as intended is only exercised by
-  the CI runs on `windows-latest` (same user); the other-user cases are not
-  tested. The agent always keeps an instance listening, so the name is not
+  another user` for a pipe it cannot open or that another user owns. While
+  all instances of the existing pipe are busy, it retries the open for up to
+  a second; a pipe still busy then is reported as an error, and the agent
+  does not start. Whether Windows enforces these as intended is only
+  exercised by the CI runs on `windows-latest` (same user); the other-user
+  cases are not tested. The agent always keeps an instance listening, so the name is not
   released while it runs: it creates the next instance before handing out a
   connected one, and when that or the connection fails, it disconnects the
   instance and listens on it again.

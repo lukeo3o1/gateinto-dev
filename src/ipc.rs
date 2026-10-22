@@ -361,6 +361,23 @@ pub fn busy_retry_delay(deadline: Instant, now: Instant) -> Option<Duration> {
     Some(remaining.min(BUSY_RETRY_DELAY))
 }
 
+pub fn retry_while_busy<T>(
+    deadline: Instant,
+    mut attempt: impl FnMut() -> io::Result<T>,
+    is_busy: impl Fn(&io::Error) -> bool,
+    mut wait: impl FnMut(Duration),
+) -> io::Result<T> {
+    loop {
+        match attempt() {
+            Err(error) if is_busy(&error) => match busy_retry_delay(deadline, Instant::now()) {
+                Some(delay) => wait(delay),
+                None => return Err(error),
+            },
+            result => return result,
+        }
+    }
+}
+
 pub fn hand_off<P>(
     listening: &mut P,
     connected: io::Result<()>,
@@ -669,7 +686,7 @@ mod windows {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::ptr::null_mut;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use tokio::net::windows::named_pipe::{
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
@@ -690,8 +707,10 @@ mod windows {
 
     use super::{
         BindError, Connection, Endpoint, REQUEST_TIMEOUT, RequestError, busy_retry_delay, hand_off,
-        owner_only_sddl, taken_pipe,
+        owner_only_sddl, retry_while_busy, taken_pipe,
     };
+
+    const BIND_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
     #[derive(Debug)]
     struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
@@ -821,10 +840,17 @@ mod windows {
     }
 
     fn pipe_owned_by_current_user(endpoint: &Endpoint) -> io::Result<bool> {
-        let pipe = std::fs::OpenOptions::new()
-            .access_mode(READ_CONTROL)
-            .security_qos_flags(SECURITY_IDENTIFICATION)
-            .open(endpoint.path())?;
+        let pipe = retry_while_busy(
+            Instant::now() + BIND_PROBE_TIMEOUT,
+            || {
+                std::fs::OpenOptions::new()
+                    .access_mode(READ_CONTROL)
+                    .security_qos_flags(SECURITY_IDENTIFICATION)
+                    .open(endpoint.path())
+            },
+            |error| error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32),
+            std::thread::sleep,
+        )?;
         owned_by_current_user(pipe.as_raw_handle())
     }
 
@@ -1396,6 +1422,51 @@ mod tests {
             "client left; resetting the pipe instance also failed: still connected"
         );
         assert_eq!(listening, "first");
+    }
+
+    #[test]
+    fn a_busy_probe_is_retried_until_it_is_answered() {
+        let busy = || io::Error::from(io::ErrorKind::WouldBlock);
+        let mut answers = vec![Ok(true), Err(busy()), Err(busy())];
+        let mut waits = Vec::new();
+        let probed = retry_while_busy(
+            Instant::now() + REQUEST_TIMEOUT,
+            || answers.pop().unwrap(),
+            |error| error.kind() == io::ErrorKind::WouldBlock,
+            |delay| waits.push(delay),
+        );
+
+        assert!(probed.unwrap());
+        assert_eq!(waits, [Duration::from_millis(20); 2]);
+    }
+
+    #[test]
+    fn a_busy_probe_fails_once_its_deadline_has_passed() {
+        let mut attempts = 0;
+        let probed: io::Result<bool> = retry_while_busy(
+            Instant::now(),
+            || {
+                attempts += 1;
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            },
+            |error| error.kind() == io::ErrorKind::WouldBlock,
+            |_| panic!("waited"),
+        );
+
+        assert_eq!(probed.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn a_probe_that_fails_otherwise_is_not_retried() {
+        let probed: io::Result<bool> = retry_while_busy(
+            Instant::now() + REQUEST_TIMEOUT,
+            || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |error| error.kind() == io::ErrorKind::WouldBlock,
+            |_| panic!("waited"),
+        );
+
+        assert_eq!(probed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
