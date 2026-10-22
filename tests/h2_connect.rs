@@ -662,6 +662,57 @@ async fn many_unread_streams_cannot_exhaust_the_connection_window_for_a_new_tunn
     drop(stalled);
 }
 
+async fn blackholed_gateway(
+    handshake_timeout: Duration,
+) -> (h2_fixture::Server, SocketAddr, TestCa) {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    config.limits.handshake_timeout = handshake_timeout;
+    let agent = start_agent(config).await;
+    echo(
+        &mut tunnel(agent, "echo.test:443").await,
+        b"before blackhole",
+    )
+    .await;
+    server
+        .blackhole_first_connection
+        .store(true, Ordering::SeqCst);
+    (server, agent, ca)
+}
+
+#[tokio::test]
+async fn an_unanswered_connect_on_a_silent_connection_retires_it_for_later_requests() {
+    let (server, agent, _ca) = blackholed_gateway(Duration::from_secs(1)).await;
+    let started = tokio::time::Instant::now();
+    let unanswered = tokio::spawn(async move {
+        send(agent, &connect_request("echo.test:443"))
+            .await
+            .1
+            .status
+    });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let mut recovered = timeout(Duration::from_secs(1), tunnel(agent, "echo.test:443"))
+        .await
+        .expect("a later CONNECT must not wait on the silent connection");
+    echo(&mut recovered, b"fresh connection").await;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(unanswered.await.unwrap(), 504);
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn an_idle_silent_connection_is_verified_and_replaced_before_reuse() {
+    let (server, agent, _ca) = blackholed_gateway(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    echo(
+        &mut tunnel(agent, "echo.test:443").await,
+        b"fresh connection",
+    )
+    .await;
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn sessions_use_separate_http2_connections_and_closing_one_leaves_the_other_working() {
     use gateinto::identity::certificates::SelfSignedCertificates;

@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::io;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ pub(super) type Tunnel = Box<dyn Io>;
 
 struct Connection {
     sender: ::h2::client::SendRequest<Bytes>,
+    liveness: h2::Liveness,
     certificate: Option<CertificateDer<'static>>,
     resolver: Arc<ClientCertificateResolver>,
 }
@@ -50,11 +52,12 @@ impl State {
             return Ok(Some(tls));
         }
         let certificate = resolver.connection_certificate();
-        let (sender, driver) =
+        let (sender, driver, liveness) =
             h2::connect(tls, limits.max_header_bytes, limits.max_tunnels).await?;
         self.drivers.push(driver);
         self.current = Some(Connection {
             sender,
+            liveness,
             certificate,
             resolver,
         });
@@ -90,9 +93,16 @@ impl Pool {
                 return Self::legacy(tls, target, max_header_bytes).await;
             }
         }
+        let probe_deadline = limits.handshake_timeout / 4;
         loop {
             if let Some(current) = &state.current
-                && current.certificate_changed()?
+                && (current.liveness.dead() || current.certificate_changed()?)
+            {
+                state.current = None;
+            }
+            if let Some(current) = &state.current
+                && current.liveness.quiet_for() >= limits.handshake_timeout
+                && !current.liveness.check(probe_deadline).await
             {
                 state.current = None;
             }
@@ -110,8 +120,18 @@ impl Pool {
                 }
                 match h2::request(&mut current.sender, target) {
                     Ok(pending) => {
+                        let liveness = current.liveness.clone();
                         drop(state);
-                        let (status, stream) = pending.response().await?;
+                        let watchdog = async {
+                            tokio::time::sleep(probe_deadline).await;
+                            liveness.check(probe_deadline).await;
+                            std::future::pending::<Infallible>().await
+                        };
+                        let (status, stream) = tokio::select! {
+                            response = pending.response() => response?,
+                            never = watchdog => match never {},
+                        };
+                        liveness.answered();
                         return if (200..300).contains(&status) {
                             Ok((Box::new(stream), Vec::new()))
                         } else {

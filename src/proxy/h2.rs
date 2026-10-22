@@ -1,7 +1,10 @@
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
+use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -26,6 +29,60 @@ impl Driver {
     }
 }
 
+struct LivenessState {
+    ping: tokio::sync::Mutex<h2::PingPong>,
+    dead: AtomicBool,
+    answered: Mutex<Instant>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Liveness(Arc<LivenessState>);
+
+impl Liveness {
+    fn new(ping: h2::PingPong) -> Self {
+        Self(Arc::new(LivenessState {
+            ping: tokio::sync::Mutex::new(ping),
+            dead: AtomicBool::new(false),
+            answered: Mutex::new(Instant::now()),
+        }))
+    }
+
+    pub(crate) fn dead(&self) -> bool {
+        self.0.dead.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn quiet_for(&self) -> Duration {
+        self.0.answered.lock().unwrap().elapsed()
+    }
+
+    pub(crate) fn answered(&self) {
+        *self.0.answered.lock().unwrap() = Instant::now();
+    }
+
+    // The probe runs in its own task because h2 refuses a new PING while a cancelled one is
+    // still outstanding; a probe that misses its deadline marks the connection dead instead.
+    pub(crate) async fn check(&self, deadline: Duration) -> bool {
+        let state = self.0.clone();
+        let probe = tokio::spawn(async move {
+            let mut ping = state.ping.lock().await;
+            if state.dead.load(Ordering::SeqCst) {
+                return false;
+            }
+            let answered = matches!(
+                tokio::time::timeout(deadline, ping.ping(h2::Ping::opaque())).await,
+                Ok(Ok(_))
+            );
+            if answered {
+                *state.answered.lock().unwrap() = Instant::now();
+            } else {
+                state.dead.store(true, Ordering::SeqCst);
+            }
+            answered
+        });
+        probe.await.unwrap_or(false)
+    }
+}
+
 const STREAM_WINDOW: u32 = 64 * 1024;
 const MAX_WINDOW: u32 = (1 << 31) - 1;
 
@@ -40,7 +97,7 @@ pub(crate) async fn connect(
     tls: TlsStream<TcpStream>,
     max_header_bytes: usize,
     max_streams: usize,
-) -> Result<(h2::client::SendRequest<Bytes>, Driver), UpstreamError> {
+) -> Result<(h2::client::SendRequest<Bytes>, Driver, Liveness), UpstreamError> {
     let (sender, mut connection) = h2::client::Builder::new()
         .enable_push(false)
         .initial_max_send_streams(0)
@@ -63,7 +120,7 @@ pub(crate) async fn connect(
         .ping(h2::Ping::opaque())
         .await
         .map_err(UpstreamError::Http2)?;
-    Ok((sender, driver))
+    Ok((sender, driver, Liveness::new(ping_pong)))
 }
 
 pub(crate) struct Pending {
