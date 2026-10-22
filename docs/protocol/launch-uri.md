@@ -58,6 +58,14 @@ of the opening timeout; the original total deadline includes any gateway
 fallback. A gateway refusal or TLS failure is final, and an established
 tunnel is never retried through another route.
 
+DNS work also has a process-wide limit of 64 queued or running lookups shared
+with gateway connection setup. Timed-out waiters do not release slots while
+their OS lookups continue. At capacity, discovery selects gateway fallback;
+new named gateway connections without a slot fail, while IP literals and
+existing gateway connections need no DNS work. OS resolver calls remain
+non-cancellable and can delay process shutdown. See
+[DNS work budget](http-connect.md#dns-work-budget).
+
 This is an IP-based heuristic, not a gateway scope or authorization protocol.
 A service behind a different IP can be sent directly; a public service on a
 shared gateway IP can be sent through the gateway. Mixed mode exposes local

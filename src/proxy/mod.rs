@@ -159,7 +159,10 @@ impl Endpoint {
         resolver
             .check_required(resolver.now())
             .map_err(UpstreamError::ClientCertificate)?;
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
+        let addresses = crate::dns::resolve(&self.host, self.port)
+            .await
+            .map_err(UpstreamError::Connect)?;
+        let tcp = TcpStream::connect(addresses.as_slice())
             .await
             .map_err(UpstreamError::Connect)?;
         let _ = tcp.set_nodelay(true);

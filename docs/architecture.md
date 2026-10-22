@@ -51,6 +51,14 @@ session and reported for mixed launches and session listings; gateway files
 never store it. See [session routing](protocol/launch-uri.md#session-routing)
 for the heuristic's limits and DNS/source-IP exposure.
 
+`dns` owns the process-wide budget of 64 queued or running system lookups for
+both mixed discovery and gateway connection setup. It acquires capacity
+without waiting before submitting `ToSocketAddrs` to `spawn_blocking`; the
+closure retains the slot even if its async waiter is dropped. IP literals
+bypass the resolver. Both TCP paths connect resolved address vectors, and a
+full DNS budget returns an immediate error. System calls already running can
+still delay process shutdown. See [DNS work budget](protocol/http-connect.md#dns-work-budget).
+
 ## Sessions and gateway profiles
 
 ```text
@@ -256,6 +264,7 @@ The full protocol, limits and guarantees are in
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
 | `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the device session's gateway, listen address and local authentication, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |

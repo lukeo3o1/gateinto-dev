@@ -21,6 +21,16 @@ Direct opening and DNS share half the total opening timeout before gateway
 fallback. A gateway refusal or TLS error never permits a direct retry, and
 routes never change after the local success response.
 
+All system DNS work uses one process-wide budget of 64 queued or running
+lookups, shared by mixed discovery and gateway connections. Slots belong to
+the blocking resolver jobs, not their async waiters, so timeout, cancellation
+and session closure do not free capacity while OS work continues. An exhausted
+budget rejects new DNS work immediately; mixed mode falls back to the gateway,
+and a fresh named gateway without capacity fails closed. IP literals bypass
+DNS. Existing OS lookups can still delay process shutdown; their number is
+bounded, and the routing deadline does not promise to interrupt them. See
+[DNS work budget](protocol/http-connect.md#dns-work-budget).
+
 Mixed mode exposes local DNS queries and the user's source IP, and direct
 connections bypass gateway authorization and inspection. Different service
 and gateway IPs or shared hosting can misclassify traffic. Any website can

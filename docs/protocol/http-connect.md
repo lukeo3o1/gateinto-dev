@@ -46,6 +46,24 @@ Early client bytes, half-close, idle limits, concurrency limits and shutdown
 use the same relay for both routes. Direct tunnels create no upstream TLS
 connection and do not use or refresh the gateway client certificate.
 
+## DNS work budget
+
+Mixed-route discovery and new gateway connections share a process-wide limit
+of 64 queued or running system DNS lookups. An IP literal needs no lookup
+slot. Capacity is acquired before submitting blocking work, without a waiting
+queue; the blocking job holds its slot until the system resolver returns,
+including when its async caller times out, is cancelled or closes its session.
+Errors and panics release the slot when that job finishes. TCP connects use
+the resulting address vector, so they cannot start an implicit extra lookup.
+
+At capacity, mixed discovery selects the gateway. An existing gateway
+connection or an IP-literal gateway may still work; a new named gateway that
+cannot obtain a slot fails immediately with the existing local `502` mapping.
+The budget is shared across sessions and `check-upstream` within one process.
+Opening deadlines bound the caller's wait, not the system resolver's lifetime.
+Already-running OS lookups remain non-cancellable and may delay process
+shutdown, but cancellation cannot admit unlimited replacement DNS work.
+
 ## Connection ownership and limits
 
 Each Proxy, and therefore each session, owns its own lazy connection pool.

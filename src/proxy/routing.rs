@@ -1,11 +1,11 @@
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::TcpStream;
 
 use crate::http::{Authority, Host};
 
@@ -38,12 +38,7 @@ impl FromStr for Route {
 }
 
 pub(super) async fn resolve(host: String, port: u16) -> io::Result<Vec<SocketAddr>> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(ip, port)]);
-    }
-    lookup_host((host.as_str(), port))
-        .await
-        .map(Iterator::collect)
+    crate::dns::resolve(&host, port).await
 }
 
 pub(super) async fn attempt<F, R>(

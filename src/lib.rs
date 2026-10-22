@@ -2,6 +2,7 @@ pub mod agent;
 pub mod browser;
 pub mod check;
 pub mod config;
+mod dns;
 pub mod http;
 pub mod identity;
 pub mod ipc;

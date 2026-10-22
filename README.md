@@ -361,6 +361,12 @@ The format, its limits and everything it can never do are specified in
   shared IPs; mixed mode exposes local DNS and the user's source IP and can
   bypass gateway policy. It is not saved to the gateway. See
   [session routing](docs/protocol/launch-uri.md#session-routing).
+- System DNS work is limited to 64 queued or running lookups per process,
+  shared by discovery and gateway connections. Timeouts do not release a
+  blocking job's slot before it finishes; excess DNS work fails immediately.
+  IP literals and existing gateway connections need no slot. OS lookups can
+  still delay process shutdown. See
+  [DNS work budget](docs/protocol/http-connect.md#dns-work-budget).
 - At least one of `gateway` or `profile` is required; no individual field
   is mandatory in every URI. A supplied gateway or portal must match the
   selected known entry; omitted portal inherits it. Gateway-only selection
