@@ -34,6 +34,7 @@ kernel32.dll CreateMutexA
 kernel32.dll CreateNamedPipeW
 kernel32.dll CreateProcessW
 kernel32.dll CreateThread
+kernel32.dll CreateWaitableTimerExW
 kernel32.dll DecodePointer
 kernel32.dll DeleteCriticalSection
 kernel32.dll DeleteFileW
@@ -155,6 +156,8 @@ kernel32.dll SetNamedPipeHandleState
 kernel32.dll SetStdHandle
 kernel32.dll SetThreadStackGuarantee
 kernel32.dll SetUnhandledExceptionFilter
+kernel32.dll SetWaitableTimer
+kernel32.dll Sleep
 kernel32.dll SleepConditionVariableSRW
 kernel32.dll SleepEx
 kernel32.dll SwitchToThread
