@@ -112,6 +112,27 @@ can discard the cached connection and use that fresh attempt. Once
 GOAWAY, RST_STREAM, a transport error or a response timeout follows. The local
 client decides whether to make another request.
 
+A connection can also stop answering without closing, for example after a NAT
+drops its mapping, the host sleeps or the network changes without a reset.
+Gateinto therefore checks liveness with an HTTP/2 PING on demand and retires a
+connection whose PONG does not arrive within a quarter of the opening timeout
+(2.5 s by default):
+
+- Before reusing a connection that has not answered a CONNECT or PING for at
+  least one opening timeout, the request waits for a PING. If it fails, that
+  request opens a fresh connection within its remaining deadline.
+- When a submitted CONNECT has no reply after a quarter of the opening timeout,
+  a PING runs beside it. If that fails, later requests open a fresh connection.
+  The unanswered CONNECT is not replayed and still ends with `504` at its own
+  deadline.
+
+A retired connection is only removed from reuse, like after GOAWAY: its
+existing streams keep running until they end or reach their idle deadline. A
+`4xx`/`5xx` status, RST_STREAM or a slow CONNECT reply on a connection that
+still answers PING does not retire it. A connection whose PONG is delayed
+beyond the deadline, for example behind a saturated uplink, is also retired;
+the cost is one new TLS connection.
+
 GOAWAY prevents new streams on the old connection while existing accepted
 streams drain. A transport error can terminate every stream on that
 connection. Dropping or cancelling an opening or established tunnel resets
@@ -142,10 +163,11 @@ Each gateway-routed request retains its opening timeout, including pool coordina
 TCP/TLS, stream-capacity waits and the CONNECT reply. Timeout maps to `504`.
 Established streams retain independent bidirectional idle deadlines: traffic
 on another stream does not keep an idle tunnel alive. HTTP/2 PING keepalive is
-not enabled. The single initialization PING checks protocol setup, rather than
-keeping an established connection alive. Opening and idle deadlines plus
-reconnect on a later request provide failure handling without background
-keepalive traffic.
+not enabled, and no TCP keepalive is configured. Besides the initialization
+PING, PINGs are sent only for the on-demand liveness checks above, so an idle
+connection generates no background traffic. A silent connection is detected
+the next time a CONNECT needs it; established tunnels on it end through their
+idle deadlines.
 
 TLS session resumption and TLS early data remain disabled. Reusing an open
 HTTP/2 connection shares its existing authenticated TLS transport; creating a
@@ -164,6 +186,7 @@ on loopback, including reuse, fallback, protocol changes, session isolation,
 shutdown, GOAWAY, connection errors without replay, statuses and resets,
 stream limits, independent timeouts, half-close, early bytes, IPv6 authorities,
 large transfers, slow-reader backpressure, many unread streams beside a live
-one, and certificate rotation and retry with injected clocks and verified
-certificates. No real gateway has been
-verified with HTTP/2.
+one, a gateway that stops answering without closing, and certificate rotation
+and retry with injected clocks and verified certificates. No real gateway has
+been verified with HTTP/2, and liveness recovery has been tested only against
+the loopback fixture.

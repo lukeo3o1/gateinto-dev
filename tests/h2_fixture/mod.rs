@@ -1,11 +1,15 @@
 use std::future::poll_fn;
+use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use h2::Reason;
 use rustls::ServerConfig;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::TlsAcceptor;
@@ -17,7 +21,53 @@ pub struct Server {
     pub sent_bytes: Arc<AtomicUsize>,
     pub requests: Arc<Mutex<Vec<(usize, String)>>>,
     pub certificates: Arc<Mutex<Vec<Vec<rustls::pki_types::CertificateDer<'static>>>>>,
+    pub blackhole_first_connection: Arc<AtomicBool>,
     task: JoinHandle<()>,
+}
+
+struct Blackholing<T> {
+    inner: T,
+    blackhole: Arc<AtomicBool>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Blackholing<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.blackhole.load(Ordering::SeqCst) {
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Blackholing<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.blackhole.load(Ordering::SeqCst) {
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.blackhole.load(Ordering::SeqCst) {
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.blackhole.load(Ordering::SeqCst) {
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 struct Active(Arc<AtomicUsize>);
@@ -61,7 +111,9 @@ impl Server {
         let sent_bytes = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let certificates = Arc::new(Mutex::new(Vec::new()));
+        let blackhole_first_connection = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn({
+            let blackhole_first_connection = blackhole_first_connection.clone();
             let accepted = accepted.clone();
             let active = active.clone();
             let requests = requests.clone();
@@ -92,6 +144,11 @@ impl Server {
                     let requests = requests.clone();
                     let certificates = certificates.clone();
                     let sent_bytes = sent_bytes.clone();
+                    let blackhole = if id == 0 {
+                        blackhole_first_connection.clone()
+                    } else {
+                        Arc::new(AtomicBool::new(false))
+                    };
                     connections.spawn(async move {
                         let _active = active;
                         let Ok(mut tls) = acceptor.accept(tcp).await else {
@@ -124,7 +181,10 @@ impl Server {
                         );
                         let Ok(mut connection) = h2::server::Builder::new()
                             .max_concurrent_streams(max_streams)
-                            .handshake::<_, Bytes>(tls)
+                            .handshake::<_, Bytes>(Blackholing {
+                                inner: tls,
+                                blackhole,
+                            })
                             .await
                         else {
                             return;
@@ -162,6 +222,7 @@ impl Server {
             sent_bytes,
             requests,
             certificates,
+            blackhole_first_connection,
             task,
         }
     }

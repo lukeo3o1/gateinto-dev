@@ -35,7 +35,8 @@ The client's own TLS session with the target (for example HTTPS to
 `example.com`) runs inside the tunnel. Gateinto does not terminate or inspect
 it; it relays bytes. ALPN offers `h2`, then `http/1.1`; the selected protocol
 determines the upstream CONNECT encoding. HTTP/2 multiplexes streams on one
-lazy TLS connection per session. HTTP/1.1, including no ALPN, keeps one TLS
+lazy TLS connection per session; a connection that stops answering PING is
+replaced on a later request. HTTP/1.1, including no ALPN, keeps one TLS
 connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
 
@@ -270,7 +271,7 @@ The full protocol, limits and guarantees are in
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/basic_tofu.rs` | `basic_tofu` local proxy authentication of one session: realm, strict Basic and base64 parsing, binding the first credential as a keyed hash, constant-time comparison, failure rate limit. |
-| `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, certificate rotation and owned connection drivers. |
+| `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, on-demand PING liveness checks, certificate rotation and owned connection drivers. |
 | `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
