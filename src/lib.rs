@@ -15,5 +15,7 @@ pub mod registration;
 #[cfg(windows)]
 mod registry;
 pub mod sessions;
+#[cfg(test)]
+mod test_support;
 pub mod tls;
 pub mod uri;

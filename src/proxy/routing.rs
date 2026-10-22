@@ -224,7 +224,9 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_ipv6_target_connects_directly() {
-        let listener = TcpListener::bind("[::1]:0").await.unwrap();
+        let Some(listener) = crate::test_support::bind_ipv6_loopback().await else {
+            return;
+        };
         let target = listener.local_addr().unwrap();
         let authority: Authority = target.to_string().parse().unwrap();
         let stream = direct(&authority, ("127.0.0.1", 443), resolve)
