@@ -1,14 +1,15 @@
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
 
@@ -30,16 +31,25 @@ impl Driver {
 }
 
 struct LivenessState {
-    ping: tokio::sync::Mutex<h2::PingPong>,
+    ping: Mutex<Option<h2::PingPong>>,
+    pong: Notify,
     dead: AtomicBool,
     opened: Instant,
     answered_nanos: AtomicU64,
 }
 
 impl LivenessState {
+    fn now_nanos(&self) -> u64 {
+        u64::try_from(self.opened.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
     fn answered(&self) {
-        let elapsed = u64::try_from(self.opened.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.answered_nanos.store(elapsed, Ordering::Relaxed);
+        self.answered_nanos
+            .store(self.now_nanos(), Ordering::Relaxed);
+    }
+
+    fn answered_since(&self, nanos: u64) -> bool {
+        self.answered_nanos.load(Ordering::Relaxed) > nanos
     }
 }
 
@@ -49,7 +59,8 @@ pub(crate) struct Liveness(Arc<LivenessState>);
 impl Liveness {
     fn new(ping: h2::PingPong) -> Self {
         Self(Arc::new(LivenessState {
-            ping: tokio::sync::Mutex::new(ping),
+            ping: Mutex::new(Some(ping)),
+            pong: Notify::new(),
             dead: AtomicBool::new(false),
             opened: Instant::now(),
             answered_nanos: AtomicU64::new(0),
@@ -65,27 +76,33 @@ impl Liveness {
         self.0.opened.elapsed().saturating_sub(answered)
     }
 
-    // The probe runs in its own task because h2 refuses a new PING while a cancelled one is
-    // still outstanding; a probe that misses its deadline marks the connection dead instead.
+    // h2 allows one PING in flight and refuses another until its PONG is consumed, so the
+    // probe task outlives the deadline and keeps waiting; later checks reuse its PONG. Anything
+    // received while a check waits proves the connection alive, even if the PONG queues behind
+    // a full connection window of DATA.
     pub(crate) async fn check(&self, deadline: Duration) -> bool {
-        let state = self.0.clone();
-        let probe = tokio::spawn(async move {
-            let mut ping = state.ping.lock().await;
-            if state.dead.load(Ordering::SeqCst) {
-                return false;
-            }
-            let answered = matches!(
-                tokio::time::timeout(deadline, ping.ping(h2::Ping::opaque())).await,
-                Ok(Ok(_))
-            );
-            if answered {
-                state.answered();
-            } else {
-                state.dead.store(true, Ordering::SeqCst);
-            }
-            answered
-        });
-        probe.await.unwrap_or(false)
+        if self.dead() {
+            return false;
+        }
+        let started = self.0.now_nanos();
+        let pong = self.0.pong.notified();
+        let idle = self.0.ping.lock().unwrap().take();
+        if let Some(mut ping) = idle {
+            let state = self.0.clone();
+            tokio::spawn(async move {
+                if ping.ping(h2::Ping::opaque()).await.is_ok() {
+                    state.answered();
+                }
+                *state.ping.lock().unwrap() = Some(ping);
+                state.pong.notify_waiters();
+            });
+        }
+        let _ = tokio::time::timeout(deadline, pong).await;
+        if self.0.answered_since(started) {
+            return true;
+        }
+        self.0.dead.store(true, Ordering::SeqCst);
+        false
     }
 }
 

@@ -747,6 +747,37 @@ async fn a_connection_receiving_data_is_reused_without_a_liveness_ping() {
 }
 
 #[tokio::test]
+async fn a_late_pong_on_a_connection_still_delivering_data_does_not_retire_it() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    config.limits.handshake_timeout = Duration::from_secs(2);
+    let agent = start_agent(config).await;
+    let mut download = tunnel_with_data(agent, "trickle.test:443").await;
+    let downloading =
+        tokio::spawn(async move { read_for(&mut download, Duration::from_millis(2500)).await });
+    *server.ping_delay.lock().unwrap() = Duration::from_millis(1500);
+    let pings = server.pings.load(Ordering::SeqCst);
+    let unanswered = tokio::spawn(async move {
+        send(agent, &connect_request("slow.test:443"))
+            .await
+            .1
+            .status
+    });
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(server.pings.load(Ordering::SeqCst), pings + 1);
+    echo(&mut tunnel(agent, "echo.test:443").await, b"still alive").await;
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(unanswered.await.unwrap(), 504);
+    downloading.await.unwrap();
+    *server.ping_delay.lock().unwrap() = Duration::ZERO;
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    echo(&mut tunnel(agent, "echo.test:443").await, b"pinged again").await;
+    assert_eq!(server.pings.load(Ordering::SeqCst), pings + 2);
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn sessions_use_separate_http2_connections_and_closing_one_leaves_the_other_working() {
     use gateinto::identity::certificates::SelfSignedCertificates;
     use gateinto::identity::client_cert::ClientCertificate;

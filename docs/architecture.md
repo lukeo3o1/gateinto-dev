@@ -35,7 +35,7 @@ The client's own TLS session with the target (for example HTTPS to
 `example.com`) runs inside the tunnel. Gateinto does not terminate or inspect
 it; it relays bytes. ALPN offers `h2`, then `http/1.1`; the selected protocol
 determines the upstream CONNECT encoding. HTTP/2 multiplexes streams on one
-lazy TLS connection per session; a connection that stops answering PING is
+lazy TLS connection per session; a connection that stops answering is
 replaced on a later request. HTTP/1.1, including no ALPN, keeps one TLS
 connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
