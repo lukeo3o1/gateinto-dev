@@ -146,7 +146,7 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
 ## Agent, launch URIs and browser sessions
 
 ```text
- browser click: gateinto://connect?profile=office[&url=..][&gateway=..&portal=..]
+ browser click: gateinto://connect?gateway=proxy.example[&portal=..][&url=..]
         |
  Windows URL handler (HKCU\Software\Classes\gateinto)
         |  "gateinto.exe" open --config "<file>" -- "%1"
@@ -174,15 +174,18 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
 The full protocol, limits and guarantees are in
 [protocol/launch-uri.md](protocol/launch-uri.md).
 
-- `uri::LaunchRequest` parses `gateinto://connect?profile=...&auth=...&v=1`
-  with the optional `route`, `url`, `gateway` and `portal` into a `GatewayName`, a
-  `LaunchAuth`, `PortalUrl`s and a `link::GatewayAddress`.
-  `LaunchRequest::new`, `LaunchRequest::with_route` and `LaunchRequest::with_link` hold the value rules
+- `uri::LaunchRequest` parses a gateway-address or legacy-profile launch
+  selector, with optional `portal`, `url`, `route`, `auth` and `v`. At least
+  one of `gateway` or `profile` is required; the profile and portal remain
+  optional throughout URI, IPC and pending confirmation handling.
+  `LaunchRequest::from_fields`, `LaunchRequest::with_route` and
+  `LaunchRequest::with_link` hold the value rules
   and are also used by the agent to parse IPC requests, so the agent applies
   the same rules again instead of trusting `open`. Its `Display` prints the
   canonical URI.
 - `link` holds the strict `GatewayAddress` (`host[:port]`) and `Origin`
-  parsers, `resolve`, a pure function from a request, the known gateways and
+  parsers, deterministic endpoint-derived internal profile names, and
+  `resolve`, a pure function from a request, the known gateways and
   a `Confirm` decision (approve, deny or defer) to a launch, a confirmation
   to ask for, or an error. `link::store::LinkedStore` keeps one file per
   approved gateway in `gateways/`, named only from the canonical address,
@@ -190,7 +193,11 @@ The full protocol, limits and guarantees are in
   invalid entries that still block their name and address, or a store that
   cannot be read), and writes new files atomically without replacing any. `ConfigFile::with_linked` turns linked entries into
   minimal `[gateways.<name>]` tables, so they get exactly the defaults of a
-  configured gateway with only `host`, `port` and `portal_url`.
+  configured gateway with only `host`, `port` and an optional `portal_url`.
+  Address-only selection reuses a unique existing profile and its trust
+  settings without DNS identity lookup, and refuses ambiguous endpoints.
+  Unknown addresses need first-time approval; internal name collisions and
+  damaged stored entries fail closed.
 - `prompt` asks the user in `gateinto open`: `MessageBoxW` on an interactive
   Windows desktop, otherwise a `yes` prompt on a terminal, otherwise it
   refuses.

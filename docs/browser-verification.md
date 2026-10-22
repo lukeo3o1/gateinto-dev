@@ -308,3 +308,23 @@ Not verified with real Chrome or Edge. On an isolated test deployment:
 5. Add an unknown gateway using a mixed link. Verify the existing confirmation
    discloses direct connections and local DNS/IP exposure, and approval starts
    a mixed session. A subsequent mode-free link must use the gateway route.
+
+## Gateway-address launch selectors
+
+Not verified with real Chrome or Edge. Using the same isolated gateway:
+
+1. Open `gateinto://connect?gateway=<percent-encoded-host-and-port>` without
+   `profile` or `portal`. Verify a configured endpoint reuses its existing
+   profile and CA/TLS settings, opens its saved portal (or `about:blank`), and
+   does not create another gateway file.
+2. Configure two profiles with the same endpoint but different TLS settings.
+   An address-only link must report ambiguity; adding the intended profile
+   selects it. A supplied mismatching address or portal must be refused.
+3. Use a new endpoint with no profile or portal. Verify first-time confirmation
+   shows its address, generated internal profile name and `Portal: none`.
+   On approval the browser opens `about:blank`; the saved file omits
+   `portal_url`. Stop and restart the agent and verify the same link reuses it.
+4. Verify a `url` is refused for a gateway with no portal; neither a start page
+   nor a link's portal may silently add a portal to an existing entry.
+5. Repeat with `route=mixed`; verify the confirmation and session listing keep
+   the mode and another launch without it retains gateway routing.

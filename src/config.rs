@@ -429,7 +429,7 @@ impl ConfigFile {
                 .or_insert_with(|| GatewaySection {
                     host: Some(gateway.address.host()),
                     port: NonZeroU16::new(gateway.address.port()),
-                    portal_url: Some(gateway.portal_url.clone()),
+                    portal_url: gateway.portal_url.clone(),
                     ..GatewaySection::default()
                 });
         }

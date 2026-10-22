@@ -48,7 +48,7 @@ impl Profiles for TestProfiles {
             name: gateway.name,
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
-            portal_url: Some(gateway.portal_url),
+            portal_url: gateway.portal_url,
             source: Source::Linked,
         });
         Ok(Known {
@@ -792,7 +792,7 @@ async fn a_new_gateway_is_stored_only_after_approval_and_relays_the_session() {
     assert_eq!(linked.len(), 1);
     assert_eq!(linked[0].name.as_str(), "newco");
     assert_eq!(linked[0].address.to_string(), agent.gateway());
-    assert_eq!(linked[0].portal_url.as_str(), NEW_PORTAL);
+    assert_eq!(linked[0].portal_url.as_ref().unwrap().as_str(), NEW_PORTAL);
     assert!(linked[0].approved_at.is_some());
 
     assert!(refused(

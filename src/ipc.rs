@@ -100,7 +100,11 @@ impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Launch(request) => {
-                write!(f, "launch {} {}", request.profile, request.auth)?;
+                f.write_str("launch ")?;
+                if let Some(profile) = &request.profile {
+                    write!(f, "{profile} ")?;
+                }
+                write!(f, "{}", request.auth)?;
                 if request.route != crate::proxy::Route::Gateway {
                     write!(f, " route={}", request.route)?;
                 }
@@ -131,8 +135,14 @@ impl FromStr for Request {
         let invalid = ProtocolError("invalid request");
         let words: Vec<&str> = line.split(' ').collect();
         match words.as_slice() {
-            ["launch", profile, auth, link @ ..] => {
-                let request = launch(profile, auth, link)
+            ["launch", profile, auth @ "basic_tofu", link @ ..] => {
+                let request = launch(Some(profile), auth, link)
+                    .filter(|request| request.to_string() == line)
+                    .ok_or(ProtocolError("invalid launch request"))?;
+                Ok(request)
+            }
+            ["launch", auth @ "basic_tofu", link @ ..] => {
+                let request = launch(None, auth, link)
                     .filter(|request| request.to_string() == line)
                     .ok_or(ProtocolError("invalid launch request"))?;
                 Ok(request)
@@ -147,7 +157,7 @@ impl FromStr for Request {
     }
 }
 
-fn launch(profile: &str, auth: &str, link: &[&str]) -> Option<Request> {
+fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
     let mut values = [None; 4];
     let mut next = 0;
     for word in link {
@@ -160,11 +170,9 @@ fn launch(profile: &str, auth: &str, link: &[&str]) -> Option<Request> {
         next = index + 1;
     }
     let [route, url, gateway, portal] = values;
-    LaunchRequest::new(profile, auth)
+    LaunchRequest::from_fields(profile, auth, url, gateway, portal)
         .ok()?
         .with_route(route.unwrap_or("gateway"))
-        .ok()?
-        .with_link(url, gateway, portal)
         .ok()
         .map(Request::Launch)
 }
@@ -863,6 +871,41 @@ mod tests {
     }
 
     #[test]
+    fn gateway_only_launches_round_trip_without_a_profile_or_portal() {
+        for line in [
+            "launch basic_tofu gateway=proxy.example:443",
+            "launch basic_tofu route=mixed gateway=[::1]:8443",
+        ] {
+            let request: Request = line.parse().unwrap();
+            assert_eq!(request.to_string(), line);
+            let Request::Launch(launch) = request else {
+                panic!("not launch")
+            };
+            assert!(!launch.to_string().contains("profile="));
+            assert!(!launch.to_string().contains("portal="));
+        }
+    }
+
+    #[test]
+    fn a_legacy_profile_named_basic_tofu_remains_unambiguous() {
+        let line = "launch basic_tofu basic_tofu";
+        let request: Request = line.parse().unwrap();
+        assert_eq!(request.to_string(), line);
+        let Request::Launch(launch) = request else {
+            panic!("not launch")
+        };
+        assert_eq!(launch.profile.unwrap().as_str(), "basic_tofu");
+        for line in [
+            "launch basic_tofu",
+            "launch basic_tofu gateway=proxy.example:443 gateway=other.example:443",
+            "launch basic_tofu gateway=proxy.example:443 profile=corp",
+            "launch basic_tofu auth=basic_tofu gateway=proxy.example:443",
+        ] {
+            assert!(line.parse::<Request>().is_err());
+        }
+    }
+
+    #[test]
     fn mixed_launch_route_round_trips_without_changing_legacy_requests() {
         let line = "launch corp basic_tofu route=mixed";
         let parsed: Request = line.parse().unwrap();
@@ -957,8 +1000,6 @@ mod tests {
             "launch corp basic_tofu URL=https://p.example/",
             "launch corp basic_tofu ca_file=/tmp/ca.pem",
             "launch corp basic_tofu url",
-            "launch corp basic_tofu gateway=proxy.example:443",
-            "launch corp basic_tofu portal=https://p.example/",
             "launch corp basic_tofu gateway=user@proxy.example portal=https://p.example/",
             "launch corp basic_tofu gateway=proxy.example portal=https://p.example/",
             "launch corp basic_tofu portal=https://p.example/ gateway=proxy.example:443",

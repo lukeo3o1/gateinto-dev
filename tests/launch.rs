@@ -238,6 +238,164 @@ fn listed(list: &[String], lines: &[String]) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn gateway_only_open_reuses_configured_trust_and_can_start_blank_in_mixed_mode() {
+    let launcher = Launcher::new("").await;
+    let original = std::fs::read_to_string(&launcher.config)
+        .unwrap()
+        .replace(&format!("portal_url = \"{PORTAL}\"\n"), "");
+    std::fs::write(&launcher.config, &original).unwrap();
+    let gateway = format!("[::ffff:127.0.0.1]:{}", launcher.upstream_port);
+    let request =
+        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
+            .unwrap()
+            .with_route("mixed")
+            .unwrap();
+    let uri = request.to_string();
+    assert!(!uri.contains("profile="));
+    assert!(!uri.contains("portal="));
+    let output = launcher.open(&uri).await;
+    let lines = output.success().lines();
+    assert_eq!(field(&lines, "gateway"), "main");
+    assert_eq!(field(&lines, "route"), "mixed");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), "about:blank");
+    tunnel_echoes(listen).await;
+    assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
+    assert_eq!(std::fs::read_to_string(&launcher.config).unwrap(), original);
+    assert!(!launcher.linked_store().exists());
+    browser.exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_only_open_refuses_ambiguous_configured_profiles() {
+    let launcher = Launcher::new("").await;
+    let mut text = std::fs::read_to_string(&launcher.config).unwrap();
+    text.push_str(&format!(
+        "\n[gateways.alternate]\nhost = \"127.0.0.1\"\nport = {}\ntls_mode = \"hybrid_required\"\n",
+        launcher.upstream_port
+    ));
+    std::fs::write(&launcher.config, &text).unwrap();
+    let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
+    let request =
+        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
+            .unwrap();
+    let output = launcher.open(&request.to_string()).await;
+    assert!(
+        output
+            .failure()
+            .stderr
+            .contains("matches several configured profiles"),
+        "{}",
+        output.stderr
+    );
+    assert!(browsers(&launcher.profiles_root).is_empty());
+    let explicit = gateinto::uri::LaunchRequest::from_fields(
+        Some("main"),
+        "basic_tofu",
+        None,
+        Some(&gateway),
+        None,
+    )
+    .unwrap();
+    let output = launcher.open(&explicit.to_string()).await;
+    let listen: SocketAddr = field(&output.success().lines(), "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), PORTAL);
+    tunnel_echoes(listen).await;
+    browser.exit();
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded_by_open() {
+    use gateinto::ipc::{self, Request, Response};
+    let launcher = Launcher::without_gateways().await;
+    let config = launcher.config.to_str().unwrap().to_owned();
+    launcher
+        .run(&["agent", "--detach", "--config", &config])
+        .await
+        .success();
+    let endpoint = launcher.endpoint();
+    let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
+    let request =
+        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
+            .unwrap()
+            .with_route("mixed")
+            .unwrap();
+    let generated = request.proposed_profile().unwrap();
+    let Response::Ok(lines) = ipc::send(&endpoint, &Request::Launch(request.clone()))
+        .await
+        .unwrap()
+    else {
+        panic!("not confirmation")
+    };
+    assert_eq!(field(&lines, "gateway"), generated.as_str());
+    assert_eq!(field(&lines, "portal"), "none");
+    assert_eq!(field(&lines, "route"), "mixed");
+    let token = ipc::confirm_token(&lines).unwrap();
+    let Response::Ok(lines) = ipc::send(&endpoint, &Request::Approve(token))
+        .await
+        .unwrap()
+    else {
+        panic!("approval failed")
+    };
+    assert_eq!(field(&lines, "route"), "mixed");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), "about:blank");
+    tunnel_echoes(listen).await;
+    let file = launcher
+        .linked_store()
+        .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
+    let stored = std::fs::read_to_string(&file).unwrap();
+    assert!(!stored.contains("portal_url"));
+    assert!(stored.contains(generated.as_str()));
+    launcher.run(&["stop"]).await.success();
+    let request = request.with_route("gateway").unwrap();
+    let output = launcher.open(&request.to_string()).await;
+    let lines = output.success().lines();
+    assert_eq!(field(&lines, "gateway"), generated.as_str());
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    assert_eq!(browser.start_page(), "about:blank");
+    tunnel_echoes(listen).await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), stored);
+    let invalid = request
+        .with_link(Some("https://127.0.0.1/"), Some(&gateway), None)
+        .unwrap();
+    assert!(
+        launcher
+            .open(&invalid.to_string())
+            .await
+            .failure()
+            .stderr
+            .contains("has no portal_url")
+    );
+    browser.exit();
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_without_a_terminal()
+{
+    let launcher = Launcher::without_gateways().await;
+    let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
+    let uri =
+        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
+            .unwrap()
+            .to_string();
+    let output = launcher.open(&uri).await;
+    assert!(
+        output.failure().stderr.contains("no desktop or terminal"),
+        "{}",
+        output.stderr
+    );
+    assert!(!launcher.linked_store().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_session() {
     let launcher = Launcher::new("").await;
     let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;

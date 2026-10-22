@@ -382,9 +382,11 @@ mod tests {
         let linked = LinkedGateway {
             name: "newco".parse().unwrap(),
             address: "proxy.newco.example:8443".parse().unwrap(),
-            portal_url: "https://portal.newco.example:444/home?secret=1"
-                .parse()
-                .unwrap(),
+            portal_url: Some(
+                "https://portal.newco.example:444/home?secret=1"
+                    .parse()
+                    .unwrap(),
+            ),
             approved_at: Some(1),
         };
         link::known_gateways(&file, &[linked])

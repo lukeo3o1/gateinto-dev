@@ -7,7 +7,7 @@ use crate::proxy::Route;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
-    pub profile: GatewayName,
+    pub profile: Option<GatewayName>,
     pub auth: LaunchAuth,
     pub route: Route,
     pub url: Option<PortalUrl>,
@@ -55,9 +55,7 @@ pub enum UriError {
     UnknownField,
     DuplicateField(&'static str),
     InvalidValue(&'static str),
-    MissingProfile,
-    GatewayWithoutPortal,
-    PortalWithoutGateway,
+    MissingSelector,
     UrlOutsidePortal,
     ReservedGateway,
 }
@@ -67,7 +65,9 @@ impl fmt::Display for UriError {
         f.write_str("invalid launch URI: ")?;
         match self {
             Self::TooLong => write!(f, "longer than {MAX_LEN} bytes"),
-            Self::Form => f.write_str("expected gateinto://connect?profile=<gateway>"),
+            Self::Form => {
+                f.write_str("expected gateinto://connect?gateway=<host> or profile=<name>")
+            }
             Self::Character => f.write_str(
                 "field names and values may contain only A-Z, a-z, 0-9, -, ., _, ~ and \
                  %-escapes, joined by = and &; field names and the profile, auth and v values \
@@ -97,13 +97,7 @@ impl fmt::Display for UriError {
                  a bracketed IPv6 address, and a port from 1 to 65535 (default 443)",
             ),
             Self::InvalidValue(name) => write!(f, "unsupported {name}"),
-            Self::MissingProfile => f.write_str("the profile field is required"),
-            Self::GatewayWithoutPortal => {
-                f.write_str("a link that names a gateway must also name its portal")
-            }
-            Self::PortalWithoutGateway => {
-                f.write_str("portal is allowed only together with gateway")
-            }
+            Self::MissingSelector => f.write_str("at least one of gateway or profile is required"),
             Self::ReservedGateway => f.write_str(
                 "the gateway host must not start with a Windows device name (CON, PRN, AUX, \
                  NUL, COM0 to COM9, LPT0 to LPT9)",
@@ -173,37 +167,57 @@ impl FromStr for LaunchRequest {
         if fields.version.is_some_and(|version| version != VERSION) {
             return Err(UriError::InvalidValue("v"));
         }
-        Self::new(
-            &fields.profile.ok_or(UriError::MissingProfile)?,
+        Self::from_fields(
+            fields.profile.as_deref(),
             fields
                 .auth
                 .as_deref()
                 .unwrap_or(LaunchAuth::BasicTofu.as_str()),
-        )?
-        .with_route(fields.route.as_deref().unwrap_or("gateway"))?
-        .with_link(
             fields.url.as_deref(),
             fields.gateway.as_deref(),
             fields.portal.as_deref(),
-        )
+        )?
+        .with_route(fields.route.as_deref().unwrap_or("gateway"))
     }
 }
 
 impl LaunchRequest {
     pub fn new(profile: &str, auth: &str) -> Result<Self, UriError> {
-        if profile.starts_with('-') {
-            return Err(UriError::InvalidValue("profile"));
-        }
-        Ok(Self {
-            profile: profile
-                .parse()
-                .map_err(|_| UriError::InvalidValue("profile"))?,
+        Self::from_fields(Some(profile), auth, None, None, None)
+    }
+
+    pub fn from_fields(
+        profile: Option<&str>,
+        auth: &str,
+        url: Option<&str>,
+        gateway: Option<&str>,
+        portal: Option<&str>,
+    ) -> Result<Self, UriError> {
+        let profile = profile
+            .map(|profile| {
+                if profile.starts_with('-') {
+                    return Err(UriError::InvalidValue("profile"));
+                }
+                profile
+                    .parse()
+                    .map_err(|_| UriError::InvalidValue("profile"))
+            })
+            .transpose()?;
+        Self {
+            profile,
             auth: auth.parse()?,
             route: Route::Gateway,
             url: None,
             gateway: None,
             portal: None,
-        })
+        }
+        .with_link(url, gateway, portal)
+    }
+
+    pub fn proposed_profile(&self) -> Option<GatewayName> {
+        self.profile
+            .clone()
+            .or_else(|| self.gateway.as_ref().map(GatewayAddress::profile_name))
     }
 
     pub fn with_route(mut self, route: &str) -> Result<Self, UriError> {
@@ -234,10 +248,8 @@ impl LaunchRequest {
             })
             .transpose()?;
         let portal = portal.map(|portal| https(portal, "portal")).transpose()?;
-        match (&gateway, &portal) {
-            (Some(_), None) => return Err(UriError::GatewayWithoutPortal),
-            (None, Some(_)) => return Err(UriError::PortalWithoutGateway),
-            _ => {}
+        if self.profile.is_none() && gateway.is_none() {
+            return Err(UriError::MissingSelector);
         }
         if let (Some((url, _)), Some((portal, _))) = (&url, &portal)
             && url != portal
@@ -255,11 +267,11 @@ impl LaunchRequest {
 
 impl fmt::Display for LaunchRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "gateinto://connect?profile={}&auth={}&v={VERSION}",
-            self.profile, self.auth
-        )?;
+        f.write_str("gateinto://connect?")?;
+        if let Some(profile) = &self.profile {
+            write!(f, "profile={profile}&")?;
+        }
+        write!(f, "auth={}&v={VERSION}", self.auth)?;
         if self.route != Route::Gateway {
             write!(f, "&route={}", self.route)?;
         }
@@ -349,6 +361,26 @@ mod tests {
 
     fn request(profile: &str) -> LaunchRequest {
         LaunchRequest::new(profile, "basic_tofu").unwrap()
+    }
+
+    #[test]
+    fn gateway_alone_selects_an_endpoint_without_inventing_a_profile_or_portal() {
+        let request = parse("gateinto://connect?gateway=Proxy.Example").unwrap();
+        let canonical = request.to_string();
+        assert!(!canonical.contains("profile="));
+        assert!(!canonical.contains("portal="));
+        assert!(canonical.contains("gateway=proxy.example%3A443"));
+        assert_eq!(parse(&canonical), Ok(request));
+    }
+
+    #[test]
+    fn gateway_and_portal_are_independent_optional_fields() {
+        assert!(parse("gateinto://connect?profile=corp&gateway=proxy.example").is_ok());
+        assert!(
+            parse("gateinto://connect?profile=corp&portal=https%3A%2F%2Fportal.example%2F").is_ok()
+        );
+        assert!(parse("gateinto://connect?route=mixed").is_err());
+        assert!(parse("gateinto://connect?portal=https%3A%2F%2Fportal.example%2F").is_err());
     }
 
     #[test]
@@ -586,14 +618,9 @@ mod tests {
                 "profile=a&gateway=x&portal=http%3A%2F%2Fx",
                 UriError::InvalidValue("portal"),
             ),
-            ("profile=a&gateway=x", UriError::GatewayWithoutPortal),
             (
                 "profile=a&gateway=nul.example&portal=https%3A%2F%2Fx",
                 UriError::ReservedGateway,
-            ),
-            (
-                "profile=a&portal=https%3A%2F%2Fx",
-                UriError::PortalWithoutGateway,
             ),
             (
                 "profile=a&gateway=x&portal=https%3A%2F%2Fx&url=https%3A%2F%2Fy",
@@ -603,7 +630,7 @@ mod tests {
                 "profile=a&url=https%3A%2F%2Fx&url=https%3A%2F%2Fx",
                 UriError::DuplicateField("url"),
             ),
-            ("auth=basic_tofu", UriError::MissingProfile),
+            ("auth=basic_tofu", UriError::MissingSelector),
             ("profile=a&auth=none", UriError::InvalidValue("auth")),
             ("profile=a&v=2", UriError::InvalidValue("v")),
             ("profile=--a", UriError::InvalidValue("profile")),

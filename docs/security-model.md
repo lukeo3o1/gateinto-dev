@@ -121,7 +121,7 @@ What a launch URI can do, at most:
   selecting default gateway routing or mixed routing, which opens Chrome or Edge with a new, empty profile on that gateway's
   portal or on another page of the same origin;
 - for a gateway the device does not know, after the user approves it in a
-  dialog that names it: store its host, port and portal, then do the above.
+  dialog that names it: store its host, port and optional portal, then do the above.
 
 How that is bounded:
 
@@ -145,6 +145,14 @@ How that is bounded:
   with a different host, port or portal is refused; the configuration file
   wins over approved entries and is never written; an address that is
   already known under another name is refused with that name.
+- **Address selection preserves trust.** A URI needs a gateway address or
+  a legacy profile, not both. Address-only selection compares canonical host
+  and port without DNS; a unique match reuses all stored settings. Multiple
+  matching profiles require an explicit profile. For unknown addresses a
+  deterministic internal name is generated; collisions and damaged entries
+  are refused. An omitted portal inherits the stored portal, or leaves a new
+  gateway without one. A supplied portal is an exact assertion for an
+  existing entry, never an update; `url` cannot invent one.
 - **New gateways need the user.** See
   [Gateways added from links](#gateways-added-from-links).
 - **No command injection.** The handler command quotes the executable and
@@ -185,7 +193,7 @@ How that is bounded:
 
 The original plan required that a URI never introduce a proxy host. This is
 deliberately relaxed, with the user's agreement, so that a gateway's website
-can bring its own gateway and portal to a user who has no local profile. It
+can bring its own gateway and optional portal to a user who has no local profile. It
 is not silent: nothing is stored or connected before the user approves.
 
 How it is bounded:
@@ -208,7 +216,7 @@ How it is bounded:
 - **Stored once, never overwritten.** An approved gateway is stored in its
   own file in a separate owner-only directory (`gateways/`, at most 32
   files), named only from its canonical address, written atomically and
-  never over an existing file, with only its name, host, port, portal and
+  never over an existing file, with only its name, host, port, optional portal and
   approval time. File names are checked to be single plain components; hosts
   that are Windows device names are refused; links and reparse points are
   never followed. A damaged file disables only its own entry and still
@@ -244,7 +252,7 @@ What remains:
   gateway without a dialog, through the agent's IPC endpoint or by editing
   the files in `gateways/`, as it can edit the configuration file.
 - **Approval is permanent until forgotten.** An approved gateway stays
-  usable by later links of any site that knows its name, gateway and portal.
+  usable by later links of any site that knows its gateway address or profile.
 
 Mitigations: the confirmation is opt-in per gateway and defaults to Cancel; the
 link cannot weaken TLS or change a known gateway; every session is isolated

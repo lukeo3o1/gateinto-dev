@@ -230,7 +230,7 @@ impl Agent {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allow(Instant::now());
         if !allowed {
-            warn!(gateway = %request.profile, "refused a browser launch: rate limit reached");
+            warn!(gateway = ?request.profile, "refused a browser launch: rate limit reached");
             return Err(format!(
                 "too many launch requests; at most {} are accepted every {} seconds",
                 limits.launches,
@@ -252,7 +252,7 @@ impl Agent {
             .as_ref()
             .is_some_and(|pending| pending.expires > now)
         {
-            warn!(gateway = %request.profile, "refused a new gateway: another confirmation is open");
+            warn!(gateway = ?request.profile, "refused a new gateway: another confirmation is open");
             return Err(
                 "another gateway confirmation is already waiting for an answer; answer it first"
                     .to_owned(),
@@ -324,7 +324,7 @@ impl Agent {
     async fn deny(&self, token: ConfirmToken) -> Result<(), String> {
         let mut pending = self.inner.launching.lock().await;
         let answered = Self::answered(&mut pending, token)?;
-        info!(gateway = %answered.request.profile, "the user did not allow a gateway from a link");
+        info!(gateway = ?answered.request.profile, "the user did not allow a gateway from a link");
         Ok(())
     }
 

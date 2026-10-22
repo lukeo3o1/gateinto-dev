@@ -1,33 +1,41 @@
 # Launch URI (`gateinto://`)
 
-A launch URI asks Gateinto to start a browser session for a gateway. It can
-name a gateway that is already set up on this machine, choose a start page on
-that gateway's portal, and, for a user who has no such gateway yet, bring the
-gateway and its portal so that the user can add it after an explicit
-confirmation. Version 1 of the format is described here; `src/uri.rs` parses
-it and `src/link.rs` decides what it may do.
+A launch URI starts an isolated browser session for a gateway. The preferred
+selector is its HTTPS proxy address in `gateway`; the legacy `profile`
+selector still works. A new address needs explicit first-time approval.
+`portal` is optional: a known gateway inherits its stored portal, and a new
+one without a portal opens `about:blank`. Version 1 is parsed by `src/uri.rs`
+and resolved by `src/link.rs`.
 
 Any web page can open a custom-scheme URI, so Gateinto treats every launch URI
 as untrusted input from an arbitrary website.
 
 ## Examples
 
-Open the portal of a gateway the device already knows:
+The minimum recommended link supplies only the gateway address (port 443 by
+default). It reuses an existing endpoint or asks before adding a new one:
+
+```text
+gateinto://connect?gateway=proxy.corp.example
+```
+
+Select mixed routing for the new session:
+
+```text
+gateinto://connect?gateway=proxy.corp.example&route=mixed
+```
+
+Supply a portal and a start page on its origin for first-time setup:
+
+```text
+gateinto://connect?gateway=proxy.corp.example&portal=https%3A%2F%2Fportal.corp.example%2F&url=https%3A%2F%2Fportal.corp.example%2Fapp
+```
+
+Existing profile links remain valid, including selection of a profile when
+several configured profiles use the same gateway address:
 
 ```text
 gateinto://connect?profile=office
-```
-
-Open a page on that gateway's portal:
-
-```text
-gateinto://connect?profile=corp&url=https%3A%2F%2Fportal.corp.example%2Fapp
-```
-
-Bring the gateway and its portal, for users who do not have it yet (one line):
-
-```text
-gateinto://connect?profile=corp&gateway=proxy.corp.example%3A443&portal=https%3A%2F%2Fportal.corp.example%2F&url=https%3A%2F%2Fportal.corp.example%2Fapp
 ```
 
 ## Session routing
@@ -68,9 +76,9 @@ routing when selected and binds the confirmation token to that request.
 Mixed launches report `route: mixed`; `session list` and `status` append
 `route=mixed` to that session's line. Default gateway-mode output keeps its
 existing form. Canonical URI and IPC output omit `route=gateway`. Older
-agents reject `route=mixed` rather than silently using a different mode; after
-upgrading, run `gateinto stop` to close old sessions and restart the agent on
-the next launch.
+agents reject gateway-only launches and `route=mixed` rather than silently
+selecting a different gateway or mode. After upgrading, run `gateinto stop`
+to close old sessions and restart the agent on the next launch.
 
 ## For gateway operators: writing links
 
@@ -78,15 +86,22 @@ the next launch.
   In particular `:` is `%3A`, `/` is `%2F`, `?` is `%3F`, `=` is `%3D`, `&`
   is `%26`, `%` is `%25` and `[` `]` are `%5B` `%5D`. A raw `:` or `/` makes
   the link invalid.
-- `profile` is the name the gateway gets on the device. Choose a stable name:
-  later links must use the same name together with the same `gateway` and
-  `portal`, or they are refused.
-- `portal` must be exactly the portal URL the device stored (or the
-  `portal_url` of the configured gateway); compare it as a string. `url` only
-  needs the same origin.
-- `gateway` and `portal` are needed only for users who may not have the
-  gateway yet. A link without them works only where the gateway is
-  configured or was added before.
+- Supply `gateway`, `profile`, or both. `gateway` alone selects a unique
+  existing endpoint by canonical host and port; it never resolves DNS to
+  decide endpoint identity. Several profiles at one endpoint require an
+  explicit `profile` so a link cannot choose different trust settings.
+- `profile` is an optional legacy name. When supplied with `gateway`, both
+  must identify the same stored entry. A new explicit name whose address is
+  already known under another name is refused; use the address alone or the
+  stored name instead.
+- `portal` is optional. When supplied for an existing entry, it must exactly
+  equal its stored `portal_url`; a link cannot add or replace that value.
+  Omitting it inherits the stored value. A new gateway without a portal
+  starts on `about:blank`; neither the address nor `url` invents a portal.
+- `url` requires a trusted portal: the stored portal of an existing gateway,
+  or the portal supplied in the first-time approval. Its origin must match.
+  A `portal` without `gateway` is allowed as an exact assertion for a known
+  profile; it cannot create a gateway or modify its portal.
 - The TLS settings of a gateway added from a link are the defaults: the
   upstream certificate must chain to a public root (the Mozilla roots built
   into Gateinto) and match the gateway host name; key exchange
@@ -119,13 +134,13 @@ Fields:
 
 | Name | Required | Value |
 | --- | --- | --- |
-| `profile` | yes | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
+| `profile` | unless `gateway` is present | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
 | `auth` | no | `basic_tofu`, the only local proxy authentication a browser session uses. Default `basic_tofu`. |
 | `route` | no | `gateway` (default) or `mixed`; applies only to this browser session, as described above. |
 | `v` | no | `1`, the format version. Default `1`. |
 | `url` | no | Start page for this launch: an `https://` URL that passes the `portal_url` checks of the configuration file (at most 2048 characters, a host, no user information, no spaces, quotes, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) and whose host is a DNS name or an IP address (below). It must have the same origin (scheme, host, port; port 443 when omitted) as the gateway's portal. |
-| `gateway` | with `portal` | `host[:port]` of the gateway's HTTPS proxy, port 443 by default. The host is a DNS name (labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`, at most 253 characters, the last label starting with a letter, no trailing dot; stored in lowercase), an IPv4 address in dotted decimal, or an IPv6 address in brackets without a zone. The port is 1 to 65535 in decimal. No user information, path, query, fragment, wildcard or whitespace. |
-| `portal` | with `gateway` | The gateway's portal: an `https://` URL with the same rules as `url`. |
+| `gateway` | unless `profile` is present | `host[:port]` of the gateway's HTTPS proxy, port 443 by default. The host is a DNS name (labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`, at most 253 characters, the last label starting with a letter, no trailing dot; stored in lowercase), an IPv4 address in dotted decimal, or an IPv6 address in brackets without a zone. The port is 1 to 65535 in decimal. No user information, path, query, fragment, wildcard or whitespace. |
+| `portal` | no | The gateway's portal (optional exact assertion for a known entry): an `https://` URL with the same rules as `url`. |
 
 Limits and rules:
 
@@ -138,8 +153,10 @@ Limits and rules:
   pairs (`&&`, a leading or trailing `&`) are errors. There is no field for a
   CA file, TLS mode, client certificate, server name, listen address or any
   other setting.
-- `gateway` and `portal` come together or not at all. When the link has both
-  `portal` and `url`, they must have the same origin.
+- At least one of `gateway` or `profile` is required. Neither `portal` nor
+  `url` can select a gateway. No individual field is mandatory in every link.
+- When the link has both `portal` and `url`, they must have the same origin.
+  Without a supplied portal, `url` still needs a stored portal at resolution.
 - Percent-encoding is decoded once. In `profile`, `auth`, `route`, `v` and the field
   names it may only yield the allowed characters, so `%00`, `%20`, `%22`,
   `%26`, `%2F`, `%2E` and `%25` are errors there. In `url`, `gateway` and
@@ -167,7 +184,7 @@ Error messages say which rule was broken and never repeat the URI.
    command line parser.
 2. `gateinto open` parses the URI. An invalid URI ends here, before any
    process or file is touched.
-3. It sends `launch <profile> <auth> [route=mixed] [url=...] [gateway=...] [portal=...]` to
+3. It sends `launch [<profile>] <auth> [route=mixed] [url=...] [gateway=...] [portal=...]` to
    the agent of the current user over a local IPC endpoint, starting the
    agent first if none is running (see [Agent and IPC](#agent-and-ipc)).
 4. The agent validates the request again, counts it against the launch rate
@@ -211,25 +228,31 @@ The agent knows the gateways of its configuration file and those in the
 gateway files. On a name collision the configuration file wins and the
 linked entry is ignored.
 
-1. **The profile is known.** If the link has `gateway` and `portal`, they
-   must equal the known gateway's host (case-insensitive, IP addresses by
-   value, an IPv4-mapped IPv6 address equal to its IPv4 address), port and
-   portal URL (exact string); otherwise the link is refused
-   and nothing changes. A `url` must have the origin of the gateway's portal;
-   a gateway without a portal refuses every `url`.
-2. **The profile differs from a known one only in letter case.** Refused,
-   with the known name, so that no look-alike gateway is created.
-3. **The profile is unknown and the link has no `gateway`.** Refused: the
-   portal must put the gateway in its link, or an administrator must add it
-   to the configuration file.
-4. **The profile is unknown and the link has `gateway` and `portal`.** If the
-   same host and port are already known under another name, the link is
-   refused with that name. Otherwise the user is asked; on approval the
-   gateway is stored and the session starts, on refusal nothing is stored.
-   Later links with the same name, gateway and portal start sessions without
-   asking.
-5. **Start page.** The link's `url` for this launch only, otherwise the
-   gateway's portal, otherwise `about:blank`.
+1. **A profile is supplied.** Look it up by its case-sensitive name. If
+   `gateway` is also supplied, it must match that entry's canonical host and
+   port. A supplied `portal` must exactly equal its stored portal; omission
+   inherits it. A look-alike name differing only in case is refused.
+2. **Only a gateway address is supplied.** Compare canonical host and port
+   with all known entries (DNS case-insensitive, default port 443, IPv4-mapped
+   IPv6 normalized). Do not resolve DNS for identity. A unique match reuses
+   its actual profile name and all configured trust settings. Multiple
+   matches are refused as ambiguous; use an explicit profile.
+3. **No known entry matches.** A gateway address is required. An explicit
+   unused profile may name it; otherwise Gateinto derives a stable internal
+   name `g-` followed by 62 hexadecimal SHA-256 digits of the canonical
+   `host:port`. A generated name already used by a different endpoint is
+   refused, never overwritten. Damaged entries still block their names and
+   addresses, and an unreadable-name entry blocks new additions.
+4. **First-time approval.** The user sees the actual gateway address, the
+   internal or explicit profile name, and its portal origin or `none`.
+   Approval stores the gateway with an optional portal; refusal stores
+   nothing. Existing entries cannot be renamed or modified by a link. A new
+   explicit name at an address already stored under another name is refused.
+5. **Start page.** A supplied `url` needs the same origin as the trusted
+   portal. Without a `url`, use the stored or newly approved portal, otherwise
+   `about:blank`. A gateway without a portal refuses every `url`; Gateinto
+   never infers a portal from either the gateway address or the start page.
+
 
 ## Confirmation
 
@@ -251,7 +274,7 @@ linked entry is ignored.
   pressing Enter or Space, or clicking OK, does approve, so a page that
   coaches the user ("press Tab, then Enter") remains a social-engineering
   risk. The text names the profile, the gateway
-  `host:port` and the portal origin, warns that the gateway will see this
+  `host:port` and the portal origin (or `none`), warns that the gateway will see this
   device's identity and the traffic routed to it (all CONNECT traffic by default), so the user
   should allow it only if they trust the organisation that runs it. Mixed
   requests additionally disclose direct connections, source IP and local DNS.
@@ -297,8 +320,10 @@ linked entry is ignored.
   every platform, and so are DNS names that would read as an IPv6 address
   with `-` for `:` (such as `fe80--1`), since their file name would be
   ambiguous.
-- A file holds `name` (the profile), `host`, `port`, `portal_url` and
-  `approved_at` (Unix seconds), and nothing else.
+- A file holds `name` (the internal or explicit profile), `host`, `port`,
+  optional `portal_url` and `approved_at` (Unix seconds), and nothing else.
+  A missing portal is omitted rather than replaced with an inferred URL.
+  Existing files containing `portal_url` remain valid.
 - The directory is created owner-only (`0700` on Unix). If it is a link, a
   reparse point or not a directory, it is refused: launches of gateways that
   are not in the configuration file fail, and `gateinto status` reports
@@ -343,7 +368,7 @@ linked entry is ignored.
 ## What a gateway added from a link gets
 
 The same settings as a `[gateways.<name>]` table with only `host`, `port` and
-`portal_url`:
+an optional `portal_url`:
 
 - server name: the host;
 - trust anchors: the Mozilla roots built into Gateinto (`webpki-roots`), never
@@ -420,7 +445,7 @@ they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch <profile> basic_tofu [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin>` |
+| `launch [<profile>] basic_tofu [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
 | `approve <token>` | as for a started `launch` |
 | `deny <token>` | none |
 | `list` | `session: <id> <device or browser> <gateway> <listen address>` per session, with ` route=mixed` appended for mixed sessions |
@@ -428,8 +453,14 @@ they never contain spaces or line breaks.
 | `stop` | none; the agent closes every session, then exits |
 
 Mixed launches and their first-time confirmations also include `route: mixed`.
-The token retains that route through approval; only the gateway address and
-portal are stored. Default gateway launches retain the previous wire format.
+The token retains the optional selector, portal and route through approval;
+only the gateway entry and optional portal are stored. Profile-based launches
+retain their previous wire format. Gateway-only launches use
+`launch basic_tofu gateway=<host:port>` with no profile placeholder or generated
+name in the request. A legacy profile named `basic_tofu` remains
+`launch basic_tofu basic_tofu`. Canonical optional fields remain ordered
+`route`, `url`, `gateway`, `portal`. Older agents reject the new address-only
+form; stop the old agent after upgrading.
 
 An error is the single line `error: <message>`. Line breaks inside a message
 are replaced by spaces. Answers are at most 64 KiB. The agent serves at most
