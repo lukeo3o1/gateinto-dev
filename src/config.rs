@@ -461,7 +461,11 @@ impl ConfigFile {
             .or(file.max_concurrent_tunnels)
             .map_or(defaults.max_concurrent_tunnels, NonZeroU32::get);
         if max_concurrent_tunnels > crate::proxy::MAX_TUNNELS {
-            return Err(self.error(ErrorKind::TunnelLimit(max_concurrent_tunnels)));
+            let kind = ErrorKind::TunnelLimit(max_concurrent_tunnels);
+            return Err(match cli.max_concurrent_tunnels {
+                Some(_) => ConfigError::new(kind),
+                None => self.error(kind),
+            });
         }
         Ok(Settings {
             listen: overrides
@@ -1112,11 +1116,12 @@ port = 443
     #[test]
     fn tunnel_limits_above_the_http2_window_bound_are_rejected_from_file_and_flags() {
         for (text, flag) in [("32767", None), ("32768", None), ("8", Some(32768))] {
-            let file = ConfigFile::parse(&format!(
+            let mut file = ConfigFile::parse(&format!(
                 "[gateways.main]\nhost = \"proxy.example.test\"\nport = 443\n\
                  [limits]\nmax_concurrent_tunnels = {text}\n"
             ))
             .unwrap();
+            file.path = Some(PathBuf::from("gateinto.toml"));
             let overrides = Overrides {
                 limits: LimitsSection {
                     max_concurrent_tunnels: flag.and_then(NonZeroU32::new),
@@ -1131,6 +1136,7 @@ port = 443
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains("max_concurrent_tunnels"), "{error}");
                 assert!(error.contains("32767"), "{error}");
+                assert_eq!(error.contains("gateinto.toml"), flag.is_none(), "{error}");
             }
         }
     }

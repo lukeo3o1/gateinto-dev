@@ -450,6 +450,36 @@ fn proxy_refuses_several_gateways_without_a_device_session_gateway() {
     );
 }
 
+#[test]
+fn proxy_refuses_tunnel_limits_beyond_the_http2_window_bound() {
+    let dir = temp_dir();
+    let gateway = "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\n";
+    let in_file = write_config(
+        &dir,
+        &format!("{gateway}[limits]\nmax_concurrent_tunnels = 32768\n"),
+    );
+    let output = gateinto(&["proxy"], &in_file);
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "config file {}: max_concurrent_tunnels (--max-tunnels) is 32768; the maximum is 32767",
+            in_file.display()
+        )),
+        "{error}"
+    );
+
+    let config = write_config(&dir, gateway);
+    let output = gateinto(&["proxy", "--max-tunnels", "32768"], &config);
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains("max_concurrent_tunnels (--max-tunnels) is 32768; the maximum is 32767"),
+        "{error}"
+    );
+    assert!(!error.contains("config file"), "{error}");
+}
+
 struct BrowserSession {
     child: Child,
     agent: SocketAddr,
