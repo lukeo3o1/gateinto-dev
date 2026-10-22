@@ -456,6 +456,13 @@ impl ConfigFile {
         let gateway = self.profile(name, section.merge(&overrides.gateway_settings))?;
         let defaults = LimitSettings::default();
         let (file, cli) = (&self.limits, &overrides.limits);
+        let max_concurrent_tunnels = cli
+            .max_concurrent_tunnels
+            .or(file.max_concurrent_tunnels)
+            .map_or(defaults.max_concurrent_tunnels, NonZeroU32::get);
+        if max_concurrent_tunnels > crate::proxy::MAX_TUNNELS {
+            return Err(self.error(ErrorKind::TunnelLimit(max_concurrent_tunnels)));
+        }
         Ok(Settings {
             listen: overrides
                 .listen
@@ -465,10 +472,7 @@ impl ConfigFile {
             gateway,
             device_key: self.device_key.merge(&overrides.device_key).settings(),
             limits: LimitSettings {
-                max_concurrent_tunnels: cli
-                    .max_concurrent_tunnels
-                    .or(file.max_concurrent_tunnels)
-                    .map_or(defaults.max_concurrent_tunnels, NonZeroU32::get),
+                max_concurrent_tunnels,
                 connect_timeout_seconds: cli
                     .connect_timeout_seconds
                     .or(file.connect_timeout_seconds)
@@ -594,6 +598,7 @@ enum ErrorKind {
         name: Option<GatewayName>,
         kind: GatewayErrorKind,
     },
+    TunnelLimit(u32),
 }
 
 #[derive(Debug)]
@@ -616,6 +621,11 @@ impl fmt::Display for ConfigError {
         }
         match &self.kind {
             ErrorKind::Read(error) => write!(f, "{error}"),
+            ErrorKind::TunnelLimit(limit) => write!(
+                f,
+                "max_concurrent_tunnels (--max-tunnels) is {limit}; the maximum is {}",
+                crate::proxy::MAX_TUNNELS
+            ),
             ErrorKind::Parse(error) => write!(f, "{}", error.to_string().trim_end()),
             ErrorKind::UnknownGateway {
                 name,
@@ -1096,6 +1106,32 @@ port = 443
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains(expected), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn tunnel_limits_above_the_http2_window_bound_are_rejected_from_file_and_flags() {
+        for (text, flag) in [("32767", None), ("32768", None), ("8", Some(32768))] {
+            let file = ConfigFile::parse(&format!(
+                "[gateways.main]\nhost = \"proxy.example.test\"\nport = 443\n\
+                 [limits]\nmax_concurrent_tunnels = {text}\n"
+            ))
+            .unwrap();
+            let overrides = Overrides {
+                limits: LimitsSection {
+                    max_concurrent_tunnels: flag.and_then(NonZeroU32::new),
+                    ..LimitsSection::default()
+                },
+                ..Overrides::default()
+            };
+            let result = file.settings(&overrides);
+            if text == "32767" {
+                assert_eq!(result.unwrap().limits.max_concurrent_tunnels, 32767);
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("max_concurrent_tunnels"), "{error}");
+                assert!(error.contains("32767"), "{error}");
+            }
         }
     }
 

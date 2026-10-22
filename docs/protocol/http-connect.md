@@ -92,9 +92,11 @@ The receive window is 64 KiB per stream. Receive credit is released only as
 bytes are consumed by the relay, so a stream whose local client stops reading
 holds at most 64 KiB of the connection window. The connection window is the
 stream window multiplied by `max_concurrent_tunnels` (4 MiB for the default
-64), capped at the HTTP/2 maximum of 2^31-1 bytes. Every gateway stream holds
-a tunnel permit, so even when every other tunnel has stopped reading, the
-connection window still has credit for the remaining stream. A slow stream
+64). Configuration rejects `max_concurrent_tunnels` above 32767, the largest
+value whose product stays within the HTTP/2 maximum window of 2^31-1 bytes.
+Every gateway stream holds a tunnel permit, so even when every other tunnel
+has stopped reading, the connection window still has credit for the remaining
+stream. A slow stream
 therefore applies backpressure to its own data only. Buffered receive data
 remains bounded by `max_concurrent_tunnels` times 64 KiB per session. Writes
 reserve available send capacity and copy at most 16 KiB at a time; they never

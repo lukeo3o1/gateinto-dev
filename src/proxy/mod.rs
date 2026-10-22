@@ -37,6 +37,8 @@ pub use routing::Route;
 pub use basic_tofu::FailureLimit;
 use basic_tofu::{BasicTofu, Verdict};
 
+pub const MAX_TUNNELS: u32 = h2::MAX_STREAMS;
+
 pub const DEFAULT_LISTEN: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18736));
 

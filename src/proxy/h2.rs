@@ -85,6 +85,7 @@ impl Liveness {
 
 const STREAM_WINDOW: u32 = 64 * 1024;
 const MAX_WINDOW: u32 = (1 << 31) - 1;
+pub(crate) const MAX_STREAMS: u32 = MAX_WINDOW / STREAM_WINDOW;
 
 fn connection_window(max_streams: usize) -> u32 {
     u32::try_from(max_streams)
@@ -279,5 +280,7 @@ mod tests {
         assert_eq!(connection_window(1), STREAM_WINDOW);
         assert_eq!(connection_window(0), STREAM_WINDOW);
         assert_eq!(connection_window(usize::MAX), MAX_WINDOW);
+        assert_eq!(MAX_STREAMS, 32767);
+        assert!(connection_window(MAX_STREAMS as usize) <= MAX_WINDOW);
     }
 }
