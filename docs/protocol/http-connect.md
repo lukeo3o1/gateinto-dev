@@ -92,16 +92,15 @@ The receive window is 64 KiB per stream. Receive credit is released only as
 bytes are consumed by the relay, so a stream whose local client stops reading
 holds at most 64 KiB of the connection window. The connection window is the
 stream window multiplied by `max_concurrent_tunnels` (4 MiB for the default
-64). Configuration rejects `max_concurrent_tunnels` above 32767, the largest
-value whose product stays within the HTTP/2 maximum window of 2^31-1 bytes.
-Every gateway stream holds a tunnel permit, so even when every other tunnel
-has stopped reading, the connection window still has credit for the remaining
-stream. A slow stream
-therefore applies backpressure to its own data only. Buffered receive data
-remains bounded by `max_concurrent_tunnels` times 64 KiB per session. Writes
-reserve available send capacity and copy at most 16 KiB at a time; they never
-enqueue an unbounded body. Decoded response headers are limited by
-`header_max_bytes`; server push is disabled.
+64). Configuration and the proxy reject `max_concurrent_tunnels` above 32767,
+the largest value whose product stays within the HTTP/2 maximum window of
+2^31-1 bytes. Every gateway stream holds a tunnel permit, so even when every
+other tunnel has stopped reading, the connection window still has credit for
+the remaining stream. A slow stream therefore applies backpressure to its own
+data only. Buffered receive data remains bounded by `max_concurrent_tunnels`
+times 64 KiB per session. Writes reserve available send capacity and copy at
+most 16 KiB at a time; they never enqueue an unbounded body. Decoded response
+headers are limited by `header_max_bytes`; server push is disabled.
 
 ## Reconnect, drain and shutdown
 
@@ -122,11 +121,12 @@ connection whose PONG does not arrive within a quarter of the opening timeout
 
 - Before reusing a connection that has not answered a CONNECT or PING for at
   least one opening timeout, the request waits for a PING. If it fails, that
-  request opens a fresh connection within its remaining deadline. This PING
-  runs while the request holds the session's pool lock, so other gateway
-  requests of the session wait behind it: up to a quarter of the opening
-  timeout, or about twice that when a probe from the next item already has a
-  PING outstanding, because a connection has one PING in flight at a time.
+  request opens a fresh connection within its remaining deadline. The PING,
+  and after a failed PING that fresh connection, run while the request holds
+  the session's pool lock, so other gateway requests of the session wait
+  behind both. The PING takes up to a quarter of the opening timeout, or about
+  twice that when a watchdog probe (next item) already has a PING outstanding,
+  because a connection has one PING in flight at a time.
 - When a submitted CONNECT has no reply after a quarter of the opening timeout,
   a PING runs beside it. If that fails, later requests open a fresh connection.
   The unanswered CONNECT is not replayed and still ends with `504` at its own

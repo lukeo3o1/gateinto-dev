@@ -473,6 +473,22 @@ async fn refuses_non_loopback_listen_address_by_default() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn refuses_tunnel_limits_beyond_the_http2_window_bound() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let mut config = setup.config();
+    config.limits.max_tunnels = gateinto::proxy::MAX_TUNNELS as usize;
+    Proxy::bind(config).await.unwrap();
+    let mut config = setup.config();
+    config.limits.max_tunnels = gateinto::proxy::MAX_TUNNELS as usize + 1;
+    match Proxy::bind(config).await {
+        Err(Error::TunnelLimit(limit)) => {
+            assert_eq!(limit, gateinto::proxy::MAX_TUNNELS as usize + 1)
+        }
+        other => panic!("{:?}", other.map(|proxy| proxy.local_addr())),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn binds_non_loopback_address_with_explicit_opt_in() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let mut config = setup.config();
