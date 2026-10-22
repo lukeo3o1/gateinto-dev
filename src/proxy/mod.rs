@@ -98,6 +98,7 @@ pub struct Config {
 #[derive(Debug)]
 pub enum Error {
     NonLoopbackListen(SocketAddr),
+    TunnelLimit(usize),
     Random,
     Tls(rustls::Error),
     Io(io::Error),
@@ -109,6 +110,10 @@ impl fmt::Display for Error {
             Self::NonLoopbackListen(addr) => write!(
                 f,
                 "refusing to listen on non-loopback address {addr}; pass --unsafe-allow-non-loopback-listen to override"
+            ),
+            Self::TunnelLimit(limit) => write!(
+                f,
+                "the tunnel limit is {limit}; the maximum is {MAX_TUNNELS}"
             ),
             Self::Random => f.write_str("the system random number generator failed"),
             Self::Tls(error) => write!(f, "invalid upstream TLS configuration: {error}"),
@@ -232,6 +237,9 @@ impl Proxy {
     ) -> Result<Self, Error> {
         if !config.listen.ip().is_loopback() && !config.allow_non_loopback {
             return Err(Error::NonLoopbackListen(config.listen));
+        }
+        if config.limits.max_tunnels > MAX_TUNNELS as usize {
+            return Err(Error::TunnelLimit(config.limits.max_tunnels));
         }
         let endpoint = Endpoint::new(
             config.upstream,

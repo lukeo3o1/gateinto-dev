@@ -281,6 +281,10 @@ mod tests {
         assert_eq!(connection_window(0), STREAM_WINDOW);
         assert_eq!(connection_window(usize::MAX), MAX_WINDOW);
         assert_eq!(MAX_STREAMS, 32767);
-        assert!(connection_window(MAX_STREAMS as usize) <= MAX_WINDOW);
+        assert_eq!(
+            connection_window(MAX_STREAMS as usize),
+            MAX_STREAMS * STREAM_WINDOW
+        );
+        assert_eq!(connection_window(MAX_STREAMS as usize + 1), MAX_WINDOW);
     }
 }
