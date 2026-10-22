@@ -361,6 +361,24 @@ pub fn busy_retry_delay(deadline: Instant, now: Instant) -> Option<Duration> {
     Some(remaining.min(BUSY_RETRY_DELAY))
 }
 
+pub fn hand_off<P>(
+    listening: &mut P,
+    connected: io::Result<()>,
+    create: impl FnOnce() -> io::Result<P>,
+    reset: impl FnOnce(&P) -> io::Result<()>,
+) -> io::Result<P> {
+    match connected.and_then(|()| create()) {
+        Ok(next) => Ok(std::mem::replace(listening, next)),
+        Err(error) => match reset(listening) {
+            Ok(()) => Err(error),
+            Err(reset_error) => Err(io::Error::new(
+                error.kind(),
+                format!("{error}; resetting the pipe instance also failed: {reset_error}"),
+            )),
+        },
+    }
+}
+
 pub fn taken_pipe(endpoint: &Endpoint, owned_by_user: io::Result<bool>) -> BindError {
     match owned_by_user {
         Ok(true) => BindError::AlreadyRunning(endpoint.clone()),
@@ -671,7 +689,7 @@ mod windows {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use super::{
-        BindError, Connection, Endpoint, REQUEST_TIMEOUT, RequestError, busy_retry_delay,
+        BindError, Connection, Endpoint, REQUEST_TIMEOUT, RequestError, busy_retry_delay, hand_off,
         owner_only_sddl, taken_pipe,
     };
 
@@ -733,38 +751,38 @@ mod windows {
     pub struct Server {
         endpoint: Endpoint,
         descriptor: SecurityDescriptor,
-        next: Option<NamedPipeServer>,
+        listening: NamedPipeServer,
     }
 
     impl Server {
         pub fn bind(endpoint: &Endpoint) -> Result<Self, BindError> {
             let io_error = |error| BindError::Io(endpoint.clone(), error);
             let descriptor = SecurityDescriptor::owner_only().map_err(io_error)?;
-            let next = descriptor
-                .create(endpoint, true)
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::PermissionDenied => {
-                        taken_pipe(endpoint, pipe_owned_by_current_user(endpoint))
-                    }
-                    _ => io_error(error),
-                })?;
+            let listening =
+                descriptor
+                    .create(endpoint, true)
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::PermissionDenied => {
+                            taken_pipe(endpoint, pipe_owned_by_current_user(endpoint))
+                        }
+                        _ => io_error(error),
+                    })?;
             Ok(Self {
                 endpoint: endpoint.clone(),
                 descriptor,
-                next: Some(next),
+                listening,
             })
         }
 
         pub async fn accept(&mut self) -> io::Result<Connection> {
-            let listening = match &mut self.next {
-                Some(pipe) => pipe,
-                next @ None => next.insert(self.descriptor.create(&self.endpoint, false)?),
-            };
-            listening.connect().await?;
-            let next = self.descriptor.create(&self.endpoint, false).ok();
-            std::mem::replace(&mut self.next, next)
-                .map(|connected| Box::new(connected) as Connection)
-                .ok_or_else(|| io::Error::other("no pipe instance was listening"))
+            let connected = self.listening.connect().await;
+            let pipe = hand_off(
+                &mut self.listening,
+                connected,
+                || self.descriptor.create(&self.endpoint, false),
+                NamedPipeServer::disconnect,
+            )?;
+            Ok(Box::new(pipe))
         }
     }
 
@@ -1276,6 +1294,25 @@ mod tests {
         assert!(windows::owned_by_current_user(client.as_raw_handle()).unwrap());
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_agent_pipe_accepts_again_after_a_client_leaves_before_being_accepted() {
+        let endpoint = Endpoint::pipe(&format!("gateinto-reaccept-{}", std::process::id()));
+        let mut server = Server::bind(&endpoint).unwrap();
+        drop(
+            tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(endpoint.path())
+                .unwrap(),
+        );
+        let _ = server.accept().await;
+
+        let accepted = tokio::spawn(async move { server.accept().await.map(drop) });
+        let connected = tokio::time::timeout(REQUEST_TIMEOUT, connect(&endpoint)).await;
+
+        assert!(matches!(connected, Ok(Ok(_))));
+        assert!(accepted.await.unwrap().is_ok());
+    }
+
     #[test]
     fn a_taken_pipe_name_is_a_running_agent_only_when_the_user_owns_the_pipe() {
         let endpoint = Endpoint(OsString::from(r"\\.\pipe\gateinto-agent-S-1-5-21-1"));
@@ -1295,6 +1332,70 @@ mod tests {
             taken(Ok(false)).to_string(),
             r"the agent endpoint \\.\pipe\gateinto-agent-S-1-5-21-1 is held by another user"
         );
+    }
+
+    #[test]
+    fn a_connected_pipe_is_handed_off_only_once_its_successor_listens() {
+        let mut listening = "first";
+        let handed = hand_off(&mut listening, Ok(()), || Ok("second"), |_| panic!("kept"));
+
+        assert_eq!(handed.unwrap(), "first");
+        assert_eq!(listening, "second");
+    }
+
+    #[test]
+    fn a_connected_pipe_without_a_successor_is_reset_and_kept_listening() {
+        let mut listening = "first";
+        let mut reset = Vec::new();
+        let handed = hand_off(
+            &mut listening,
+            Ok(()),
+            || Err(io::Error::other("no instance")),
+            |pipe| {
+                reset.push(*pipe);
+                Ok(())
+            },
+        );
+
+        assert_eq!(handed.unwrap_err().to_string(), "no instance");
+        assert_eq!(listening, "first");
+        assert_eq!(reset, ["first"]);
+    }
+
+    #[test]
+    fn a_failed_connection_is_reset_and_kept_listening_without_a_successor() {
+        let mut listening = "first";
+        let mut reset = Vec::new();
+        let handed = hand_off(
+            &mut listening,
+            Err(io::Error::other("client left")),
+            || -> io::Result<&str> { panic!("created") },
+            |pipe| {
+                reset.push(*pipe);
+                Ok(())
+            },
+        );
+
+        assert_eq!(handed.unwrap_err().to_string(), "client left");
+        assert_eq!(listening, "first");
+        assert_eq!(reset, ["first"]);
+    }
+
+    #[test]
+    fn a_failed_reset_is_reported_with_the_failure_it_follows() {
+        let mut listening = "first";
+        let handed = hand_off(
+            &mut listening,
+            Err(io::Error::other("client left")),
+            || -> io::Result<&str> { panic!("created") },
+            |_| Err(io::Error::other("still connected")),
+        );
+
+        assert_eq!(
+            handed.unwrap_err().to_string(),
+            "client left; resetting the pipe instance also failed: still connected"
+        );
+        assert_eq!(listening, "first");
     }
 
     #[test]
