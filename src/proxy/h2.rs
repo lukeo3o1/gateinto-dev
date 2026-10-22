@@ -207,13 +207,14 @@ pub(crate) fn request(
         .uri(target.to_string())
         .body(())
         .expect("a validated CONNECT authority is a valid URI");
+    let tracked = Tracked::new(&liveness.0);
     let (response, send) = sender
         .send_request(request, false)
         .map_err(UpstreamError::Http2)?;
     Ok(Pending {
         response,
         send: Some(send),
-        tracked: Tracked::new(&liveness.0),
+        tracked,
     })
 }
 
