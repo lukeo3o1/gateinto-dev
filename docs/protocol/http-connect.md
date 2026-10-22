@@ -122,7 +122,11 @@ connection whose PONG does not arrive within a quarter of the opening timeout
 
 - Before reusing a connection that has not answered a CONNECT or PING for at
   least one opening timeout, the request waits for a PING. If it fails, that
-  request opens a fresh connection within its remaining deadline.
+  request opens a fresh connection within its remaining deadline. This PING
+  runs while the request holds the session's pool lock, so other gateway
+  requests of the session wait behind it: up to a quarter of the opening
+  timeout, or about twice that when a probe from the next item already has a
+  PING outstanding, because a connection has one PING in flight at a time.
 - When a submitted CONNECT has no reply after a quarter of the opening timeout,
   a PING runs beside it. If that fails, later requests open a fresh connection.
   The unanswered CONNECT is not replayed and still ends with `504` at its own
