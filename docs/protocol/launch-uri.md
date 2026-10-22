@@ -431,7 +431,11 @@ Endpoint:
   another owner (for example with `SeRestorePrivilege`) could create a pipe
   that passes this check, and such accounts are outside the boundary. An
   agent running with an elevated token has not been tested, in particular
-  whether a client without elevation can open its pipe. Whether Windows enforces these as intended is only exercised by
+  whether a client without elevation can open its pipe. When the name is
+  already taken, the agent opens the existing pipe with `READ_CONTROL` and
+  checks its owner the same way: it reports `an agent is already running`
+  only for a pipe the user owns, and `the agent endpoint ... is held by
+  another user` for a pipe it cannot open or that another user owns. Whether Windows enforces these as intended is only exercised by
   the CI runs on `windows-latest` (same user); the other-user cases are not
   tested.
 - Unix (development and tests): the socket `agent.sock` in
