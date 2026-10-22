@@ -441,10 +441,12 @@ Endpoint:
   second; a pipe still busy then is reported as an error, and the agent does
   not start. Whether Windows enforces these as intended is only exercised by
   the CI runs on `windows-latest` (same user); the other-user cases are not
-  tested. The agent always keeps an instance listening, so the name is not
-  released while it runs: it creates the next instance before handing out a
-  connected one, and when that or the connection fails, it disconnects the
-  instance and listens on it again.
+  tested. The agent holds at least one instance of the pipe while it runs, so
+  the name is not released: it hands out a connected instance only once the
+  next one exists, keeps it until then, and replaces an instance whose
+  connection failed with a new one rather than reusing it. The unit tests
+  cover this order with stand-in pipes; CI on `windows-latest` only exercises
+  the path where creating instances succeeds.
 - Unix (development and tests): the socket `agent.sock` in
   `$XDG_RUNTIME_DIR/gateinto`, or `$HOME/.local/state/gateinto` without
   `XDG_RUNTIME_DIR`. The directory must be accessible only by its owner
