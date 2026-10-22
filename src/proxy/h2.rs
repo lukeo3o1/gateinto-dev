@@ -1,7 +1,7 @@
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use bytes::{Buf, Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio_rustls::client::TlsStream;
 
 use super::UpstreamError;
@@ -36,6 +36,8 @@ struct LivenessState {
     dead: AtomicBool,
     opened: Instant,
     answered_nanos: AtomicU64,
+    streams: AtomicUsize,
+    driver: AbortHandle,
 }
 
 impl LivenessState {
@@ -51,19 +53,28 @@ impl LivenessState {
     fn answered_since(&self, nanos: u64) -> bool {
         self.answered_nanos.load(Ordering::Relaxed) > nanos
     }
+
+    // A silent socket can stay open until TCP gives up, holding its buffers in the meantime.
+    fn close_if_unused(&self) {
+        if self.dead.load(Ordering::SeqCst) && self.streams.load(Ordering::SeqCst) == 0 {
+            self.driver.abort();
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct Liveness(Arc<LivenessState>);
 
 impl Liveness {
-    fn new(ping: h2::PingPong) -> Self {
+    fn new(ping: h2::PingPong, driver: AbortHandle) -> Self {
         Self(Arc::new(LivenessState {
             ping: Mutex::new(Some(ping)),
             pong: Notify::new(),
             dead: AtomicBool::new(false),
             opened: Instant::now(),
             answered_nanos: AtomicU64::new(0),
+            streams: AtomicUsize::new(0),
+            driver,
         }))
     }
 
@@ -102,7 +113,30 @@ impl Liveness {
             return true;
         }
         self.0.dead.store(true, Ordering::SeqCst);
+        self.0.close_if_unused();
         false
+    }
+}
+
+struct Tracked(Arc<LivenessState>);
+
+impl Tracked {
+    fn new(state: &Arc<LivenessState>) -> Self {
+        state.streams.fetch_add(1, Ordering::SeqCst);
+        Self(state.clone())
+    }
+}
+
+impl Clone for Tracked {
+    fn clone(&self) -> Self {
+        Self::new(&self.0)
+    }
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.0.streams.fetch_sub(1, Ordering::SeqCst);
+        self.0.close_if_unused();
     }
 }
 
@@ -144,13 +178,14 @@ pub(crate) async fn connect(
         .ping(h2::Ping::opaque())
         .await
         .map_err(UpstreamError::Http2)?;
-    Ok((sender, driver, Liveness::new(ping_pong)))
+    let liveness = Liveness::new(ping_pong, driver.0.abort_handle());
+    Ok((sender, driver, liveness))
 }
 
 pub(crate) struct Pending {
     response: h2::client::ResponseFuture,
     send: Option<h2::SendStream<Bytes>>,
-    liveness: Liveness,
+    tracked: Tracked,
 }
 
 impl Drop for Pending {
@@ -178,14 +213,14 @@ pub(crate) fn request(
     Ok(Pending {
         response,
         send: Some(send),
-        liveness: liveness.clone(),
+        tracked: Tracked::new(&liveness.0),
     })
 }
 
 impl Pending {
     pub(crate) async fn response(mut self) -> Result<(u16, Stream), UpstreamError> {
         let response = (&mut self.response).await.map_err(UpstreamError::Http2)?;
-        self.liveness.0.answered();
+        self.tracked.0.answered();
         let status = response.status().as_u16();
         Ok((
             status,
@@ -197,7 +232,7 @@ impl Pending {
                 recv: response.into_body(),
                 buffered: Bytes::new(),
                 closed: false,
-                liveness: self.liveness.clone(),
+                tracked: self.tracked.clone(),
             },
         ))
     }
@@ -208,7 +243,7 @@ pub(crate) struct Stream {
     recv: h2::RecvStream,
     buffered: Bytes,
     closed: bool,
-    liveness: Liveness,
+    tracked: Tracked,
 }
 
 impl Drop for Stream {
@@ -245,7 +280,7 @@ impl AsyncRead for Stream {
             }
             match ready!(self.recv.poll_data(cx)) {
                 Some(Ok(data)) => {
-                    self.liveness.0.answered();
+                    self.tracked.0.answered();
                     self.buffered = data;
                 }
                 Some(Err(error)) => return Poll::Ready(Err(io_error(error))),

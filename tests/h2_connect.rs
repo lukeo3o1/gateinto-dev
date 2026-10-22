@@ -719,6 +719,41 @@ async fn an_idle_silent_connection_is_verified_and_replaced_before_reuse() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test]
+async fn a_dead_connection_is_closed_once_its_last_stream_ends() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    config.limits.handshake_timeout = Duration::from_secs(1);
+    let agent = start_agent(config).await;
+    echo(
+        &mut tunnel(agent, "echo.test:443").await,
+        b"before blackhole",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    server
+        .blackhole_first_connection
+        .store(true, Ordering::SeqCst);
+    let unanswered = tokio::spawn(async move {
+        send(agent, &connect_request("echo.test:443"))
+            .await
+            .1
+            .status
+    });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(server.active.load(Ordering::SeqCst), 1);
+    assert_eq!(unanswered.await.unwrap(), 504);
+    timeout(Duration::from_secs(3), async {
+        while server.active.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent must close a dead connection without streams");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+}
+
 async fn read_for(stream: &mut TcpStream, duration: Duration) {
     let deadline = tokio::time::Instant::now() + duration;
     let mut chunk = [0; 4096];
