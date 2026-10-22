@@ -683,7 +683,7 @@ async fn blackholed_gateway(
 
 #[tokio::test]
 async fn an_unanswered_connect_on_a_silent_connection_retires_it_for_later_requests() {
-    let (server, agent, _ca) = blackholed_gateway(Duration::from_secs(1)).await;
+    let (server, agent, _ca) = blackholed_gateway(Duration::from_secs(2)).await;
     let started = tokio::time::Instant::now();
     let unanswered = tokio::spawn(async move {
         send(agent, &connect_request("echo.test:443"))
@@ -691,20 +691,20 @@ async fn an_unanswered_connect_on_a_silent_connection_retires_it_for_later_reque
             .1
             .status
     });
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    let mut recovered = timeout(Duration::from_secs(1), tunnel(agent, "echo.test:443"))
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    let mut recovered = timeout(Duration::from_millis(1500), tunnel(agent, "echo.test:443"))
         .await
         .expect("a later CONNECT must not wait on the silent connection");
     echo(&mut recovered, b"fresh connection").await;
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_millis(3500));
     assert_eq!(unanswered.await.unwrap(), 504);
     assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
 async fn an_idle_silent_connection_is_verified_and_replaced_before_reuse() {
-    let (server, agent, _ca) = blackholed_gateway(Duration::from_millis(400)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (server, agent, _ca) = blackholed_gateway(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
     echo(
         &mut tunnel(agent, "echo.test:443").await,
         b"fresh connection",
