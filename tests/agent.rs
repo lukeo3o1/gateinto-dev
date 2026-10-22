@@ -48,7 +48,7 @@ impl Profiles for TestProfiles {
             name: gateway.name,
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
-            portal_url: Some(gateway.portal_url),
+            portal_url: gateway.portal_url,
             source: Source::Linked,
         });
         Ok(Known {
@@ -287,6 +287,46 @@ async fn tunnel_echoes(proxy: SocketAddr, credential: &str) {
         read_to_end_within(&mut stream, WAIT).await,
         b"through the session"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("mixed").unwrap();
+    let (echo, token) = agent.asks(request).await;
+    assert_eq!(field(&echo, "route"), "mixed");
+    let (lines, browser) = agent.opened(Request::Approve(token)).await;
+    assert_eq!(field(&lines, "route"), "mixed");
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let (mut stream, response) = send(
+        browser.proxy(),
+        &connect_with(&target.to_string(), Some(&basic("me", "pw"))),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    stream.write_all(b"mixed approval").await.unwrap();
+    stream.shutdown().await.unwrap();
+    assert_eq!(
+        read_to_end_within(&mut stream, WAIT).await,
+        b"mixed approval"
+    );
+    assert!(agent._upstream.requests().is_empty());
+    let (plain, plain_browser) = agent
+        .opened(Request::Launch(
+            LaunchRequest::new("newco", "basic_tofu").unwrap(),
+        ))
+        .await;
+    assert!(!plain.iter().any(|line| line.starts_with("route:")));
+    let (mut stream, response) = send(
+        plain_browser.proxy(),
+        &connect_with(&target.to_string(), Some(&basic("me", "pw"))),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    stream.shutdown().await.unwrap();
+    assert!(read_to_end_within(&mut stream, WAIT).await.is_empty());
+    assert_eq!(agent._upstream.requests().len(), 1);
+    agent.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -752,7 +792,7 @@ async fn a_new_gateway_is_stored_only_after_approval_and_relays_the_session() {
     assert_eq!(linked.len(), 1);
     assert_eq!(linked[0].name.as_str(), "newco");
     assert_eq!(linked[0].address.to_string(), agent.gateway());
-    assert_eq!(linked[0].portal_url.as_str(), NEW_PORTAL);
+    assert_eq!(linked[0].portal_url.as_ref().unwrap().as_str(), NEW_PORTAL);
     assert!(linked[0].approved_at.is_some());
 
     assert!(refused(

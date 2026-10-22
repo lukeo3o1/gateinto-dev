@@ -500,7 +500,11 @@ where
 }
 
 pub async fn echo_server() -> SocketAddr {
-    serve(|mut stream| async move {
+    echo_server_on(LOOPBACK).await
+}
+
+pub async fn echo_server_on(ip: Ipv4Addr) -> SocketAddr {
+    serve_on(ip, |mut stream| async move {
         let (mut reader, mut writer) = stream.split();
         let _ = tokio::io::copy(&mut reader, &mut writer).await;
         let _ = writer.shutdown().await;
@@ -559,7 +563,15 @@ where
     F: Fn(TcpStream) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let listener = TcpListener::bind((LOOPBACK, 0)).await.unwrap();
+    serve_on(LOOPBACK, handler).await
+}
+
+async fn serve_on<F, Fut>(ip: Ipv4Addr, handler: F) -> SocketAddr
+where
+    F: Fn(TcpStream) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let listener = TcpListener::bind((ip, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
@@ -580,6 +592,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
         listen: SocketAddr::from((LOOPBACK, 0)),
         allow_non_loopback: false,
         local_auth: LocalAuth::None,
+        route: gateinto::proxy::Route::Gateway,
         upstream: Upstream {
             host: upstream.ip().to_string(),
             port: upstream.port(),

@@ -657,6 +657,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
         listen: settings.listen,
         allow_non_loopback: false,
         local_auth: LocalAuth::None,
+        route: gateinto::proxy::Route::Gateway,
         upstream: upstream(settings)?,
         tls_mode: settings.gateway.tls_mode,
         client_certificate: client_certificate(settings)?,
@@ -887,14 +888,18 @@ async fn open(args: OpenArgs) -> Result {
     let Some(token) = ipc::confirm_token(&lines) else {
         return print_response(response);
     };
-    let (Some(gateway), Some(portal)) = (launch.gateway, launch.portal) else {
+    let profile = launch
+        .proposed_profile()
+        .ok_or("the launch has no gateway selector")?;
+    let Some(gateway) = launch.gateway else {
         ipc::send(&endpoint, &Request::Deny(token)).await?;
         return Err("the agent asked to confirm a gateway the link does not name".into());
     };
     let confirmation = Confirmation {
-        profile: launch.profile.clone(),
+        route: launch.route,
+        profile: profile.clone(),
         gateway,
-        portal,
+        portal: launch.portal,
     };
     if !confirmation.echoed_by(&lines) {
         ipc::send(&endpoint, &Request::Deny(token)).await?;
@@ -912,7 +917,7 @@ async fn open(args: OpenArgs) -> Result {
         Ok(true) => print_response(ipc::send(&endpoint, &Request::Approve(token)).await?),
         Ok(false) => {
             ipc::send(&endpoint, &Request::Deny(token)).await?;
-            Err(link::LinkError::Denied(launch.profile).into())
+            Err(link::LinkError::Denied(profile).into())
         }
         Err(error) => {
             ipc::send(&endpoint, &Request::Deny(token)).await?;

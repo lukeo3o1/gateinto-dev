@@ -5,6 +5,8 @@ what does not exist.
 
 ## Data path
 
+The default `gateway` route follows this path:
+
 ```text
  client (browser, curl, ...)
    |  TCP to 127.0.0.1:18736
@@ -36,6 +38,26 @@ determines the upstream CONNECT encoding. HTTP/2 multiplexes streams on one
 lazy TLS connection per session. HTTP/1.1, including no ALPN, keeps one TLS
 connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
+
+A launch URI can select `route=mixed` only for its new browser session.
+`proxy::routing` resolves target and gateway concurrently, selects gateway on
+missing/error answers or a canonical IP intersection, and otherwise tries TCP
+to the resolved target addresses. Discovery and direct TCP share half the
+opening deadline; failure falls through to the ordinary gateway pool within
+the original total deadline. A direct success uses the same authenticated
+local CONNECT response and byte relay with no upstream TLS. Gateway failures
+and established tunnels cannot switch routes. The mode is held by the
+session and reported for mixed launches and session listings; gateway files
+never store it. See [session routing](protocol/launch-uri.md#session-routing)
+for the heuristic's limits and DNS/source-IP exposure.
+
+`dns` owns the process-wide budget of 64 queued or running system lookups for
+both mixed discovery and gateway connection setup. It acquires capacity
+without waiting before submitting `ToSocketAddrs` to `spawn_blocking`; the
+closure retains the slot even if its async waiter is dropped. IP literals
+bypass the resolver. Both TCP paths connect resolved address vectors, and a
+full DNS budget returns an immediate error. System calls already running can
+still delay process shutdown. See [DNS work budget](protocol/http-connect.md#dns-work-budget).
 
 ## Sessions and gateway profiles
 
@@ -132,7 +154,7 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
 ## Agent, launch URIs and browser sessions
 
 ```text
- browser click: gateinto://connect?profile=office[&url=..][&gateway=..&portal=..]
+ browser click: gateinto://connect?gateway=proxy.example[&portal=..][&url=..]
         |
  Windows URL handler (HKCU\Software\Classes\gateinto)
         |  "gateinto.exe" open --config "<file>" -- "%1"
@@ -160,15 +182,18 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
 The full protocol, limits and guarantees are in
 [protocol/launch-uri.md](protocol/launch-uri.md).
 
-- `uri::LaunchRequest` parses `gateinto://connect?profile=...&auth=...&v=1`
-  with the optional `url`, `gateway` and `portal` into a `GatewayName`, a
-  `LaunchAuth`, `PortalUrl`s and a `link::GatewayAddress`.
-  `LaunchRequest::new` and `LaunchRequest::with_link` hold the value rules
+- `uri::LaunchRequest` parses a gateway-address or legacy-profile launch
+  selector, with optional `portal`, `url`, `route`, `auth` and `v`. At least
+  one of `gateway` or `profile` is required; the profile and portal remain
+  optional throughout URI, IPC and pending confirmation handling.
+  `LaunchRequest::from_fields`, `LaunchRequest::with_route` and
+  `LaunchRequest::with_link` hold the value rules
   and are also used by the agent to parse IPC requests, so the agent applies
   the same rules again instead of trusting `open`. Its `Display` prints the
   canonical URI.
 - `link` holds the strict `GatewayAddress` (`host[:port]`) and `Origin`
-  parsers, `resolve`, a pure function from a request, the known gateways and
+  parsers, deterministic endpoint-derived internal profile names, and
+  `resolve`, a pure function from a request, the known gateways and
   a `Confirm` decision (approve, deny or defer) to a launch, a confirmation
   to ask for, or an error. `link::store::LinkedStore` keeps one file per
   approved gateway in `gateways/`, named only from the canonical address,
@@ -176,7 +201,11 @@ The full protocol, limits and guarantees are in
   invalid entries that still block their name and address, or a store that
   cannot be read), and writes new files atomically without replacing any. `ConfigFile::with_linked` turns linked entries into
   minimal `[gateways.<name>]` tables, so they get exactly the defaults of a
-  configured gateway with only `host`, `port` and `portal_url`.
+  configured gateway with only `host`, `port` and an optional `portal_url`.
+  Address-only selection reuses a unique existing profile and its trust
+  settings without DNS identity lookup, and refuses ambiguous endpoints.
+  Unknown addresses need first-time approval; internal name collisions and
+  damaged stored entries fail closed.
 - `prompt` asks the user in `gateinto open`: `MessageBoxW` on an interactive
   Windows desktop, otherwise a `yes` prompt on a terminal, otherwise it
   refuses.
@@ -235,12 +264,14 @@ The full protocol, limits and guarantees are in
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
 | `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the device session's gateway, listen address and local authentication, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/basic_tofu.rs` | `basic_tofu` local proxy authentication of one session: realm, strict Basic and base64 parsing, binding the first credential as a keyed hash, constant-time comparison, failure rate limit. |
 | `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, certificate rotation and owned connection drivers. |
+| `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |

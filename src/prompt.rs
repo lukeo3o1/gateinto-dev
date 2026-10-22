@@ -198,9 +198,10 @@ mod tests {
 
     fn confirmation() -> Confirmation {
         Confirmation {
+            route: crate::proxy::Route::Gateway,
             profile: "newco".parse().unwrap(),
             gateway: "proxy.newco.example".parse().unwrap(),
-            portal: "https://portal.newco.example/home".parse().unwrap(),
+            portal: Some("https://portal.newco.example/home".parse().unwrap()),
         }
     }
 

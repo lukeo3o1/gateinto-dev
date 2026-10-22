@@ -3,6 +3,7 @@
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::Request;
 use gateinto::link::{self, Decision, Known, KnownGateway, Origin, Resolution, Source};
+use gateinto::proxy::Route;
 use gateinto::uri::{LaunchRequest, MAX_LEN, UriError};
 use libfuzzer_sys::fuzz_target;
 
@@ -43,16 +44,18 @@ fuzz_target!(|data: &[u8]| {
     };
     assert!(uri.len() <= MAX_LEN);
     assert!(uri[..9].eq_ignore_ascii_case("gateinto:"));
-    let profile = request.profile.as_str();
-    assert!((1..=GatewayName::MAX_LEN).contains(&profile.len()));
-    assert!(
-        profile
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    );
-    assert!(!profile.starts_with('-'));
+    assert!(request.profile.is_some() || request.gateway.is_some());
+    if let Some(profile) = &request.profile {
+        let profile = profile.as_str();
+        assert!((1..=GatewayName::MAX_LEN).contains(&profile.len()));
+        assert!(
+            profile
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        );
+        assert!(!profile.starts_with('-'));
+    }
 
-    assert_eq!(request.gateway.is_some(), request.portal.is_some());
     if let Some(gateway) = &request.gateway {
         let host = gateway.host();
         assert!(!host.is_empty());
@@ -90,6 +93,7 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(decision, Decision::Defer);
             continue;
         };
+        assert_eq!(launch.route, request.route);
         let portal = known
             .gateways
             .iter()
@@ -111,7 +115,11 @@ fuzz_target!(|data: &[u8]| {
         .into_iter()
         .flatten()
         .count()
-        + usize::from(request.gateway.is_some());
-    assert_eq!(line.split(' ').count(), 3 + fields);
+        + usize::from(request.gateway.is_some())
+        + usize::from(request.route != Route::Gateway);
+    assert_eq!(
+        line.split(' ').count(),
+        2 + usize::from(request.profile.is_some()) + fields
+    );
     assert_eq!(line.parse::<Request>(), Ok(Request::Launch(request)));
 });

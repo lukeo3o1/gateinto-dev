@@ -14,7 +14,8 @@ is the validated target `host:port` (including brackets for IPv6), and
 credentials and headers are not forwarded to the gateway.
 
 The request stream stays open while the tunnel carries bytes in DATA frames.
-Gateinto sends the local `200 Connection Established` only after a gateway
+For gateway-routed tunnels, Gateinto sends the local `200 Connection Established`
+only after a gateway
 `2xx` response. Bytes following the local request head and DATA received with
 the gateway response remain tunnel payload. END_STREAM maps to TCP half-close;
 one side can finish sending while the other continues receiving.
@@ -24,6 +25,44 @@ local tunnel: gateway `403` maps to local `403`, other statuses and stream
 errors to `502`. Response headers and bodies are not forwarded. Once a tunnel
 is established, a reset closes its byte relay; it cannot send a second HTTP
 response to the local client.
+
+## Mixed routing
+
+All CONNECTs use the gateway by default. A launch URI with `route=mixed`
+selects an opt-in DNS/IP heuristic for that browser session; see
+[session routing](launch-uri.md#session-routing) for the rules and exposure.
+Local request parsing, authentication and the tunnel permit precede route
+selection. Distinct, nonempty target and gateway DNS answers permit a direct
+TCP attempt to the resolved target addresses. An IP intersection, DNS error
+or empty answers select gateway CONNECT with the original authority.
+
+Local `200` for a direct route is sent only after TCP connects. Direct errors
+or timeout may fall back to gateway CONNECT before that response. DNS and
+direct TCP share at most half of the existing opening timeout, leaving the
+remaining total deadline for the gateway. Gateway statuses, TLS failures and
+other gateway errors never cause a direct retry. Neither route can replay
+bytes after local `200`; target TLS and HTTP errors belong to the browser.
+Early client bytes, half-close, idle limits, concurrency limits and shutdown
+use the same relay for both routes. Direct tunnels create no upstream TLS
+connection and do not use or refresh the gateway client certificate.
+
+## DNS work budget
+
+Mixed-route discovery and new gateway connections share a process-wide limit
+of 64 queued or running system DNS lookups. An IP literal needs no lookup
+slot. Capacity is acquired before submitting blocking work, without a waiting
+queue; the blocking job holds its slot until the system resolver returns,
+including when its async caller times out, is cancelled or closes its session.
+Errors and panics release the slot when that job finishes. TCP connects use
+the resulting address vector, so they cannot start an implicit extra lookup.
+
+At capacity, mixed discovery selects the gateway. An existing gateway
+connection or an IP-literal gateway may still work; a new named gateway that
+cannot obtain a slot fails immediately with the existing local `502` mapping.
+The budget is shared across sessions and `check-upstream` within one process.
+Opening deadlines bound the caller's wait, not the system resolver's lifetime.
+Already-running OS lookups remain non-cancellable and may delay process
+shutdown, but cancellation cannot admit unlimited replacement DNS work.
 
 ## Connection ownership and limits
 
@@ -93,7 +132,7 @@ authenticated connection. An upstream that does not accept anonymous clients
 can refuse the optional handshake. Certificate snapshots belong to individual
 TLS handshakes, so an old connection cannot masquerade as a renewed one.
 
-Each local request retains its opening timeout, including pool coordination,
+Each gateway-routed request retains its opening timeout, including pool coordination,
 TCP/TLS, stream-capacity waits and the CONNECT reply. Timeout maps to `504`.
 Established streams retain independent bidirectional idle deadlines: traffic
 on another stream does not keep an idle tunnel alive. HTTP/2 PING keepalive is

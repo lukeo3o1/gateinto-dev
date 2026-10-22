@@ -10,6 +10,41 @@ item to its code, its tests and where they run.
 
 ## What it protects
 
+### Routing scope
+
+All traffic received by a session uses the gateway by default. A launch URI
+may opt its new browser session into `route=mixed` without changing any other
+session or saved gateway. Mixed routing is an IP heuristic, not a policy or
+scope guarantee: locally resolved target addresses matching any gateway IP,
+empty answers and DNS errors use the gateway; other targets try direct TCP.
+Direct opening and DNS share half the total opening timeout before gateway
+fallback. A gateway refusal or TLS error never permits a direct retry, and
+routes never change after the local success response.
+
+All system DNS work uses one process-wide budget of 64 queued or running
+lookups, shared by mixed discovery and gateway connections. Slots belong to
+the blocking resolver jobs, not their async waiters, so timeout, cancellation
+and session closure do not free capacity while OS work continues. An exhausted
+budget rejects new DNS work immediately; mixed mode falls back to the gateway,
+and a fresh named gateway without capacity fails closed. IP literals bypass
+DNS. Existing OS lookups can still delay process shutdown; their number is
+bounded, and the routing deadline does not promise to interrupt them. See
+[DNS work budget](protocol/http-connect.md#dns-work-budget).
+
+Mixed mode exposes local DNS queries and the user's source IP, and direct
+connections bypass gateway authorization and inspection. Different service
+and gateway IPs or shared hosting can misclassify traffic. Any website can
+select mixed mode in a link for a known gateway; there is no additional
+routing confirmation or locally enforced gateway-only policy. The existing
+first-time gateway confirmation discloses mixed routing when requested.
+Operators needing all traffic through the gateway must use gateway-mode
+links and must not treat this client as an enforcement boundary. Full rules
+are in [session routing](protocol/launch-uri.md#session-routing).
+
+The following upstream TLS protections apply to the gateway route. A direct
+tunnel carries the browser's own TLS unchanged and uses no gateway client
+certificate or Gateinto outer TLS/key-exchange policy.
+
 ### The connection to the upstream proxy
 
 - **TLS 1.3 only.** `rustls` is built without its `tls12` feature, so no
@@ -93,18 +128,18 @@ format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 What a launch URI can do, at most:
 
 - make the user's agent start a new browser session for a known gateway,
-  which opens Chrome or Edge with a new, empty profile on that gateway's
+  selecting default gateway routing or mixed routing, which opens Chrome or Edge with a new, empty profile on that gateway's
   portal or on another page of the same origin;
 - for a gateway the device does not know, after the user approves it in a
-  dialog that names it: store its host, port and portal, then do the above.
+  dialog that names it: store its host, port and optional portal, then do the above.
 
 How that is bounded:
 
 - **Strict parsing, twice.** `gateinto open` accepts only
   `gateinto://connect?` with the fields `profile`, `auth`, `v`, `url`,
-  `gateway` and `portal`, each at most once, raw characters only from
+  `gateway`, `portal` and `route`, each at most once, raw characters only from
   `A-Z a-z 0-9 - . _ ~` and percent-escapes, at most 8192 bytes, no fragment,
-  user information, port or path. `profile`, `auth` and `v` decode only to
+  user information, port or path. `profile`, `auth`, `route` and `v` decode only to
   `A-Z a-z 0-9 _ -`; `url` and `portal` must be `https://` URLs with a DNS or
   IP host and the same origin; `gateway` must be a plain `host[:port]`. The
   agent parses the forwarded request again with the same rules.
@@ -120,6 +155,14 @@ How that is bounded:
   with a different host, port or portal is refused; the configuration file
   wins over approved entries and is never written; an address that is
   already known under another name is refused with that name.
+- **Address selection preserves trust.** A URI needs a gateway address or
+  a legacy profile, not both. Address-only selection compares canonical host
+  and port without DNS; a unique match reuses all stored settings. Multiple
+  matching profiles require an explicit profile. For unknown addresses a
+  deterministic internal name is generated; collisions and damaged entries
+  are refused. An omitted portal inherits the stored portal, or leaves a new
+  gateway without one. A supplied portal is an exact assertion for an
+  existing entry, never an update; `url` cannot invent one.
 - **New gateways need the user.** See
   [Gateways added from links](#gateways-added-from-links).
 - **No command injection.** The handler command quotes the executable and
@@ -160,7 +203,7 @@ How that is bounded:
 
 The original plan required that a URI never introduce a proxy host. This is
 deliberately relaxed, with the user's agreement, so that a gateway's website
-can bring its own gateway and portal to a user who has no local profile. It
+can bring its own gateway and optional portal to a user who has no local profile. It
 is not silent: nothing is stored or connected before the user approves.
 
 How it is bounded:
@@ -183,7 +226,7 @@ How it is bounded:
 - **Stored once, never overwritten.** An approved gateway is stored in its
   own file in a separate owner-only directory (`gateways/`, at most 32
   files), named only from its canonical address, written atomically and
-  never over an existing file, with only its name, host, port, portal and
+  never over an existing file, with only its name, host, port, optional portal and
   approval time. File names are checked to be single plain components; hosts
   that are Windows device names are refused; links and reparse points are
   never followed. A damaged file disables only its own entry and still
@@ -203,8 +246,8 @@ What remains:
   approve its gateway. The dialog shows the real gateway host and portal
   origin, but a user who approves a hostile gateway sends that isolated
   browser's traffic through it. The browser's TLS still runs end to end to
-  each site, so the gateway cannot read HTTPS content, but it learns every
-  host the browser connects to, can block, delay or misroute connections, and
+  each site, so the gateway cannot read HTTPS content, but it learns hosts
+  routed to it, can block, delay or misroute those connections, and
   chooses the start page, where it can ask for credentials like any phishing
   site. The browser profile is new and empty, so the user's normal cookies
   and saved passwords are not exposed.
@@ -219,7 +262,7 @@ What remains:
   gateway without a dialog, through the agent's IPC endpoint or by editing
   the files in `gateways/`, as it can edit the configuration file.
 - **Approval is permanent until forgotten.** An approved gateway stays
-  usable by later links of any site that knows its name, gateway and portal.
+  usable by later links of any site that knows its gateway address or profile.
 
 Mitigations: the confirmation is opt-in per gateway and defaults to Cancel; the
 link cannot weaken TLS or change a known gateway; every session is isolated
@@ -290,10 +333,11 @@ Non-guarantees:
 
 - **No MITM of the inner TLS.** Gateinto does not terminate, inspect or modify
   the client's own TLS session with the target. It relays bytes after the
-  upstream accepted the `CONNECT`.
-- **Local `200` only after upstream `2xx`.** A client never believes a tunnel
-  exists when the upstream refused it. Upstream error headers and bodies are
-  not forwarded.
+  upstream accepted the `CONNECT`, or after direct TCP connects in mixed mode.
+- **Local `200` only after route establishment.** Gateway routes require
+  upstream `2xx`; direct routes require a connected TCP socket. A client never
+  believes a gateway tunnel exists when the upstream refused it. Upstream
+  error headers and bodies are not forwarded.
 - **Strict request parsing and limits** against request smuggling and resource
   exhaustion: only `CONNECT host:port HTTP/1.1` with exactly one `Host`
   header; header size limit, timeouts, idle timeout and a connection limit.
@@ -382,7 +426,7 @@ Non-guarantees:
   the identity (a software key can be copied), read traffic before it enters
   the tunnel, change the configuration, add CAs or replace the binary.
 - **Traffic from the upstream proxy.** The upstream sees the source address,
-  every target `host:port`, the client certificate, and any traffic that is not
+  each gateway-routed target `host:port`, the client certificate, and any traffic that is not
   end-to-end encrypted inside the tunnel. It can block, log or redirect
   tunnels. Gateinto provides no anonymity.
 - **A wrong trust anchor.** `--ca-file` replaces the default roots entirely;

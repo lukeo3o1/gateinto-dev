@@ -179,7 +179,7 @@ struct Entry {
     name: GatewayName,
     host: String,
     port: NonZeroU16,
-    portal_url: PortalUrl,
+    portal_url: Option<PortalUrl>,
     approved_at: Option<u64>,
 }
 
@@ -368,13 +368,15 @@ impl LinkedStore {
         let mut text = format!(
             "# A gateway added from a gateinto:// link after confirmation.\n\
              # Remove it with `gateinto gateway forget {}`.\n\
-             name = \"{}\"\nhost = \"{}\"\nport = {}\nportal_url = \"{}\"\n",
+             name = \"{}\"\nhost = \"{}\"\nport = {}\n",
             gateway.name,
             gateway.name,
             gateway.address.host(),
-            gateway.address.port(),
-            gateway.portal_url
+            gateway.address.port()
         );
+        if let Some(portal) = &gateway.portal_url {
+            text.push_str(&format!("portal_url = \"{portal}\"\n"));
+        }
         if let Some(approved_at) = gateway.approved_at {
             text.push_str(&format!("approved_at = {approved_at}\n"));
         }
@@ -549,7 +551,11 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
         .map_err(|error| invalid(name.clone(), hint.clone(), format!("{error}")))?;
     let mut addresses = vec![address.clone()];
     addresses.extend(hint.iter().filter(|hint| **hint != address).cloned());
-    if Origin::of(&entry.portal_url).is_none() {
+    if entry
+        .portal_url
+        .as_ref()
+        .is_some_and(|portal| Origin::of(portal).is_none())
+    {
         return Err(invalid(
             name,
             addresses,
@@ -711,7 +717,7 @@ mod tests {
         LinkedGateway {
             name: name(profile),
             address: address(host),
-            portal_url: format!("https://{profile}.example/").parse().unwrap(),
+            portal_url: Some(format!("https://{profile}.example/").parse().unwrap()),
             approved_at: Some(NOW),
         }
     }
@@ -745,6 +751,33 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_linked_gateway_can_be_loaded_without_a_portal() {
+        let store = store();
+        plant(
+            &store,
+            "proxy.example.toml",
+            "name = \"corp\"\nhost = \"proxy.example\"\nport = 443\n",
+        );
+        let loaded = store.load().unwrap();
+        assert!(loaded.invalid.is_empty(), "{:?}", loaded.invalid);
+        assert_eq!(loaded.gateways.len(), 1);
+    }
+
+    #[test]
+    fn a_portalless_gateway_round_trips_and_config_does_not_invent_one() {
+        let store = store();
+        let mut entry = gateway("corp", "proxy.example");
+        entry.portal_url = None;
+        store.add(&entry).unwrap();
+        let file = std::fs::read_to_string(store.dir().join("proxy.example.toml")).unwrap();
+        assert!(!file.contains("portal_url"));
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.gateways, vec![entry]);
+        let config = config::ConfigFile::default().with_linked(&loaded.gateways);
+        assert_eq!(config.gateway(&name("corp")).unwrap().portal_url, None);
     }
 
     #[test]

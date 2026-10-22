@@ -32,7 +32,7 @@ meant to protect, against whom, and what it does not protect.
   a `gateinto://` link. When the handler is registered, the URI reaches
   `gateinto open` and then the agent as untrusted input. It can name a known
   gateway and a start page on that gateway's portal origin, or bring a new
-  gateway (host, port and portal only) that is used only after the user
+  gateway (host, port and optional portal only) that is used only after the user
   approves it; see [protocol/launch-uri.md](protocol/launch-uri.md).
 - **Programs of the same user and the agent's IPC endpoint.** Any program
   running as the user can send requests to the agent, including `approve`
@@ -67,13 +67,13 @@ meant to protect, against whom, and what it does not protect.
 | A configuration file with a typo silently runs with defaults. | Unknown sections and keys are errors (`deny_unknown_fields`), and there is no default upstream. |
 | Gateinto reads or alters tunnel content. | No MITM: Gateinto never terminates the client's inner TLS and does not inspect tunnel bytes. |
 | Malformed or hostile requests cause request smuggling, desynchronisation or resource exhaustion. | Strict parser: only `CONNECT host:port HTTP/1.1` with exactly one `Host` header; rejects bare LF, CR inside lines, NUL, obs-fold, control characters, `Transfer-Encoding` and a non-zero `Content-Length`. Header block size limit, request and upstream timeouts, idle timeout, and a limit on concurrent connections. |
-| A client believes a tunnel exists when the upstream refused it. | The local `200` is sent only after the upstream answers `2xx`. Upstream error headers and bodies are not forwarded. |
+| A client believes a tunnel exists when the upstream refused it. | A gateway route sends local `200` only after the upstream answers `2xx`; a mixed direct route requires a connected TCP socket. Upstream error headers and bodies are not forwarded. |
 | An attacker on the network impersonates the upstream proxy or downgrades TLS. | TLS 1.3 only (`rustls` without `tls12`). The upstream certificate and name are verified with WebPKI against the Mozilla roots or `--ca-file`. There is no option to disable verification. |
 | Recorded traffic is decrypted later by a quantum computer. | The hybrid key exchange `X25519MLKEM768` is preferred, with `X25519` as fallback (`hybrid_preferred`). This protects the confidentiality of the outer TLS session only if the upstream also supports it. It is not a post-quantum signature: certificates and the device key use classical ECDSA or RSA, so authentication is not quantum resistant. |
 | An attacker on the network, or a misconfigured upstream, downgrades the key exchange to classical `X25519`. | `hybrid_required` offers only `X25519MLKEM768`, so the handshake fails (`502`) instead of downgrading, and every tunnel is also checked after the handshake and refused unless the negotiated group is one the mode offers. TLS 1.3 signs the handshake transcript, so an attacker without the server key cannot alter the negotiated group in the other modes either; `hybrid_preferred` still accepts `X25519` from an upstream that only offers it. `check-upstream` shows which group an upstream negotiates. |
 | Another local program uses a browser session's port. | `basic_tofu`: the session binds the first well-formed Basic credential and then answers `407` to any other credential, compared in constant time, with exactly one winner among concurrent first attempts. Failures beyond 10 a minute get `429`. A program that is first still wins; the user then starts a new session (new port, realm and state). |
 | A website uses a `gateinto://` link to add a trust anchor or TLS setting, inject a credential, change a known gateway, open an arbitrary page or run a command. | The URI has no field for a CA, TLS mode, client certificate, server name, listen address, credential or command; `auth` is only `basic_tofu`. A link that disagrees with the host, port or portal of a known gateway is refused, and the configuration file is never written. `url` must have the origin of the gateway's portal. Strict parser (allowed characters, no duplicates or unknown fields, 8192 bytes), applied by `open` and again by the agent. The handler passes the URI after `--` as one argument and nothing starts a shell. |
-| A website uses a `gateinto://` link to route the user through its own proxy (deliberate, user-approved deviation from the plan's rule that a URI never introduces a proxy host). | Only after an explicit first-time confirmation in `gateinto open` that names the profile, gateway `host:port` and portal origin, with OK and Cancel, Cancel as the default and no access keys, so no single keystroke approves it; no desktop or terminal means refusal. The agent never prompts, rate-limits before asking, keeps one confirmation open and needs the one-time token of that request (which binds the answer to the request but does not prove a person gave it). The gateway gets only default settings (public roots, host as server name); it is stored separately, listed with its source and removable with `gateinto gateway forget`. Remaining: phishing and the device certificate's SPKI (see residual risks). |
+| A website uses a `gateinto://` link to route the user through its own proxy (deliberate, user-approved deviation from the plan's rule that a URI never introduces a proxy host). | Only after an explicit first-time confirmation in `gateinto open` that names the profile, gateway `host:port` and portal origin or `none`, with OK and Cancel, Cancel as the default and no access keys, so no single keystroke approves it; no desktop or terminal means refusal. The agent never prompts, rate-limits before asking, keeps one confirmation open and needs the one-time token of that request (which binds the answer to the request but does not prove a person gave it). The gateway gets only default settings (public roots, host as server name); it is stored separately, listed with its source and removable with `gateinto gateway forget`. Remaining: phishing and the device certificate's SPKI (see residual risks). |
 | A website floods the user with launches or confirmation dialogs. | At most 5 launch requests per minute (confirmations included) and 4 browser sessions at a time per agent; at most one confirmation is open at a time. |
 | A launch leaks state between browser sessions or into the user's profile. | Each launch gets a new session (port, realm, `basic_tofu` state, certificate) and a new browser profile directory, deleted when the browser exits or the session is closed. |
 | Profile cleanup deletes the wrong directory. | Only directories directly in the profiles directory, with Gateinto's name pattern and marker file, are deleted; links are not followed. |
@@ -112,12 +112,18 @@ meant to protect, against whom, and what it does not protect.
   that is not acceptable.
 - Anyone who can edit the configuration file can point Gateinto at another
   upstream or CA bundle, like anyone who can change its command line.
+- A website can select `route=mixed` in a launch link for a known gateway
+  without an additional prompt. This exposes local DNS and the source IP of
+  direct connections, which bypass gateway policy. DNS/IP matching is a
+  heuristic: a service on another IP may go direct, and a shared gateway IP
+  may send unrelated traffic through it. Only that new session is affected;
+  the stored gateway, device session and other browser sessions are unchanged.
 - A website can open up to 5 browser windows a minute (4 at a time) on
   configured gateways' portals, each with a proxy credential prompt that a
   user might mistake for a real login.
 - A user can be talked into approving a hostile gateway from a link
-  (phishing). That gateway then sees every host the isolated browser
-  connects to, can block or misroute connections and chooses the start page,
+  (phishing). That gateway then sees hosts routed through it (every CONNECT
+  by default), can block or misroute those connections and chooses the start page,
   where it can phish credentials. It cannot read end-to-end HTTPS content and
   gets a new, empty browser profile.
 - The confirmation stops accidental approval, not a user who is persuaded:
@@ -130,7 +136,7 @@ meant to protect, against whom, and what it does not protect.
   "optional"`) and so the stable SPKI of the device key, which lets it
   recognise the device and correlate it with other gateways.
 - An approved gateway stays usable by any later link with the same name,
-  gateway and portal until `gateinto gateway forget` removes it, and there is
+  gateway address or profile until `gateinto gateway forget` removes it, and there is
   no setting yet to disable gateways from links other than not registering
   the handler. The confirmation dialog has not been verified by hand on
   Windows.

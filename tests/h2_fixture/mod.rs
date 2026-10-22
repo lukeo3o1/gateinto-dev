@@ -201,10 +201,8 @@ async fn serve(
         std::future::pending::<()>().await;
     }
     let status = target
-        .split('.')
-        .next()
-        .unwrap()
-        .parse::<u16>()
+        .strip_suffix(".test:443")
+        .and_then(|name| name.parse::<u16>().ok())
         .unwrap_or(200);
     let response = http::Response::builder().status(status).body(()).unwrap();
     let Ok(mut send) = respond.send_response(response, status != 200) else {

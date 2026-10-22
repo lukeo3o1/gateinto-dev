@@ -30,6 +30,9 @@ pub mod fuzzing;
 pub(crate) mod h2;
 mod pool;
 mod relay;
+mod routing;
+
+pub use routing::Route;
 
 pub use basic_tofu::FailureLimit;
 use basic_tofu::{BasicTofu, Verdict};
@@ -83,6 +86,7 @@ pub struct Config {
     pub listen: SocketAddr,
     pub allow_non_loopback: bool,
     pub local_auth: LocalAuth,
+    pub route: Route,
     pub upstream: Upstream,
     pub tls_mode: TlsMode,
     pub client_certificate: Option<ClientCertificate>,
@@ -155,7 +159,10 @@ impl Endpoint {
         resolver
             .check_required(resolver.now())
             .map_err(UpstreamError::ClientCertificate)?;
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
+        let addresses = crate::dns::resolve(&self.host, self.port)
+            .await
+            .map_err(UpstreamError::Connect)?;
+        let tcp = TcpStream::connect(addresses.as_slice())
             .await
             .map_err(UpstreamError::Connect)?;
         let _ = tcp.set_nodelay(true);
@@ -197,6 +204,7 @@ pub(crate) async fn request_tunnel<T>(
 struct Shared {
     endpoint: Endpoint,
     pool: pool::Pool,
+    route: Route,
     basic_tofu: Option<BasicTofu>,
     limits: Limits,
     tunnels: Arc<Semaphore>,
@@ -251,6 +259,7 @@ impl Proxy {
         let shared = Shared {
             endpoint,
             pool: pool::Pool::default(),
+            route: config.route,
             basic_tofu,
             limits: config.limits,
             tunnels,
@@ -277,7 +286,7 @@ impl Proxy {
     }
 
     pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
-        info!(local_addr = %self.local_addr(), "listening");
+        info!(local_addr = %self.local_addr(), route = %self.shared.route, "listening");
         let Self { listener, shared } = self;
         let mut connections = JoinSet::new();
         let mut shutdown = std::pin::pin!(shutdown);
@@ -395,6 +404,19 @@ impl Shared {
         &self,
         target: &Authority,
     ) -> Result<(pool::Tunnel, Vec<u8>), UpstreamError> {
+        if let Some(stream) = routing::attempt(
+            self.route,
+            self.limits.handshake_timeout,
+            target,
+            (&self.endpoint.host, self.endpoint.port),
+            routing::resolve,
+        )
+        .await
+        {
+            info!(route = "direct", "selected tunnel route");
+            return Ok((Box::new(stream), Vec::new()));
+        }
+        info!(route = "gateway", "selected tunnel route");
         self.pool
             .open(&self.endpoint, target, self.limits.max_header_bytes)
             .await

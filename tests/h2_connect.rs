@@ -30,6 +30,31 @@ async fn echo(stream: &mut TcpStream, message: &[u8]) {
 }
 
 #[tokio::test]
+async fn mixed_gateway_routes_and_direct_failures_share_the_http2_pool() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    config.route = gateinto::proxy::Route::Mixed;
+    let proxy = Proxy::bind(config).await.unwrap();
+    let agent = proxy.local_addr();
+    let running = tokio::spawn(proxy.run());
+    for _ in 0..2 {
+        echo(&mut tunnel(agent, "127.0.0.1:443").await, b"matching IP").await;
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let unavailable = listener.local_addr().unwrap();
+    drop(listener);
+    echo(
+        &mut tunnel(agent, &unavailable.to_string()).await,
+        b"fallback",
+    )
+    .await;
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+    running.abort();
+}
+
+#[tokio::test]
 async fn sequential_and_concurrent_tunnels_share_one_lazy_http2_connection() {
     let ca = TestCa::new();
     let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 100).await;

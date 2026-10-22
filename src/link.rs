@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use crate::config::{ConfigFile, GatewayName, PortalUrl};
 use crate::http::{self, Authority, Host};
+use crate::proxy::Route;
 use crate::uri::LaunchRequest;
 
 pub mod store;
@@ -66,6 +67,14 @@ fn host_text(host: &Host) -> String {
 pub struct GatewayAddress(Authority);
 
 impl GatewayAddress {
+    pub fn profile_name(&self) -> GatewayName {
+        let fingerprint =
+            crate::identity::encoding::sha256_fingerprint(self.to_string().as_bytes());
+        format!("g-{}", &fingerprint[..62])
+            .parse()
+            .expect("a prefixed SHA-256 digest is a valid gateway name")
+    }
+
     pub fn host(&self) -> String {
         host_text(&self.0.host)
     }
@@ -239,7 +248,7 @@ impl KnownGateway {
 pub struct LinkedGateway {
     pub name: GatewayName,
     pub address: GatewayAddress,
-    pub portal_url: PortalUrl,
+    pub portal_url: Option<PortalUrl>,
     pub approved_at: Option<u64>,
 }
 
@@ -261,7 +270,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
                 name: gateway.name.clone(),
                 host: Some(gateway.address.host()),
                 port: Some(gateway.address.port()),
-                portal_url: Some(gateway.portal_url.clone()),
+                portal_url: gateway.portal_url.clone(),
                 source: Source::Linked,
             });
         }
@@ -309,22 +318,30 @@ impl Known {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
+    pub route: Route,
     pub profile: GatewayName,
     pub gateway: GatewayAddress,
-    pub portal: PortalUrl,
+    pub portal: Option<PortalUrl>,
 }
 
 impl Confirmation {
     pub fn portal_origin(&self) -> String {
-        Origin::of(&self.portal).map_or_else(String::new, |origin| origin.to_string())
+        self.portal
+            .as_ref()
+            .and_then(Origin::of)
+            .map_or_else(|| "none".to_owned(), |origin| origin.to_string())
     }
 
     pub fn echo(&self) -> Vec<String> {
-        vec![
+        let mut lines = vec![
             format!("gateway: {}", self.profile),
             format!("address: {}", self.gateway),
             format!("portal: {}", self.portal_origin()),
-        ]
+        ];
+        if self.route != Route::Gateway {
+            lines.push(format!("route: {}", self.route));
+        }
+        lines
     }
 
     pub fn echoed_by(&self, lines: &[String]) -> bool {
@@ -345,13 +362,19 @@ impl Confirmation {
         } else {
             ""
         };
+        let traffic = match self.route {
+            Route::Gateway => "all traffic of the isolated browser",
+            Route::Mixed => {
+                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups"
+            }
+        };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
-             installed) and all traffic of the isolated browser. Allow it only if you trust \
+             installed) and {traffic}. Allow it only if you trust \
              the organisation that runs this gateway.",
             self.profile,
             self.gateway,
@@ -379,6 +402,7 @@ impl Confirm for Decision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
+    pub route: Route,
     pub profile: GatewayName,
     pub start_page: Option<PortalUrl>,
     pub add: Option<LinkedGateway>,
@@ -392,6 +416,9 @@ pub enum Resolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkError {
+    MissingSelector,
+    AmbiguousGateway(GatewayAddress),
+    ProfileCollision(GatewayName),
     UnknownProfile(GatewayName),
     GatewayMismatch(GatewayName),
     UrlWithoutPortal(GatewayName),
@@ -419,10 +446,19 @@ pub enum LinkError {
 impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingSelector => f.write_str("at least one of gateway or profile is required"),
+            Self::AmbiguousGateway(address) => write!(
+                f,
+                "gateway {address} matches several configured profiles; select one with profile=<name>"
+            ),
+            Self::ProfileCollision(name) => write!(
+                f,
+                "the generated gateway name \"{name}\" is already used by another endpoint; choose an explicit unused profile"
+            ),
             Self::UnknownProfile(name) => write!(
                 f,
                 "unknown gateway \"{name}\": it is not set up on this device and the link does \
-                 not bring one; the portal must provide the gateway and its portal in the link, \
+                 not bring one; the link must provide the gateway address, \
                  or an administrator must add [gateways.{name}] to the config file"
             ),
             Self::GatewayMismatch(name) => write!(
@@ -484,30 +520,51 @@ pub fn resolve(
     confirm: &mut dyn Confirm,
     now: u64,
 ) -> Result<Resolution, LinkError> {
-    let profile = &link.profile;
+    let proposed = link.proposed_profile().ok_or(LinkError::MissingSelector)?;
+    let profile = &proposed;
     let known = all.gateways.as_slice();
     let damaged = |entry: &store::InvalidEntry| LinkError::Damaged {
         profile: profile.clone(),
         file: entry.file.display().to_string(),
     };
-    if let Some(local) = known.iter().find(|known| &known.name == profile) {
-        if let Some(gateway) = &link.gateway {
-            let matches = local.is_at(gateway) && link.portal == local.portal_url;
-            if !matches {
-                return Err(LinkError::GatewayMismatch(profile.clone()));
-            }
+    let local = if let Some(profile) = &link.profile {
+        known.iter().find(|known| &known.name == profile)
+    } else {
+        let gateway = link.gateway.as_ref().ok_or(LinkError::MissingSelector)?;
+        let mut matching = known.iter().filter(|known| known.is_at(gateway));
+        let local = matching.next();
+        if matching.next().is_some() {
+            return Err(LinkError::AmbiguousGateway(gateway.clone()));
+        }
+        local
+    };
+    if let Some(local) = local {
+        if link
+            .gateway
+            .as_ref()
+            .is_some_and(|gateway| !local.is_at(gateway))
+            || link
+                .portal
+                .as_ref()
+                .is_some_and(|portal| Some(portal) != local.portal_url.as_ref())
+        {
+            return Err(LinkError::GatewayMismatch(local.name.clone()));
         }
         let start_page = match (&link.url, &local.portal_url) {
             (None, portal) => portal.clone(),
-            (Some(_), None) => return Err(LinkError::UrlWithoutPortal(profile.clone())),
+            (Some(_), None) => return Err(LinkError::UrlWithoutPortal(local.name.clone())),
             (Some(url), Some(portal)) if same_origin(url, portal) => Some(url.clone()),
-            (Some(_), Some(_)) => return Err(LinkError::UrlOutsidePortal(profile.clone())),
+            (Some(_), Some(_)) => return Err(LinkError::UrlOutsidePortal(local.name.clone())),
         };
         return Ok(Resolution::Launch(Launch {
-            profile: profile.clone(),
+            route: link.route,
+            profile: local.name.clone(),
             start_page,
             add: None,
         }));
+    }
+    if link.profile.is_none() && known.iter().any(|known| &known.name == profile) {
+        return Err(LinkError::ProfileCollision(profile.clone()));
     }
     if let Some(entry) = all
         .invalid
@@ -531,7 +588,7 @@ pub fn resolve(
     if let Some(error) = &all.unavailable {
         return Err(LinkError::StoreUnavailable(error.clone()));
     }
-    let (Some(gateway), Some(portal)) = (&link.gateway, &link.portal) else {
+    let Some(gateway) = &link.gateway else {
         return Err(LinkError::UnknownProfile(profile.clone()));
     };
     if let Some(entry) = all.invalid.iter().find(|entry| {
@@ -548,12 +605,13 @@ pub fn resolve(
             existing: existing.name.clone(),
         });
     }
-    if link
-        .url
-        .as_ref()
-        .is_some_and(|url| !same_origin(url, portal))
-    {
-        return Err(LinkError::UrlOutsidePortal(profile.clone()));
+    if let Some(url) = &link.url {
+        let Some(portal) = &link.portal else {
+            return Err(LinkError::UrlWithoutPortal(profile.clone()));
+        };
+        if !same_origin(url, portal) {
+            return Err(LinkError::UrlOutsidePortal(profile.clone()));
+        }
     }
     if let Err(error) = store::file_name(gateway) {
         return Err(LinkError::Unstorable {
@@ -562,20 +620,22 @@ pub fn resolve(
         });
     }
     let confirmation = Confirmation {
+        route: link.route,
         profile: profile.clone(),
         gateway: gateway.clone(),
-        portal: portal.clone(),
+        portal: link.portal.clone(),
     };
     match confirm.decide(&confirmation) {
         Decision::Defer => Ok(Resolution::Confirm(confirmation)),
         Decision::Deny => Err(LinkError::Denied(profile.clone())),
         Decision::Approve => Ok(Resolution::Launch(Launch {
+            route: link.route,
             profile: profile.clone(),
-            start_page: Some(link.url.clone().unwrap_or_else(|| portal.clone())),
+            start_page: link.url.clone().or_else(|| link.portal.clone()),
             add: Some(LinkedGateway {
                 name: profile.clone(),
                 address: gateway.clone(),
-                portal_url: portal.clone(),
+                portal_url: link.portal.clone(),
                 approved_at: Some(now),
             }),
         })),
@@ -784,7 +844,7 @@ mod tests {
             assert_eq!(
                 resolution,
                 Err(LinkError::Damaged {
-                    profile: request.profile.clone(),
+                    profile: request.profile.clone().unwrap(),
                     file: "/c/gateways/garbage.toml".to_owned(),
                 }),
                 "{request}"
@@ -861,10 +921,173 @@ mod tests {
 
     fn launch(profile: &str, start: Option<&str>) -> Resolution {
         Resolution::Launch(Launch {
+            route: Route::Gateway,
             profile: name(profile),
             start_page: start.map(|url| url.parse().unwrap()),
             add: None,
         })
+    }
+
+    fn address_link(gateway: &str, portal: Option<&str>, url: Option<&str>) -> LaunchRequest {
+        LaunchRequest::from_fields(None, "basic_tofu", url, Some(gateway), portal).unwrap()
+    }
+
+    #[test]
+    fn address_selection_reuses_the_stored_profile_and_inherits_its_portal() {
+        for (endpoint, profile, portal) in [
+            ("PROXY.CORP.EXAMPLE", "corp", Some(PORTAL)),
+            ("bare.example:8443", "bare", None),
+            (
+                "[::ffff:10.0.0.1]:3128",
+                "partner",
+                Some("https://partner.example:8443/x"),
+            ),
+        ] {
+            let request = address_link(endpoint, None, None);
+            let (resolution, asked) = resolve_with(&request, None);
+            assert_eq!(resolution, Ok(launch(profile, portal)));
+            assert!(asked.is_empty());
+            assert!(request.profile.is_none());
+        }
+        let request = address_link(
+            "proxy.corp.example",
+            None,
+            Some("https://portal.corp.example/app"),
+        );
+        assert_eq!(
+            resolve_with(&request, None).0,
+            Ok(launch("corp", Some("https://portal.corp.example/app")))
+        );
+    }
+
+    #[test]
+    fn omitted_portal_is_not_an_assertion_but_supplied_portal_must_match() {
+        let request = link("corp", None, Some("proxy.corp.example"), None);
+        assert_eq!(
+            resolve_with(&request, None).0,
+            Ok(launch("corp", Some(PORTAL)))
+        );
+        for request in [
+            address_link(
+                "proxy.corp.example",
+                Some("https://elsewhere.example/"),
+                None,
+            ),
+            address_link("bare.example:8443", Some(PORTAL), None),
+            link("corp", None, None, Some("https://elsewhere.example/")),
+        ] {
+            assert!(matches!(
+                resolve_with(&request, None).0,
+                Err(LinkError::GatewayMismatch(_))
+            ));
+        }
+        assert_eq!(
+            resolve_with(&link("corp", None, None, Some(PORTAL)), None).0,
+            Ok(launch("corp", Some(PORTAL)))
+        );
+    }
+
+    #[test]
+    fn ambiguous_endpoint_selection_requires_an_explicit_profile() {
+        let mut known = Known {
+            gateways: profiles(),
+            ..Known::default()
+        };
+        known.gateways.push(super::tests::known(
+            "alternate",
+            "PROXY.corp.example",
+            443,
+            None,
+            Source::Config,
+        ));
+        let request = address_link("proxy.corp.example", None, None);
+        assert_eq!(
+            resolve(&request, &known, &mut Decision::Defer, NOW),
+            Err(LinkError::AmbiguousGateway(
+                request.gateway.clone().unwrap()
+            ))
+        );
+        assert_eq!(
+            resolve(
+                &link("corp", None, Some("proxy.corp.example"), None),
+                &known,
+                &mut Decision::Defer,
+                NOW
+            ),
+            Ok(launch("corp", Some(PORTAL)))
+        );
+    }
+
+    #[test]
+    fn an_address_only_add_gets_a_stable_safe_name_and_no_invented_portal() {
+        let request = address_link("new.example", None, None);
+        let canonical = address_link("NEW.EXAMPLE:443", None, None);
+        assert_eq!(request.proposed_profile(), canonical.proposed_profile());
+        let generated = request.proposed_profile().unwrap();
+        assert_eq!(generated.as_str().len(), GatewayName::MAX_LEN);
+        let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].portal, None);
+        assert_eq!(asked[0].portal_origin(), "none");
+        let Ok(Resolution::Launch(launch)) = resolution else {
+            panic!("no launch")
+        };
+        assert_eq!(launch.profile, generated);
+        assert_eq!(launch.start_page, None);
+        let stored = launch.add.unwrap();
+        assert_eq!(stored.portal_url, None);
+        let all = Known {
+            gateways: known_gateways(&ConfigFile::default(), &[stored]),
+            ..Known::default()
+        };
+        assert_eq!(
+            resolve(&request, &all, &mut Decision::Defer, NOW),
+            Ok(super::tests::launch(generated.as_str(), None))
+        );
+    }
+
+    #[test]
+    fn a_generated_name_collision_with_another_endpoint_is_refused() {
+        let request = address_link("new.example", None, None);
+        let generated = request.proposed_profile().unwrap();
+        let known = Known {
+            gateways: vec![super::tests::known(
+                generated.as_str(),
+                "other.example",
+                443,
+                None,
+                Source::Config,
+            )],
+            ..Known::default()
+        };
+        assert_eq!(
+            resolve(&request, &known, &mut Decision::Approve, NOW),
+            Err(LinkError::ProfileCollision(generated))
+        );
+        assert_eq!(known.gateways[0].host.as_deref(), Some("other.example"));
+    }
+
+    #[test]
+    fn address_selection_does_not_bypass_damaged_endpoint_entries() {
+        let known = damaged();
+        let request = address_link("held.example", None, None);
+        assert!(matches!(
+            resolve(&request, &known, &mut Decision::Approve, NOW),
+            Err(LinkError::Damaged { .. })
+        ));
+    }
+
+    #[test]
+    fn a_start_page_without_a_trusted_portal_is_refused_before_confirmation() {
+        for request in [
+            address_link("new.example", None, Some("https://new.example/")),
+            address_link("bare.example:8443", None, Some("https://bare.example/")),
+        ] {
+            assert!(matches!(
+                resolve_with(&request, None).0,
+                Err(LinkError::UrlWithoutPortal(_))
+            ));
+        }
     }
 
     #[test]
@@ -1002,7 +1225,7 @@ mod tests {
         assert!(asked.is_empty());
         let text = error.to_string();
         assert!(text.contains("unknown gateway \"nope\""), "{text}");
-        assert!(text.contains("portal"), "{text}");
+        assert!(text.contains("gateway address"), "{text}");
         assert!(text.contains("administrator"), "{text}");
     }
 
@@ -1017,10 +1240,43 @@ mod tests {
 
     fn confirmation() -> Confirmation {
         Confirmation {
+            route: Route::Gateway,
             profile: name("newco"),
             gateway: "proxy.newco.example:443".parse().unwrap(),
-            portal: "https://portal.newco.example/home".parse().unwrap(),
+            portal: Some("https://portal.newco.example/home".parse().unwrap()),
         }
+    }
+
+    #[test]
+    fn a_portalless_confirmation_does_not_accept_an_invented_portal_in_the_echo() {
+        let request = address_link("new.example", None, None);
+        let (resolution, _) = resolve_with(&request, Some(Decision::Defer));
+        let Ok(Resolution::Confirm(confirmation)) = resolution else {
+            panic!("not confirmation")
+        };
+        assert!(confirmation.message().contains("Portal: none"));
+        assert!(confirmation.echoed_by(&confirmation.echo()));
+        let changed = Confirmation {
+            portal: Some(PORTAL.parse().unwrap()),
+            ..confirmation.clone()
+        };
+        assert!(!confirmation.echoed_by(&changed.echo()));
+        assert!(!changed.echoed_by(&confirmation.echo()));
+    }
+
+    #[test]
+    fn mixed_confirmation_binds_the_route_and_discloses_direct_connections() {
+        let request = new_link(None).with_route("mixed").unwrap();
+        let (resolution, _) = resolve_with(&request, Some(Decision::Defer));
+        let Ok(Resolution::Confirm(mixed)) = resolution else {
+            panic!("missing confirmation")
+        };
+        assert_eq!(mixed.route, Route::Mixed);
+        assert!(mixed.message().contains("mixed mode"));
+        assert!(mixed.message().contains("IP address and local DNS"));
+        assert!(mixed.echoed_by(&mixed.echo()));
+        assert!(!mixed.echoed_by(&confirmation().echo()));
+        assert!(!confirmation().echoed_by(&mixed.echo()));
     }
 
     #[test]
@@ -1044,12 +1300,13 @@ mod tests {
             assert_eq!(
                 resolution,
                 Ok(Resolution::Launch(Launch {
+                    route: Route::Gateway,
                     profile: name("newco"),
                     start_page: Some(start.parse().unwrap()),
                     add: Some(LinkedGateway {
                         name: name("newco"),
                         address: "proxy.newco.example:443".parse().unwrap(),
-                        portal_url: "https://portal.newco.example/home".parse().unwrap(),
+                        portal_url: Some("https://portal.newco.example/home".parse().unwrap()),
                         approved_at: Some(NOW),
                     }),
                 }))
@@ -1281,7 +1538,7 @@ mod tests {
         LinkedGateway {
             name: name(text),
             address: host.parse().unwrap(),
-            portal_url: format!("https://{text}.example/").parse().unwrap(),
+            portal_url: Some(format!("https://{text}.example/").parse().unwrap()),
             approved_at: None,
         }
     }

@@ -2,7 +2,7 @@
 
 Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows 10/11 x64. Clients on
 the same machine use it as their HTTPS proxy at `127.0.0.1:18736`; Gateinto
-opens a TLS 1.3 connection to a remote HTTPS forward proxy that you run and
+by default opens a TLS 1.3 connection to a remote HTTPS forward proxy that you run and
 issues the `CONNECT` there. ALPN selects HTTP/2, sharing one connection per
 session, or HTTP/1.1 with a separate connection per tunnel. It can authenticate
 the device to that proxy with
@@ -145,6 +145,7 @@ Local responses:
 
 | Situation | Status |
 | --- | --- |
+| Direct TCP connected (mixed mode only) | `200 Connection Established`, then the tunnel |
 | Upstream `2xx` | `200 Connection Established`, then the tunnel |
 | Upstream `403` | `403` |
 | Upstream `407` or any other status | `502`; upstream headers and body are not forwarded |
@@ -332,29 +333,51 @@ share only the device key.
 
 ### Launching a browser session from a link
 
-`gateinto://connect?profile=<gateway>` starts a browser session for a known
-gateway and opens Chrome or Edge on that gateway's `portal_url`. A link may
-also choose a start page on the portal's origin (`url=`), and a gateway's
-website may bring its gateway and portal (`gateway=`, `portal=`) for users who
-do not have it yet; such a gateway is added only after the user confirms it.
+`gateinto://connect?gateway=proxy.example.com` starts a browser session for
+that gateway endpoint, reusing an existing profile or asking before adding a
+new gateway. Port 443 is the default. `profile` is an optional legacy selector
+and disambiguates several configured profiles at one endpoint. `portal` is
+optional: inherit it for a known gateway, otherwise start on `about:blank`.
+`url` may choose a start page only on the origin of a trusted portal; neither
+`url` nor the gateway address creates a portal automatically.
 The format, its limits and everything it can never do are specified in
 [docs/protocol/launch-uri.md](docs/protocol/launch-uri.md). In short:
 
 - Any website can open such a link, so the URI is strictly limited: at most
   8192 bytes, only `profile` (a gateway name), `auth` (`basic_tofu`), `v`
-  (`1`), `url`, `gateway` and `portal`, each once, percent-encoded. It never
+  (`1`), `url`, `gateway`, `portal` and `route` (`gateway` or `mixed`), each once, percent-encoded. It never
   carries a credential, CA, TLS setting, certificate or command.
 - `url` must have exactly the origin (https, host, port) of the gateway's
   portal and applies to that launch only; a gateway without a portal refuses
   it.
-- A link whose `gateway` or `portal` differs from a known gateway of the same
-  name is refused; known gateways are never changed. For an unknown name with
-  `gateway` and `portal`, `gateinto open` asks the user first: a Windows
-  dialog naming the profile, gateway and portal origin, with Cancel as the
+- Routing defaults to `gateway`: every CONNECT goes through the gateway.
+  `gateinto://connect?profile=office&route=mixed` selects mixed routing for only
+  that new browser session. Target and gateway DNS answers are compared by IP;
+  any shared IP, missing answers or DNS failure selects gateway CONNECT.
+  Other targets try direct TCP, falling back to the gateway on TCP error or
+  timeout before local `200`. Gateway errors and established tunnels never
+  switch routes. DNS and direct opening get at most half the existing total
+  opening deadline. This heuristic can misclassify services with different or
+  shared IPs; mixed mode exposes local DNS and the user's source IP and can
+  bypass gateway policy. It is not saved to the gateway. See
+  [session routing](docs/protocol/launch-uri.md#session-routing).
+- System DNS work is limited to 64 queued or running lookups per process,
+  shared by discovery and gateway connections. Timeouts do not release a
+  blocking job's slot before it finishes; excess DNS work fails immediately.
+  IP literals and existing gateway connections need no slot. OS lookups can
+  still delay process shutdown. See
+  [DNS work budget](docs/protocol/http-connect.md#dns-work-budget).
+- At least one of `gateway` or `profile` is required; no individual field
+  is mandatory in every URI. A supplied gateway or portal must match the
+  selected known entry; omitted portal inherits it. Gateway-only selection
+  matches canonical host and port without DNS and refuses ambiguous profiles.
+  Known trust settings and portals are never changed. A new gateway needs
+  approval first: a Windows dialog naming the internal or explicit profile,
+  gateway and portal origin (or `none`), with Cancel as the
   default button (a `yes` prompt on a terminal elsewhere; no desktop or
   terminal means refusal). On approval the gateway is stored in its own
   file under `%APPDATA%\Gateinto\gateways\`, named after its address, with
-  only its name, host, port and portal, and later links to it do not ask
+  its name, host, port and optional portal, and later links to it do not ask
   again. A damaged file there disables only its own gateway. It uses the default TLS
   settings: public roots, `hybrid_preferred`, `client_certificate =
   "optional"`. The configuration file is never written, and its gateways win
@@ -389,7 +412,7 @@ unregister` removes it again; neither touches a handler that is not
 Gateinto's. To try it without a browser link:
 
 ```powershell
-gateinto open --config gateinto.toml -- "gateinto://connect?profile=office"
+gateinto open --config gateinto.toml -- "gateinto://connect?gateway=proxy.example.com"
 gateinto session list
 gateinto stop
 ```
