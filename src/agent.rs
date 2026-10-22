@@ -37,6 +37,27 @@ fn accept_retry_delay(failures: u32) -> Duration {
     }
 }
 
+#[derive(Debug, Default)]
+struct AcceptBackoff {
+    failures: u32,
+    retry_at: Option<tokio::time::Instant>,
+}
+
+impl AcceptBackoff {
+    fn failed(&mut self, now: tokio::time::Instant) {
+        self.failures = self.failures.saturating_add(1);
+        self.retry_at = Some(now + accept_retry_delay(self.failures));
+    }
+
+    fn succeeded(&mut self) {
+        *self = Self::default();
+    }
+
+    fn retry_at(&self) -> Option<tokio::time::Instant> {
+        self.retry_at
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentLimits {
     pub launches: usize,
@@ -160,12 +181,12 @@ impl Agent {
         let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks = JoinSet::new();
         tokio::pin!(shutdown);
-        let mut failures = 0u32;
+        let mut backoff = AcceptBackoff::default();
         loop {
-            let delay = accept_retry_delay(failures);
+            let retry_at = backoff.retry_at();
             let accept = async {
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
+                if let Some(at) = retry_at {
+                    tokio::time::sleep_until(at).await;
                 }
                 server.accept().await
             };
@@ -174,7 +195,7 @@ impl Agent {
                 () = self.inner.stop.notified() => break,
                 accepted = accept => match accepted {
                     Ok(connection) => {
-                        failures = 0;
+                        backoff.succeeded();
                         match connections.clone().try_acquire_owned() {
                             Ok(permit) => {
                                 let agent = self.clone();
@@ -187,7 +208,7 @@ impl Agent {
                         }
                     }
                     Err(error) => {
-                        failures = failures.saturating_add(1);
+                        backoff.failed(tokio::time::Instant::now());
                         warn!("accepting an agent request failed: {error}");
                     }
                 },
@@ -566,6 +587,26 @@ mod tests {
         assert_eq!(accept_retry_delay(6), Duration::from_millis(3200));
         assert_eq!(accept_retry_delay(7), Duration::from_secs(5));
         assert_eq!(accept_retry_delay(u32::MAX), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_accept_retry_waits_until_a_fixed_time_after_the_last_failure() {
+        let start = tokio::time::Instant::now();
+        let mut backoff = AcceptBackoff::default();
+        assert_eq!(backoff.retry_at(), None);
+
+        backoff.failed(start);
+        assert_eq!(backoff.retry_at(), Some(start + Duration::from_millis(100)));
+        assert_eq!(backoff.retry_at(), Some(start + Duration::from_millis(100)));
+
+        let later = start + Duration::from_secs(1);
+        backoff.failed(later);
+        assert_eq!(backoff.retry_at(), Some(later + Duration::from_millis(200)));
+
+        backoff.succeeded();
+        assert_eq!(backoff.retry_at(), None);
+        backoff.failed(later);
+        assert_eq!(backoff.retry_at(), Some(later + Duration::from_millis(100)));
     }
 
     #[test]
