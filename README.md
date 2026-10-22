@@ -129,7 +129,7 @@ in a [configuration file](#configuration-file). Clients then use
 | `--client-cert-file` | search `CurrentUser\My` | PEM file with the client certificate, optionally followed by intermediates. |
 | `--self-signed-client-cert` | off | Issue short-lived self-signed client certificates with the device key, one per session, instead of using a file or `CurrentUser\My`. Cannot be combined with `--client-cert-file`. See [Self-signed client certificate](#self-signed-client-certificate). |
 | `--key-name` | `gateinto-device-v1` | CNG device key that signs the client authentication. It is only opened, never created. |
-| `--max-tunnels` | 64 | Concurrent connections; further connections get `503`. |
+| `--max-tunnels` | 64 | Concurrent connections, at most 32767; further connections get `503`. |
 | `--max-header-bytes` | 16384 | Limit for the request and the upstream response header block. |
 | `--connect-timeout-secs` | 10 | Limit for reading the request, and a separate limit for connecting, the TLS handshake and the upstream `CONNECT` reply together. |
 | `--idle-timeout-secs` | 300 | Close a tunnel after this long without traffic in either direction. |
