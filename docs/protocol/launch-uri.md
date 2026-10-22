@@ -437,7 +437,10 @@ Endpoint:
   only for a pipe the user owns, and `the agent endpoint ... is held by
   another user` for a pipe it cannot open or that another user owns. Whether Windows enforces these as intended is only exercised by
   the CI runs on `windows-latest` (same user); the other-user cases are not
-  tested.
+  tested. The agent always keeps an instance listening, so the name is not
+  released while it runs: it creates the next instance before handing out a
+  connected one, and when that or the connection fails, it disconnects the
+  instance and listens on it again.
 - Unix (development and tests): the socket `agent.sock` in
   `$XDG_RUNTIME_DIR/gateinto`, or `$HOME/.local/state/gateinto` without
   `XDG_RUNTIME_DIR`. The directory must be accessible only by its owner
