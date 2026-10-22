@@ -90,8 +90,10 @@ impl Frames {
         while let Some((at, _)) = self.delayed.front() {
             if *at > Instant::now() {
                 self.timer.as_mut().reset(*at);
-                let _ = self.timer.as_mut().poll(cx);
-                return;
+                if self.timer.as_mut().poll(cx).is_pending() {
+                    return;
+                }
+                continue;
             }
             let (_, frame) = self.delayed.pop_front().unwrap();
             self.ready.extend(frame);
