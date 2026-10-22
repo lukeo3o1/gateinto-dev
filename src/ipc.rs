@@ -724,7 +724,7 @@ mod windows {
     pub struct Server {
         endpoint: Endpoint,
         descriptor: SecurityDescriptor,
-        next: NamedPipeServer,
+        next: Option<NamedPipeServer>,
     }
 
     impl Server {
@@ -742,14 +742,20 @@ mod windows {
             Ok(Self {
                 endpoint: endpoint.clone(),
                 descriptor,
-                next,
+                next: Some(next),
             })
         }
 
         pub async fn accept(&mut self) -> io::Result<Connection> {
-            self.next.connect().await?;
-            let next = self.descriptor.create(&self.endpoint, false)?;
-            Ok(Box::new(std::mem::replace(&mut self.next, next)))
+            let listening = match &mut self.next {
+                Some(pipe) => pipe,
+                next @ None => next.insert(self.descriptor.create(&self.endpoint, false)?),
+            };
+            listening.connect().await?;
+            let next = self.descriptor.create(&self.endpoint, false).ok();
+            std::mem::replace(&mut self.next, next)
+                .map(|connected| Box::new(connected) as Connection)
+                .ok_or_else(|| io::Error::other("no pipe instance was listening"))
         }
     }
 

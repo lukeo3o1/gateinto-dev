@@ -25,6 +25,17 @@ const DRAIN_REJECTED_BYTES: usize = 64 * 1024;
 const DRAIN_REJECTED_TIMEOUT: Duration = Duration::from_secs(1);
 const PROFILE_REMOVAL_ATTEMPTS: u32 = 40;
 const PROFILE_REMOVAL_DELAY: Duration = Duration::from_millis(250);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const ACCEPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+
+fn accept_retry_delay(failures: u32) -> Duration {
+    match failures.checked_sub(1) {
+        None => Duration::ZERO,
+        Some(doublings) => ACCEPT_RETRY_DELAY
+            .saturating_mul(2u32.saturating_pow(doublings))
+            .min(ACCEPT_RETRY_MAX_DELAY),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentLimits {
@@ -149,24 +160,35 @@ impl Agent {
         let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks = JoinSet::new();
         tokio::pin!(shutdown);
+        let mut failures = 0u32;
         loop {
+            let delay = accept_retry_delay(failures);
+            let accept = async {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                server.accept().await
+            };
             tokio::select! {
                 () = &mut shutdown => break,
                 () = self.inner.stop.notified() => break,
-                accepted = server.accept() => match accepted {
-                    Ok(connection) => match connections.clone().try_acquire_owned() {
-                        Ok(permit) => {
-                            let agent = self.clone();
-                            tasks.spawn(async move {
-                                agent.respond(connection).await;
-                                drop(permit);
-                            });
+                accepted = accept => match accepted {
+                    Ok(connection) => {
+                        failures = 0;
+                        match connections.clone().try_acquire_owned() {
+                            Ok(permit) => {
+                                let agent = self.clone();
+                                tasks.spawn(async move {
+                                    agent.respond(connection).await;
+                                    drop(permit);
+                                });
+                            }
+                            Err(_) => warn!("too many agent requests at once; dropping one"),
                         }
-                        Err(_) => warn!("too many agent requests at once; dropping one"),
-                    },
+                    }
                     Err(error) => {
+                        failures = failures.saturating_add(1);
                         warn!("accepting an agent request failed: {error}");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 },
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -534,6 +556,16 @@ mod tests {
             assert!(!limiter.allow(start + Duration::from_secs(second)));
         }
         assert!(limiter.allow(start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn repeated_accept_failures_back_off_up_to_a_limit() {
+        assert_eq!(accept_retry_delay(0), Duration::ZERO);
+        assert_eq!(accept_retry_delay(1), Duration::from_millis(100));
+        assert_eq!(accept_retry_delay(2), Duration::from_millis(200));
+        assert_eq!(accept_retry_delay(6), Duration::from_millis(3200));
+        assert_eq!(accept_retry_delay(7), Duration::from_secs(5));
+        assert_eq!(accept_retry_delay(u32::MAX), Duration::from_secs(5));
     }
 
     #[test]
