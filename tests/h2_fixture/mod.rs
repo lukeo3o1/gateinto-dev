@@ -1,10 +1,12 @@
+use std::collections::VecDeque;
+use std::future::Future;
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -13,6 +15,7 @@ use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Instant, Sleep};
 use tokio_rustls::TlsAcceptor;
 
 pub struct Server {
@@ -24,6 +27,7 @@ pub struct Server {
     pub certificates: Arc<Mutex<Vec<Vec<rustls::pki_types::CertificateDer<'static>>>>>,
     pub blackhole_first_connection: Arc<AtomicBool>,
     pub pings: Arc<AtomicUsize>,
+    pub ping_delay: Arc<Mutex<Duration>>,
     task: JoinHandle<()>,
 }
 
@@ -33,32 +37,64 @@ const PING: u8 = 6;
 const ACK: u8 = 1;
 
 struct Frames {
-    skip: usize,
-    header: Vec<u8>,
+    preface: usize,
+    incoming: Vec<u8>,
+    ready: VecDeque<u8>,
+    delayed: VecDeque<(Instant, Vec<u8>)>,
+    timer: Pin<Box<Sleep>>,
     pings: Arc<AtomicUsize>,
+    ping_delay: Arc<Mutex<Duration>>,
 }
 
 impl Frames {
-    fn observe(&mut self, mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            if self.skip > 0 {
-                let amount = self.skip.min(bytes.len());
-                self.skip -= amount;
-                bytes = &bytes[amount..];
-                continue;
+    fn new(pings: Arc<AtomicUsize>, ping_delay: Arc<Mutex<Duration>>) -> Self {
+        Self {
+            preface: PREFACE_LEN,
+            incoming: Vec::new(),
+            ready: VecDeque::new(),
+            delayed: VecDeque::new(),
+            timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            pings,
+            ping_delay,
+        }
+    }
+
+    fn receive(&mut self, mut bytes: &[u8]) {
+        let preface = self.preface.min(bytes.len());
+        self.ready.extend(&bytes[..preface]);
+        self.preface -= preface;
+        bytes = &bytes[preface..];
+        self.incoming.extend_from_slice(bytes);
+        while self.incoming.len() >= FRAME_HEADER_LEN {
+            let header = &self.incoming[..FRAME_HEADER_LEN];
+            let length =
+                usize::from(header[0]) << 16 | usize::from(header[1]) << 8 | usize::from(header[2]);
+            if self.incoming.len() < FRAME_HEADER_LEN + length {
+                break;
             }
-            let amount = (FRAME_HEADER_LEN - self.header.len()).min(bytes.len());
-            self.header.extend_from_slice(&bytes[..amount]);
-            bytes = &bytes[amount..];
-            if self.header.len() == FRAME_HEADER_LEN {
-                let header = std::mem::take(&mut self.header);
-                if header[3] == PING && header[4] & ACK == 0 {
-                    self.pings.fetch_add(1, Ordering::SeqCst);
+            let ping = header[3] == PING && header[4] & ACK == 0;
+            let frame: Vec<u8> = self.incoming.drain(..FRAME_HEADER_LEN + length).collect();
+            if ping {
+                self.pings.fetch_add(1, Ordering::SeqCst);
+                let delay = *self.ping_delay.lock().unwrap();
+                if !delay.is_zero() {
+                    self.delayed.push_back((Instant::now() + delay, frame));
+                    continue;
                 }
-                self.skip = usize::from(header[0]) << 16
-                    | usize::from(header[1]) << 8
-                    | usize::from(header[2]);
             }
+            self.ready.extend(frame);
+        }
+    }
+
+    fn release(&mut self, cx: &mut Context<'_>) {
+        while let Some((at, _)) = self.delayed.front() {
+            if *at > Instant::now() {
+                self.timer.as_mut().reset(*at);
+                let _ = self.timer.as_mut().poll(cx);
+                return;
+            }
+            let (_, frame) = self.delayed.pop_front().unwrap();
+            self.ready.extend(frame);
         }
     }
 }
@@ -78,11 +114,23 @@ impl<T: AsyncRead + Unpin> AsyncRead for Blackholing<T> {
         if self.blackhole.load(Ordering::SeqCst) {
             return Poll::Pending;
         }
-        let before = buf.filled().len();
-        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
         let this = &mut *self;
-        this.frames.observe(&buf.filled()[before..]);
-        poll
+        loop {
+            this.frames.release(cx);
+            if !this.frames.ready.is_empty() {
+                let amount = buf.remaining().min(this.frames.ready.len());
+                let bytes: Vec<u8> = this.frames.ready.drain(..amount).collect();
+                buf.put_slice(&bytes);
+                return Poll::Ready(Ok(()));
+            }
+            let mut chunk = [0; 16 * 1024];
+            let mut chunk = ReadBuf::new(&mut chunk);
+            ready!(Pin::new(&mut this.inner).poll_read(cx, &mut chunk))?;
+            if chunk.filled().is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            this.frames.receive(chunk.filled());
+        }
     }
 }
 
@@ -156,6 +204,7 @@ impl Server {
         let certificates = Arc::new(Mutex::new(Vec::new()));
         let blackhole_first_connection = Arc::new(AtomicBool::new(false));
         let pings = Arc::new(AtomicUsize::new(0));
+        let ping_delay = Arc::new(Mutex::new(Duration::ZERO));
         let task = tokio::spawn({
             let blackhole_first_connection = blackhole_first_connection.clone();
             let accepted = accepted.clone();
@@ -164,6 +213,7 @@ impl Server {
             let certificates = certificates.clone();
             let sent_bytes = sent_bytes.clone();
             let pings = pings.clone();
+            let ping_delay = ping_delay.clone();
             async move {
                 let mut legacy_config = (*config).clone();
                 legacy_config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -189,7 +239,7 @@ impl Server {
                     let requests = requests.clone();
                     let certificates = certificates.clone();
                     let sent_bytes = sent_bytes.clone();
-                    let pings = pings.clone();
+                    let frames = Frames::new(pings.clone(), ping_delay.clone());
                     let blackhole = if id == 0 {
                         blackhole_first_connection.clone()
                     } else {
@@ -230,11 +280,7 @@ impl Server {
                             .handshake::<_, Bytes>(Blackholing {
                                 inner: tls,
                                 blackhole,
-                                frames: Frames {
-                                    skip: PREFACE_LEN,
-                                    header: Vec::new(),
-                                    pings,
-                                },
+                                frames,
                             })
                             .await
                         else {
@@ -275,6 +321,7 @@ impl Server {
             certificates,
             blackhole_first_connection,
             pings,
+            ping_delay,
             task,
         }
     }

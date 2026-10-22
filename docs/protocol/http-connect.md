@@ -115,32 +115,34 @@ client decides whether to make another request.
 
 A connection can also stop answering without closing, for example after a NAT
 drops its mapping, the host sleeps or the network changes without a reset.
-Gateinto therefore checks liveness with an HTTP/2 PING on demand and retires a
-connection whose PONG does not arrive within a quarter of the opening timeout
-(2.5 s by default):
+Gateinto therefore checks liveness on demand. A check sends an HTTP/2 PING and
+fails when nothing arrives within a quarter of the opening timeout (2.5 s by
+default); its PONG, a CONNECT reply and tunnel data read by the relay all count
+as an answer. A failed check retires the connection:
 
-- Before reusing a connection that has not answered a CONNECT or PING, or
-  delivered tunnel data, for at least one opening timeout, the request waits
-  for a PING. If it fails, that
-  request opens a fresh connection within its remaining deadline. The PING,
-  and after a failed PING that fresh connection, run while the request holds
-  the session's pool lock, so other gateway requests of the session wait
-  behind both. The PING takes up to a quarter of the opening timeout, or about
-  twice that when a watchdog probe (next item) already has a PING outstanding,
-  because a connection has one PING in flight at a time. Tunnel data counts
-  when the relay reads it from the connection, so a busy download keeps its
-  connection reusable without a PING round trip.
+- Before reusing a connection that has not answered for at least one opening
+  timeout, the request runs a check. If it fails, that request opens a fresh
+  connection within its remaining deadline. The check, and after a failed check
+  that fresh connection, run while the request holds the session's pool lock,
+  so other gateway requests of the session wait behind both. A busy download
+  keeps its connection answering, so reusing it needs no PING round trip.
 - When a submitted CONNECT has no reply after a quarter of the opening timeout,
-  a PING runs beside it. If that fails, later requests open a fresh connection.
-  The unanswered CONNECT is not replayed and still ends with `504` at its own
-  deadline.
+  a check runs beside it. If that fails, later requests open a fresh
+  connection. The unanswered CONNECT is not replayed and still ends with `504`
+  at its own deadline.
+
+A connection has one PING in flight at a time. A check that finds a PING
+already outstanding waits for that PONG instead of sending another, so every
+check takes at most a quarter of the opening timeout. A PONG that misses the
+check, for example behind a full connection window of DATA on a slow downlink,
+does not retire a connection that delivered anything else meanwhile; the PING
+stays outstanding until its PONG arrives or the connection closes, and that
+late PONG counts as an answer and frees the connection for the next PING.
 
 A retired connection is only removed from reuse, like after GOAWAY: its
 existing streams keep running until they end or reach their idle deadline. A
 `4xx`/`5xx` status, RST_STREAM or a slow CONNECT reply on a connection that
-still answers PING does not retire it. A connection whose PONG is delayed
-beyond the deadline, for example behind a saturated uplink, is also retired;
-the cost is one new TLS connection.
+still answers does not retire it.
 
 GOAWAY prevents new streams on the old connection while existing accepted
 streams drain. A transport error can terminate every stream on that
@@ -195,7 +197,9 @@ on loopback, including reuse, fallback, protocol changes, session isolation,
 shutdown, GOAWAY, connection errors without replay, statuses and resets,
 stream limits, independent timeouts, half-close, early bytes, IPv6 authorities,
 large transfers, slow-reader backpressure, many unread streams beside a live
-one, a gateway that stops answering without closing, and certificate rotation
-and retry with injected clocks and verified certificates. No real gateway has
+one, a gateway that stops answering without closing, a busy connection reused
+without a PING, a PONG delayed past the check on a connection still delivering
+data, and certificate rotation and retry with injected clocks and verified
+certificates. No real gateway has
 been verified with HTTP/2, and liveness recovery has been tested only against
 the loopback fixture.
