@@ -204,6 +204,6 @@ large transfers, slow-reader backpressure, many unread streams beside a live
 one, a gateway that stops answering without closing, a busy connection reused
 without a PING, a PONG delayed past the check on a connection still delivering
 data, closing a silent connection after its last stream, and certificate
-rotation and retry with injected clocks and verified certificates. No real gateway has
-been verified with HTTP/2, and liveness recovery has been tested only against
-the loopback fixture.
+rotation and retry with injected clocks and verified certificates. No real
+gateway has been verified with HTTP/2, and liveness recovery has been tested
+only against the loopback fixture.
