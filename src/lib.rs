@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod browser;
+pub mod browser_pairing;
 pub mod check;
 pub mod config;
 mod dns;
