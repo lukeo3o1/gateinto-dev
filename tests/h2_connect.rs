@@ -681,6 +681,7 @@ async fn blackholed_gateway(
         b"before blackhole",
     )
     .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     server
         .blackhole_first_connection
         .store(true, Ordering::SeqCst);
@@ -717,6 +718,13 @@ async fn an_idle_silent_connection_is_verified_and_replaced_before_reuse() {
     )
     .await;
     assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+    timeout(Duration::from_secs(3), async {
+        while server.active.load(Ordering::SeqCst) > 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the silent connection should be closed");
 }
 
 #[tokio::test]
