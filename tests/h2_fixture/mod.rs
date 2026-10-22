@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use h2::Reason;
@@ -22,12 +23,50 @@ pub struct Server {
     pub requests: Arc<Mutex<Vec<(usize, String)>>>,
     pub certificates: Arc<Mutex<Vec<Vec<rustls::pki_types::CertificateDer<'static>>>>>,
     pub blackhole_first_connection: Arc<AtomicBool>,
+    pub pings: Arc<AtomicUsize>,
     task: JoinHandle<()>,
+}
+
+const PREFACE_LEN: usize = 24;
+const FRAME_HEADER_LEN: usize = 9;
+const PING: u8 = 6;
+const ACK: u8 = 1;
+
+struct Frames {
+    skip: usize,
+    header: Vec<u8>,
+    pings: Arc<AtomicUsize>,
+}
+
+impl Frames {
+    fn observe(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            if self.skip > 0 {
+                let amount = self.skip.min(bytes.len());
+                self.skip -= amount;
+                bytes = &bytes[amount..];
+                continue;
+            }
+            let amount = (FRAME_HEADER_LEN - self.header.len()).min(bytes.len());
+            self.header.extend_from_slice(&bytes[..amount]);
+            bytes = &bytes[amount..];
+            if self.header.len() == FRAME_HEADER_LEN {
+                let header = std::mem::take(&mut self.header);
+                if header[3] == PING && header[4] & ACK == 0 {
+                    self.pings.fetch_add(1, Ordering::SeqCst);
+                }
+                self.skip = usize::from(header[0]) << 16
+                    | usize::from(header[1]) << 8
+                    | usize::from(header[2]);
+            }
+        }
+    }
 }
 
 struct Blackholing<T> {
     inner: T,
     blackhole: Arc<AtomicBool>,
+    frames: Frames,
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for Blackholing<T> {
@@ -39,7 +78,11 @@ impl<T: AsyncRead + Unpin> AsyncRead for Blackholing<T> {
         if self.blackhole.load(Ordering::SeqCst) {
             return Poll::Pending;
         }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        let this = &mut *self;
+        this.frames.observe(&buf.filled()[before..]);
+        poll
     }
 }
 
@@ -112,6 +155,7 @@ impl Server {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let certificates = Arc::new(Mutex::new(Vec::new()));
         let blackhole_first_connection = Arc::new(AtomicBool::new(false));
+        let pings = Arc::new(AtomicUsize::new(0));
         let task = tokio::spawn({
             let blackhole_first_connection = blackhole_first_connection.clone();
             let accepted = accepted.clone();
@@ -119,6 +163,7 @@ impl Server {
             let requests = requests.clone();
             let certificates = certificates.clone();
             let sent_bytes = sent_bytes.clone();
+            let pings = pings.clone();
             async move {
                 let mut legacy_config = (*config).clone();
                 legacy_config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -144,6 +189,7 @@ impl Server {
                     let requests = requests.clone();
                     let certificates = certificates.clone();
                     let sent_bytes = sent_bytes.clone();
+                    let pings = pings.clone();
                     let blackhole = if id == 0 {
                         blackhole_first_connection.clone()
                     } else {
@@ -184,6 +230,11 @@ impl Server {
                             .handshake::<_, Bytes>(Blackholing {
                                 inner: tls,
                                 blackhole,
+                                frames: Frames {
+                                    skip: PREFACE_LEN,
+                                    header: Vec::new(),
+                                    pings,
+                                },
                             })
                             .await
                         else {
@@ -223,6 +274,7 @@ impl Server {
             requests,
             certificates,
             blackhole_first_connection,
+            pings,
             task,
         }
     }
@@ -277,6 +329,15 @@ async fn serve(
             .await
             .is_err()
     {
+        return;
+    }
+    if target.starts_with("trickle.") {
+        while send_data(&mut send, Bytes::from(vec![0x74; 1024]))
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         return;
     }
     if target.starts_with("flood.") {

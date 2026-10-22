@@ -19,6 +19,12 @@ async fn tunnel(agent: SocketAddr, target: &str) -> TcpStream {
     stream
 }
 
+async fn tunnel_with_data(agent: SocketAddr, target: &str) -> TcpStream {
+    let (stream, response) = send(agent, &connect_request(target)).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    stream
+}
+
 async fn echo(stream: &mut TcpStream, message: &[u8]) {
     stream.write_all(message).await.unwrap();
     let mut received = vec![0; message.len()];
@@ -711,6 +717,33 @@ async fn an_idle_silent_connection_is_verified_and_replaced_before_reuse() {
     )
     .await;
     assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+}
+
+async fn read_for(stream: &mut TcpStream, duration: Duration) {
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut chunk = [0; 4096];
+    while tokio::time::Instant::now() < deadline {
+        let read = timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(read > 0);
+    }
+}
+
+#[tokio::test]
+async fn a_connection_receiving_data_is_reused_without_a_liveness_ping() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    config.limits.handshake_timeout = Duration::from_secs(1);
+    let agent = start_agent(config).await;
+    let mut download = tunnel_with_data(agent, "trickle.test:443").await;
+    read_for(&mut download, Duration::from_millis(1500)).await;
+    let pings = server.pings.load(Ordering::SeqCst);
+    echo(&mut tunnel(agent, "echo.test:443").await, b"reused").await;
+    assert_eq!(server.pings.load(Ordering::SeqCst), pings);
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

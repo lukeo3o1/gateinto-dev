@@ -1,8 +1,8 @@
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,15 @@ impl Driver {
 struct LivenessState {
     ping: tokio::sync::Mutex<h2::PingPong>,
     dead: AtomicBool,
-    answered: Mutex<Instant>,
+    opened: Instant,
+    answered_nanos: AtomicU64,
+}
+
+impl LivenessState {
+    fn answered(&self) {
+        let elapsed = u64::try_from(self.opened.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.answered_nanos.store(elapsed, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -43,7 +51,8 @@ impl Liveness {
         Self(Arc::new(LivenessState {
             ping: tokio::sync::Mutex::new(ping),
             dead: AtomicBool::new(false),
-            answered: Mutex::new(Instant::now()),
+            opened: Instant::now(),
+            answered_nanos: AtomicU64::new(0),
         }))
     }
 
@@ -52,11 +61,8 @@ impl Liveness {
     }
 
     pub(crate) fn quiet_for(&self) -> Duration {
-        self.0.answered.lock().unwrap().elapsed()
-    }
-
-    pub(crate) fn answered(&self) {
-        *self.0.answered.lock().unwrap() = Instant::now();
+        let answered = Duration::from_nanos(self.0.answered_nanos.load(Ordering::Relaxed));
+        self.0.opened.elapsed().saturating_sub(answered)
     }
 
     // The probe runs in its own task because h2 refuses a new PING while a cancelled one is
@@ -73,7 +79,7 @@ impl Liveness {
                 Ok(Ok(_))
             );
             if answered {
-                *state.answered.lock().unwrap() = Instant::now();
+                state.answered();
             } else {
                 state.dead.store(true, Ordering::SeqCst);
             }
@@ -127,6 +133,7 @@ pub(crate) async fn connect(
 pub(crate) struct Pending {
     response: h2::client::ResponseFuture,
     send: Option<h2::SendStream<Bytes>>,
+    liveness: Liveness,
 }
 
 impl Drop for Pending {
@@ -139,6 +146,7 @@ impl Drop for Pending {
 
 pub(crate) fn request(
     sender: &mut h2::client::SendRequest<Bytes>,
+    liveness: &Liveness,
     target: &Authority,
 ) -> Result<Pending, UpstreamError> {
     let request = http::Request::builder()
@@ -153,12 +161,14 @@ pub(crate) fn request(
     Ok(Pending {
         response,
         send: Some(send),
+        liveness: liveness.clone(),
     })
 }
 
 impl Pending {
     pub(crate) async fn response(mut self) -> Result<(u16, Stream), UpstreamError> {
         let response = (&mut self.response).await.map_err(UpstreamError::Http2)?;
+        self.liveness.0.answered();
         let status = response.status().as_u16();
         Ok((
             status,
@@ -170,6 +180,7 @@ impl Pending {
                 recv: response.into_body(),
                 buffered: Bytes::new(),
                 closed: false,
+                liveness: self.liveness.clone(),
             },
         ))
     }
@@ -180,6 +191,7 @@ pub(crate) struct Stream {
     recv: h2::RecvStream,
     buffered: Bytes,
     closed: bool,
+    liveness: Liveness,
 }
 
 impl Drop for Stream {
@@ -215,7 +227,10 @@ impl AsyncRead for Stream {
                 return Poll::Ready(Ok(()));
             }
             match ready!(self.recv.poll_data(cx)) {
-                Some(Ok(data)) => self.buffered = data,
+                Some(Ok(data)) => {
+                    self.liveness.0.answered();
+                    self.buffered = data;
+                }
                 Some(Err(error)) => return Poll::Ready(Err(io_error(error))),
                 None => return Poll::Ready(Ok(())),
             }
