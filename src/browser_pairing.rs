@@ -103,8 +103,7 @@ impl BrowserPairingGate {
             self.pending = None;
             return Err(PairingError::Expired);
         }
-        if proof.len() != CHALLENGE_SIZE
-            || verify_slices_are_equal(&pending.secret, proof).is_err()
+        if proof.len() != CHALLENGE_SIZE || verify_slices_are_equal(&pending.secret, proof).is_err()
         {
             return Err(PairingError::InvalidProof);
         }
@@ -147,11 +146,15 @@ mod tests {
     fn fail_closed_until_approved_and_paired() {
         let now = Instant::now();
         let mut gate = BrowserPairingGate::new();
-        assert_eq!(gate.pair(ConnectionId(1), &[0; 32], now), Err(PairingError::NotApproved));
+        assert_eq!(
+            gate.pair(ConnectionId(1), &[0; 32], now),
+            Err(PairingError::NotApproved)
+        );
         assert!(!gate.may_open_tunnel(ConnectionId(1)));
         let challenge = gate.approve(now).unwrap();
         assert!(!gate.may_open_tunnel(ConnectionId(1)));
-        gate.pair(ConnectionId(1), challenge.as_bytes(), now).unwrap();
+        gate.pair(ConnectionId(1), challenge.as_bytes(), now)
+            .unwrap();
         assert!(gate.may_open_tunnel(ConnectionId(1)));
         assert!(!gate.may_open_tunnel(ConnectionId(2)));
     }
@@ -161,7 +164,8 @@ mod tests {
         let now = Instant::now();
         let mut gate = BrowserPairingGate::new();
         let challenge = gate.approve(now).unwrap();
-        gate.pair(ConnectionId(10), challenge.as_bytes(), now).unwrap();
+        gate.pair(ConnectionId(10), challenge.as_bytes(), now)
+            .unwrap();
         assert!(matches!(gate.approve(now), Err(PairingError::AlreadyBound)));
         assert_eq!(
             gate.pair(ConnectionId(11), challenge.as_bytes(), now),
@@ -175,11 +179,18 @@ mod tests {
         let now = Instant::now();
         let mut gate = BrowserPairingGate::new();
         let challenge = gate.approve(now).unwrap();
-        assert_eq!(gate.pair(ConnectionId(1), &[1], now), Err(PairingError::InvalidProof));
+        assert_eq!(
+            gate.pair(ConnectionId(1), &[1], now),
+            Err(PairingError::InvalidProof)
+        );
         let mut wrong = *challenge.as_bytes();
         wrong[0] ^= 1;
-        assert_eq!(gate.pair(ConnectionId(1), &wrong, now), Err(PairingError::InvalidProof));
-        gate.pair(ConnectionId(1), challenge.as_bytes(), now).unwrap();
+        assert_eq!(
+            gate.pair(ConnectionId(1), &wrong, now),
+            Err(PairingError::InvalidProof)
+        );
+        gate.pair(ConnectionId(1), challenge.as_bytes(), now)
+            .unwrap();
         gate.disconnected(ConnectionId(1));
         assert_eq!(
             gate.pair(ConnectionId(2), challenge.as_bytes(), now),
@@ -201,7 +212,8 @@ mod tests {
             gate.pair(ConnectionId(1), old.as_bytes(), now + PAIRING_TTL),
             Err(PairingError::InvalidProof)
         );
-        gate.pair(ConnectionId(1), new.as_bytes(), now + PAIRING_TTL).unwrap();
+        gate.pair(ConnectionId(1), new.as_bytes(), now + PAIRING_TTL)
+            .unwrap();
     }
 
     #[test]
@@ -214,10 +226,16 @@ mod tests {
         assert!(gate.may_open_tunnel(ConnectionId(10)));
         assert!(gate.disconnected(ConnectionId(10)));
         assert!(!gate.may_open_tunnel(ConnectionId(10)));
-        assert_eq!(gate.pair(ConnectionId(11), old.as_bytes(), now), Err(PairingError::NotApproved));
+        assert_eq!(
+            gate.pair(ConnectionId(11), old.as_bytes(), now),
+            Err(PairingError::NotApproved)
+        );
         let fresh = gate.approve(now).unwrap();
         gate.revoke();
-        assert_eq!(gate.pair(ConnectionId(11), fresh.as_bytes(), now), Err(PairingError::NotApproved));
+        assert_eq!(
+            gate.pair(ConnectionId(11), fresh.as_bytes(), now),
+            Err(PairingError::NotApproved)
+        );
     }
 
     #[test]
