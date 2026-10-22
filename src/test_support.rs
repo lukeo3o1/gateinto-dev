@@ -28,18 +28,18 @@ pub(crate) async fn bind_ipv6_loopback() -> Option<TcpListener> {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn address_family_errors_mean_ipv6_is_unavailable() {
-        let errors = [io::Error::from(io::ErrorKind::AddrNotAvailable)]
-            .into_iter()
-            .chain(ADDRESS_FAMILY_NOT_SUPPORTED.map(io::Error::from_raw_os_error));
-        for error in errors {
-            assert!(ipv6_unavailable(&error), "{error:?}");
-        }
+        assert!(ipv6_unavailable(&io::Error::from(
+            io::ErrorKind::AddrNotAvailable
+        )));
+        #[cfg(target_os = "linux")]
+        assert!(ipv6_unavailable(&io::Error::from_raw_os_error(97)));
+        #[cfg(windows)]
+        assert!(ipv6_unavailable(&io::Error::from_raw_os_error(10047)));
     }
 
     #[test]
@@ -51,5 +51,9 @@ mod tests {
         ] {
             assert!(!ipv6_unavailable(&error), "{error:?}");
         }
+        #[cfg(target_os = "linux")]
+        assert!(!ipv6_unavailable(&io::Error::from_raw_os_error(98)));
+        #[cfg(windows)]
+        assert!(!ipv6_unavailable(&io::Error::from_raw_os_error(10048)));
     }
 }
