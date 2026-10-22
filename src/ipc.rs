@@ -333,6 +333,7 @@ pub type Connection = Box<dyn Stream>;
 #[derive(Debug)]
 pub enum BindError {
     AlreadyRunning(Endpoint),
+    HeldByAnotherUser(Endpoint),
     Io(Endpoint, io::Error),
 }
 
@@ -342,12 +343,26 @@ impl fmt::Display for BindError {
             Self::AlreadyRunning(endpoint) => {
                 write!(f, "an agent is already running for this user at {endpoint}")
             }
+            Self::HeldByAnotherUser(endpoint) => {
+                write!(f, "the agent endpoint {endpoint} is held by another user")
+            }
             Self::Io(endpoint, error) => write!(f, "listening on {endpoint} failed: {error}"),
         }
     }
 }
 
 impl std::error::Error for BindError {}
+
+pub fn taken_pipe(endpoint: &Endpoint, owned_by_user: io::Result<bool>) -> BindError {
+    match owned_by_user {
+        Ok(true) => BindError::AlreadyRunning(endpoint.clone()),
+        Ok(false) => BindError::HeldByAnotherUser(endpoint.clone()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            BindError::HeldByAnotherUser(endpoint.clone())
+        }
+        Err(error) => BindError::Io(endpoint.clone(), error),
+    }
+}
 
 #[derive(Debug)]
 pub enum RequestError {
@@ -625,6 +640,7 @@ pub use windows::user_sid;
 #[cfg(windows)]
 mod windows {
     use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::ptr::null_mut;
     use std::time::Duration;
@@ -643,9 +659,10 @@ mod windows {
         EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
         SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
+    use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, SECURITY_IDENTIFICATION};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    use super::{BindError, Connection, Endpoint, RequestError, owner_only_sddl};
+    use super::{BindError, Connection, Endpoint, RequestError, owner_only_sddl, taken_pipe};
 
     const BUSY_DELAY: Duration = Duration::from_millis(20);
 
@@ -717,7 +734,9 @@ mod windows {
             let next = descriptor
                 .create(endpoint, true)
                 .map_err(|error| match error.kind() {
-                    io::ErrorKind::PermissionDenied => BindError::AlreadyRunning(endpoint.clone()),
+                    io::ErrorKind::PermissionDenied => {
+                        taken_pipe(endpoint, pipe_owned_by_current_user(endpoint))
+                    }
                     _ => io_error(error),
                 })?;
             Ok(Self {
@@ -762,6 +781,14 @@ mod windows {
                 "its owner is unknown: {error}"
             ))),
         }
+    }
+
+    fn pipe_owned_by_current_user(endpoint: &Endpoint) -> io::Result<bool> {
+        let pipe = std::fs::OpenOptions::new()
+            .access_mode(READ_CONTROL)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(endpoint.path())?;
+        owned_by_current_user(pipe.as_raw_handle())
     }
 
     pub(super) fn owned_by_current_user(handle: HANDLE) -> io::Result<bool> {
@@ -1228,6 +1255,27 @@ mod tests {
             .unwrap();
 
         assert!(windows::owned_by_current_user(client.as_raw_handle()).unwrap());
+    }
+
+    #[test]
+    fn a_taken_pipe_name_is_a_running_agent_only_when_the_user_owns_the_pipe() {
+        let endpoint = Endpoint(OsString::from(r"\\.\pipe\gateinto-agent-S-1-5-21-1"));
+        let taken = |owner| taken_pipe(&endpoint, owner);
+
+        assert!(matches!(taken(Ok(true)), BindError::AlreadyRunning(_)));
+        assert!(matches!(taken(Ok(false)), BindError::HeldByAnotherUser(_)));
+        assert!(matches!(
+            taken(Err(io::ErrorKind::PermissionDenied.into())),
+            BindError::HeldByAnotherUser(_)
+        ));
+        assert!(matches!(
+            taken(Err(io::ErrorKind::NotFound.into())),
+            BindError::Io(..)
+        ));
+        assert_eq!(
+            taken(Ok(false)).to_string(),
+            r"the agent endpoint \\.\pipe\gateinto-agent-S-1-5-21-1 is held by another user"
+        );
     }
 
     #[test]
