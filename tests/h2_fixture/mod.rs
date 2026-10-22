@@ -111,11 +111,17 @@ impl<T: AsyncRead + Unpin> AsyncRead for Blackholing<T> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.blackhole.load(Ordering::SeqCst) {
-            return Poll::Pending;
-        }
         let this = &mut *self;
         loop {
+            if this.blackhole.load(Ordering::SeqCst) {
+                let mut discarded = [0; 16 * 1024];
+                let mut discarded = ReadBuf::new(&mut discarded);
+                ready!(Pin::new(&mut this.inner).poll_read(cx, &mut discarded))?;
+                if discarded.filled().is_empty() {
+                    return Poll::Ready(Ok(()));
+                }
+                continue;
+            }
             this.frames.release(cx);
             if !this.frames.ready.is_empty() {
                 let amount = buf.remaining().min(this.frames.ready.len());

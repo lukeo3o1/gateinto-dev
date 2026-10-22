@@ -142,7 +142,11 @@ late PONG counts as an answer and frees the connection for the next PING.
 A retired connection is only removed from reuse, like after GOAWAY: its
 existing streams keep running until they end or reach their idle deadline. A
 `4xx`/`5xx` status, RST_STREAM or a slow CONNECT reply on a connection that
-still answers does not retire it.
+still answers does not retire it. Once the last stream of a connection retired
+by a failed check ends, or immediately if it has none, Gateinto aborts its
+driver and closes its TLS socket instead of holding it and its buffers until
+TCP gives up. Connections retired for other reasons, such as GOAWAY, keep
+their drivers until they finish draining.
 
 GOAWAY prevents new streams on the old connection while existing accepted
 streams drain. A transport error can terminate every stream on that
@@ -199,7 +203,7 @@ stream limits, independent timeouts, half-close, early bytes, IPv6 authorities,
 large transfers, slow-reader backpressure, many unread streams beside a live
 one, a gateway that stops answering without closing, a busy connection reused
 without a PING, a PONG delayed past the check on a connection still delivering
-data, and certificate rotation and retry with injected clocks and verified
-certificates. No real gateway has
+data, closing a silent connection after its last stream, and certificate
+rotation and retry with injected clocks and verified certificates. No real gateway has
 been verified with HTTP/2, and liveness recovery has been tested only against
 the loopback fixture.
