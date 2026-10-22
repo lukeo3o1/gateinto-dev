@@ -419,13 +419,19 @@ Endpoint:
 
 - Windows: the named pipe `\\.\pipe\gateinto-agent-<user SID>`, created with
   `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS` and the
-  protected DACL `D:P(A;;GA;;;<user SID>)(A;;GA;;;SY)`: only the user and
-  SYSTEM can open it, so other users cannot read, write or hold its
-  connection slots. Before sending a request, a client checks that the
-  process serving the pipe (`GetNamedPipeServerProcessId`) runs as the same
-  user (token user SIDs compared with `EqualSid`) and refuses the pipe
-  otherwise, so a pipe that another user created first under that name is
-  not used. Whether Windows enforces these as intended is only exercised by
+  security descriptor `O:<user SID>D:P(A;;GA;;;<user SID>)(A;;GA;;;SY)`: the
+  user owns the pipe, and only the user and SYSTEM can open it, so other users
+  cannot read, write or hold its connection slots. The owner is set
+  explicitly because a process with an elevated administrator token would
+  otherwise give the pipe its default owner, the Administrators group. Before
+  sending a request, a client reads the owner of the pipe it opened
+  (`GetSecurityInfo`) and compares it with the user SID of its own token
+  (`EqualSid`); it refuses the pipe otherwise, so a pipe that another user
+  created first under that name is not used. Only an account that may set
+  another owner (for example with `SeRestorePrivilege`) could create a pipe
+  that passes this check, and such accounts are outside the boundary. An
+  agent running with an elevated token has not been tested, in particular
+  whether a client without elevation can open its pipe. Whether Windows enforces these as intended is only exercised by
   the CI runs on `windows-latest` (same user); the other-user cases are not
   tested.
 - Unix (development and tests): the socket `agent.sock` in

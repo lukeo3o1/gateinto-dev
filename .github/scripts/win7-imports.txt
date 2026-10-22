@@ -1,6 +1,7 @@
 advapi32.dll ConvertSidToStringSidW
 advapi32.dll ConvertStringSecurityDescriptorToSecurityDescriptorW
 advapi32.dll EqualSid
+advapi32.dll GetSecurityInfo
 advapi32.dll GetTokenInformation
 advapi32.dll OpenProcessToken
 advapi32.dll RegCloseKey
@@ -80,7 +81,6 @@ kernel32.dll GetModuleFileNameW
 kernel32.dll GetModuleHandleA
 kernel32.dll GetModuleHandleExW
 kernel32.dll GetModuleHandleW
-kernel32.dll GetNamedPipeServerProcessId
 kernel32.dll GetOEMCP
 kernel32.dll GetOverlappedResult
 kernel32.dll GetProcAddress
