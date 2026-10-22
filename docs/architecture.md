@@ -212,11 +212,12 @@ The full protocol, limits and guarantees are in
   refuses.
 - `ipc` holds the request and response types (`Request`, `Response`), their
   one-line text encoding with size limits, the per-user `Endpoint` (a named
-  pipe named after the user's SID on Windows with a DACL for the user and
-  SYSTEM only, a socket in a private directory on Unix, both suffixed by
-  `GATEINTO_INSTANCE` when it is set), the `Server` that only one agent can
-  bind (on Unix under a lock file), and `send` for clients, which checks on
-  Windows that the pipe server runs as the same user and gives up after 60
+  pipe named after the user's SID on Windows, owned by the user, with a DACL
+  for the user and SYSTEM only, a socket in a private directory on Unix, both
+  suffixed by `GATEINTO_INSTANCE` when it is set), the `Server` that only one
+  agent can bind (on Unix under a lock file), and `send` for clients, which
+  checks on
+  Windows that the pipe is owned by the same user and gives up after 60
   seconds.
 - `agent::Agent` owns a `SessionManager` and one watch task per browser
   session. `Agent::serve` first deletes profile directories left by an

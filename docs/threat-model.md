@@ -77,7 +77,7 @@ meant to protect, against whom, and what it does not protect.
 | A website floods the user with launches or confirmation dialogs. | At most 5 launch requests per minute (confirmations included) and 4 browser sessions at a time per agent; at most one confirmation is open at a time. |
 | A launch leaks state between browser sessions or into the user's profile. | Each launch gets a new session (port, realm, `basic_tofu` state, certificate) and a new browser profile directory, deleted when the browser exits or the session is closed. |
 | Profile cleanup deletes the wrong directory. | Only directories directly in the profiles directory, with Gateinto's name pattern and marker file, are deleted; links are not followed. |
-| Another user or a remote machine controls the agent. | Per-user named pipe (named after the SID, first instance, remote clients rejected, DACL granting access only to the user and SYSTEM); clients refuse a pipe served by another user's process; `0600` socket in a `0700` directory owned by the user on Unix. |
+| Another user or a remote machine controls the agent. | Per-user named pipe (named after the SID, first instance, remote clients rejected, owned by the user, DACL granting access only to the user and SYSTEM); clients refuse a pipe owned by another user; `0600` socket in a `0700` directory owned by the user on Unix. |
 | URI registration clobbers another application's handler or leaves a broken one. | Only `HKCU\Software\Classes\gateinto` is written; an existing non-Gateinto handler is refused; a failed first registration is rolled back; unregistration removes only a Gateinto handler. |
 | Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level; the session keeps only a keyed hash of its bound credential. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
 | An installer running as `SYSTEM` or another account creates a device key the user cannot use, or a second identity. | The MSI is per user and has no custom action that touches a key. `gateinto setup` refuses LocalSystem, LocalService and NetworkService and reuses an existing key. The agent and `open` never create a key. |
@@ -145,7 +145,7 @@ meant to protect, against whom, and what it does not protect.
   `gateinto session close`.
 - Another user can still create a pipe with the agent's name before the
   agent starts. The agent then cannot start, and `gateinto open` refuses to
-  talk to that pipe because its server runs as another user, so launches
+  talk to that pipe because another user owns it, so launches
   fail until the other pipe is gone (denial of service, no data reaches that
   user). The pipe DACL and this check are exercised on `windows-latest` only
   as the same user; the other-user cases are not tested.
