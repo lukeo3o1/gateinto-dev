@@ -145,10 +145,12 @@ meant to protect, against whom, and what it does not protect.
   `gateinto session close`.
 - Another user can still create a pipe with the agent's name before the
   agent starts. The agent then cannot start and reports that another user
-  holds the pipe name, and `gateinto open` refuses to talk to that pipe
-  because another user owns it, so launches fail until the other pipe is gone
-  (denial of service, no data reaches that user). The pipe DACL and this check are exercised on `windows-latest` only
-  as the same user; the other-user cases are not tested.
+  holds the pipe name (or, if the pipe stays busy for a second, that it could
+  not open it), and `gateinto open` refuses to talk to that pipe because
+  another user owns it, so launches fail until the other pipe is gone
+  (denial of service, no data reaches that user). The pipe DACL and this
+  check are exercised on `windows-latest` only as the same user; the
+  other-user cases are not tested.
 - SYSTEM and administrators can always act as or impersonate the user and
   are outside the boundary, as for the rest of Gateinto.
 - Purging the key locally does not revoke the device at a gateway. Until the
