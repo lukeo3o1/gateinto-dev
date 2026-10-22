@@ -378,21 +378,53 @@ pub fn retry_while_busy<T>(
     }
 }
 
-pub fn hand_off<P>(
-    listening: &mut P,
-    connected: io::Result<()>,
-    create: impl FnOnce() -> io::Result<P>,
-    reset: impl FnOnce(&P) -> io::Result<()>,
-) -> io::Result<P> {
-    match connected.and_then(|()| create()) {
-        Ok(next) => Ok(std::mem::replace(listening, next)),
-        Err(error) => match reset(listening) {
-            Ok(()) => Err(error),
-            Err(reset_error) => Err(io::Error::new(
-                error.kind(),
-                format!("{error}; resetting the pipe instance also failed: {reset_error}"),
-            )),
-        },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstanceState {
+    Listening,
+    Connected,
+    Spent,
+}
+
+#[derive(Debug)]
+pub struct Instances<P> {
+    current: P,
+    state: InstanceState,
+}
+
+impl<P> Instances<P> {
+    pub fn new(first: P) -> Self {
+        Self {
+            current: first,
+            state: InstanceState::Listening,
+        }
+    }
+
+    pub fn replace_spent(&mut self, create: impl FnOnce() -> io::Result<P>) -> io::Result<()> {
+        if self.state == InstanceState::Spent {
+            self.current = create()?;
+            self.state = InstanceState::Listening;
+        }
+        Ok(())
+    }
+
+    pub async fn connect(
+        &mut self,
+        connect: impl AsyncFnOnce(&P) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if self.state == InstanceState::Listening {
+            if let Err(error) = connect(&self.current).await {
+                self.state = InstanceState::Spent;
+                return Err(error);
+            }
+            self.state = InstanceState::Connected;
+        }
+        Ok(())
+    }
+
+    pub fn hand_off(&mut self, create: impl FnOnce() -> io::Result<P>) -> io::Result<P> {
+        let next = create()?;
+        self.state = InstanceState::Listening;
+        Ok(std::mem::replace(&mut self.current, next))
     }
 }
 
@@ -706,8 +738,8 @@ mod windows {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use super::{
-        BindError, Connection, Endpoint, REQUEST_TIMEOUT, RequestError, busy_retry_delay, hand_off,
-        owner_only_sddl, retry_while_busy, taken_pipe,
+        BindError, Connection, Endpoint, Instances, REQUEST_TIMEOUT, RequestError,
+        busy_retry_delay, owner_only_sddl, retry_while_busy, taken_pipe,
     };
 
     const BIND_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -770,7 +802,7 @@ mod windows {
     pub struct Server {
         endpoint: Endpoint,
         descriptor: SecurityDescriptor,
-        listening: NamedPipeServer,
+        instances: Instances<NamedPipeServer>,
     }
 
     impl Server {
@@ -789,19 +821,16 @@ mod windows {
             Ok(Self {
                 endpoint: endpoint.clone(),
                 descriptor,
-                listening,
+                instances: Instances::new(listening),
             })
         }
 
         pub async fn accept(&mut self) -> io::Result<Connection> {
-            let connected = self.listening.connect().await;
-            let pipe = hand_off(
-                &mut self.listening,
-                connected,
-                || self.descriptor.create(&self.endpoint, false),
-                NamedPipeServer::disconnect,
-            )?;
-            Ok(Box::new(pipe))
+            let create = || self.descriptor.create(&self.endpoint, false);
+            self.instances.replace_spent(create)?;
+            self.instances.connect(NamedPipeServer::connect).await?;
+            let create = || self.descriptor.create(&self.endpoint, false);
+            Ok(Box::new(self.instances.hand_off(create)?))
         }
     }
 
@@ -1322,7 +1351,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn the_agent_pipe_accepts_again_after_a_client_leaves_before_being_accepted() {
+    async fn the_agent_pipe_accepts_again_after_a_client_leaves() {
         let endpoint = Endpoint::pipe(&format!("gateinto-reaccept-{}", std::process::id()));
         let mut server = Server::bind(&endpoint).unwrap();
         drop(
@@ -1360,68 +1389,100 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_connected_pipe_is_handed_off_only_once_its_successor_listens() {
-        let mut listening = "first";
-        let handed = hand_off(&mut listening, Ok(()), || Ok("second"), |_| panic!("kept"));
-
-        assert_eq!(handed.unwrap(), "first");
-        assert_eq!(listening, "second");
+    struct FakePipes {
+        names: std::vec::IntoIter<io::Result<&'static str>>,
+        connects: Vec<io::Result<()>>,
+        connected: Vec<&'static str>,
     }
 
-    #[test]
-    fn a_connected_pipe_without_a_successor_is_reset_and_kept_listening() {
-        let mut listening = "first";
-        let mut reset = Vec::new();
-        let handed = hand_off(
-            &mut listening,
-            Ok(()),
-            || Err(io::Error::other("no instance")),
-            |pipe| {
-                reset.push(*pipe);
-                Ok(())
-            },
-        );
+    impl FakePipes {
+        fn new(names: Vec<io::Result<&'static str>>, connects: Vec<io::Result<()>>) -> Self {
+            Self {
+                names: names.into_iter(),
+                connects,
+                connected: Vec::new(),
+            }
+        }
 
-        assert_eq!(handed.unwrap_err().to_string(), "no instance");
-        assert_eq!(listening, "first");
-        assert_eq!(reset, ["first"]);
+        async fn accept(
+            &mut self,
+            instances: &mut Instances<&'static str>,
+        ) -> io::Result<&'static str> {
+            let names = &mut self.names;
+            instances.replace_spent(|| names.next().expect("an instance was created"))?;
+            instances
+                .connect(async |pipe: &&'static str| {
+                    self.connected.push(*pipe);
+                    self.connects.remove(0)
+                })
+                .await?;
+            instances.hand_off(|| self.names.next().expect("an instance was created"))
+        }
     }
 
-    #[test]
-    fn a_failed_connection_is_reset_and_kept_listening_without_a_successor() {
-        let mut listening = "first";
-        let mut reset = Vec::new();
-        let handed = hand_off(
-            &mut listening,
-            Err(io::Error::other("client left")),
-            || -> io::Result<&str> { panic!("created") },
-            |pipe| {
-                reset.push(*pipe);
-                Ok(())
-            },
-        );
+    #[tokio::test]
+    async fn a_connected_pipe_is_handed_off_only_once_its_successor_listens() {
+        let mut pipes = FakePipes::new(vec![Ok("second")], vec![Ok(())]);
+        let mut instances = Instances::new("first");
 
-        assert_eq!(handed.unwrap_err().to_string(), "client left");
-        assert_eq!(listening, "first");
-        assert_eq!(reset, ["first"]);
+        assert_eq!(pipes.accept(&mut instances).await.unwrap(), "first");
+        assert_eq!(pipes.connected, ["first"]);
+        assert_eq!(instances.current, "second");
     }
 
-    #[test]
-    fn a_failed_reset_is_reported_with_the_failure_it_follows() {
-        let mut listening = "first";
-        let handed = hand_off(
-            &mut listening,
-            Err(io::Error::other("client left")),
-            || -> io::Result<&str> { panic!("created") },
-            |_| Err(io::Error::other("still connected")),
+    #[tokio::test]
+    async fn a_connected_pipe_without_a_successor_waits_to_be_handed_off_later() {
+        let mut pipes = FakePipes::new(
+            vec![Err(io::Error::other("no instance")), Ok("second")],
+            vec![Ok(())],
         );
+        let mut instances = Instances::new("first");
 
-        assert_eq!(
-            handed.unwrap_err().to_string(),
-            "client left; resetting the pipe instance also failed: still connected"
+        let failed = pipes.accept(&mut instances).await.unwrap_err();
+        assert_eq!(failed.to_string(), "no instance");
+        assert_eq!(instances.current, "first");
+
+        assert_eq!(pipes.accept(&mut instances).await.unwrap(), "first");
+        assert_eq!(pipes.connected, ["first"]);
+        assert_eq!(instances.current, "second");
+    }
+
+    #[tokio::test]
+    async fn a_pipe_that_failed_to_connect_is_replaced_before_listening_again() {
+        let mut pipes = FakePipes::new(
+            vec![Ok("second"), Ok("third")],
+            vec![Err(io::Error::other("client left")), Ok(())],
         );
-        assert_eq!(listening, "first");
+        let mut instances = Instances::new("first");
+
+        let failed = pipes.accept(&mut instances).await.unwrap_err();
+        assert_eq!(failed.to_string(), "client left");
+        assert_eq!(instances.current, "first");
+
+        assert_eq!(pipes.accept(&mut instances).await.unwrap(), "second");
+        assert_eq!(pipes.connected, ["first", "second"]);
+        assert_eq!(instances.current, "third");
+    }
+
+    #[tokio::test]
+    async fn a_pipe_that_failed_to_connect_is_kept_until_it_can_be_replaced() {
+        let mut pipes = FakePipes::new(
+            vec![
+                Err(io::Error::other("no instance")),
+                Ok("second"),
+                Ok("third"),
+            ],
+            vec![Err(io::Error::other("client left")), Ok(())],
+        );
+        let mut instances = Instances::new("first");
+
+        pipes.accept(&mut instances).await.unwrap_err();
+        let failed = pipes.accept(&mut instances).await.unwrap_err();
+        assert_eq!(failed.to_string(), "no instance");
+        assert_eq!(instances.current, "first");
+
+        assert_eq!(pipes.accept(&mut instances).await.unwrap(), "second");
+        assert_eq!(pipes.connected, ["first", "second"]);
     }
 
     #[test]
