@@ -421,26 +421,27 @@ Endpoint:
   `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS` and the
   security descriptor `O:<user SID>D:P(A;;GA;;;<user SID>)(A;;GA;;;SY)`: the
   user owns the pipe, and only the user and SYSTEM can open it, so other users
-  cannot read, write or hold its connection slots. The owner is set
-  explicitly because a process with an elevated administrator token would
-  otherwise give the pipe its default owner, the Administrators group. Before
-  sending a request, a client reads the owner of the pipe it opened
-  (`GetSecurityInfo`) and compares it with the user SID of its own token
-  (`EqualSid`); it refuses the pipe otherwise, so a pipe that another user
-  created first under that name is not used. Only an account that may set
-  another owner (for example with `SeRestorePrivilege`) could create a pipe
-  that passes this check, and such accounts are outside the boundary. An
+  cannot read, write or hold its connection slots. The owner is set explicitly
+  because a process with an elevated administrator token would otherwise give
+  the pipe its default owner, the Administrators group. Before sending a
+  request, a client reads the owner of the pipe it opened (`GetSecurityInfo`)
+  and compares it with the user SID of its own token (`EqualSid`); it refuses
+  the pipe otherwise, so a pipe that another user created first under that
+  name is not used. Only an account that may set another owner (for example
+  with `SeRestorePrivilege`), or one that holds `SeImpersonatePrivilege` and
+  an impersonation token for the user (for example a service), could create a
+  pipe that passes this check, and such accounts are outside the boundary. An
   agent running with an elevated token has not been tested, in particular
   whether a client without elevation can open its pipe. When the name is
   already taken, the agent opens the existing pipe with `READ_CONTROL` and
-  checks its owner the same way: it reports `an agent is already running`
-  only for a pipe the user owns, and `the agent endpoint ... is held by
-  another user` for a pipe it cannot open or that another user owns. While
-  all instances of the existing pipe are busy, it retries the open for up to
-  a second; a pipe still busy then is reported as an error, and the agent
-  does not start. Whether Windows enforces these as intended is only
-  exercised by the CI runs on `windows-latest` (same user); the other-user
-  cases are not tested. The agent always keeps an instance listening, so the name is not
+  checks its owner the same way: it reports `an agent is already running` only
+  for a pipe the user owns, and `the agent endpoint ... is held by another
+  user` for a pipe it cannot open or that another user owns. While all
+  instances of the existing pipe are busy, it retries the open for up to a
+  second; a pipe still busy then is reported as an error, and the agent does
+  not start. Whether Windows enforces these as intended is only exercised by
+  the CI runs on `windows-latest` (same user); the other-user cases are not
+  tested. The agent always keeps an instance listening, so the name is not
   released while it runs: it creates the next instance before handing out a
   connected one, and when that or the connection fails, it disconnects the
   instance and listens on it again.

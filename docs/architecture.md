@@ -216,9 +216,8 @@ The full protocol, limits and guarantees are in
   for the user and SYSTEM only, a socket in a private directory on Unix, both
   suffixed by `GATEINTO_INSTANCE` when it is set), the `Server` that only one
   agent can bind (on Unix under a lock file), and `send` for clients, which
-  checks on
-  Windows that the pipe is owned by the same user and gives up after 60
-  seconds.
+  checks on Windows that the pipe is owned by the same user and gives up
+  after 60 seconds.
 - `agent::Agent` owns a `SessionManager` and one watch task per browser
   session. `Agent::serve` first deletes profile directories left by an
   earlier agent, then accepts at most 8 connections at a time, answers one

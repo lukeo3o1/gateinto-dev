@@ -180,10 +180,10 @@ How that is bounded:
 - **Per-user endpoint.** The agent listens on a named pipe named after the
   user's SID, created as the first instance, rejecting remote clients, with a
   security descriptor that makes the user its owner and grants access only to
-  the user and SYSTEM. Clients refuse a pipe that another user owns. On Unix the socket is `0600` in
-  a `0700` directory that must belong to the user. The agent answers one
-  short request per connection with size limits and a timeout, and clients
-  give up after 60 seconds.
+  the user and SYSTEM. Clients refuse a pipe that another user owns. On Unix
+  the socket is `0600` in a `0700` directory that must belong to the user.
+  The agent answers one short request per connection with size limits and a
+  timeout, and clients give up after 60 seconds.
 - **Isolation of each launch.** Every launch is a new session with its own
   port, realm, `basic_tofu` state and client certificate, and a new browser
   profile directory, so a launched browser does not share cookies, cache or
