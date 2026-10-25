@@ -49,6 +49,7 @@ The intended security properties are described in
   Report those upstream; a note to us is welcome if Gateinto needs to update.
 - Attacks that require administrator rights or code already running as the
   user on the machine, which the threat model lists as residual risks.
-- Use of the loopback listener by other local processes, which is documented
-  behavior.
+- Use of the loopback listener by other local processes when
+  `[device_session] auth = "none"` is set, or by processes running as the same
+  user, which is documented behavior.
 - Running with `--unsafe-allow-non-loopback-listen`.

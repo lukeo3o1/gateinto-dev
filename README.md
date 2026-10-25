@@ -118,7 +118,8 @@ use `http://127.0.0.1:18736` as their HTTP proxy with these credentials, for
 example
 `curl --proxy http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com/`.
 There is no flag that turns the credentials off; only `[device_session] auth = "none"`
-in a configuration file does.
+in a configuration file does, so `gateinto proxy` with flags only always
+requires the credentials.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
