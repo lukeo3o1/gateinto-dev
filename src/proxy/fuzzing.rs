@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use aws_lc_rs::error::Unspecified;
 
-use super::basic_tofu::{BasicTofu, parse_basic};
+use super::basic_tofu::BasicTofu;
+use super::session_credentials::parse_basic;
 use super::{FailureLimit, HeadError, authorize};
 use crate::http::parse_connect_request;
 

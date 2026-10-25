@@ -1,29 +1,12 @@
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aws_lc_rs::constant_time::verify_slices_are_equal;
 use aws_lc_rs::error::Unspecified;
 use aws_lc_rs::hmac;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 
-use crate::http::is_token;
-
-const MAX_ENCODED_BYTES: usize = 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FailureLimit {
-    pub max_failures: u32,
-    pub window: Duration,
-}
-
-impl Default for FailureLimit {
-    fn default() -> Self {
-        Self {
-            max_failures: 10,
-            window: Duration::from_secs(60),
-        }
-    }
-}
+use super::session_credentials::{FailureLimit, Rejection, parse_basic};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -32,7 +15,7 @@ pub(crate) enum Verdict {
     Challenge,
     Rejected,
     Malformed,
-    RateLimited { retry_after: Duration },
+    RateLimited { retry_after: std::time::Duration },
 }
 
 pub(crate) struct BasicTofu {
@@ -47,11 +30,6 @@ pub(crate) struct BasicTofu {
 struct Failures {
     since: Option<Instant>,
     count: u32,
-}
-
-pub(super) enum Rejection {
-    Scheme,
-    Malformed,
 }
 
 impl BasicTofu {
@@ -111,74 +89,13 @@ impl BasicTofu {
     }
 }
 
-pub(super) fn parse_basic(value: &[u8]) -> Result<Vec<u8>, Rejection> {
-    let (scheme, token) = match value.iter().position(|&b| b == b' ') {
-        Some(space) => (&value[..space], value[space..].trim_ascii_start()),
-        None => (value, &b""[..]),
-    };
-    if !is_token(scheme) {
-        return Err(Rejection::Malformed);
-    }
-    if !scheme.eq_ignore_ascii_case(b"basic") {
-        return Err(Rejection::Scheme);
-    }
-    if token.len() > MAX_ENCODED_BYTES {
-        return Err(Rejection::Malformed);
-    }
-    let credential = decode_base64(token).ok_or(Rejection::Malformed)?;
-    let colon = credential
-        .iter()
-        .position(|&b| b == b':')
-        .ok_or(Rejection::Malformed)?;
-    if colon + 1 == credential.len() || credential.iter().any(|&b| b < 0x20 || b == 0x7f) {
-        return Err(Rejection::Malformed);
-    }
-    Ok(credential)
-}
-
-fn decode_base64(encoded: &[u8]) -> Option<Vec<u8>> {
-    if encoded.is_empty() || !encoded.len().is_multiple_of(4) {
-        return None;
-    }
-    let padding = encoded.iter().rev().take_while(|&&b| b == b'=').count();
-    if padding > 2 {
-        return None;
-    }
-    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
-    let last = encoded.len() / 4 - 1;
-    for (index, quad) in encoded.as_chunks::<4>().0.iter().enumerate() {
-        let pad = if index == last { padding } else { 0 };
-        let mut bits = 0u32;
-        for &byte in &quad[..4 - pad] {
-            bits = bits << 6 | u32::from(sextet(byte)?);
-        }
-        bits <<= 6 * pad;
-        let bytes = bits.to_be_bytes();
-        let used = 3 - pad;
-        if bytes[1 + used..].iter().any(|&b| b != 0) {
-            return None;
-        }
-        decoded.extend_from_slice(&bytes[1..1 + used]);
-    }
-    Some(decoded)
-}
-
-fn sextet(byte: u8) -> Option<u8> {
-    match byte {
-        b'A'..=b'Z' => Some(byte - b'A'),
-        b'a'..=b'z' => Some(byte - b'a' + 26),
-        b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
-    const MAX_DECODED_BYTES: usize = MAX_ENCODED_BYTES / 4 * 3;
+    const MAX_DECODED_BYTES: usize = 768;
 
     const LIMIT: FailureLimit = FailureLimit {
         max_failures: 3,
@@ -213,48 +130,6 @@ mod tests {
 
     fn check(tofu: &BasicTofu, header: &[u8]) -> Verdict {
         tofu.check(Some(header), Instant::now())
-    }
-
-    #[test]
-    fn the_test_encoder_matches_rfc_4648_vectors() {
-        for (plain, encoded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(encode(plain.as_bytes()), encoded);
-        }
-    }
-
-    #[test]
-    fn decodes_rfc_4648_vectors() {
-        for (plain, encoded) in [
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(
-                decode_base64(encoded.as_bytes()),
-                Some(plain.as_bytes().to_vec())
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_non_canonical_base64() {
-        for encoded in [
-            "", "Zg", "Zg=", "Zh==", "Zm9=", "Z===", "Zg==Zg==", "Zm9v\n", "Zm 9v", "Zm9-", "Zm9_",
-            "=Zm9", "Zm=v",
-        ] {
-            assert_eq!(decode_base64(encoded.as_bytes()), None, "{encoded:?}");
-        }
     }
 
     #[test]
