@@ -885,13 +885,18 @@ async fn agent(args: ConfigArg) -> Result {
             local_auth: settings.device_session_auth,
             ..proxy_config(&settings)?
         };
-        agent
+        let id = agent
             .start_session(SessionConfig {
                 kind: SessionKind::Device,
                 gateway: settings.gateway.name,
                 proxy: config,
             })
             .await?;
+        if settings.device_session_auth == LocalAuth::SessionCredentials {
+            tracing::info!(
+                "device session {id} requires session credentials; run `gateinto session credentials {id}`"
+            );
+        }
     }
     tracing::info!(%endpoint, "agent ready");
     agent.serve(server, shutdown).await;
