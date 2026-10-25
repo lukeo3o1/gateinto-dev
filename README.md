@@ -323,9 +323,10 @@ share only the device key.
   credential, shows the credentials in a prompt (see
   [Local proxy authentication](#local-proxy-authentication)) and runs until
   Ctrl+C. If the credentials cannot be shown it closes the session and exits
-  with an error. Each start is a new session with a new port, realm and
-  credentials. `gateinto proxy` with `[device_session] auth =
-  "session_credentials"` shows its credentials the same way.
+  with an error. Each start is a new session with a new realm and
+  credentials, on a new ephemeral port. `gateinto proxy` with
+  `[device_session] auth = "session_credentials"` shows its credentials the
+  same way.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or

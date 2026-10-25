@@ -96,7 +96,8 @@ meant to protect, against whom, and what it does not protect.
 - With `session_credentials`, a local process that does not know the
   credentials can still make the session answer `429` to everyone, the
   browser included, for up to a minute at a time by sending wrong ones.
-  Closing the session and starting a new one gives a new port.
+  Closing the session and starting a new one gives a new realm and new
+  credentials, and a new failure count.
 - A website can draw a dialog or page that looks like the browser's proxy
   sign-in and ask for the session credentials. The prompt warns against it
   and names the proxy address, but nothing stops a user from typing them in.

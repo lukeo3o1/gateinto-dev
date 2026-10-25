@@ -529,9 +529,9 @@ accepting connections before it closes its sessions.
   and `deny` are not counted; they need the token of a counted `launch`.
 - At most 4 browser sessions at a time; a further launch gets
   `error: 4 browser sessions are already open`.
-- Every accepted launch creates a new, separate session: new port, new realm,
-  new credentials and failure count, new profile directory and new browser
-  process.
+- Every accepted launch creates a new, separate session: new ephemeral port,
+  new realm, new credentials and failure count, new profile directory and new
+  browser process.
   Launches never reuse or replace an existing session, so the result of a
   launch does not depend on what ran before.
 - A launch is answered only after the browser process has started. If the

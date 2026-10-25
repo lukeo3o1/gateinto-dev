@@ -36,11 +36,12 @@ browser. None of those steps has been executed either.
    It prints `session`, `kind`, `gateway`, `listen` (for example
    `127.0.0.1:49731`) and `realm` (for example
    `Gateinto session 3f9c0a1d2b4e5f60`), then shows a message box titled
-   `Gateinto local proxy` with the proxy address, a user name such as
-   `k7mp-2xqa` and a password such as `t9ce-hu4w-38nr`, and the warning to
-   enter them only in the browser's proxy sign-in dialog. Note the port, the
-   realm and the credentials, and record whether the message box was on top
-   and whether its text could be selected or copied. The console must not
+   `Gateinto` whose text starts with `Gateinto local proxy` and gives the
+   proxy address, a user name such as `k7mp-2xqa`, a password such as
+   `t9ce-hu4w-38nr` and the warning to enter them only in the browser's proxy
+   sign-in dialog. Note the port, the realm and the credentials, and record
+   whether the message box was on top and whether its text could be selected
+   or copied. The console must not
    show the user name or password. Choose OK.
 
 2. Start Chrome against that port with a throwaway profile:
@@ -96,11 +97,17 @@ browser. None of those steps has been executed either.
    loopback traffic), how many such requests it sends per tunnel, and
    whether that alone ever leads to `429`.
 
+   A browser that caches a mistyped password and replays it on its parallel
+   `CONNECT`s can reach the limit within seconds and lock the session for
+   60 seconds. Record whether Chrome does this after one mistyped entry, how
+   long it took to reach `429`, and whether it asked again once the lockout
+   ended.
+
 7. With Chrome still open, stop the session with Ctrl+C. Expected: open tabs
    that were using a tunnel lose their connections, and new pages fail
    because the port is closed. Record what Chrome shows. Start a new session
-   (step 1) and note the new port, realm and credentials. All must differ
-   from the old ones.
+   (step 1) and note the new port, realm and credentials. The realm and
+   credentials must differ from the old ones; the port may be reused.
 
 8. Close Chrome completely (Chrome ignores `--proxy-server` for a profile
    that is already running), then start it with the new port and the same
@@ -176,9 +183,10 @@ portal_url = "https://example.com/"
     Expected: it prints `session`, `gateway`, `listen`, `realm`, `profile`
     (a directory under `%LOCALAPPDATA%\Gateinto\profiles`) and `browser`
     (Chrome if installed, else Edge), but no user name or password, and shows
-    a message box titled `Gateinto session <id>` with the proxy address, the
-    credentials, the warning and the hint
-    `gateinto session credentials <id>`. A new browser window opens on
+    a message box titled `Gateinto` whose text starts with
+    `Gateinto session <id>` and gives the proxy address, the credentials, the
+    warning and the hint `gateinto session credentials <id>`. A new browser
+    window opens on
     `https://example.com/` with a fresh profile (no first-run page, no
     default-browser question, none of your bookmarks or extensions) and shows
     the proxy sign-in dialog. Record whether the message box or the browser
@@ -307,7 +315,7 @@ For each browser and version: whether the native dialog appeared on the first
 happened after a restart with the same profile, whether it offered to save the
 credentials, what wrong credentials and the rate limit looked like, whether it
 sent a non-Basic scheme first, what happened to open tabs when the session
-closed, and whether a new session (new port, realm and credentials) asked
+closed, and whether a new session (new realm and credentials) asked
 again or first sent the old cached credentials. For the prompt: whether the
 message box appeared, on top or behind the browser, and whether its text
 could be copied. For the agent:
