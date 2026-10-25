@@ -521,9 +521,9 @@ Design-only, not exercised at all:
 - Browsers with `session_credentials`: whether Chrome and Edge show their
   native sign-in dialog for the `407`, cache the credentials across tunnels
   and restarts, what they do when the session closes, and whether they ask
-  again or resend the old credentials for a new session with a new port and
-  realm. The credentials message box on a real Windows desktop has not been
-  seen either. Manual steps are
+  again or resend the old credentials for a new session with a new realm and
+  new credentials. The credentials message box on a real Windows desktop has
+  not been seen either. Manual steps are
   in [browser-verification.md](browser-verification.md); they have not been
   executed.
 - Chrome and Edge started by the agent, and a `gateinto://` link clicked in

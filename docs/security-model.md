@@ -324,10 +324,13 @@ Guarantees:
   `Basic` (case-insensitive), canonical padded base64 of at most 1024
   characters, decoding to `user:password` with a non-empty password and no
   control characters. Malformed credentials get `400`.
-- **Bounded failures.** After 10 failed attempts within 60 seconds every
-  request to the session gets `429` until the window ends, so guessing is
-  limited to 10 attempts a minute per session. The limiter keeps a counter
-  and a timestamp per session, nothing per client.
+- **Bounded failures.** Wrong and malformed Basic credentials and every
+  other scheme (`Bearer`, `Negotiate`, `NTLM` and so on, which get `407`)
+  count as failed attempts; a request without credentials does not. After 10
+  failed attempts within 60 seconds every request to the session gets `429`
+  until the window ends, so guessing is limited to 10 attempts a minute per
+  session. The limiter keeps a counter and a timestamp per session, nothing
+  per client.
 - **Revocation by closing.** Realm, port, credentials and failure count
   belong to one session. Closing it (browser exit, `gateinto session close`,
   `gateinto stop`, Ctrl+C) closes the port, aborts its established tunnels
@@ -364,7 +367,8 @@ Non-guarantees:
   sends 10 wrong credentials makes the session answer `429` to everyone,
   including the browser with the right credentials, for up to 60 seconds, and
   can renew the lockout for as long as it runs. Closing the session and
-  starting a new one gives a new port.
+  starting a new one gives a new realm and new credentials, and a new
+  failure count.
 - **Basic credentials are sent in clear on loopback.** Anything that can
   capture loopback traffic on the machine can read them. They only protect
   this one session's port.
