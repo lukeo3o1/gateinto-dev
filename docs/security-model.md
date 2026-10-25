@@ -185,12 +185,12 @@ How that is bounded:
   The agent answers one short request per connection with size limits and a
   timeout, and clients give up after 60 seconds.
 - **Isolation of each launch.** Every launch is a new session with its own
-  port, realm, `basic_tofu` state and client certificate, and a new browser
+  port, realm, local proxy credentials and client certificate, and a new browser
   profile directory, so a launched browser does not share cookies, cache or
   saved credentials with the user's normal profile or with another launch.
 - **Cleanup.** When the browser exits, or on `gateinto session close`,
   `gateinto stop` or Ctrl+C, the session's listener, tunnels, upstream TLS
-  connections, `basic_tofu` state and certificate are dropped and the profile
+  connections, local proxy credentials and certificate are dropped and the profile
   directory is deleted. Deletion is limited to directories inside the
   profiles directory that carry Gateinto's marker file and name, does not
   follow links, and never touches other profiles.
@@ -273,61 +273,103 @@ reaches Gateinto at all. Manual verification of the
 dialog on Windows is not done yet; it is covered by unit tests of its text,
 style and answer handling and by integration tests of the agent's side.
 
-### Local proxy authentication (`basic_tofu`)
+### Local proxy authentication (`session_credentials`)
 
 Browser sessions, and the device session with
-`[device_session] auth = "basic_tofu"`, accept only one local credential:
-the first well-formed Basic credential they receive (trust on first use).
-This is local proxy access control, not authorization by the upstream, and it
-does not identify a user.
+`[device_session] auth = "session_credentials"`, accept only the user name
+and password generated for them when they start. This is local proxy access
+control, not authorization by the upstream, and it does not identify a user.
+The trust-on-first-use mode `basic_tofu` it replaces is refused in the
+configuration file, in links and in IPC requests with an error naming
+`session_credentials`, so an old configuration fails closed instead of
+running without local authentication.
 
 Guarantees:
 
-- **One credential per session.** The first well-formed credential is bound
-  atomically. Concurrent first attempts with different credentials bind
-  exactly one; the others are rejected with `407` like any other wrong
-  credential. Afterwards only the identical user name and password are
-  accepted, compared in constant time.
-- **No stored or logged secret.** The session keeps an HMAC-SHA-256 of the
-  decoded credential under a random per-session key, never the credential.
-  The credential is never logged at any level (a test captures `trace` logs
-  and checks that neither the password nor the base64 form appear), never
-  printed, and never forwarded to the upstream. There is no way to provision
-  a credential in advance or to pass one in a URI.
+- **Unguessable, per session.** The user name has 8 and the password 12
+  symbols, drawn by rejection sampling from the system CSPRNG over the
+  31-symbol alphabet `abcdefghjkmnpqrstuvwxyz23456789` and grouped by four
+  (`xxxx-xxxx`, `xxxx-xxxx-xxxx`): 20 log2 31, about 99.1 bits. The alphabet
+  leaves out `i`, `l`, `o`, `0` and `1` so that they can be read and typed
+  without confusion. Every session gets new ones.
+- **An unknown credential never binds.** Nothing is learned from requests:
+  the expected value is fixed when the session starts, and a different
+  credential, however early it arrives, only gets `407` and counts as a
+  failure. Authentication runs right after the request head is parsed and
+  before any DNS lookup, routing decision, upstream connection or use of the
+  device key, so an unauthenticated client reaches none of them.
+- **Constant-time keyed check.** The verifier keeps an HMAC-SHA-256 tag of
+  the issued `user:password` under a random per-session key and compares the
+  tag of each received credential with it in constant time.
+- **Memory only, shown on request.** The credentials live in the memory of
+  the process that runs the session (the agent, `gateinto session browser`
+  or `gateinto proxy`) and of the command that shows them. They are never
+  written to disk, never logged at any level (a test captures `trace` logs
+  and checks that neither the user name, the password nor the base64 form
+  appear), never part of an IPC error message, never shown by
+  `gateinto status` or `gateinto session list`, never accepted from a URI
+  and never forwarded to the upstream. The agent hands them out only in the
+  successful answer to a `launch` or `credentials <id>` request on its
+  per-user endpoint; `gateinto open` and `gateinto session credentials`
+  remove them from what they print and show them in the prompt instead.
+- **A prompt that names the proxy.** On an interactive Windows desktop the
+  prompt is a message box; otherwise it goes to the command's terminal. It
+  names the proxy address the browser's own sign-in dialog shows and says to
+  enter the credentials only there, never in a website's sign-in page or
+  dialog. When there is neither, `gateinto open` names the command that
+  shows them, and the foreground commands close their session and fail
+  rather than serve credentials nobody can see. The presentation lives in
+  `src/prompt.rs` and can be replaced without touching the check.
 - **Strict parsing.** Exactly one `Proxy-Authorization` header, scheme
   `Basic` (case-insensitive), canonical padded base64 of at most 1024
   characters, decoding to `user:password` with a non-empty password and no
-  control characters. Malformed credentials get `400` and bind nothing.
+  control characters. Malformed credentials get `400`.
 - **Bounded failures.** After 10 failed attempts within 60 seconds every
-  request to the session gets `429` until the window ends, so guessing the
-  bound credential is limited to 10 attempts a minute per session. The
-  limiter keeps a counter and a timestamp per session, nothing per client.
-- **Per-session state.** Realm (random per session), port, bound credential
-  and failure count belong to one session. Closing a session discards them;
-  a new session starts with a new port, a new realm and nothing bound.
+  request to the session gets `429` until the window ends, so guessing is
+  limited to 10 attempts a minute per session. The limiter keeps a counter
+  and a timestamp per session, nothing per client.
+- **Revocation by closing.** Realm, port, credentials and failure count
+  belong to one session. Closing it (browser exit, `gateinto session close`,
+  `gateinto stop`, Ctrl+C) closes the port, aborts its established tunnels
+  and drops the credentials and the verifier; the agent then answers
+  `credentials <id>` with `no session <id>`. A browser that cached the old
+  credentials can only reach a closed port, and a new session, even if the
+  system gives it the same port, has a new realm and new credentials, so the
+  cached ones get `407`. Closing is therefore the revocation; there is no
+  separate revoke command, and no expiry or rotation while a session runs.
 
 Non-guarantees:
 
-- **TOFU does not prove which local process connected first.** Any local
-  program, including another user's, that sends a credential to a new
-  session's port before the browser does gets bound instead. The browser then
-  only sees repeated prompts; the remedy is to close the session and start a
-  new one, which is again open to whoever is first. Nothing ties the binding
-  to the browser process.
+- **Lookalike dialogs.** A website can draw a dialog that looks like the
+  browser's proxy sign-in and ask for the credentials. The prompt warns
+  against this and names the proxy address, but nothing technical stops a
+  user from typing them into a page. Credentials entered there are useful to
+  the site's operator only from this machine and only while the session runs,
+  because the port listens on loopback (unless
+  `--unsafe-allow-non-loopback-listen` was given) and closes with the session.
+- **The clipboard.** The prompt does not copy anything, but a user who copies
+  the password puts it where every program of the user, and clipboard history
+  or sync if enabled, can read it.
 - **Not a defense against malware running as the user.** Such a program can
-  read the credential from the browser, or wait for it and race a new
-  session, or simply use the device identity directly.
-- **The rate limit can lock out the legitimate client indefinitely.** A local
-  program that sends 10 wrong credentials makes the session answer `429` to
-  everyone, including the browser with the right credential, for up to 60
-  seconds, and by sending another burst each time the window ends it can
-  renew the lockout for as long as it runs. This is accepted because a local
-  attacker can already take the binding first.
+  ask the agent for the credentials over the per-user endpoint
+  (`gateinto session credentials`), read them from the agent's or the
+  browser's memory or from the prompt, or simply use the device identity
+  directly. The endpoint keeps out other users, not other programs of the
+  same user.
+- **Browser caching and dialogs are not verified.** How Chrome and Edge on
+  Windows show the proxy sign-in dialog for this realm, whether and how long
+  they cache the credentials, and what they do after the session closes has
+  not been verified; see [browser-verification.md](browser-verification.md).
+- **The rate limit can lock out the legitimate client.** A local program that
+  sends 10 wrong credentials makes the session answer `429` to everyone,
+  including the browser with the right credentials, for up to 60 seconds, and
+  can renew the lockout for as long as it runs. Closing the session and
+  starting a new one gives a new port.
 - **Basic credentials are sent in clear on loopback.** Anything that can
-  capture loopback traffic on the machine can read them. The credential only
-  protects this one session's port.
-- **Memory.** The decoded credential and the request head are ordinary heap
-  buffers, dropped after the request is checked but not zeroized.
+  capture loopback traffic on the machine can read them. They only protect
+  this one session's port.
+- **Memory.** The credentials, the decoded request credential and the request
+  head are ordinary heap buffers, not locked and not zeroized when dropped.
 
 ### The tunnel content
 
@@ -398,9 +440,9 @@ Non-guarantees:
   `127.0.0.1`. A
   non-loopback address is refused unless `--unsafe-allow-non-loopback-listen`
   is given on the command line; the configuration file has no key for it.
-  With `[device_session] auth = "basic_tofu"` that flag sends the Basic
-  credential in cleartext over the network, and any host that can reach the
-  port can bind its credential first.
+  With `[device_session] auth = "session_credentials"` that flag sends the
+  Basic credentials in cleartext over the network, where anything on the path
+  can read them.
 - **No secrets or payload in logs.** Tunnel payload, private keys and local
   proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
   listen address, the client's local address and port for each tunnel, tunnel
@@ -419,9 +461,10 @@ Non-guarantees:
 - **Local users and processes.** The device session's loopback listener has
   no authentication by default (`auth = "none"`). Any local process, including
   other users' processes, can use the tunnel and the device identity behind
-  it. `basic_tofu` keeps out only programs that arrive after the first
-  credential was bound; see
-  [above](#local-proxy-authentication-basic_tofu).
+  it. `session_credentials` keeps out programs that do not know the issued
+  credentials, not programs of the same user, which can ask the agent for
+  them; see
+  [above](#local-proxy-authentication-session_credentials).
 - **Administrators and malware running as the user.** They can use or steal
   the identity (a software key can be copied), read traffic before it enters
   the tunnel, change the configuration, add CAs or replace the binary.

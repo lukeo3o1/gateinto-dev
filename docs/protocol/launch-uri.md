@@ -143,7 +143,7 @@ Fields:
 | Name | Required | Value |
 | --- | --- | --- |
 | `profile` | unless `gateway` is present | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
-| `auth` | no | `basic_tofu`, the only local proxy authentication a browser session uses. Default `basic_tofu`. |
+| `auth` | no | `session_credentials`, the only local proxy authentication a browser session uses. Default `session_credentials`. The removed `basic_tofu` is refused with an error naming `session_credentials`. |
 | `route` | no | `gateway` (default) or `mixed`; applies only to this browser session, as described above. |
 | `v` | no | `1`, the format version. Default `1`. |
 | `url` | no | Start page for this launch: an `https://` URL that passes the `portal_url` checks of the configuration file (at most 2048 characters, a host, no user information, no spaces, quotes, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) and whose host is a DNS name or an IP address (below). It must have the same origin (scheme, host, port; port 443 when omitted) as the gateway's portal. |
@@ -200,9 +200,10 @@ Error messages say which rule was broken and never repeat the URI.
    and the gateways added from links, which it reads again for every launch
    (see [Resolution](#resolution)).
 5. For a known gateway it starts a browser session on a new ephemeral
-   loopback port with `basic_tofu`, creates a new browser profile directory
-   and starts Chrome or Edge with that profile, that session's proxy and the
-   start page.
+   loopback port with `session_credentials`, creates a new browser profile
+   directory and starts Chrome or Edge with that profile, that session's proxy
+   and the start page. It returns the session's credentials to `open`, which
+   shows them in a prompt and never prints them.
 6. For a new gateway it starts nothing. It keeps the validated request and
    answers `open` with a one-time confirmation token and the gateway name,
    address and portal origin it validated. `open` checks that these equal
@@ -472,20 +473,25 @@ they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch [<profile>] basic_tofu [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
+| `launch [<profile>] session_credentials [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
 | `approve <token>` | as for a started `launch` |
 | `deny <token>` | none |
 | `list` | `session: <id> <device or browser> <gateway> <listen address>` per session, with ` route=mixed` appended for mixed sessions |
 | `close <id>` | none |
+| `credentials <id>` | `listen: 127.0.0.1:<port>`, `username: <user name>`, `password: <password>`; `error: no session <id>` once the session is closed |
 | `stop` | none; the agent closes every session, then exits |
 
 Mixed launches and their first-time confirmations also include `route: mixed`.
 The token retains the optional selector, portal and route through approval;
 only the gateway entry and optional portal are stored. Profile-based launches
 retain their previous wire format. Gateway-only launches use
-`launch basic_tofu gateway=<host:port>` with no profile placeholder or generated
-name in the request. A legacy profile named `basic_tofu` remains
-`launch basic_tofu basic_tofu`. Canonical optional fields remain ordered
+`launch session_credentials gateway=<host:port>` with no profile placeholder or
+generated name in the request. A legacy profile named `session_credentials`
+remains `launch session_credentials session_credentials`. A request with the
+removed `basic_tofu` gets `error: the basic_tofu local proxy authentication was
+removed; use session_credentials`. Credentials appear only in the answers to a
+started `launch`, `approve` and `credentials`, never in an error, in `list` or
+in what the command line prints. Canonical optional fields remain ordered
 `route`, `url`, `gateway`, `portal`. Older agents reject the new address-only
 form; stop the old agent after upgrading.
 
@@ -495,7 +501,9 @@ are replaced by spaces. Answers are at most 64 KiB. The agent serves at most
 within 10 seconds. A client gives up on an agent that does not answer within
 60 seconds, and on Windows stops retrying a busy pipe after the same time; a
 connection that the agent closes without an answer is reported as such. The command line exposes the requests as `gateinto open`,
-`gateinto session list`, `gateinto session close <id>` and `gateinto stop`.
+`gateinto session list`, `gateinto session close <id>`,
+`gateinto session credentials <id>` (shows the credentials again in the
+prompt and prints nothing) and `gateinto stop`.
 
 `gateinto open` without a running agent starts `gateinto agent` with the same
 `--config` as a detached process (on Windows without a console and without
@@ -522,7 +530,8 @@ accepting connections before it closes its sessions.
 - At most 4 browser sessions at a time; a further launch gets
   `error: 4 browser sessions are already open`.
 - Every accepted launch creates a new, separate session: new port, new realm,
-  new `basic_tofu` state, new profile directory and new browser process.
+  new credentials and failure count, new profile directory and new browser
+  process.
   Launches never reuse or replace an existing session, so the result of a
   launch does not depend on what ran before.
 - A launch is answered only after the browser process has started. If the
@@ -567,8 +576,8 @@ The agent starts the browser without a shell, with these arguments:
   only relays `CONNECT`, so plain `http://` pages other than loopback fail
   with `405`.
 - When the browser process exits, the agent closes the session (listener
-  dropped, tunnels and upstream TLS connections aborted, `basic_tofu` state
-  and certificate discarded) and deletes the profile directory.
+  dropped, tunnels and upstream TLS connections aborted, credentials,
+  verifier and certificate discarded) and deletes the profile directory.
 - `gateinto session close <id>`, `gateinto stop`, and Ctrl+C, Ctrl+Break or
   closing the console of `gateinto agent` (SIGINT or SIGTERM on Unix) kill the browser process, then do the same.
 

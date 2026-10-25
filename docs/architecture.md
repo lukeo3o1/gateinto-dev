@@ -69,7 +69,7 @@ still delay process shutdown. See [DNS work budget](protocol/http-connect.md#dns
      |                                   |
  session 1 (device)                  session 2 (browser)
    listener 127.0.0.1:18736            listener 127.0.0.1:<ephemeral>
-   local auth: none (default)          local auth: basic_tofu, own realm
+   local auth: none (default)          local auth: session_credentials
    own TLS client config + resolver    own TLS client config + resolver
    own client certificate              own client certificate
    own connection limits, tunnels      own connection limits, tunnels
@@ -99,8 +99,9 @@ only its own), so two sessions never present the same self-signed
 certificate; a file or `CurrentUser\My` certificate is the same certificate in
 every session, because only one exists for the key. Each session also has a
 local authentication policy (`proxy::LocalAuth`): `None` accepts every local
-client; `BasicTofu` gives the session its own `proxy::basic_tofu::BasicTofu`
-state, created in `Proxy::bind` and owned by that session only (see below).
+client; `SessionCredentials` makes `Proxy::bind` generate the session's own
+`proxy::SessionCredentials` and a `Verifier` for them, owned by that session
+only (see below).
 
 `SessionManager::close` closes a session: the accept loop stops before it
 accepts anything else, the listener is dropped so its port refuses new
@@ -119,18 +120,24 @@ authentication is `[device_session] auth`, `none` by default.
 `gateinto proxy` starts exactly one device session and runs until Ctrl+C (or
 SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
 `SessionKind::Browser` is a session for one browser: `gateinto session
-browser` starts one on `127.0.0.1:0` with `BasicTofu`, prints its port and
-realm and runs until Ctrl+C, then closes it the same way. The agent (below)
+browser` starts one on `127.0.0.1:0` with `SessionCredentials`, prints its
+port and realm, shows the credentials (see below) and runs until Ctrl+C, then
+closes it the same way. The agent (below)
 starts browser sessions for launch URIs and runs the device session too.
 
-### Local proxy authentication (`basic_tofu`)
+### Local proxy authentication (`session_credentials`)
 
-`BasicTofu` holds, per session: a realm `Gateinto session <16 hex digits>`
-from the system random generator, a random HMAC-SHA-256 key, a
-`OnceLock` for the bound credential's HMAC tag, and a failure counter with
-the time of the first failure in the current window, behind a mutex.
-`Shared::handle` calls `BasicTofu::check` after the request head is parsed
-and before any upstream connection is opened:
+`SessionCredentials::generate` draws a user name of 8 and a password of 12
+symbols from the 31-symbol alphabet `abcdefghjkmnpqrstuvwxyz23456789` by
+rejection sampling from the system random generator, grouped by four with
+hyphens (about 99 bits). `Verifier` holds, per session: a realm
+`Gateinto session <16 hex digits>`, a random HMAC-SHA-256 key, the tag of the
+issued `user:password` under that key, and a failure counter with the time
+of the first failure in the current window, behind a mutex. The session keeps
+the credentials themselves only so that they can be shown
+(`Session::credentials`). `Shared::handle` calls `Verifier::check` right
+after the request head is parsed and before any DNS lookup, routing decision,
+upstream connection or signature with the device key:
 
 1. If the failure window (60 s from its first failure) has passed, the
    counter is reset. If it holds 10 or more failures, the answer is `429`
@@ -141,16 +148,25 @@ and before any upstream connection is opened:
 3. The header is parsed strictly (`http.rs` already refuses a repeated
    header with `400`). Another scheme: `407`. A malformed `Basic` credential:
    `400`.
-4. A well-formed credential is MACed. The first one to fill the `OnceLock`
-   is bound (logged at `info` without the credential) and accepted; any later
-   one is compared with the bound tag in constant time: equal is accepted,
-   different is `407` (logged at `warn`).
+4. A well-formed credential is MACed and its tag compared with the issued
+   one in constant time: equal is accepted, different is `407` (logged at
+   `warn` without the credential). Nothing is ever learned from a request.
 
 Every `407` for a wrong credential or other scheme, and every `400` from
-step 3, counts as a failure. The check runs under the mutex, so concurrent
-first credentials are ordered and exactly one binds. The upstream `CONNECT`
+step 3, counts as a failure. The upstream `CONNECT`
 is built from the target alone, so the local credential never reaches the
-upstream. `ConnectRequest`'s `Debug` output redacts the header value.
+upstream. `ConnectRequest`'s `Debug` output redacts the header value, and
+`SessionCredentials`' `Debug` output redacts both fields.
+
+The credentials are shown by the command that started the session, never by
+the agent: `prompt::show_credentials` uses `MessageBoxW` on an interactive
+Windows desktop, otherwise the terminal (stderr), and returns `false` when
+there is neither. The text (`prompt::credentials_text`) names the proxy
+address and warns against entering the credentials in a website. The agent
+returns them only in a successful `launch` answer and for `credentials <id>`;
+`gateinto open` and `gateinto session credentials` take them out of the
+lines they print (`ipc::without_credentials`) and show them in the prompt.
+Closing the session drops the credentials and the verifier with it.
 
 ## Agent, launch URIs and browser sessions
 
@@ -161,7 +177,7 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
         |  "gateinto.exe" open --config "<file>" -- "%1"
         v
  gateinto open ---- uri::LaunchRequest (strict parse; invalid URI ends here)
-        |  "launch office basic_tofu [url=..] [gateway=..] [portal=..]\n"
+        |  "launch office session_credentials [url=..] [gateway=..] [portal=..]\n"
         |  named pipe \\.\pipe\gateinto-agent-<SID> (Unix socket in tests)
         |  (no agent: spawn detached `gateinto agent --config <file>`, retry)
         v
@@ -173,7 +189,7 @@ upstream. `ConnectRequest`'s `Debug` output redacts the header value.
         |       <- gateinto open asks the user (MessageBoxW / terminal)   |
         |       <- "approve <token>": LinkedStore::add, then -------------|
         |       <- "deny <token>": forget the request                     v
-        |-- SessionManager::start(Browser, 127.0.0.1:0, BasicTofu)
+        |-- SessionManager::start(Browser, 127.0.0.1:0, SessionCredentials)
         |-- browser::ProfileDir::create(<profiles>/<id>-<random>, marker)
         |-- chrome.exe --user-data-dir=... --proxy-server=http://127.0.0.1:<port> ... <start page>
         '-- watch task: browser exit or close request
@@ -209,7 +225,7 @@ The full protocol, limits and guarantees are in
   damaged stored entries fail closed.
 - `prompt` asks the user in `gateinto open`: `MessageBoxW` on an interactive
   Windows desktop, otherwise a `yes` prompt on a terminal, otherwise it
-  refuses.
+  refuses. It also shows the session credentials the same way.
 - `ipc` holds the request and response types (`Request`, `Response`), their
   one-line text encoding with size limits, the per-user `Endpoint` (a named
   pipe named after the user's SID on Windows, owned by the user, with a DACL
@@ -231,7 +247,9 @@ The full protocol, limits and guarantees are in
   proxy configuration of a browser session; `main.rs` implements it with the
   loaded configuration file and `LinkedStore` (read again for every launch),
   the tests with in-process fixtures. The agent forces the session to
-  `127.0.0.1:0` and `BasicTofu` whatever the profile says.
+  `127.0.0.1:0` and `SessionCredentials` whatever the profile says, and
+  answers a launch with the session's credentials, which `gateinto open`
+  shows.
 - A browser's watch task waits for the browser process to exit or for a
   close request (`close <id>`, `stop`, Ctrl+C), kills the browser in the
   second case, closes the session, deletes the profile directory (retrying
@@ -254,12 +272,12 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
 | `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting and purging. |
-| `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
+| `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
@@ -270,7 +288,7 @@ The full protocol, limits and guarantees are in
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
-| `src/proxy/basic_tofu.rs` | `basic_tofu` local proxy authentication of one session: realm, strict Basic and base64 parsing, binding the first credential as a keyed hash, constant-time comparison, failure rate limit. |
+| `src/proxy/session_credentials.rs` | `session_credentials` local proxy authentication of one session: credential generation, realm, strict Basic and base64 parsing, keyed constant-time comparison with the issued credentials, failure rate limit. |
 | `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, on-demand PING liveness checks, certificate rotation and owned connection drivers. |
 | `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
@@ -297,9 +315,9 @@ local `200`.
 | Upstream connect, handshake or reply timeout | `504` |
 | Method other than `CONNECT` | `405` with `Allow: CONNECT` |
 | Malformed request | `400` |
-| `basic_tofu`: no credential, another scheme, or a credential other than the bound one | `407` with `Proxy-Authenticate: Basic realm="<session realm>", charset="UTF-8"` |
-| `basic_tofu`: malformed `Basic` credential or repeated `Proxy-Authorization` | `400` |
-| `basic_tofu`: 10 failures within 60 s | `429` with `Retry-After`, until the 60 s are over |
+| `session_credentials`: no credential, another scheme, or a credential other than the issued one | `407` with `Proxy-Authenticate: Basic realm="<session realm>", charset="UTF-8"` |
+| `session_credentials`: malformed `Basic` credential or repeated `Proxy-Authorization` | `400` |
+| `session_credentials`: 10 failures within 60 s | `429` with `Retry-After`, until the 60 s are over |
 | Request header block over the limit | `431` |
 | Request not complete within the connect timeout | `408` |
 | Too many connections | `503` |
@@ -317,7 +335,7 @@ side.
 | Reading the local request | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s |
 | Upstream TCP connect, TLS handshake and `CONNECT` reply together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s (separate budget) |
 | Tunnel without traffic in either direction | `--idle-timeout-secs` / `idle_timeout_seconds` | 300 s |
-| `basic_tofu` failures before `429` (`Limits::local_auth_failures`) | none | 10 within 60 s |
+| `session_credentials` failures before `429` (`Limits::local_auth_failures`) | none | 10 within 60 s |
 | `Proxy-Authorization` Basic token | none | 1024 base64 characters |
 
 Limits apply to each session separately. The listen address must be loopback

@@ -25,9 +25,11 @@ meant to protect, against whom, and what it does not protect.
   listener has no authentication by default. Any process on the machine that
   can open a TCP connection to `127.0.0.1`, including processes of other
   users, can use it and the device identity behind it. A session with
-  `basic_tofu` (every browser session) accepts only the first Basic
-  credential it receives, so it excludes other local processes only if the
-  intended client is first.
+  `session_credentials` (every browser session) accepts only the random user
+  name and password generated for it, so it excludes local processes that do
+  not know them. The credentials are shown to the user, who types them into
+  the browser's proxy sign-in dialog; a program running as the user can get
+  them from the agent or from memory.
 - **Websites and the launch URI.** Any web page, e-mail or document can open
   a `gateinto://` link. When the handler is registered, the URI reaches
   `gateinto open` and then the agent as untrusted input. It can name a known
@@ -71,15 +73,16 @@ meant to protect, against whom, and what it does not protect.
 | An attacker on the network impersonates the upstream proxy or downgrades TLS. | TLS 1.3 only (`rustls` without `tls12`). The upstream certificate and name are verified with WebPKI against the Mozilla roots or `--ca-file`. There is no option to disable verification. |
 | Recorded traffic is decrypted later by a quantum computer. | The hybrid key exchange `X25519MLKEM768` is preferred, with `X25519` as fallback (`hybrid_preferred`). This protects the confidentiality of the outer TLS session only if the upstream also supports it. It is not a post-quantum signature: certificates and the device key use classical ECDSA or RSA, so authentication is not quantum resistant. |
 | An attacker on the network, or a misconfigured upstream, downgrades the key exchange to classical `X25519`. | `hybrid_required` offers only `X25519MLKEM768`, so the handshake fails (`502`) instead of downgrading, and every tunnel is also checked after the handshake and refused unless the negotiated group is one the mode offers. TLS 1.3 signs the handshake transcript, so an attacker without the server key cannot alter the negotiated group in the other modes either; `hybrid_preferred` still accepts `X25519` from an upstream that only offers it. `check-upstream` shows which group an upstream negotiates. |
-| Another local program uses a browser session's port. | `basic_tofu`: the session binds the first well-formed Basic credential and then answers `407` to any other credential, compared in constant time, with exactly one winner among concurrent first attempts. Failures beyond 10 a minute get `429`. A program that is first still wins; the user then starts a new session (new port, realm and state). |
-| A website uses a `gateinto://` link to add a trust anchor or TLS setting, inject a credential, change a known gateway, open an arbitrary page or run a command. | The URI has no field for a CA, TLS mode, client certificate, server name, listen address, credential or command; `auth` is only `basic_tofu`. A link that disagrees with the host, port or portal of a known gateway is refused, and the configuration file is never written. `url` must have the origin of the gateway's portal. Strict parser (allowed characters, no duplicates or unknown fields, 8192 bytes), applied by `open` and again by the agent. The handler passes the URI after `--` as one argument and nothing starts a shell. |
+| Another local program uses a browser session's port. | `session_credentials`: the session accepts only the user name and password generated for it from the system CSPRNG (about 99 bits); any other credential gets `407` and is never learned, however early it arrives. The check is an HMAC-SHA-256 under a per-session key compared in constant time, and it runs before any DNS lookup, routing decision, upstream connection or device key signature. Failures beyond 10 a minute get `429`. Closing the session revokes the credentials: the port closes, its tunnels end, and a new session has new credentials. |
+| A website phishes the session credentials with a page or dialog that imitates the browser's proxy sign-in. | The prompt that shows the credentials names the proxy address the real dialog shows and says to enter them only there, never in a website. Credentials typed into a page are useful only from this machine, because the port listens on loopback, and only until the session closes. Not prevented technically (see residual risks). |
+| A website uses a `gateinto://` link to add a trust anchor or TLS setting, inject a credential, change a known gateway, open an arbitrary page or run a command. | The URI has no field for a CA, TLS mode, client certificate, server name, listen address, credential or command; `auth` is only `session_credentials`, and the removed `basic_tofu` is refused. A link that disagrees with the host, port or portal of a known gateway is refused, and the configuration file is never written. `url` must have the origin of the gateway's portal. Strict parser (allowed characters, no duplicates or unknown fields, 8192 bytes), applied by `open` and again by the agent. The handler passes the URI after `--` as one argument and nothing starts a shell. |
 | A website uses a `gateinto://` link to route the user through its own proxy (deliberate, user-approved deviation from the plan's rule that a URI never introduces a proxy host). | Only after an explicit first-time confirmation in `gateinto open` that names the profile, gateway `host:port` and portal origin or `none`, with OK and Cancel, Cancel as the default and no access keys, so no single keystroke approves it; no desktop or terminal means refusal. The agent never prompts, rate-limits before asking, keeps one confirmation open and needs the one-time token of that request (which binds the answer to the request but does not prove a person gave it). The gateway gets only default settings (public roots, host as server name); it is stored separately, listed with its source and removable with `gateinto gateway forget`. Remaining: phishing and the device certificate's SPKI (see residual risks). |
 | A website floods the user with launches or confirmation dialogs. | At most 5 launch requests per minute (confirmations included) and 4 browser sessions at a time per agent; at most one confirmation is open at a time. |
-| A launch leaks state between browser sessions or into the user's profile. | Each launch gets a new session (port, realm, `basic_tofu` state, certificate) and a new browser profile directory, deleted when the browser exits or the session is closed. |
+| A launch leaks state between browser sessions or into the user's profile. | Each launch gets a new session (port, realm, credentials, failure count, certificate) and a new browser profile directory, deleted when the browser exits or the session is closed. |
 | Profile cleanup deletes the wrong directory. | Only directories directly in the profiles directory, with Gateinto's name pattern and marker file, are deleted; links are not followed. |
 | Another user or a remote machine controls the agent. | Per-user named pipe (named after the SID, first instance, remote clients rejected, owned by the user, DACL granting access only to the user and SYSTEM); clients refuse a pipe owned by another user; `0600` socket in a `0700` directory owned by the user on Unix. |
 | URI registration clobbers another application's handler or leaves a broken one. | Only `HKCU\Software\Classes\gateinto` is written; an existing non-Gateinto handler is refused; a failed first registration is rolled back; unregistration removes only a Gateinto handler. |
-| Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level; the session keeps only a keyed hash of its bound credential. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
+| Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level. Session credentials exist only in memory and are never written to disk, part of an IPC error message or shown by `gateinto status`; the session verifies against an HMAC tag of them. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
 | An installer running as `SYSTEM` or another account creates a device key the user cannot use, or a second identity. | The MSI is per user and has no custom action that touches a key. `gateinto setup` refuses LocalSystem, LocalService and NetworkService and reuses an existing key. The agent and `open` never create a key. |
 | An uninstall, a silent uninstall or a script destroys the device identity. | Uninstall keeps the key and the config; they are not MSI components. `reset --purge-device-identity` requires the SPKI prefix, refuses without a terminal unless `--confirm-spki` matches, and deletes only the named Gateinto key after rechecking its SPKI. |
 | Uninstall cleanup deletes the user's own browser data. | The uninstaller only runs `gateinto stop --remove-stale-profiles`, which deletes Gateinto-marked profile directories under `%LOCALAPPDATA%\Gateinto\profiles`, never the user's Chrome or Edge profiles. |
@@ -88,12 +91,25 @@ meant to protect, against whom, and what it does not protect.
 ## Residual risks
 
 - Any local process, including other users' processes, can use the loopback
-  proxy of a session without local authentication. With `basic_tofu`, a local
-  process that reaches a new session before the browser binds its own
-  credential; trust on first use does not prove which process was first. It
-  can also make the session answer `429` to everyone for up to a minute by
-  sending wrong credentials. Do not run Gateinto on shared hosts you do not
-  trust.
+  proxy of a session without local authentication. Do not run Gateinto on
+  shared hosts you do not trust.
+- With `session_credentials`, a local process that does not know the
+  credentials can still make the session answer `429` to everyone, the
+  browser included, for up to a minute at a time by sending wrong ones.
+  Closing the session and starting a new one gives a new port.
+- A website can draw a dialog or page that looks like the browser's proxy
+  sign-in and ask for the session credentials. The prompt warns against it
+  and names the proxy address, but nothing stops a user from typing them in.
+- A user who copies the password puts it on the clipboard, where every
+  program of the user, and clipboard history or sync if enabled, can read it.
+- Session credentials give no isolation from programs running as the same
+  user: they can ask the agent for them over its IPC endpoint
+  (`gateinto session credentials`), read the prompt or process memory, or
+  use the device identity directly. The credentials are not zeroized.
+- How Chrome and Edge on Windows show the proxy sign-in dialog for a
+  session, whether and how long they cache the credentials, and what they do
+  after the session closes has not been verified; see
+  [browser-verification.md](browser-verification.md).
 - Administrators and malware running as the user can use or steal the
   identity, read traffic before it enters the tunnel, or redirect Gateinto to
   another upstream.
