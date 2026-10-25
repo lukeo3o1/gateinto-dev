@@ -182,23 +182,30 @@ portal_url = "https://example.com/"
 
     Expected: it prints `session`, `gateway`, `listen`, `realm`, `profile`
     (a directory under `%LOCALAPPDATA%\Gateinto\profiles`) and `browser`
-    (Chrome if installed, else Edge), but no user name or password, and shows
-    a message box titled `Gateinto` whose text starts with
-    `Gateinto session <id>` and gives the proxy address, the credentials, the
-    warning and the hint `gateinto session credentials <id>`. A new browser
+    (Chrome if installed, else Edge), but no user name or password, and no
+    message box: on Windows the session offers `os_user`, which accepts
+    the browser because it runs in the session's job object as the current
+    user. If the agent logged a warning that the browser could not be put
+    in a job object, the session accepts only session credentials and the
+    message box with them appears instead; record that. A new browser
     window opens on
     `https://example.com/` with a fresh profile (no first-run page, no
-    default-browser question, none of your bookmarks or extensions) and shows
-    the proxy sign-in dialog. Record whether the message box or the browser
-    window ended up in front. Record the browser, version and what the window
+    default-browser question, none of your bookmarks or extensions) and
+    loads it without a proxy sign-in dialog. Record whether any dialog
+    appeared. Record the browser, version and what the window
     showed. If your normal Chrome was already open, record that it was not
     affected and that the new window belongs to a separate process
     (Task Manager).
 
-14. Sign in with the credentials from the message box as in step 3 and
-    browse to a few HTTPS sites. Expected: as in steps 3 and 4. Then run
-    `gateinto session credentials <id>`: the same message box appears again,
-    and the console prints nothing. Run `gateinto status`
+14. Browse to a few HTTPS sites. Expected: they load without a dialog. Then
+    run `gateinto session credentials <id>`: a message box titled `Gateinto`
+    whose text starts with `Gateinto session <id>` gives the proxy address,
+    the credentials and the warning, and the console prints nothing. These
+    credentials are the fallback when `os_user` denies a connection, for
+    example from a client outside the browser's job; the agent then logs a
+    warning naming `gateinto session credentials` for the first denial of
+    the session (later ones at debug level) and the client gets the Basic
+    `407`. Run `gateinto status`
     and `gateinto session list`: neither shows the credentials.
 
 15. Run `gateinto session list`. Expected: the device session (if
@@ -216,8 +223,9 @@ portal_url = "https://example.com/"
 
 17. Run step 13 twice in a row. Expected: two windows, two different
     sessions, ports, realms, credentials and profile directories, each
-    prompting separately; the credentials of one session are refused by the
-    other. Then run `gateinto session close <id>` for one of them. Expected:
+    loading without a dialog; the credentials of one session, shown by
+    `gateinto session credentials <id>`, are refused by the other. Then run
+    `gateinto session close <id>` for one of them. Expected:
     that browser window disappears, its profile directory is gone,
     `gateinto session credentials <id>` answers `no session <id>`, and the
     other window keeps working.

@@ -70,7 +70,7 @@ still delay process shutdown. See [DNS work budget](protocol/http-connect.md#dns
  session 1 (device)                  session 2 (browser)
    listener 127.0.0.1:18736            listener 127.0.0.1:<ephemeral>
    local auth: session_credentials     local auth: session_credentials
-     (default; none only if set)
+     (default; none only if set)         (and os_user on Windows)
    own TLS client config + resolver    own TLS client config + resolver
    own client certificate              own client certificate
    own connection limits, tunnels      own connection limits, tunnels
@@ -118,7 +118,8 @@ that certificate. Other sessions are not affected.
 
 Kinds: `SessionKind::Device` is the long-running session for background
 programs, configured by `[device_session]` (or the command line); its local
-authentication is `[device_session] auth`, `session_credentials` by default.
+authentication is `[device_session] auth`, `session_credentials` by default,
+or `os_user` (Windows), or a list of both, or `none`.
 `gateinto proxy` starts exactly one device session and runs until Ctrl+C (or
 SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
 `SessionKind::Browser` is a session for one browser: `gateinto session
@@ -170,6 +171,46 @@ returns them only in a successful `launch` answer and for `credentials <id>`;
 `gateinto open` and `gateinto session credentials` take them out of the
 lines they print (`ipc::without_credentials`) and show them in the prompt.
 Closing the session drops the credentials and the verifier with it.
+
+### Local proxy authentication (`os_user`)
+
+`Authenticator` (`src/proxy/local_auth.rs`) combines the session's methods:
+the `session_credentials` verifier, an `Owners` lookup for `os_user`, or
+both. `Shared::handle` sets one deadline for the connection (the connect
+timeout) and, before reading the request, asks `Authenticator::os_user` about
+the client's address and the listener's address; the lookup runs in
+`spawn_blocking`. Reading the request head shares the same deadline. Then
+`Authenticator::check` decides: a passed `os_user` opens the tunnel; otherwise
+the `session_credentials` verifier decides as before when it is offered, and
+`os_user` alone answers `403`. A lookup past the deadline answers `408`. The
+first denial of a session logs a warning, later ones a debug line; denials
+never touch the verifier's failure count.
+
+`src/proxy/os_user.rs` holds the denial reasons, the `Owners` trait and the
+matching of TCP table rows to a connection (for an IPv4 client, the IPv6
+table is also searched for an IPv4-mapped row); tests use a fake `Owners`.
+`src/proxy/os_user/windows.rs` is the Windows lookup: `GetExtendedTcpTable`
+with `TCP_TABLE_OWNER_PID_CONNECTIONS`, `OpenProcess`, a second table lookup
+while the process handle is held, `OpenProcessToken`, `EqualSid` against the
+agent's own user SID and, when the session has a job, `IsProcessInJob`.
+
+On Windows the agent creates one job object per browser session (`src/job.rs`:
+`CreateJobObjectW` without a name or inheritable handle, with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), passes it to the session as
+`Config::os_user_job`, and starts the browser in it with `CreateProcessW` and
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, or, when that fails, with `CREATE_SUSPENDED`,
+`AssignProcessToJobObject` and `ResumeThread`. Stopping the browser process, or
+the browser exiting, terminates the job and waits up to 5 seconds until it has
+no active process, before the session closes and the profile is removed; a job
+still not empty then is logged as a warning. Dropping the browser process
+without stopping it terminates the job and leaves that wait to the background.
+The waits and the browser start run on the blocking thread pool. Browser
+sessions in a job offer `os_user` and `session_credentials`; their `launch`
+answers carry no credentials, so `gateinto open` shows no prompt, and
+`credentials <id>` still returns them. When no job can be created or the browser
+cannot be put in one, the agent logs one warning for that launch, closes that
+attempt's session and starts a new one with only `session_credentials` and the
+browser outside any job; its `launch` answer carries the credentials.
 
 ## Agent, launch URIs and browser sessions
 
@@ -292,6 +333,10 @@ The full protocol, limits and guarantees are in
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/session_credentials.rs` | `session_credentials` local proxy authentication of one session: credential generation, realm, strict Basic and base64 parsing, keyed constant-time comparison with the issued credentials, failure rate limit. |
+| `src/proxy/local_auth.rs` | The configured local authentication methods (`LocalAuth`) and the per-connection decision between `os_user` and `session_credentials`. |
+| `src/proxy/os_user.rs`, `src/proxy/os_user/windows.rs` | `os_user`: denial reasons, the owner lookup interface, TCP table row matching, and the Windows lookup of the owning process, its user SID and its job. |
+| `src/job.rs` | Job objects for browser sessions and starting a process inside one (Windows only); command-line quoting. |
+| `src/token.rs` | The current process token and the user SID of a token (Windows only), shared by the named pipe, the elevation check and `os_user`. |
 | `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, on-demand PING liveness checks, certificate rotation and owned connection drivers. |
 | `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
@@ -321,6 +366,9 @@ local `200`.
 | `session_credentials`: no credential, another scheme, or a credential other than the issued one | `407` with `Proxy-Authenticate: Basic realm="<session realm>", charset="UTF-8"` |
 | `session_credentials`: malformed `Basic` credential or repeated `Proxy-Authorization` | `400` |
 | `session_credentials`: 10 failures within 60 s | `429` with `Retry-After`, until the 60 s are over |
+| `os_user` denied, with `session_credentials` offered too | as `session_credentials` without a credential: `407` with the `Basic` challenge |
+| `os_user` denied, as the only method | `403` |
+| `os_user` lookup not finished within the connect timeout | `408` |
 | Request header block over the limit | `431` |
 | Request not complete within the connect timeout | `408` |
 | Too many connections | `503` |
@@ -335,10 +383,10 @@ side.
 | --- | --- | --- |
 | Concurrent connections per session, including those still sending their request | `--max-tunnels` / `max_concurrent_tunnels` | 64 |
 | Request and upstream response header block | `--max-header-bytes` / `header_max_bytes` | 16384 bytes |
-| Reading the local request | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s |
+| The `os_user` check and reading the local request together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s |
 | Upstream TCP connect, TLS handshake and `CONNECT` reply together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s (separate budget) |
 | Tunnel without traffic in either direction | `--idle-timeout-secs` / `idle_timeout_seconds` | 300 s |
-| `session_credentials` failures before `429` (`Limits::local_auth_failures`) | none | 10 within 60 s |
+| `session_credentials` failures before `429` (`Limits::local_auth_failures`); `os_user` denials are not counted | none | 10 within 60 s |
 | `Proxy-Authorization` Basic token | none | 1024 base64 characters |
 
 Limits apply to each session separately. The listen address must be loopback

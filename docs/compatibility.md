@@ -113,6 +113,7 @@ Locally on Linux:
 | Configuration file: every section and key, defaults, unknown keys and sections (including the earlier `[listen]`, `[upstream]` and `[tls]`) rejected, invalid values rejected, gateway names limited to 1 to 64 characters from `[A-Za-z0-9_-]` (as table keys, in `[device_session] gateway` and for `--gateway`), a missing or incomplete upstream is an error naming the gateway and `--upstream-host`/`--upstream-port`, the device session uses `[device_session] gateway` or the only gateway, several gateways without `[device_session] gateway` and a reference to an unknown gateway are errors listing the configured gateways, gateway lookup by name reads only the loaded file, flags override the selected gateway key by key and leave the others unchanged, relative paths in every gateway resolve against the file, errors name the file, `config.example.toml` parses. Through the binary: `proxy`, `check-upstream`, `key init` and `key info` read `--config`; flags override it; `proxy` relays through the device session's gateway; `check-upstream --gateway` checks the named gateway, applies flags to it and names the file and the configured gateways for an unknown one; `[limits] max_concurrent_tunnels` and its `--max-tunnels` override take effect; a non-loopback `[device_session] listen` is refused without `--unsafe-allow-non-loopback-listen` and binds with it; there is no file key that allows it. | Unit tests in `src/config.rs`; `tests/config_cli.rs`; `tests/cli.rs`. |
 | Sessions: several sessions in one process each bind their own loopback listener (ephemeral ports differ), build their own TLS client configuration and resolver, and with a self-signed source issue their own certificate, so the upstream fixture sees one fingerprint per session over several alternating tunnels, the same SPKI for all, and never the source's or the other session's certificate, on one gateway and on two gateways (each session reaching only its own upstream). Closing a session refuses new connections on its port without reaching the upstream, aborts its established tunnels, and leaves the other session's tunnels and new tunnels working with their own certificate; closing every session refuses every port. A required self-signed certificate that cannot be issued for a session fails its start; an optional one starts the session without a client certificate. A non-loopback listen address still needs the opt-in. | `tests/sessions.rs`; unit tests `a_reissue_has_its_own_certificate_for_the_same_key` in `src/identity/certificates.rs` and `a_session_gets_its_own_self_signed_certificate_but_shares_a_fixed_one` in `src/identity/client_cert.rs`. |
 | `session_credentials`: the user name is the fixed `gateinto` and any other is refused; generated passwords are grouped, drawn uniformly from the 31-symbol alphabet and fresh per session; a `CONNECT` without credentials gets `407` with `Proxy-Authenticate: Basic realm="Gateinto session <hex>", charset="UTF-8"` and reaches no upstream; the issued credentials work for many sequential and concurrent tunnels and are not forwarded upstream; an unknown credential gets `407`, also when it is the first one, and never starts to work; a rejected request causes no DNS lookup, routing decision or gateway connection; malformed credentials get `400`; the failure limit answers `429` with `Retry-After` even for the issued credentials; sessions have distinct credentials that work only on their own port; closing a session ends its tunnels, closes its port, and a new session's credentials differ so the old ones get `407`; `trace` logs contain neither the password nor a base64 credential. Through the binary: `session browser` listens on an ephemeral loopback port, prints `listen` and `realm` but not the credentials, shows them in the prompt, and fails closed when there is nowhere to show them; two processes have separate ports, realms and credentials; `proxy` uses `session_credentials` without an `auth` key and with `[device_session] auth = "session_credentials"`, and relays without credentials only with an explicit `auth = "none"`; `basic_tofu` in the configuration file, a link or an IPC request is refused with an error naming `session_credentials`. | Unit tests in `src/proxy/session_credentials.rs`, `src/http.rs`, `src/prompt.rs`, `src/config.rs`, `src/uri.rs` and `src/ipc.rs`; `tests/session_credentials.rs`; `tests/session_credentials_logs.rs`; `tests/config_cli.rs`. The prompt is captured through a test hook; the Windows message box is only type-checked. |
+| `os_user`: `auth` takes one method or a list, a list names each method once, is not empty and does not combine `none`; `os_user` fails to load outside Windows, and the list error outside Windows does not offer it; TCP table rows decode addresses and network-order ports, and the owner is the row whose local end is the client and whose remote end is the listener, also for IPv6 with a scope and IPv4-mapped addresses, an IPv4 client is also looked up as an IPv4-mapped row in the IPv6 table, rows without an owning process lose to rows with one, and a row count beyond the table buffer is a lookup error; with a fake owner lookup, the lookup sees the client and listener addresses, a passed check tunnels without credentials, every denial falls back to the exact `Basic` `407` when `session_credentials` is offered (where the issued credentials still pass) and is `403` with `Connection: close` when `os_user` is alone, denials never count toward `429` while wrong session credentials still do, a lookup that outlasts the connect timeout gets `408` without waiting for it and is logged, only the first denial of a session is a warning, and no lookup happens without `os_user`; browser sessions offer `os_user` with `session_credentials` on Windows only when the browser is in a job and their launch answers carry no credentials then, while a browser without a job gets only `session_credentials` and its launch answer carries them; when putting the browser in its job fails, the agent closes that attempt's session, logs one warning and starts the browser again without a job in a session that accepts only `session_credentials`, and its launch answer carries the credentials; binding a proxy with `os_user` fails outside Windows; job command lines quote arguments for the Microsoft C runtime and refuse NUL. | Unit tests in `src/config.rs`, `src/proxy/os_user.rs`, `src/proxy/local_auth.rs`, `src/proxy/mod.rs`, `src/job.rs` and `src/agent.rs`; `tests/agent.rs`, `tests/launch.rs`. The real lookup and job are exercised only by `tests/os_user_windows.rs` (the current user tunnels without credentials, a connection from outside a job gets `403`, a process started in the job tunnels and the upstream sees its `CONNECT`), `tests/job_windows.rs` (killing the browser process ends its children and leaves the job with no active process; dropping it empties the job in the background on a runtime and before returning outside one) and a unit test in `src/job.rs` (the suspended-and-assign fallback runs the process inside the job), which have been type-checked for Windows but not run. |
 | Launch URIs and the agent, on Linux with a Unix socket and a fake browser: the strict URI grammar and its rejections; `open` refusing invalid URIs before any agent exists, starting a detached agent, and later calls reaching it; the agent re-validating requests, refusing unknown profiles, malformed and oversized requests, launches beyond 5 a minute (a lower limit in the test) and beyond the session cap; each launch starting a new session and a browser with its own marked profile directory, the session's proxy and the configured `portal_url` or `about:blank`; a tunnel with the issued session credentials through the launched session; the credentials returned to `open` and shown in the prompt but not printed, shown again by `session credentials <id>` until the session closes, then refused with `no session <id>`; `session close` ending the session's tunnels; the browser's exit, `session close`, `stop`, SIGINT and SIGTERM closing the session and deleting the profile; stale profiles swept at agent start without touching other directories; a second agent refused; the device session run by the agent, which answers `407` without credentials by default, tunnels with the credentials from `session credentials <id>`, and accepts any client only with an explicit `auth = "none"`. The registration command string and its recognition. | `tests/agent.rs`, `tests/launch.rs`; unit tests in `src/uri.rs`, `src/ipc.rs`, `src/agent.rs`, `src/browser.rs`, `src/registration.rs`. Linux only so far; the Windows paths (named pipe, registry, SID) are type-checked. |
 | `key init` flags override `[device_key] software_fallback_on_first_create` in both directions (`--no-software-fallback` over `true`, `--software-fallback` over `false`), the default allows fallback, and the two flags cannot be combined. | Unit tests in `src/main.rs`. |
 | The `[default: ...]` values in `--help` match `DEFAULT_LISTEN`, the limit defaults, `DEFAULT_KEY_NAME`, the default backend, TLS mode and client certificate mode. Temporarily changing `DEFAULT_KEY_NAME` made the test fail. | `tests/cli.rs`: `help_defaults_match_the_real_defaults`. |
@@ -479,6 +480,54 @@ uninstall, the Windows 10/11 matrix, an upgrade between two versions, the
 logon autostart starting an agent at a real logon, and a `gateinto://` link
 clicked in a real browser after installing are manual and not verified. There
 is no WinGet package.
+
+## Local proxy authentication (`os_user`)
+
+`os_user` is Windows only. For each connection Gateinto finds the process
+that owns the client's end in the TCP connection table and accepts the
+connection only when that process's token has the same user SID as its own
+(`EqualSid`); in browser sessions the process must also be inside the job
+object the browser was started in. The client sends no credentials, so any
+client works, whatever proxy authentication it supports. Outside Windows a
+configuration naming it fails to load.
+
+The browser is started in its job with `PROC_THREAD_ATTRIBUTE_JOB_LIST`
+(Windows 10 and later). Where that fails, the agent creates the browser
+suspended, assigns it to the job and resumes it; where that fails too (for
+example on Windows 7, which does not allow nested jobs, when the agent
+itself runs in a job), it logs one warning for that launch, closes the
+session it had started and starts the browser without a job, in a new session
+that accepts only `session_credentials`, so `gateinto open` shows the
+credentials. The fallback and the launch without a job are not
+verified on real Windows 7 or 8.1.
+
+Results of manual checks in Windows Sandbox with a local account, using a
+test probe that performs the same lookup (versions not recorded). Windows
+Sandbox gives a medium-integrity process a restricted token rather than a
+real UAC linked token, so the elevation results are approximate:
+
+- Edge started by the probe inside a job: every connection came from
+  `msedge.exe`, inside the job, with the same SID, and was accepted. Lookups
+  took about 0.2 to 3.7 ms and always found the row on the first attempt.
+- The probe at medium integrity with an elevated `curl.exe` client of the
+  same user: the lookup, `OpenProcess` and `OpenProcessToken` worked, and the
+  client was accepted.
+- The probe elevated with a medium-integrity `curl.exe` client of the same
+  user: accepted.
+- Edge also sends plain HTTP `GET` requests through the proxy (network time,
+  update downloads); Gateinto answers them `405` as before.
+
+With a real UAC split token, a Gateinto that is not elevated may be unable
+to open an elevated client's process or token. The check fails closed, so
+such a client may get `403`, or the `Basic` challenge when
+`session_credentials` is offered. This is not verified.
+
+Not verified: Chrome inside the job, a real UAC split token, domain-joined
+machines and domain accounts, browsers launched by the Gateinto agent itself
+(rather than by the probe), the suspended-and-assign fallback and the launch
+without a job on real Windows 7 and 8.1, and `tests/os_user_windows.rs`,
+`tests/job_windows.rs` and the Windows unit test in `src/job.rs` on Windows
+CI.
 
 ## Unverified
 
