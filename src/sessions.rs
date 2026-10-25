@@ -94,6 +94,7 @@ pub struct Session {
     route: proxy::Route,
     local_addr: SocketAddr,
     realm: Option<String>,
+    credentials: Option<proxy::SessionCredentials>,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -121,6 +122,10 @@ impl Session {
 
     pub fn realm(&self) -> Option<&str> {
         self.realm.as_deref()
+    }
+
+    pub fn credentials(&self) -> Option<&proxy::SessionCredentials> {
+        self.credentials.as_ref()
     }
 
     async fn close(self) {
@@ -154,6 +159,7 @@ impl SessionManager {
             .map_err(SessionError::Proxy)?;
         let local_addr = proxy.local_addr();
         let realm = proxy.realm().map(str::to_owned);
+        let credentials = proxy.credentials().cloned();
         if let Some(realm) = &realm {
             span.in_scope(|| info!(realm, "local proxy authentication: basic_tofu"));
         }
@@ -169,6 +175,7 @@ impl SessionManager {
             route,
             local_addr,
             realm,
+            credentials,
             close,
             task,
         };

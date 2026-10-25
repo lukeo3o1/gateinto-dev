@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aws_lc_rs::rand::SystemRandom;
 use rustls::RootCertStore;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -31,11 +32,13 @@ pub(crate) mod h2;
 mod pool;
 mod relay;
 mod routing;
+mod session_credentials;
 
 pub use routing::Route;
 
-pub use basic_tofu::FailureLimit;
 use basic_tofu::{BasicTofu, Verdict};
+use session_credentials::Verifier;
+pub use session_credentials::{FailureLimit, SessionCredentials};
 
 pub const MAX_TUNNELS: u32 = h2::MAX_STREAMS;
 
@@ -81,6 +84,7 @@ pub enum LocalAuth {
     #[default]
     None,
     BasicTofu,
+    SessionCredentials,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +130,7 @@ impl std::error::Error for Error {}
 
 pub struct Proxy {
     listener: TcpListener,
+    credentials: Option<SessionCredentials>,
     shared: Arc<Shared>,
 }
 
@@ -213,6 +218,7 @@ struct Shared {
     pool: pool::Pool,
     route: Route,
     basic_tofu: Option<BasicTofu>,
+    verifier: Option<Verifier>,
     limits: Limits,
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
@@ -251,10 +257,22 @@ impl Proxy {
         )
         .map_err(Error::Tls)?;
         let basic_tofu = match config.local_auth {
-            LocalAuth::None => None,
             LocalAuth::BasicTofu => {
                 Some(BasicTofu::new(config.limits.local_auth_failures).map_err(|_| Error::Random)?)
             }
+            _ => None,
+        };
+        let (credentials, verifier) = match config.local_auth {
+            LocalAuth::SessionCredentials => {
+                let random = SystemRandom::new();
+                let credentials =
+                    SessionCredentials::generate(&random).map_err(|_| Error::Random)?;
+                let verifier =
+                    Verifier::new(&credentials, config.limits.local_auth_failures, &random)
+                        .map_err(|_| Error::Random)?;
+                (Some(credentials), Some(verifier))
+            }
+            _ => (None, None),
         };
         let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
         let tunnels = Arc::new(Semaphore::new(
@@ -271,12 +289,14 @@ impl Proxy {
             pool: pool::Pool::default(),
             route: config.route,
             basic_tofu,
+            verifier,
             limits: config.limits,
             tunnels,
             rejects,
         };
         Ok(Self {
             listener,
+            credentials,
             shared: Arc::new(shared),
         })
     }
@@ -288,7 +308,15 @@ impl Proxy {
     }
 
     pub fn realm(&self) -> Option<&str> {
-        self.shared.basic_tofu.as_ref().map(BasicTofu::realm)
+        match (&self.shared.basic_tofu, &self.shared.verifier) {
+            (Some(tofu), _) => Some(tofu.realm()),
+            (_, Some(verifier)) => Some(verifier.realm()),
+            _ => None,
+        }
+    }
+
+    pub fn credentials(&self) -> Option<&SessionCredentials> {
+        self.credentials.as_ref()
     }
 
     pub async fn run(self) {
@@ -297,7 +325,9 @@ impl Proxy {
 
     pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
         info!(local_addr = %self.local_addr(), route = %self.shared.route, "listening");
-        let Self { listener, shared } = self;
+        let Self {
+            listener, shared, ..
+        } = self;
         let mut connections = JoinSet::new();
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
@@ -376,6 +406,14 @@ impl Shared {
                 return reject_with(client, &response, limits.reject_linger).await;
             }
         }
+        if let Some(verifier) = &self.verifier {
+            let authorization = request.proxy_authorization.as_deref();
+            if let Err(status) = authenticate(verifier, authorization, Instant::now()) {
+                debug!(?status, "rejecting");
+                let response = status.response_in(verifier.realm());
+                return reject_with(client, &response, limits.reject_linger).await;
+            }
+        }
         let target = request.target;
         debug!(%target, "opening tunnel");
         let opening = timeout(limits.handshake_timeout, self.open_upstream(&target));
@@ -448,6 +486,29 @@ fn authorize(tofu: &BasicTofu, authorization: Option<&[u8]>, now: Instant) -> Re
             Err(Status::BadRequest)
         }
         Verdict::RateLimited { retry_after } => {
+            warn!("local proxy authentication rate limited");
+            Err(Status::TooManyRequests { retry_after })
+        }
+    }
+}
+
+fn authenticate(
+    verifier: &Verifier,
+    authorization: Option<&[u8]>,
+    now: Instant,
+) -> Result<(), Status> {
+    match verifier.check(authorization, now) {
+        session_credentials::Verdict::Accepted => Ok(()),
+        session_credentials::Verdict::Challenge => Err(Status::ProxyAuthenticationRequired),
+        session_credentials::Verdict::Rejected => {
+            warn!("local proxy credentials differ from the ones issued to this session");
+            Err(Status::ProxyAuthenticationRequired)
+        }
+        session_credentials::Verdict::Malformed => {
+            warn!("malformed local proxy credential");
+            Err(Status::BadRequest)
+        }
+        session_credentials::Verdict::RateLimited { retry_after } => {
             warn!("local proxy authentication rate limited");
             Err(Status::TooManyRequests { retry_after })
         }
