@@ -251,6 +251,7 @@ impl Agent {
             Request::Deny(token) => self.deny(token).await.map(|()| Vec::new()),
             Request::List => Ok(self.list().await),
             Request::Close(id) => self.close(id).await.map(|()| Vec::new()),
+            Request::Credentials(id) => self.credentials(id).await,
             Request::Stop => {
                 self.inner.stop.notify_one();
                 self.close_all().await;
@@ -389,7 +390,7 @@ impl Agent {
         let mut proxy = plan.proxy;
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         proxy.allow_non_loopback = false;
-        proxy.local_auth = LocalAuth::BasicTofu;
+        proxy.local_auth = LocalAuth::SessionCredentials;
         proxy.route = launch.route;
         let mut sessions = self.inner.sessions.lock().await;
         let id = sessions
@@ -401,9 +402,13 @@ impl Agent {
             .await
             .map_err(|error| error.to_string())?;
         let session = sessions.session(id).expect("the session just started");
-        let (listen, realm) = (
+        let (listen, realm, credentials) = (
             session.local_addr(),
             session.realm().unwrap_or_default().to_owned(),
+            session
+                .credentials()
+                .map(ipc::credential_lines)
+                .expect("browser sessions authenticate with session credentials"),
         );
         let span = info_span!("session", %id, kind = %SessionKind::Browser, gateway = %profile);
         let started = ProfileDir::create(&self.inner.options.profiles_root, id).and_then(|dir| {
@@ -441,6 +446,7 @@ impl Agent {
             format!("profile: {}", dir.path().display()),
             format!("browser: {}", executable.display()),
         ];
+        lines.extend(credentials);
         if launch.route != proxy::Route::Gateway {
             lines.push(format!("route: {}", launch.route));
         }
@@ -472,6 +478,19 @@ impl Agent {
                 )
             })
             .collect()
+    }
+
+    async fn credentials(&self, id: SessionId) -> Result<Vec<String>, String> {
+        let sessions = self.inner.sessions.lock().await;
+        let session = sessions
+            .session(id)
+            .ok_or_else(|| format!("no session {id}"))?;
+        let credentials = session
+            .credentials()
+            .ok_or_else(|| format!("session {id} has no credentials"))?;
+        let mut lines = vec![format!("listen: {}", session.local_addr())];
+        lines.extend(ipc::credential_lines(credentials));
+        Ok(lines)
     }
 
     async fn close(&self, id: SessionId) -> Result<(), String> {

@@ -1010,7 +1010,7 @@ async fn start_agent_and_send(
 fn print_response(response: Response) -> Result {
     match response {
         Response::Ok(lines) => {
-            for line in lines {
+            for line in ipc::without_credentials(lines) {
                 println!("{line}");
             }
             Ok(())

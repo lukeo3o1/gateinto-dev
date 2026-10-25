@@ -198,6 +198,7 @@ impl Launcher {
                 "gateinto://connect?profile={profile}&auth=basic_tofu"
             ))
             .await;
+        assert_no_credentials(&output);
         let lines = output.success().lines();
         let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
         let browser = wait_for_browser(&self.profiles_root, listen).await;
@@ -219,14 +220,56 @@ impl Drop for Launcher {
     }
 }
 
-async fn tunnel_echoes(proxy: SocketAddr) {
-    let target = echo_server().await.to_string();
-    let (mut stream, response) =
-        send(proxy, &connect_with(&target, Some(&basic("me", "pw")))).await;
-    assert_eq!(response.status, 200, "{}", response.head);
-    stream.write_all(b"hello").await.unwrap();
-    stream.shutdown().await.unwrap();
-    assert_eq!(read_to_end_within(&mut stream, WAIT).await, b"hello");
+impl Launcher {
+    async fn session_auth(&self, listen: SocketAddr) -> String {
+        session_auth(&self.shown_credentials(listen).await)
+    }
+
+    async fn shown_credentials(&self, listen: SocketAddr) -> Vec<String> {
+        use gateinto::ipc::{self, Request, Response};
+
+        let endpoint = self.endpoint();
+        let Response::Ok(list) = ipc::send(&endpoint, &Request::List).await.unwrap() else {
+            panic!("listing the sessions failed");
+        };
+        let id = list
+            .iter()
+            .find_map(|line| {
+                let mut words = line.strip_prefix("session: ")?.split(' ');
+                let id = words.next()?;
+                (words.nth(2)? == listen.to_string()).then(|| id.parse().unwrap())
+            })
+            .unwrap_or_else(|| panic!("no session listens on {listen}: {list:?}"));
+        let Response::Ok(lines) = ipc::send(&endpoint, &Request::Credentials(id))
+            .await
+            .unwrap()
+        else {
+            panic!("the credentials of session {id} were not shown");
+        };
+        assert_eq!(field(&lines, "listen"), listen.to_string());
+        lines
+    }
+
+    async fn tunnel_echoes(&self, proxy: SocketAddr) {
+        let target = echo_server().await.to_string();
+        let auth = self.session_auth(proxy).await;
+        let (mut stream, response) = send(proxy, &connect_with(&target, Some(&auth))).await;
+        assert_eq!(response.status, 200, "{}", response.head);
+        stream.write_all(b"hello").await.unwrap();
+        stream.shutdown().await.unwrap();
+        assert_eq!(read_to_end_within(&mut stream, WAIT).await, b"hello");
+    }
+}
+
+fn assert_no_credentials(output: &Output) {
+    for text in [&output.stdout, &output.stderr] {
+        for line in text.lines() {
+            assert!(
+                !line.starts_with("username:") && !line.starts_with("password:"),
+                "{text}"
+            );
+        }
+    }
 }
 
 fn listed(list: &[String], lines: &[String]) -> bool {
@@ -260,7 +303,7 @@ async fn gateway_only_open_reuses_configured_trust_and_can_start_blank_in_mixed_
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let browser = wait_for_browser(&launcher.profiles_root, listen).await;
     assert_eq!(browser.start_page(), "about:blank");
-    tunnel_echoes(listen).await;
+    launcher.tunnel_echoes(listen).await;
     assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
     assert_eq!(std::fs::read_to_string(&launcher.config).unwrap(), original);
     assert!(!launcher.linked_store().exists());
@@ -302,7 +345,7 @@ async fn gateway_only_open_refuses_ambiguous_configured_profiles() {
     let listen: SocketAddr = field(&output.success().lines(), "listen").parse().unwrap();
     let browser = wait_for_browser(&launcher.profiles_root, listen).await;
     assert_eq!(browser.start_page(), PORTAL);
-    tunnel_echoes(listen).await;
+    launcher.tunnel_echoes(listen).await;
     browser.exit();
 }
 
@@ -344,7 +387,7 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let browser = wait_for_browser(&launcher.profiles_root, listen).await;
     assert_eq!(browser.start_page(), "about:blank");
-    tunnel_echoes(listen).await;
+    launcher.tunnel_echoes(listen).await;
     let file = launcher
         .linked_store()
         .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
@@ -360,7 +403,7 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let browser = wait_for_browser(&launcher.profiles_root, listen).await;
     assert_eq!(browser.start_page(), "about:blank");
-    tunnel_echoes(listen).await;
+    launcher.tunnel_echoes(listen).await;
     assert_eq!(std::fs::read_to_string(&file).unwrap(), stored);
     let invalid = request
         .with_link(Some("https://127.0.0.1/"), Some(&gateway), None)
@@ -408,9 +451,10 @@ async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_sessio
     let mixed_browser = wait_for_browser(&launcher.profiles_root, listen).await;
     let (gateway, gateway_browser) = launcher.opened("main").await;
     for browser in [&mixed_browser, &gateway_browser] {
+        let auth = launcher.session_auth(browser.proxy()).await;
         let (mut stream, response) = send(
             browser.proxy(),
-            &connect_with(&target.to_string(), Some(&basic("me", "pw"))),
+            &connect_with(&target.to_string(), Some(&auth)),
         )
         .await;
         assert_eq!(response.status, 200);
@@ -442,7 +486,7 @@ async fn open_starts_the_agent_which_opens_the_configured_portal_in_a_browser_se
         Some(launcher.profiles_root.as_path())
     );
     assert!(listed(&launcher.list().await, &lines));
-    tunnel_echoes(browser.proxy()).await;
+    launcher.tunnel_echoes(browser.proxy()).await;
 
     browser.exit();
 
@@ -494,7 +538,7 @@ async fn open_without_config_uses_the_default_config_file_like_the_installed_han
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let browser = wait_for_browser(&launcher.profiles_root, listen).await;
     assert_eq!(browser.start_page(), PORTAL);
-    tunnel_echoes(browser.proxy()).await;
+    launcher.tunnel_echoes(browser.proxy()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -618,7 +662,14 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
     assert!(after.contains(&"agent: running".to_owned()), "{after:?}");
     assert!(listed(&after, &lines), "{after:?}");
     let text = after.join("\n");
-    for secret in [PORTAL, "ca.pem", field(&lines, "realm")] {
+    let shown = launcher.shown_credentials(browser.proxy()).await;
+    for secret in [
+        PORTAL,
+        "ca.pem",
+        field(&lines, "realm"),
+        field(&shown, "username"),
+        field(&shown, "password"),
+    ] {
         assert!(!text.contains(secret), "{secret}: {text}");
     }
     assert!(browser.profile().exists());
@@ -743,7 +794,7 @@ async fn an_agent_of_another_instance_leaves_running_profiles_alone() {
 
     assert!(browser.profile().exists());
     assert!(listed(&first.list().await, &lines));
-    tunnel_echoes(browser.proxy()).await;
+    first.tunnel_echoes(browser.proxy()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -987,7 +1038,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let browser = wait_for_browser(&launcher.profiles_root, listen).await;
     assert_eq!(browser.start_page(), start);
-    tunnel_echoes(listen).await;
+    launcher.tunnel_echoes(listen).await;
 
     let file = launcher
         .linked_store()
@@ -1007,7 +1058,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
     let output = launcher.open(&uri).await;
     let listen: SocketAddr = field(&output.success().lines(), "listen").parse().unwrap();
     wait_for_browser(&launcher.profiles_root, listen).await;
-    tunnel_echoes(listen).await;
+    launcher.tunnel_echoes(listen).await;
     let output = launcher
         .run(&["gateway", "list", "--config", &config])
         .await;
@@ -1064,7 +1115,7 @@ async fn a_linked_gateway_trusts_only_the_public_roots() {
     };
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let target = echo_server().await.to_string();
-    let (_, response) = send(listen, &connect_with(&target, Some(&basic("me", "pw")))).await;
+    let (_, response) = send(listen, &connect_with(&target, Some(&session_auth(&lines)))).await;
     assert_eq!(response.status, 502, "{}", response.head);
 
     launcher.run(&["stop"]).await.success();
