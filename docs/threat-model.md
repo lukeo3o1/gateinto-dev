@@ -21,13 +21,14 @@ meant to protect, against whom, and what it does not protect.
 
 ## Trust boundaries
 
-- **Local processes and the loopback listener.** The device session's
-  listener has no authentication by default. Any process on the machine that
-  can open a TCP connection to `127.0.0.1`, including processes of other
-  users, can use it and the device identity behind it. A session with
-  `session_credentials` (every browser session) accepts only the user name
-  `gateinto` with the random password generated for it, so it excludes local
-  processes that do not know the password. The credentials are shown to the user, who types them into
+- **Local processes and the loopback listener.** Every session uses
+  `session_credentials` by default: it accepts only the user name `gateinto`
+  with the random password generated for it, so it excludes local processes
+  that do not know the password. A device session whose configuration sets
+  `[device_session] auth = "none"` explicitly has no authentication: any
+  process on the machine that can open a TCP connection to `127.0.0.1`,
+  including processes of other users, can use it and the device identity
+  behind it. The credentials are shown to the user, who types them into
   the browser's proxy sign-in dialog; a program running as the user can get
   them from the agent or from memory.
 - **Websites and the launch URI.** Any web page, e-mail or document can open
@@ -90,8 +91,9 @@ meant to protect, against whom, and what it does not protect.
 
 ## Residual risks
 
-- Any local process, including other users' processes, can use the loopback
-  proxy of a session without local authentication. Do not run Gateinto on
+- With an explicit `[device_session] auth = "none"`, any local process,
+  including other users' processes, can use the device session's loopback
+  proxy and the device identity behind it. Do not set it, or run Gateinto, on
   shared hosts you do not trust.
 - With `session_credentials`, a local process that does not know the
   credentials can still make the session answer `429` to everyone, the
@@ -118,8 +120,9 @@ meant to protect, against whom, and what it does not protect.
   rights. TPM storage reduces this to misuse while the attacker has access.
 - `--ca-file` replaces the default roots entirely; a wrong or compromised
   bundle makes Gateinto trust the wrong upstream.
-- `--unsafe-allow-non-loopback-listen` exposes the proxy to the network
-  without authentication.
+- `--unsafe-allow-non-loopback-listen` exposes the proxy to the network: with
+  `session_credentials` the Basic credentials cross it in cleartext, and with
+  `auth = "none"` it has no authentication at all.
 - The upstream proxy learns every target `host:port` and can block, log or
   redirect tunnels.
 - Traffic is linkable to the device by the upstream proxy when mutual TLS is

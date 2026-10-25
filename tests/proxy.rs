@@ -554,6 +554,12 @@ impl Agent {
     }
 
     async fn spawn_with(setup: &Setup, log_filter: &str, extra: &[&str]) -> Self {
+        let config = write_temp("auth-none.toml", b"[device_session]\nauth = \"none\"\n");
+        let config = ["--config", config.to_str().unwrap()];
+        Self::spawn_from_flags(setup, log_filter, &[&config[..], extra].concat()).await
+    }
+
+    async fn spawn_from_flags(setup: &Setup, log_filter: &str, extra: &[&str]) -> Self {
         let ca_file = write_temp("cli-ca.pem", setup.ca.pem().as_bytes());
         let mut child = Child(
             isolated::gateinto()
@@ -631,6 +637,17 @@ async fn proxy_command_relays_through_the_upstream() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let agent = Agent::spawn(&setup, "info").await;
     echo_through(agent.addr, echo_server().await).await;
+    agent.stop().await;
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_command_without_a_config_file_requires_session_credentials() {
+    let setup = Setup::new(Behavior::Tunnel).await;
+    let agent = Agent::spawn_from_flags(&setup, "info", &[]).await;
+    let target = echo_server().await.to_string();
+    let (_, response) = send(agent.addr, &connect_with(&target, None)).await;
+    assert_eq!(response.status, 407, "{}", response.head);
     agent.stop().await;
 }
 

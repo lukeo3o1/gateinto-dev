@@ -13,7 +13,7 @@ proxy's status line.
 | --- | --- | --- |
 | `200` | The upstream proxy accepted the tunnel with a `2xx` status. | If the request still fails, the problem is between the client and the target, inside the tunnel. |
 | `400` | The request was malformed, or the client closed the connection before finishing it. Only `CONNECT host:port HTTP/1.1` with exactly one `Host` header and at most one `Proxy-Authorization` header is accepted; with `session_credentials`, a malformed Basic credential (bad base64, no `:`, empty password, control characters, over 1024 characters) is also `400`. | Configure the client to use Gateinto as an HTTP proxy for HTTPS, not as a SOCKS proxy or an HTTPS proxy. |
-| `407` | Browser sessions and `[device_session] auth = "session_credentials"` only: the request had no credential, another scheme than Basic, or a credential other than the user name and password issued to this session. Browsers show their proxy sign-in dialog. | Enter the issued credentials exactly, including the hyphens. To see them again run `gateinto session credentials <id>` (`gateinto session list` shows the id); for `gateinto session browser` or `gateinto proxy` they are in the prompt shown at start. Credentials of a closed or another session never work: a browser that keeps sending old cached ones needs the new ones, or a new session. Gateinto never logs credentials; a `warn` line says when different credentials were refused. |
+| `407` | `session_credentials` only (browser sessions, and the device session unless `[device_session] auth = "none"`): the request had no credential, another scheme than Basic, or a credential other than the user name and password issued to this session. Browsers show their proxy sign-in dialog. | Enter the issued credentials exactly, including the hyphens. To see them again run `gateinto session credentials <id>` (`gateinto session list` shows the id); for `gateinto session browser` or `gateinto proxy` they are in the prompt shown at start. Credentials of a closed or another session never work: a browser that keeps sending old cached ones needs the new ones, or a new session. Gateinto never logs credentials; a `warn` line says when different credentials were refused. |
 | `429` | `session_credentials` only: 10 wrong or malformed Basic credentials, or requests with another scheme such as `Bearer`, `Negotiate` or `NTLM`, within 60 seconds. Every request gets `429` until `Retry-After` seconds have passed, even one with the issued credentials. | Which local program is sending wrong credentials (`warn` lines name the client's local port). A browser that cached a mistyped password and replays it on parallel tunnels reaches the limit within seconds: wait for `Retry-After`, then enter the issued credentials. If the session stays locked, close it and start a new one. |
 | `403` | The upstream proxy answered `403`. | The upstream proxy's access policy for this target or this device. |
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
@@ -116,7 +116,8 @@ gateway "default": unknown field `hostname`, expected one of `host`, `port`, `se
   `_` and `-`.
 - `auth = "basic_tofu" was removed; use "session_credentials"`: the
   trust-on-first-use local proxy authentication no longer exists. Set
-  `[device_session] auth = "session_credentials"` (or `"none"`); a browser
+  `[device_session] auth = "session_credentials"` (or leave `auth` out, or
+  set `"none"`); a browser
   session needs no setting.
 - Relative `ca_file` and `client_cert_file` paths are relative to the
   configuration file, not to the current directory.
@@ -134,8 +135,9 @@ error: refusing to listen on non-loopback address 0.0.0.0:18736; pass --unsafe-a
 The same error appears for a non-loopback `[device_session] listen` in a
 configuration file; the opt-in exists only as a command line flag.
 
-The listener has no authentication, so on a non-loopback address anyone on the
-network could use it and the identity behind it. Keep the default
+On a non-loopback address anyone on the network could reach the listener: with
+`[device_session] auth = "none"` they could use it and the identity behind it,
+and otherwise they could try credentials against it. Keep the default
 `127.0.0.1:18736`, or another loopback address. Pass
 `--unsafe-allow-non-loopback-listen` only if you control who can reach the
 address. See [threat-model.md](threat-model.md).
@@ -169,7 +171,7 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   were not shown: ...`: `gateinto open` had neither an interactive desktop
   nor a terminal. The session runs; run `gateinto session credentials <id>`
   in a terminal to see its user name and password. `gateinto session browser`
-  and `gateinto proxy` with `session_credentials` instead close their session
+  and `gateinto proxy` (unless `[device_session] auth = "none"`) instead close their session
   and fail with this error; start them from a terminal or a desktop.
 - `no session <id>` from `gateinto session credentials`: the session was
   closed (its browser exited, or `session close` or `stop` ran), and its

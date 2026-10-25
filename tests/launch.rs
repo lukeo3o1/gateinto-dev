@@ -901,24 +901,43 @@ async fn concurrent_opens_without_an_agent_start_exactly_one() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_agent_runs_the_configured_device_session() {
+async fn the_agent_runs_the_configured_device_session_with_session_credentials() {
     let launcher =
         Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
 
     let (lines, _) = launcher.opened("main").await;
 
-    let list = launcher.list().await;
-    let device = list
-        .iter()
-        .find_map(|line| line.strip_prefix("session: 1 device main "))
-        .unwrap_or_else(|| panic!("{list:?}"));
-    let device: SocketAddr = device.parse().unwrap();
-    let target = echo_server().await;
-    let mut stream = open_tunnel(device, target).await;
+    let device = device_session_listen(&launcher).await;
+    let target = echo_server().await.to_string();
+    let (_, challenge) = send(device, &connect_with(&target, None)).await;
+    assert_eq!(challenge.status, 407, "{}", challenge.head);
+    launcher.tunnel_echoes(device).await;
+    assert_ne!(field(&lines, "session"), "1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_device_session_with_auth_none_accepts_any_local_client() {
+    let launcher = Launcher::new(
+        "[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n",
+    )
+    .await;
+
+    launcher.opened("main").await;
+
+    let device = device_session_listen(&launcher).await;
+    let mut stream = open_tunnel(device, echo_server().await).await;
     stream.write_all(b"device").await.unwrap();
     stream.shutdown().await.unwrap();
     assert_eq!(read_to_end_within(&mut stream, WAIT).await, b"device");
-    assert_ne!(field(&lines, "session"), "1");
+}
+
+async fn device_session_listen(launcher: &Launcher) -> SocketAddr {
+    let list = launcher.list().await;
+    list.iter()
+        .find_map(|line| line.strip_prefix("session: 1 device main "))
+        .unwrap_or_else(|| panic!("{list:?}"))
+        .parse()
+        .unwrap()
 }
 
 #[cfg(unix)]
@@ -975,8 +994,10 @@ mod interrupt {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ctrl_c_stops_proxy_and_session_browser_cleanly() {
-        let launcher =
-            Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
+        let launcher = Launcher::new(
+            "[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n",
+        )
+        .await;
         let config = launcher.config.to_str().unwrap().to_owned();
         #[allow(unused_mut)]
         let mut commands = vec![vec!["proxy", "--config", &config]];
