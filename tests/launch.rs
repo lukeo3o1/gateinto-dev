@@ -1196,3 +1196,91 @@ async fn launch_errors_notify_once_but_a_successful_launch_does_not() {
     assert_eq!(text.matches("Gateinto could not open the link.").count(), 1);
     browser.exit();
 }
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+async fn open_shows_the_credentials_in_a_prompt_and_session_credentials_shows_them_again() {
+    let mut launcher = Launcher::new("").await;
+    let prompt = launcher.dir.join("credentials-prompt.txt");
+    launcher
+        .env
+        .push(("GATEINTO_TEST_CREDENTIALS_FILE", prompt.clone().into()));
+    let (lines, browser) = launcher.opened("main").await;
+    let id = field(&lines, "session");
+    let listen = browser.proxy();
+    let issued =
+        gateinto::ipc::issued_credentials(&launcher.shown_credentials(listen).await).unwrap();
+    let shown = std::fs::read_to_string(&prompt).unwrap();
+    for expected in [
+        format!("Gateinto session {id}"),
+        format!("Proxy: {listen}"),
+        format!("Username: {}", issued.username()),
+        format!("Password: {}", issued.password()),
+        format!("gateinto session credentials {id}"),
+    ] {
+        assert!(shown.contains(&expected), "{expected:?} in {shown}");
+    }
+    std::fs::remove_file(&prompt).unwrap();
+
+    let again = launcher.run(&["session", "credentials", id]).await;
+    again.success();
+    for text in [&again.stdout, &again.stderr] {
+        assert!(!text.contains(issued.password()), "{text}");
+    }
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), shown);
+
+    let unknown = launcher.run(&["session", "credentials", "999"]).await;
+    unknown.failure();
+    assert!(
+        unknown.stderr.contains("no session 999"),
+        "{}",
+        unknown.stderr
+    );
+    browser.exit();
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_desktop_or_terminal_the_credentials_are_not_shown_but_named() {
+    let launcher = Launcher::new("").await;
+    let output = launcher
+        .open("gateinto://connect?profile=main&auth=basic_tofu")
+        .await;
+    let lines = output.success().lines();
+    let id = field(&lines, "session");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    let issued =
+        gateinto::ipc::issued_credentials(&launcher.shown_credentials(listen).await).unwrap();
+    for text in [&output.stdout, &output.stderr] {
+        assert!(!text.contains(issued.username()), "{text}");
+        assert!(!text.contains(issued.password()), "{text}");
+    }
+    assert!(
+        output.stderr.contains("were not shown"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains(&format!(
+            "run `gateinto session credentials {id}` in a terminal"
+        )),
+        "{}",
+        output.stderr
+    );
+
+    let again = launcher.run(&["session", "credentials", id]).await;
+    again.failure();
+    assert!(
+        again.stderr.contains("no desktop or terminal"),
+        "{}",
+        again.stderr
+    );
+    assert!(
+        !again.stderr.contains(issued.password()),
+        "{}",
+        again.stderr
+    );
+    assert!(again.stdout.is_empty(), "{}", again.stdout);
+    browser.exit();
+}

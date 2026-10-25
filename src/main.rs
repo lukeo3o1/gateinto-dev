@@ -23,7 +23,7 @@ use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
 use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
 use gateinto::prompt;
-use gateinto::proxy::{Config, Limits, LocalAuth, Upstream};
+use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
 use gateinto::registration;
 use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use gateinto::tls::{self, TlsMode};
@@ -146,6 +146,12 @@ enum SessionCommand {
     Browser(BrowserSessionArgs),
     /// List the sessions of the running agent
     List,
+    /// Show the proxy credentials of a session of the running agent again, in a dialog on an
+    /// interactive Windows desktop or otherwise on the terminal; never on standard output
+    Credentials {
+        /// Session id as shown by `gateinto session list`
+        id: SessionId,
+    },
     /// Close a session of the running agent, stopping its browser and deleting its profile
     Close {
         /// Session id as shown by `gateinto session list`
@@ -467,6 +473,7 @@ async fn main() -> ExitCode {
         Command::Key(command) => key(command),
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
         Command::Session(SessionCommand::List) => agent_request(Request::List).await,
+        Command::Session(SessionCommand::Credentials { id }) => session_credentials(id).await,
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
         Command::Agent(args) if args.detach => agent_detach(args.config.config.as_deref()).await,
         Command::Agent(args) => agent(args.config).await,
@@ -886,7 +893,7 @@ async fn open(args: OpenArgs) -> Result {
         Response::Error(_) => Vec::new(),
     };
     let Some(token) = ipc::confirm_token(&lines) else {
-        return print_response(response);
+        return print_launched(response).await;
     };
     let profile = launch
         .proposed_profile()
@@ -914,7 +921,7 @@ async fn open(args: OpenArgs) -> Result {
     })
     .await?;
     match answer {
-        Ok(true) => print_response(ipc::send(&endpoint, &Request::Approve(token)).await?),
+        Ok(true) => print_launched(ipc::send(&endpoint, &Request::Approve(token)).await?).await,
         Ok(false) => {
             ipc::send(&endpoint, &Request::Deny(token)).await?;
             Err(link::LinkError::Denied(profile).into())
@@ -1017,6 +1024,62 @@ fn print_response(response: Response) -> Result {
         }
         Response::Error(message) => Err(message.into()),
     }
+}
+
+async fn print_launched(response: Response) -> Result {
+    let issued = match &response {
+        Response::Ok(lines) => lines
+            .iter()
+            .find_map(|line| line.strip_prefix("session: ")?.parse().ok())
+            .zip(listen_and_credentials(lines)),
+        Response::Error(_) => None,
+    };
+    print_response(response)?;
+    if let Some((session, (listen, credentials))) = issued
+        && let Err(note) = show_credentials(Some(session), listen, credentials).await
+    {
+        eprintln!("warning: {note}");
+    }
+    Ok(())
+}
+
+fn listen_and_credentials(lines: &[String]) -> Option<(SocketAddr, SessionCredentials)> {
+    let listen = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("listen: ")?.parse().ok())?;
+    Some((listen, ipc::issued_credentials(lines)?))
+}
+
+async fn show_credentials(
+    session: Option<SessionId>,
+    listen: SocketAddr,
+    credentials: SessionCredentials,
+) -> std::result::Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let notice = prompt::CredentialsNotice {
+            session,
+            listen,
+            credentials: &credentials,
+        };
+        if prompt::show_credentials(&notice) {
+            Ok(())
+        } else {
+            Err(prompt::unshown_text(&notice))
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn session_credentials(id: SessionId) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    let lines = match ipc::send(&endpoint, &Request::Credentials(id)).await? {
+        Response::Ok(lines) => lines,
+        Response::Error(message) => return Err(message.into()),
+    };
+    let (listen, credentials) =
+        listen_and_credentials(&lines).ok_or("the agent did not return the session credentials")?;
+    Ok(show_credentials(Some(id), listen, credentials).await?)
 }
 
 async fn agent_request(request: Request) -> Result {
