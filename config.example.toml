@@ -11,8 +11,9 @@ gateway = "default"
 # --unsafe-allow-non-loopback-listen command line flag; it cannot be allowed here.
 listen = "127.0.0.1:18736"
 # Local proxy authentication for programs using the device session:
-# "none" accepts every local client; "basic_tofu" binds the first Basic
-# credential the session receives and then accepts only that one.
+# "none" accepts every local client; "session_credentials" generates a
+# random username and password, shows them when `gateinto proxy` starts,
+# and accepts only them.
 auth = "none"
 
 # One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,

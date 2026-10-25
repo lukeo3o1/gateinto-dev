@@ -139,9 +139,11 @@ async fn mixed_direct_connections_require_local_auth_and_close_on_shutdown() {
     let gateway = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Status(403)).await;
     let mut config = agent_config(gateway.addr, ca.roots(), PROXY_NAME);
     config.route = Route::Mixed;
-    config.local_auth = LocalAuth::BasicTofu;
+    config.local_auth = LocalAuth::SessionCredentials;
     let proxy = Proxy::bind(config).await.unwrap();
     let agent = proxy.local_addr();
+    let issued = proxy.credentials().unwrap();
+    let issued = basic(issued.username(), issued.password());
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(proxy.run_until(async {
         let _ = stopped.await;
@@ -155,16 +157,13 @@ async fn mixed_direct_connections_require_local_auth_and_close_on_shutdown() {
             .await
             .is_err()
     );
-    let (mut stream, response) = send(
-        agent,
-        &connect_with(&target.to_string(), Some(&basic("alice", "secret"))),
-    )
-    .await;
+    let (mut stream, response) =
+        send(agent, &connect_with(&target.to_string(), Some(&issued))).await;
     assert_eq!(response.status, 200);
     let (mut origin, _) = listener.accept().await.unwrap();
     let (_, refused) = send(
         agent,
-        &connect_with(&target.to_string(), Some(&basic("alice", "wrong"))),
+        &connect_with(&target.to_string(), Some(&basic("alice", "secret"))),
     )
     .await;
     assert_eq!(refused.status, 407);

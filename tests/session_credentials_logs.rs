@@ -25,24 +25,18 @@ impl Write for Captured {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logs_never_contain_the_credential() {
+async fn logs_never_contain_the_credentials() {
     let captured = Captured::default();
     let writer = captured.clone();
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .with_writer(move || writer.clone())
         .init();
-    let password = "s3cret-Pa55word";
-    let wrong_password = "wr0ng-Pa55word";
-    let right = basic("alice", password);
-    let wrong = basic("alice", wrong_password);
-    let malformed = format!("Basic {}", base64(format!("alice{password}").as_bytes()));
-
     let ca = TestCa::new();
     let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
     let target = echo_server().await.to_string();
     let mut config = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
-    config.local_auth = LocalAuth::BasicTofu;
+    config.local_auth = LocalAuth::SessionCredentials;
     config.limits.local_auth_failures = FailureLimit {
         max_failures: 4,
         window: Duration::from_secs(600),
@@ -56,7 +50,17 @@ async fn logs_never_contain_the_credential() {
         })
         .await
         .unwrap();
-    let agent = sessions.session(id).unwrap().local_addr();
+    let session = sessions.session(id).unwrap();
+    let agent = session.local_addr();
+    let issued = session.credentials().unwrap().clone();
+    let (username, password) = (issued.username(), issued.password());
+    let wrong_password = "wr0ng-Pa55word";
+    let right = basic(username, password);
+    let wrong = basic(username, wrong_password);
+    let malformed = format!(
+        "Basic {}",
+        base64(format!("{username}{password}").as_bytes())
+    );
 
     let (mut stream, response) = send(agent, &connect_with(&target, Some(&right))).await;
     assert_eq!(response.status, 200, "{}", response.head);
@@ -77,15 +81,15 @@ async fn logs_never_contain_the_credential() {
 
     let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     for expected in [
-        "bound the first local proxy credential",
         "tunnel established",
-        "differs from the one bound",
+        "differ from the ones issued",
         "malformed local proxy credential",
         "rate limited",
     ] {
         assert!(logs.contains(expected), "{expected} missing from\n{logs}");
     }
     for secret in [
+        username,
         password,
         wrong_password,
         &right["Basic ".len()..],

@@ -1,1 +1,1 @@
-gateinto://connect?profile=office_1&auth=basic_tofu&v=1
+gateinto://connect?profile=office_1&auth=session_credentials&v=1

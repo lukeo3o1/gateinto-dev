@@ -702,7 +702,7 @@ mod tests {
         gateway: Option<&str>,
         portal: Option<&str>,
     ) -> LaunchRequest {
-        LaunchRequest::new(profile, "basic_tofu")
+        LaunchRequest::new(profile, "session_credentials")
             .unwrap()
             .with_link(url, gateway, portal)
             .unwrap()
@@ -929,7 +929,7 @@ mod tests {
     }
 
     fn address_link(gateway: &str, portal: Option<&str>, url: Option<&str>) -> LaunchRequest {
-        LaunchRequest::from_fields(None, "basic_tofu", url, Some(gateway), portal).unwrap()
+        LaunchRequest::from_fields(None, "session_credentials", url, Some(gateway), portal).unwrap()
     }
 
     #[test]

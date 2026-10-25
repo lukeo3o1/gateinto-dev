@@ -17,13 +17,13 @@ pub struct LaunchRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchAuth {
-    BasicTofu,
+    SessionCredentials,
 }
 
 impl LaunchAuth {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::BasicTofu => "basic_tofu",
+            Self::SessionCredentials => "session_credentials",
         }
     }
 }
@@ -39,7 +39,8 @@ impl FromStr for LaunchAuth {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "basic_tofu" => Ok(Self::BasicTofu),
+            "session_credentials" => Ok(Self::SessionCredentials),
+            "basic_tofu" => Err(UriError::RemovedAuth),
             _ => Err(UriError::InvalidValue("auth")),
         }
     }
@@ -55,6 +56,7 @@ pub enum UriError {
     UnknownField,
     DuplicateField(&'static str),
     InvalidValue(&'static str),
+    RemovedAuth,
     MissingSelector,
     UrlOutsidePortal,
     ReservedGateway,
@@ -82,7 +84,10 @@ impl fmt::Display for UriError {
                 "profile must be a gateway name of 1 to {} characters that does not start with -",
                 GatewayName::MAX_LEN
             ),
-            Self::InvalidValue("auth") => f.write_str("auth must be basic_tofu"),
+            Self::InvalidValue("auth") => f.write_str("auth must be session_credentials"),
+            Self::RemovedAuth => f.write_str(
+                "auth=basic_tofu was removed; use auth=session_credentials or leave auth out",
+            ),
             Self::InvalidValue("route") => f.write_str("route must be gateway or mixed"),
             Self::InvalidValue("v") => f.write_str("v must be 1"),
             Self::InvalidValue(name @ ("url" | "portal")) => write!(
@@ -172,7 +177,7 @@ impl FromStr for LaunchRequest {
             fields
                 .auth
                 .as_deref()
-                .unwrap_or(LaunchAuth::BasicTofu.as_str()),
+                .unwrap_or(LaunchAuth::SessionCredentials.as_str()),
             fields.url.as_deref(),
             fields.gateway.as_deref(),
             fields.portal.as_deref(),
@@ -360,7 +365,7 @@ mod tests {
     }
 
     fn request(profile: &str) -> LaunchRequest {
-        LaunchRequest::new(profile, "basic_tofu").unwrap()
+        LaunchRequest::new(profile, "session_credentials").unwrap()
     }
 
     #[test]
@@ -410,23 +415,40 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_and_basic_tofu_are_accepted() {
+    fn a_profile_and_session_credentials_are_accepted() {
         assert_eq!(
-            parse("gateinto://connect?profile=my-gateway&auth=basic_tofu"),
+            parse("gateinto://connect?profile=my-gateway&auth=session_credentials"),
             Ok(request("my-gateway"))
         );
     }
 
     #[test]
-    fn auth_defaults_to_basic_tofu_and_keys_may_come_in_any_order() {
+    fn auth_defaults_to_session_credentials_and_keys_may_come_in_any_order() {
         for uri in [
             "gateinto://connect?profile=office_1",
-            "gateinto://connect?auth=basic_tofu&profile=office_1",
+            "gateinto://connect?auth=session_credentials&profile=office_1",
             "gateinto://connect?v=1&profile=office_1",
-            "gateinto://connect?profile=office_1&v=1&auth=basic_tofu",
+            "gateinto://connect?profile=office_1&v=1&auth=session_credentials",
         ] {
             assert_eq!(parse(uri), Ok(request("office_1")), "{uri}");
         }
+    }
+
+    #[test]
+    fn the_removed_basic_tofu_auth_fails_closed_naming_its_replacement() {
+        for uri in [
+            "gateinto://connect?profile=a&auth=basic_tofu",
+            "gateinto://connect?gateway=proxy.example&auth=basic%5ftofu",
+        ] {
+            assert_eq!(parse(uri), Err(UriError::RemovedAuth), "{uri}");
+        }
+        let error = UriError::RemovedAuth.to_string();
+        assert!(error.contains("basic_tofu"), "{error}");
+        assert!(error.contains("auth=session_credentials"), "{error}");
+        assert!(
+            LaunchRequest::new("a", "basic_tofu").is_err(),
+            "the removed mode is not a launch mode"
+        );
     }
 
     #[test]
@@ -443,7 +465,7 @@ mod tests {
     #[test]
     fn percent_encoded_characters_of_the_allowed_set_are_decoded() {
         assert_eq!(
-            parse("gateinto://connect?profile=my%2Dgateway&auth=basic%5ftofu"),
+            parse("gateinto://connect?profile=my%2Dgateway&auth=session%5fcredentials"),
             Ok(request("my-gateway"))
         );
         assert_eq!(parse("gateinto://connect?pro%66ile=a"), Ok(request("a")));
@@ -483,22 +505,22 @@ mod tests {
     #[test]
     fn unknown_duplicate_empty_and_malformed_fields_are_rejected() {
         for query in [
-            "auth=basic_tofu",
+            "auth=session_credentials",
             "v=1",
             "profile=",
             "profile",
             "=a",
             "profile=a&",
             "&profile=a",
-            "profile=a&&auth=basic_tofu",
+            "profile=a&&auth=session_credentials",
             "profile=a&profile=a",
             "profile=a&profile=b",
-            "profile=a&auth=basic_tofu&auth=basic_tofu",
+            "profile=a&auth=session_credentials&auth=session_credentials",
             "profile=a&v=1&v=1",
             "profile=a&Profile=b",
             "PROFILE=a",
             "profile=a&auth=none",
-            "profile=a&auth=Basic_Tofu",
+            "profile=a&auth=Session_Credentials",
             "profile=a&auth=",
             "profile=a&v=2",
             "profile=a&v=01",
@@ -510,7 +532,7 @@ mod tests {
             "profile=a&password=secret",
             "profile=a=b",
             "profile==a",
-            "profile=a;auth=basic_tofu",
+            "profile=a;auth=session_credentials",
         ] {
             let uri = format!("gateinto://connect?{query}");
             assert!(parse(&uri).is_err(), "{uri:?}");
@@ -532,7 +554,7 @@ mod tests {
             "--config",
             "-a",
             "a&",
-            "a%26auth=basic_tofu",
+            "a%26auth=session_credentials",
             "a%00",
             "a%0a",
             "a%0D%0A",
@@ -584,7 +606,7 @@ mod tests {
     #[test]
     fn the_longest_profile_name_is_accepted() {
         let name = "a".repeat(GatewayName::MAX_LEN);
-        let uri = format!("gateinto://connect?profile={name}&auth=basic_tofu&v=1");
+        let uri = format!("gateinto://connect?profile={name}&auth=session_credentials&v=1");
         assert_eq!(parse(&uri), Ok(request(&name)));
     }
 
@@ -594,7 +616,7 @@ mod tests {
         let fits = format!("gateinto://connect?profile={encoded}");
         assert!(fits.len() <= MAX_LEN);
         assert_eq!(parse(&fits), Ok(request(&"a".repeat(GatewayName::MAX_LEN))));
-        let padded = format!("{fits}&auth=basic_tofu&v=1{}", "&".repeat(MAX_LEN));
+        let padded = format!("{fits}&auth=session_credentials&v=1{}", "&".repeat(MAX_LEN));
         assert!(parse(&padded).is_err());
         let long = format!("gateinto://connect?profile=a{}", "a".repeat(MAX_LEN));
         assert_eq!(parse(&long).unwrap_err(), UriError::TooLong);
@@ -605,7 +627,7 @@ mod tests {
         for (query, expected) in [
             ("profile=a&profile=a", UriError::DuplicateField("profile")),
             (
-                "profile=a&auth=basic_tofu&auth=basic_tofu",
+                "profile=a&auth=session_credentials&auth=session_credentials",
                 UriError::DuplicateField("auth"),
             ),
             ("profile=a&host=x", UriError::UnknownField),
@@ -630,7 +652,7 @@ mod tests {
                 "profile=a&url=https%3A%2F%2Fx&url=https%3A%2F%2Fx",
                 UriError::DuplicateField("url"),
             ),
-            ("auth=basic_tofu", UriError::MissingSelector),
+            ("auth=session_credentials", UriError::MissingSelector),
             ("profile=a&auth=none", UriError::InvalidValue("auth")),
             ("profile=a&v=2", UriError::InvalidValue("v")),
             ("profile=--a", UriError::InvalidValue("profile")),
@@ -747,7 +769,7 @@ mod tests {
         }
         assert_eq!(
             linked(Some("https://p.example/a~b?c=%20"), None, None).to_string(),
-            "gateinto://connect?profile=corp&auth=basic_tofu&v=1&url=https%3A%2F%2Fp.example%2Fa~b%3Fc%3D%2520"
+            "gateinto://connect?profile=corp&auth=session_credentials&v=1&url=https%3A%2F%2Fp.example%2Fa~b%3Fc%3D%2520"
         );
     }
 
@@ -759,7 +781,7 @@ mod tests {
         let name = "a".repeat(GatewayName::MAX_LEN);
         let host = format!("{}example", format!("{}.", "a".repeat(63)).repeat(3));
         let uri = format!(
-            "gateinto://connect?profile={name}&auth=basic_tofu&v=1&gateway={host}%3A65535&portal={portal}&url={url}"
+            "gateinto://connect?profile={name}&auth=session_credentials&v=1&gateway={host}%3A65535&portal={portal}&url={url}"
         );
         assert!(uri.len() <= MAX_LEN, "{}", uri.len());
         let parsed = parse(&uri).unwrap();

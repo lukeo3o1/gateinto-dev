@@ -746,7 +746,7 @@ mod tests {
 [device_session]
 gateway = "office"
 listen = "127.0.0.2:8080"
-auth = "basic_tofu"
+auth = "session_credentials"
 
 [gateways.office]
 host = "proxy.example.test"
@@ -795,7 +795,7 @@ port = 443
             settings,
             Settings {
                 listen: "127.0.0.2:8080".parse().unwrap(),
-                device_session_auth: LocalAuth::BasicTofu,
+                device_session_auth: LocalAuth::SessionCredentials,
                 gateway: GatewayProfile {
                     name: name("office"),
                     upstream: UpstreamSettings {
@@ -937,7 +937,7 @@ port = 443
         );
         for (value, expected) in [
             ("none", LocalAuth::None),
-            ("basic_tofu", LocalAuth::BasicTofu),
+            ("session_credentials", LocalAuth::SessionCredentials),
         ] {
             let text = format!("[device_session]\nauth = \"{value}\"\n{MINIMAL}");
             assert_eq!(settings(&text).unwrap().device_session_auth, expected);
@@ -945,7 +945,18 @@ port = 443
         let error = ConfigFile::parse("[device_session]\nauth = \"basic\"\n")
             .unwrap_err()
             .to_string();
+        assert!(error.contains("none"), "{error}");
+        assert!(error.contains("session_credentials"), "{error}");
+    }
+
+    #[test]
+    fn the_removed_basic_tofu_auth_fails_closed_naming_its_replacement() {
+        let error = ConfigFile::parse("[device_session]\nauth = \"basic_tofu\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("basic_tofu"), "{error}");
+        assert!(error.contains("was removed"), "{error}");
+        assert!(error.contains("session_credentials"), "{error}");
     }
 
     #[test]
