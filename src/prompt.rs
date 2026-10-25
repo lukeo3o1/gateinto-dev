@@ -1,6 +1,9 @@
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
 
 use crate::link::Confirmation;
+use crate::proxy::SessionCredentials;
+use crate::sessions::SessionId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unavailable;
@@ -78,6 +81,75 @@ pub fn show_launch_error(error: &str) {
     let _ = error;
 }
 
+pub struct CredentialsNotice<'a> {
+    pub session: Option<SessionId>,
+    pub listen: SocketAddr,
+    pub credentials: &'a SessionCredentials,
+}
+
+impl CredentialsNotice<'_> {
+    fn title(&self) -> String {
+        match self.session {
+            Some(id) => format!("Gateinto session {id}"),
+            None => "Gateinto local proxy".to_owned(),
+        }
+    }
+}
+
+pub fn credentials_text(notice: &CredentialsNotice) -> String {
+    let listen = notice.listen;
+    let mut text = format!(
+        "{}\n\nProxy: {listen}\nUsername: {}\nPassword: {}\n\nEnter these only in the browser's \
+         proxy sign-in dialog that names the proxy {listen}. Never enter them in a website's \
+         sign-in page or dialog. Type them exactly, including the hyphens. They stop working \
+         when the session closes.",
+        notice.title(),
+        notice.credentials.username(),
+        notice.credentials.password(),
+    );
+    if let Some(id) = notice.session {
+        text.push_str(&format!(
+            "\n\nTo see them again, run gateinto session credentials {id}."
+        ));
+    }
+    text
+}
+
+pub fn unshown_text(notice: &CredentialsNotice) -> String {
+    let how = match notice.session {
+        Some(id) => format!("run `gateinto session credentials {id}` in a terminal"),
+        None => "start the session from a terminal".to_owned(),
+    };
+    format!(
+        "the credentials for {} on {} were not shown: no desktop or terminal to show them on; \
+         to see them, {how}",
+        notice.title(),
+        notice.listen,
+    )
+}
+
+pub fn show_credentials(notice: &CredentialsNotice) -> bool {
+    use std::io::IsTerminal;
+
+    let text = credentials_text(notice);
+    #[cfg(feature = "test-hooks")]
+    if let Some(path) = std::env::var_os("GATEINTO_TEST_CREDENTIALS_FILE") {
+        return std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut output| writeln!(output, "{text}"))
+            .is_ok();
+    }
+    #[cfg(windows)]
+    if windows::interactive_desktop() {
+        windows::show_credentials(&text);
+        return true;
+    }
+    let mut stderr = io::stderr();
+    stderr.is_terminal() && writeln!(stderr, "{text}").is_ok()
+}
+
 #[cfg(any(windows, test))]
 fn launch_error_dialog_needed(interactive: bool, console_processes: u32, redirected: bool) -> bool {
     interactive && console_processes <= 1 && !redirected
@@ -97,8 +169,9 @@ mod windows {
         GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDOK, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND,
-        MB_TOPMOST, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW, WSF_VISIBLE,
+        IDOK, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL,
+        MB_SETFOREGROUND, MB_TOPMOST, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, MessageBoxW,
+        WSF_VISIBLE,
     };
 
     // OK and Cancel have no access keys and Cancel has the focus, so no single keystroke
@@ -107,6 +180,13 @@ mod windows {
         MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST;
 
     pub const ERROR_STYLE: MESSAGEBOX_STYLE = MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST;
+
+    pub const CREDENTIALS_STYLE: MESSAGEBOX_STYLE =
+        MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST;
+
+    pub fn show_credentials(text: &str) {
+        show(text, CREDENTIALS_STYLE);
+    }
 
     pub fn show_launch_error(text: &str) {
         use std::io::IsTerminal;
@@ -180,6 +260,13 @@ mod windows {
         fn error_notifications_have_one_ok_button_and_an_error_icon() {
             assert_eq!(ERROR_STYLE & MB_TYPEMASK, MB_OK);
             assert_ne!(ERROR_STYLE & MB_ICONERROR, 0);
+        }
+
+        #[test]
+        fn the_credentials_box_has_one_ok_button_and_an_information_icon() {
+            assert_eq!(CREDENTIALS_STYLE & MB_TYPEMASK, MB_OK);
+            assert_ne!(CREDENTIALS_STYLE & MB_ICONINFORMATION, 0);
+            assert_ne!(CREDENTIALS_STYLE & MB_TOPMOST, 0);
         }
 
         #[test]
@@ -261,6 +348,70 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Yes") && !text.contains('?'), "{text}");
+    }
+
+    fn issued() -> SessionCredentials {
+        SessionCredentials::parse("abcd-efgh", "jkmn-pqrs-tuvw").unwrap()
+    }
+
+    fn notice(
+        credentials: &SessionCredentials,
+        session: Option<SessionId>,
+    ) -> CredentialsNotice<'_> {
+        CredentialsNotice {
+            session,
+            listen: "127.0.0.1:49152".parse().unwrap(),
+            credentials,
+        }
+    }
+
+    #[test]
+    fn the_credentials_prompt_names_the_proxy_and_warns_against_other_dialogs() {
+        let credentials = issued();
+        let text = credentials_text(&notice(&credentials, Some("7".parse().unwrap())));
+        for expected in [
+            "Gateinto session 7",
+            "Proxy: 127.0.0.1:49152",
+            "Username: abcd-efgh",
+            "Password: jkmn-pqrs-tuvw",
+            "only in the browser's proxy sign-in dialog that names the proxy 127.0.0.1:49152",
+            "Never enter them in a website's sign-in page or dialog",
+            "including the hyphens",
+            "stop working when the session closes",
+            "gateinto session credentials 7",
+        ] {
+            assert!(text.contains(expected), "{expected:?} in {text}");
+        }
+    }
+
+    #[test]
+    fn credentials_of_a_session_outside_the_agent_cannot_be_shown_again() {
+        let credentials = issued();
+        let text = credentials_text(&notice(&credentials, None));
+        assert!(text.contains("Gateinto local proxy"), "{text}");
+        assert!(text.contains("Username: abcd-efgh"), "{text}");
+        assert!(!text.contains("gateinto session credentials"), "{text}");
+    }
+
+    #[test]
+    fn the_note_for_unshown_credentials_names_the_way_to_see_them_without_them() {
+        let credentials = issued();
+        let text = unshown_text(&notice(&credentials, Some("7".parse().unwrap())));
+        assert!(text.contains("not shown"), "{text}");
+        assert!(text.contains("no desktop or terminal"), "{text}");
+        assert!(
+            text.contains("run `gateinto session credentials 7` in a terminal"),
+            "{text}"
+        );
+        let local = unshown_text(&notice(&credentials, None));
+        assert!(
+            local.contains("start the session from a terminal"),
+            "{local}"
+        );
+        for text in [text, local] {
+            assert!(!text.contains("abcd-efgh"), "{text}");
+            assert!(!text.contains("jkmn-pqrs-tuvw"), "{text}");
+        }
     }
 
     #[test]
