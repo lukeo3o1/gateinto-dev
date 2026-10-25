@@ -112,9 +112,13 @@ gateinto proxy --upstream-host proxy.example.com --upstream-port 443
 ```
 
 The upstream endpoint has no default and must be given, on the command line or
-in a [configuration file](#configuration-file). Clients then use
-`http://127.0.0.1:18736` as their HTTP proxy, for example
-`curl --proxy http://127.0.0.1:18736 https://example.com/`.
+in a [configuration file](#configuration-file). The proxy shows its
+[session credentials](#local-proxy-authentication) when it starts. Clients then
+use `http://127.0.0.1:18736` as their HTTP proxy with these credentials, for
+example
+`curl --proxy http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com/`.
+There is no flag that turns the credentials off; only `[device_session] auth = "none"`
+in a configuration file does.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -312,7 +316,7 @@ share only the device key.
   programs. It listens on `[device_session] listen` (or `--listen`), relays
   through `[device_session] gateway` (or the only configured gateway, or the
   upstream flags alone) and uses the local proxy authentication set by
-  `[device_session] auth` (`none` by default). It runs until the process is
+  `[device_session] auth` (`session_credentials` by default). It runs until the process is
   stopped. Its log lines carry `session{id=1 kind=device gateway=<name>}`.
 - `gateinto session browser` runs one browser session: its own listener on
   an ephemeral port of `127.0.0.1`, its own client certificate and upstream
@@ -324,9 +328,8 @@ share only the device key.
   [Local proxy authentication](#local-proxy-authentication)) and runs until
   Ctrl+C. If the credentials cannot be shown it closes the session and exits
   with an error. Each start is a new session with a new realm and
-  credentials, on a new ephemeral port. `gateinto proxy` with
-  `[device_session] auth = "session_credentials"` shows its credentials the
-  same way.
+  credentials, on a new ephemeral port. `gateinto proxy` shows its
+  credentials the same way, unless `[device_session] auth = "none"`.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or
@@ -438,15 +441,18 @@ Local proxy authentication controls which local programs may use a session.
 It is not authorization by the remote upstream, and it does not identify a
 user. Each session has one policy:
 
-- `none`: every local client is accepted. The device session's default.
+- `none`: every local client is accepted, including processes of other users
+  on the same machine, and each of them can use the device identity toward the
+  gateway. Only the device session can use it, and only when the configuration
+  sets `[device_session] auth = "none"` explicitly.
 - `session_credentials`: when the session starts, Gateinto generates a random
   password for it; the user name is always `gateinto`. A `CONNECT` without a
   `Proxy-Authorization` header gets `407 Proxy Authentication Required` with
   `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
   so a browser shows its own proxy sign-in dialog. Only the issued user name
   and password are accepted; any other credential gets `407` again and never
-  becomes valid. Browser sessions always use it; the device session uses it
-  with `[device_session] auth = "session_credentials"`.
+  becomes valid. Browser sessions always use it, and it is the device
+  session's default.
 
 The removed trust-on-first-use mode `basic_tofu` is refused wherever it
 appears (`auth = "basic_tofu"` in the configuration file, `auth=basic_tofu` in
@@ -476,7 +482,10 @@ Details of `session_credentials`:
   (`127.0.0.1:<port>`) the browser's sign-in dialog shows, and says to enter
   the credentials only there and never in a website's sign-in page or dialog.
   `gateinto session credentials <id>` asks the agent for them over its
-  per-user IPC endpoint and shows the same prompt again. Without a desktop or
+  per-user IPC endpoint and shows the same prompt again. The device session
+  that `gateinto agent` runs is started by the agent itself, so nothing shows
+  its credentials at start; `gateinto session list` gives its id and
+  `gateinto session credentials <id>` shows them. Without a desktop or
   terminal `gateinto open` prints a warning naming that command instead, and
   `gateinto session browser` and `gateinto proxy` close their session and exit
   with an error, because nobody could use it.
@@ -520,7 +529,7 @@ See [config.example.toml](config.example.toml).
 [device_session]
 gateway = "default"              # optional when exactly one gateway is configured
 listen = "127.0.0.1:18736"
-auth = "none"                    # none | session_credentials
+auth = "session_credentials"     # session_credentials (default) | none
 
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
@@ -747,14 +756,14 @@ and residual risks. [docs/security-boundaries.md](docs/security-boundaries.md)
 maps each security acceptance item to the code that enforces it and the tests
 that prove it.
 
-The device session's loopback listener has no authentication by default. Any
-local process, including those of other users on the same machine, can connect
-to it and use the agent, including its device identity, to reach the remote
-proxy. Browser sessions (and a device session with
-`auth = "session_credentials"`) accept only the random credentials issued to
-them and shown to the user, which keeps out other programs that do not know
-them but not malware running as the same user. Do not run it on shared hosts
-you do not trust.
+Every session, including the device session by default, accepts only the
+random credentials issued to it and shown to the user, which keeps out other
+programs that do not know them but not malware running as the same user. A
+device session with `[device_session] auth = "none"` has no authentication:
+any local process, including those of other users on the same machine, can
+connect to it and use the agent, including its device identity, to reach the
+remote proxy. Set it only on a machine where you accept that, and do not run
+Gateinto on shared hosts you do not trust.
 
 Any website can open a `gateinto://` link. With the handler registered, such a
 link can at most make the agent start a browser session for a known gateway

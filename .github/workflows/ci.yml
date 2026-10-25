@@ -211,6 +211,7 @@ jobs:
               '(?m)^port = 443' = "port = $env:UPSTREAM_PORT"
               '(?m)^# server_name = "proxy\.example\.invalid"' = 'server_name = "localhost"'
               '(?m)^# ca_file = "upstream-ca\.pem"' = 'ca_file = "upstream-ca.pem"'
+              '(?m)^auth = "session_credentials"' = 'auth = "none"'
             }
             foreach ($pattern in $replacements.Keys) {
               $found = [regex]::Matches($text, $pattern).Count

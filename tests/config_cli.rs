@@ -293,7 +293,7 @@ async fn proxy_reads_listen_tls_and_limits_from_the_config_file() {
     let fixture = Fixture::new().await;
     let target = echo_server().await;
     let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\n[limits]\nmax_concurrent_tunnels = 1\n",
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n[limits]\nmax_concurrent_tunnels = 1\n",
     );
 
     let (_child, agent) = spawn_proxy(config.clone(), &[]).await;
@@ -310,8 +310,9 @@ async fn proxy_reads_listen_tls_and_limits_from_the_config_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn non_loopback_listen_from_the_config_file_still_needs_the_flag() {
     let fixture = Fixture::new().await;
-    let config =
-        fixture.config("client_certificate = \"off\"\n[device_session]\nlisten = \"0.0.0.0:0\"\n");
+    let config = fixture.config(
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"0.0.0.0:0\"\nauth = \"none\"\n",
+    );
 
     let output = run(args(&["proxy"]), config.clone()).await;
     assert!(!output.status.success());
@@ -453,7 +454,7 @@ async fn proxy_uses_the_device_session_gateway() {
     let config = fixture.config(&format!(
         "client_certificate = \"off\"\n\
          [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\n\
-         [device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n"
+         [device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n"
     ));
 
     let (_child, agent) = spawn_proxy(config, &[]).await;
@@ -764,12 +765,11 @@ async fn every_isolated_run_routes_the_credentials_prompt_to_the_test_hook() {
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn proxy_applies_the_device_session_auth() {
+async fn proxy_requires_session_credentials_by_default() {
     let fixture = Fixture::new().await;
     let target = echo_server().await.to_string();
-    let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
-    );
+    let config = fixture
+        .config("client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\n");
     let prompt = temp_dir().join("prompt");
 
     let (_child, agent) = spawn_proxy_showing(config, &[], Some(&prompt)).await;

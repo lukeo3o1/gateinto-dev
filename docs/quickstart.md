@@ -255,12 +255,19 @@ The warning is expected without a client certificate: the default
 `client_certificate = "off"` in the gateway table to silence it, or `"required"` once you have a
 certificate (step 7). Stop the proxy with Ctrl+C.
 
+At start the proxy also shows its session credentials: the user name is always
+`gateinto` and the password is generated for this run. Clients must send them;
+a `CONNECT` without them gets `407`. See
+[Local proxy authentication](../README.md#local-proxy-authentication). If the
+credentials cannot be shown, the proxy exits with an error that says they
+were not shown; start it from a terminal or a desktop.
+
 ## 6. Use the tunnel
 
 In a second PowerShell window:
 
 ```powershell
-curl.exe -x http://127.0.0.1:18736 https://example.com
+curl.exe -x http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com
 ```
 
 This prints the HTML of `example.com`, and the proxy logs
@@ -271,15 +278,17 @@ explains each status.
 
 To send a browser through it, configure `127.0.0.1` port `18736` as the HTTP
 proxy for HTTPS traffic, either in the browser's own proxy settings or in
-Windows under Settings, Network & Internet, Proxy, Manual proxy setup. Only
+Windows under Settings, Network & Internet, Proxy, Manual proxy setup, and
+enter the credentials when the browser asks for proxy sign-in. Only
 `CONNECT` is supported: plain `http://` URLs sent to the proxy get `405`, so
 use HTTPS sites or exclude plain HTTP where the client allows it.
 
-Security caveat: the listener has no authentication. Any local process,
-including processes of other users on the same machine, can use the tunnel
-and the device identity behind it. Keep the default loopback address and do
-not run Gateinto on shared machines you do not trust. See the
-[security model](security-model.md).
+Security caveat: the credentials keep out local programs that do not know
+them, but not malware running as your user. `[device_session] auth = "none"`
+removes them: any local process, including processes of other users on the
+same machine, can then use the tunnel and the device identity behind it. Keep
+the default and the loopback address, and do not run Gateinto on shared
+machines you do not trust. See the [security model](security-model.md).
 
 ## 7. Optional: mutual TLS with the device key
 

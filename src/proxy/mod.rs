@@ -78,8 +78,8 @@ pub struct Upstream {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LocalAuth {
-    #[default]
     None,
+    #[default]
     SessionCredentials,
 }
 

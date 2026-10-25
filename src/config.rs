@@ -930,10 +930,10 @@ port = 443
     }
 
     #[test]
-    fn the_device_session_auth_defaults_to_none() {
+    fn the_device_session_auth_defaults_to_session_credentials() {
         assert_eq!(
             settings(MINIMAL).unwrap().device_session_auth,
-            LocalAuth::None
+            LocalAuth::SessionCredentials
         );
         for (value, expected) in [
             ("none", LocalAuth::None),

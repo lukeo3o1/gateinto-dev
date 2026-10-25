@@ -275,9 +275,9 @@ style and answer handling and by integration tests of the agent's side.
 
 ### Local proxy authentication (`session_credentials`)
 
-Browser sessions, and the device session with
-`[device_session] auth = "session_credentials"`, accept only the user name
-and password generated for them when they start. This is local proxy access
+Browser sessions, and the device session unless the configuration sets
+`[device_session] auth = "none"`, accept only the user name and password
+generated for them when they start. This is local proxy access
 control, not authorization by the upstream, and it does not identify a user.
 The trust-on-first-use mode `basic_tofu` it replaces is refused in the
 configuration file, in links and in IPC requests with an error naming
@@ -448,9 +448,10 @@ Non-guarantees:
   `127.0.0.1`. A
   non-loopback address is refused unless `--unsafe-allow-non-loopback-listen`
   is given on the command line; the configuration file has no key for it.
-  With `[device_session] auth = "session_credentials"` that flag sends the
-  Basic credentials in cleartext over the network, where anything on the path
-  can read them.
+  With the default `[device_session] auth = "session_credentials"` that flag
+  sends the Basic credentials in cleartext over the network, where anything on
+  the path can read them; with `auth = "none"` anyone who can reach the
+  address can use the tunnel and the device identity behind it.
 - **No secrets or payload in logs.** Tunnel payload, private keys and local
   proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
   listen address, the client's local address and port for each tunnel, tunnel
@@ -466,12 +467,13 @@ Non-guarantees:
 
 ## What it does not protect
 
-- **Local users and processes.** The device session's loopback listener has
-  no authentication by default (`auth = "none"`). Any local process, including
-  other users' processes, can use the tunnel and the device identity behind
-  it. `session_credentials` keeps out programs that do not know the issued
-  credentials, not programs of the same user, which can ask the agent for
-  them; see
+- **Local users and processes.** `session_credentials`, the default for every
+  session, keeps out programs that do not know the issued credentials, not
+  programs of the same user, which can ask the agent for them or read them
+  from the prompt. A device session with an explicit
+  `[device_session] auth = "none"` has no authentication: any local process,
+  including other users' processes, can use the tunnel and the device
+  identity behind it. See
   [above](#local-proxy-authentication-session_credentials).
 - **Administrators and malware running as the user.** They can use or steal
   the identity (a software key can be copied), read traffic before it enters

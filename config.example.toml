@@ -10,11 +10,13 @@ gateway = "default"
 # Must be a loopback address. A non-loopback address additionally requires the
 # --unsafe-allow-non-loopback-listen command line flag; it cannot be allowed here.
 listen = "127.0.0.1:18736"
-# Local proxy authentication for programs using the device session:
-# "none" accepts every local client; "session_credentials" generates a
-# random password (the user name is always "gateinto"), shows the
-# credentials when `gateinto proxy` starts, and accepts only them.
-auth = "none"
+# Local proxy authentication for programs using the device session.
+# "session_credentials" (the default) generates a random password (the user
+# name is always "gateinto"), shows the credentials when `gateinto proxy`
+# starts, and accepts only them. "none" accepts every local client, including
+# processes of other users on this machine, and lets each of them use this
+# device's identity toward the gateway; set it only if you accept that.
+auth = "session_credentials"
 
 # One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,
 # a-z, 0-9, _ and -.

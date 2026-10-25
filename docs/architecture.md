@@ -69,7 +69,8 @@ still delay process shutdown. See [DNS work budget](protocol/http-connect.md#dns
      |                                   |
  session 1 (device)                  session 2 (browser)
    listener 127.0.0.1:18736            listener 127.0.0.1:<ephemeral>
-   local auth: none (default)          local auth: session_credentials
+   local auth: session_credentials     local auth: session_credentials
+     (default; none only if set)
    own TLS client config + resolver    own TLS client config + resolver
    own client certificate              own client certificate
    own connection limits, tunnels      own connection limits, tunnels
@@ -99,7 +100,8 @@ only its own), so two sessions never present the same self-signed
 certificate; a file or `CurrentUser\My` certificate is the same certificate in
 every session, because only one exists for the key. Each session also has a
 local authentication policy (`proxy::LocalAuth`): `None` accepts every local
-client; `SessionCredentials` makes `Proxy::bind` generate the session's own
+client and is used only when `[device_session] auth = "none"` sets it;
+`SessionCredentials`, the default, makes `Proxy::bind` generate the session's own
 `proxy::SessionCredentials` and a `Verifier` for them, owned by that session
 only (see below).
 
@@ -116,7 +118,7 @@ that certificate. Other sessions are not affected.
 
 Kinds: `SessionKind::Device` is the long-running session for background
 programs, configured by `[device_session]` (or the command line); its local
-authentication is `[device_session] auth`, `none` by default.
+authentication is `[device_session] auth`, `session_credentials` by default.
 `gateinto proxy` starts exactly one device session and runs until Ctrl+C (or
 SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
 `SessionKind::Browser` is a session for one browser: `gateinto session
