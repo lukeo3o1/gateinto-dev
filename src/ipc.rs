@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::proxy::SessionCredentials;
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
@@ -23,6 +24,7 @@ pub enum Request {
     Deny(ConfirmToken),
     List,
     Close(SessionId),
+    Credentials(SessionId),
     Stop,
 }
 
@@ -124,6 +126,7 @@ impl fmt::Display for Request {
             Self::Deny(token) => write!(f, "deny {token}"),
             Self::List => f.write_str("list"),
             Self::Close(id) => write!(f, "close {id}"),
+            Self::Credentials(id) => write!(f, "credentials {id}"),
             Self::Stop => f.write_str("stop"),
         }
     }
@@ -152,6 +155,7 @@ impl FromStr for Request {
             ["deny", token] => token.parse().map(Self::Deny),
             ["list"] => Ok(Self::List),
             ["close", id] => id.parse().map(Self::Close).map_err(|_| invalid),
+            ["credentials", id] => id.parse().map(Self::Credentials).map_err(|_| invalid),
             ["stop"] => Ok(Self::Stop),
             _ => Err(invalid),
         }
@@ -215,6 +219,28 @@ impl Response {
             None => Err(invalid),
         }
     }
+}
+
+const USERNAME: &str = "username: ";
+const PASSWORD: &str = "password: ";
+
+pub fn credential_lines(credentials: &SessionCredentials) -> [String; 2] {
+    [
+        format!("{USERNAME}{}", credentials.username()),
+        format!("{PASSWORD}{}", credentials.password()),
+    ]
+}
+
+pub fn issued_credentials(lines: &[String]) -> Option<SessionCredentials> {
+    let value = |prefix: &str| lines.iter().find_map(|line| line.strip_prefix(prefix));
+    SessionCredentials::parse(value(USERNAME)?, value(PASSWORD)?)
+}
+
+pub fn without_credentials(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .filter(|line| !line.starts_with(USERNAME) && !line.starts_with(PASSWORD))
+        .collect()
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
@@ -1060,6 +1086,7 @@ mod tests {
             (launch("office"), "launch office basic_tofu"),
             (Request::List, "list"),
             (Request::Close(SessionId(12)), "close 12"),
+            (Request::Credentials(SessionId(7)), "credentials 7"),
             (Request::Stop, "stop"),
         ] {
             assert_eq!(request.to_string(), line);
@@ -1177,6 +1204,47 @@ mod tests {
         }
     }
 
+    fn issued() -> SessionCredentials {
+        SessionCredentials::generate(&aws_lc_rs::rand::SystemRandom::new()).unwrap()
+    }
+
+    #[test]
+    fn issued_credentials_are_read_from_their_lines() {
+        let credentials = issued();
+        let mut lines = vec!["session: 1".to_owned()];
+        lines.extend(credential_lines(&credentials));
+        lines.push("listen: 127.0.0.1:1".to_owned());
+        assert_eq!(issued_credentials(&lines), Some(credentials.clone()));
+        let [username, password] = credential_lines(&credentials);
+        assert_eq!(username, format!("username: {}", credentials.username()));
+        assert_eq!(password, format!("password: {}", credentials.password()));
+        for lines in [
+            vec![username.clone()],
+            vec![password.clone()],
+            vec![username.to_uppercase(), password.clone()],
+            vec![username.clone(), password.replace('-', "")],
+            vec![format!("{username}x"), password.clone()],
+            vec![username.clone(), format!("{password} ")],
+            vec![password.replace("password", "username"), password.clone()],
+            vec![],
+        ] {
+            assert_eq!(issued_credentials(&lines), None, "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn credential_lines_are_stripped_from_what_is_shown() {
+        let credentials = issued();
+        let mut lines = vec!["session: 1".to_owned()];
+        lines.extend(credential_lines(&credentials));
+        lines.push("listen: 127.0.0.1:1".to_owned());
+        lines.push("username: anything".to_owned());
+        assert_eq!(
+            without_credentials(lines),
+            ["session: 1", "listen: 127.0.0.1:1"]
+        );
+    }
+
     #[test]
     fn malformed_requests_are_rejected() {
         let long = format!("launch {} basic_tofu", "a".repeat(65));
@@ -1206,6 +1274,10 @@ mod tests {
             "close -1",
             "close 1 2",
             "close 99999999999999999999999",
+            "credentials",
+            "credentials x",
+            "credentials 1 2",
+            "credentials  1",
             "open gateinto://connect?profile=office",
         ] {
             assert!(line.parse::<Request>().is_err(), "{line:?}");

@@ -18,6 +18,7 @@ use gateinto::ipc::{
 };
 use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
 use gateinto::proxy::Config;
+use gateinto::sessions::SessionId;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
 use tokio::io::AsyncWriteExt;
@@ -273,13 +274,10 @@ fn limits() -> AgentLimits {
     }
 }
 
-async fn tunnel_echoes(proxy: SocketAddr, credential: &str) {
+async fn tunnel_echoes(proxy: SocketAddr, lines: &[String]) {
     let target = echo_server().await.to_string();
-    let (mut stream, response) = send(
-        proxy,
-        &connect_with(&target, Some(&basic("me", credential))),
-    )
-    .await;
+    let (mut stream, response) =
+        send(proxy, &connect_with(&target, Some(&session_auth(lines)))).await;
     assert_eq!(response.status, 200, "{}", response.head);
     stream.write_all(b"through the session").await.unwrap();
     stream.shutdown().await.unwrap();
@@ -300,7 +298,7 @@ async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
     let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
     let (mut stream, response) = send(
         browser.proxy(),
-        &connect_with(&target.to_string(), Some(&basic("me", "pw"))),
+        &connect_with(&target.to_string(), Some(&session_auth(&lines))),
     )
     .await;
     assert_eq!(response.status, 200);
@@ -319,7 +317,7 @@ async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
     assert!(!plain.iter().any(|line| line.starts_with("route:")));
     let (mut stream, response) = send(
         plain_browser.proxy(),
-        &connect_with(&target.to_string(), Some(&basic("me", "pw"))),
+        &connect_with(&target.to_string(), Some(&session_auth(&plain))),
     )
     .await;
     assert_eq!(response.status, 200);
@@ -352,7 +350,10 @@ async fn a_launch_opens_the_portal_in_a_browser_with_its_own_profile_and_session
     assert_eq!(profile.parent(), Some(agent.profiles_root.as_path()));
     assert_eq!(PathBuf::from(field(&lines, "profile")), profile);
     assert!(profile.join("Default").join("Preferences").is_file());
-    tunnel_echoes(listen, "browser secret").await;
+    tunnel_echoes(listen, &lines).await;
+    for line in ["username", "password"] {
+        assert!(!field(&lines, line).is_empty());
+    }
     let (_, other) = send(
         listen,
         &connect_with("127.0.0.1:1", Some(&basic("me", "other"))),
@@ -392,6 +393,8 @@ async fn repeated_launches_open_separate_sessions_profiles_and_browsers() {
     assert_ne!(field(&first, "session"), field(&second, "session"));
     assert_ne!(field(&first, "listen"), field(&second, "listen"));
     assert_ne!(field(&first, "realm"), field(&second, "realm"));
+    assert_ne!(field(&first, "username"), field(&second, "username"));
+    assert_ne!(field(&first, "password"), field(&second, "password"));
     assert_ne!(first_browser.profile(), second_browser.profile());
     assert_ne!(first_browser.pid, second_browser.pid);
     let list = agent.list().await;
@@ -403,8 +406,14 @@ async fn repeated_launches_open_separate_sessions_profiles_and_browsers() {
         );
         assert!(list.contains(&expected), "{list:?}");
     }
-    tunnel_echoes(first_browser.proxy(), "one").await;
-    tunnel_echoes(second_browser.proxy(), "two").await;
+    tunnel_echoes(first_browser.proxy(), &first).await;
+    tunnel_echoes(second_browser.proxy(), &second).await;
+    let (_, crossed) = send(
+        second_browser.proxy(),
+        &connect_with("127.0.0.1:1", Some(&session_auth(&first))),
+    )
+    .await;
+    assert_eq!(crossed.status, 407, "{}", crossed.head);
     agent.stop().await;
 }
 
@@ -412,7 +421,7 @@ async fn repeated_launches_open_separate_sessions_profiles_and_browsers() {
 async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     let agent = TestAgent::start(limits()).await;
     let (lines, browser) = agent.launched("main").await;
-    let (_, other) = agent.launched("main").await;
+    let (other_lines, other) = agent.launched("main").await;
     let id = field(&lines, "session").parse().unwrap();
 
     assert_eq!(
@@ -429,10 +438,52 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
         "{list:?}"
     );
     assert!(other.profile().exists());
-    tunnel_echoes(other.proxy(), "still open").await;
+    tunnel_echoes(other.proxy(), &other_lines).await;
     assert!(matches!(
         agent.send(Request::Close(id)).await,
         Response::Error(error) if error.contains("no session")
+    ));
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_credentials_of_a_session_can_be_shown_again_until_it_closes() {
+    let agent = TestAgent::start(limits()).await;
+    let (lines, _browser) = agent.launched("main").await;
+    let (other_lines, _other) = agent.launched("main").await;
+    let id: SessionId = field(&lines, "session").parse().unwrap();
+
+    let Response::Ok(again) = agent.send(Request::Credentials(id)).await else {
+        panic!("the credentials were not shown again");
+    };
+    assert_eq!(
+        again,
+        [
+            format!("listen: {}", field(&lines, "listen")),
+            format!("username: {}", field(&lines, "username")),
+            format!("password: {}", field(&lines, "password")),
+        ]
+    );
+    assert_eq!(
+        ipc::issued_credentials(&again),
+        ipc::issued_credentials(&lines)
+    );
+
+    assert_eq!(
+        agent.send(Request::Close(id)).await,
+        Response::Ok(Vec::new())
+    );
+    let unknown: SessionId = "999".parse().unwrap();
+    for id in [id, unknown] {
+        let Response::Error(error) = agent.send(Request::Credentials(id)).await else {
+            panic!("credentials of a closed or unknown session were shown");
+        };
+        assert_eq!(error, format!("no session {id}"));
+    }
+    let other_id = field(&other_lines, "session").parse().unwrap();
+    assert!(matches!(
+        agent.send(Request::Credentials(other_id)).await,
+        Response::Ok(shown) if ipc::issued_credentials(&shown) == ipc::issued_credentials(&other_lines)
     ));
     agent.stop().await;
 }
@@ -787,7 +838,7 @@ async fn a_new_gateway_is_stored_only_after_approval_and_relays_the_session() {
     let (lines, browser) = agent.opened(Request::Approve(token)).await;
     assert_eq!(field(&lines, "gateway"), "newco");
     assert_eq!(browser.start_page(), start);
-    tunnel_echoes(browser.proxy(), "linked secret").await;
+    tunnel_echoes(browser.proxy(), &lines).await;
     let linked = agent.linked();
     assert_eq!(linked.len(), 1);
     assert_eq!(linked[0].name.as_str(), "newco");

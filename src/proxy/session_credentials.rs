@@ -51,6 +51,15 @@ impl SessionCredentials {
         })
     }
 
+    pub fn parse(username: &str, password: &str) -> Option<Self> {
+        (is_grouped(username, USERNAME_GROUPS) && is_grouped(password, PASSWORD_GROUPS)).then(
+            || Self {
+                username: username.to_owned(),
+                password: password.to_owned(),
+            },
+        )
+    }
+
     pub fn username(&self) -> &str {
         &self.username
     }
@@ -78,6 +87,14 @@ fn grouped(random: &SystemRandom, groups: usize) -> Result<String, Unspecified> 
         }
     }
     Ok(text)
+}
+
+fn is_grouped(text: &str, groups: usize) -> bool {
+    let parts: Vec<&str> = text.split('-').collect();
+    parts.len() == groups
+        && parts
+            .iter()
+            .all(|part| part.len() == GROUP_LEN && part.bytes().all(|b| ALPHABET.contains(&b)))
 }
 
 fn symbol(byte: u8) -> Option<u8> {
@@ -350,6 +367,31 @@ mod tests {
         let second = issued();
         assert_ne!(first.username(), second.username());
         assert_ne!(first.password(), second.password());
+    }
+
+    #[test]
+    fn only_well_formed_credentials_are_parsed() {
+        let credentials = issued();
+        let (user, pass) = (credentials.username(), credentials.password());
+        assert_eq!(
+            SessionCredentials::parse(user, pass),
+            Some(credentials.clone())
+        );
+        for (user, pass) in [
+            (pass, user),
+            (&user.to_uppercase()[..], pass),
+            (user, &pass.replace('-', "")[..]),
+            (&format!("{user}-abcd")[..], pass),
+            (user, &format!("{pass} ")[..]),
+            (
+                &user.replacen(|c: char| c.is_ascii_alphanumeric(), "l", 1)[..],
+                pass,
+            ),
+            ("", pass),
+            (user, ""),
+        ] {
+            assert_eq!(SessionCredentials::parse(user, pass), None, "{user} {pass}");
+        }
     }
 
     #[test]

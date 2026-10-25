@@ -123,3 +123,9 @@ pub fn field<'a>(lines: &'a [String], name: &str) -> &'a str {
         .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
         .unwrap_or_else(|| panic!("no {name} in {lines:?}"))
 }
+
+pub fn session_auth(lines: &[String]) -> String {
+    let credentials = gateinto::ipc::issued_credentials(lines)
+        .unwrap_or_else(|| panic!("no session credentials in {lines:?}"));
+    crate::fixture::basic(credentials.username(), credentials.password())
+}

@@ -20,7 +20,7 @@ fn check_request(line: &str) {
     assert!(!encoded.contains(['\r', '\n']));
     assert!(encoded.len() < MAX_REQUEST_BYTES);
     assert_eq!(encoded.parse::<Request>().as_ref(), Ok(&request));
-    if !matches!(request, Request::Close(_)) {
+    if !matches!(request, Request::Close(_) | Request::Credentials(_)) {
         assert_eq!(encoded, line);
     }
 }
