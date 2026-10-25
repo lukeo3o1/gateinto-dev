@@ -485,8 +485,10 @@ Details of `session_credentials`:
   `gateinto session credentials <id>` asks the agent for them over its
   per-user IPC endpoint and shows the same prompt again. The device session
   that `gateinto agent` runs is started by the agent itself, so nothing shows
-  its credentials at start; `gateinto session list` gives its id and
-  `gateinto session credentials <id>` shows them. Without a desktop or
+  its credentials at start. Instead the agent logs one `info` line saying
+  that the device session requires session credentials and naming
+  `gateinto session credentials <id>`, which shows them; the line never
+  contains the credentials. Without a desktop or
   terminal `gateinto open` prints a warning naming that command instead, and
   `gateinto session browser` and `gateinto proxy` close their session and exit
   with an error, because nobody could use it.

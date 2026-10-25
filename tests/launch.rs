@@ -916,6 +916,46 @@ async fn the_agent_runs_the_configured_device_session_with_session_credentials()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_agent_logs_how_to_show_the_device_session_credentials_but_not_them() {
+    let launcher =
+        Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
+    let config = launcher.config.to_str().unwrap().to_owned();
+    let log = launcher.dir.join("agent.err");
+    let mut agent = launcher
+        .command(&["agent", "--config", &config])
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while !launcher.run(&["session", "list"]).await.status.success() {
+        assert!(agent.try_wait().unwrap().is_none(), "agent exited");
+        assert!(std::time::Instant::now() < deadline, "no agent");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let device = device_session_listen(&launcher).await;
+    let credentials = launcher.shown_credentials(device).await;
+
+    assert!(launcher.run(&["stop"]).await.status.success());
+    tokio::task::block_in_place(|| agent.wait().unwrap());
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    let line = text
+        .lines()
+        .find(|line| line.contains("device session 1 requires session credentials"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains(" INFO "), "{line}");
+    assert!(
+        line.contains("run `gateinto session credentials 1`"),
+        "{line}"
+    );
+    let password = field(&credentials, "password");
+    assert!(!password.is_empty());
+    assert!(!text.contains(password), "{text}");
+    assert!(!text.contains(&format!("gateinto:{password}")), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_agent_device_session_with_auth_none_accepts_any_local_client() {
     let launcher = Launcher::new(
         "[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n",
