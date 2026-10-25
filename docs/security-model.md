@@ -309,12 +309,13 @@ Guarantees:
   the process that runs the session (the agent, `gateinto session browser`
   or `gateinto proxy`) and of the command that shows them. They are never
   written to disk, never logged at any level (a test captures `trace` logs
-  and checks that neither the password nor the base64 form appear), never part of an IPC error message, never shown by
-  `gateinto status` or `gateinto session list`, never accepted from a URI
-  and never forwarded to the upstream. The agent hands them out only in the
-  successful answer to a `launch` or `credentials <id>` request on its
-  per-user endpoint; `gateinto open` and `gateinto session credentials`
-  remove them from what they print and show them in the prompt instead.
+  and checks that neither the password nor the base64 form appear), never
+  part of an IPC error message, never shown by `gateinto status` or
+  `gateinto session list`, never accepted from a URI and never forwarded to
+  the upstream. The agent hands them out only in the successful answer to a
+  `launch` or `credentials <id>` request on its per-user endpoint;
+  `gateinto open` and `gateinto session credentials` remove them from what
+  they print and show them in the prompt instead.
 - **A prompt that names the proxy.** On an interactive Windows desktop the
   prompt is a message box; otherwise it goes to the command's terminal. It
   names the proxy address the browser's own sign-in dialog shows and says to

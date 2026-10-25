@@ -12,8 +12,8 @@ gateway = "default"
 listen = "127.0.0.1:18736"
 # Local proxy authentication for programs using the device session:
 # "none" accepts every local client; "session_credentials" generates a
-# random username and password, shows them when `gateinto proxy` starts,
-# and accepts only them.
+# random password (the user name is always "gateinto"), shows the
+# credentials when `gateinto proxy` starts, and accepts only them.
 auth = "none"
 
 # One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,
