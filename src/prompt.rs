@@ -142,12 +142,21 @@ pub fn show_credentials(notice: &CredentialsNotice) -> bool {
             .is_ok();
     }
     #[cfg(windows)]
-    if windows::interactive_desktop() {
-        windows::show_credentials(&text);
-        return true;
-    }
-    let mut stderr = io::stderr();
-    stderr.is_terminal() && writeln!(stderr, "{text}").is_ok()
+    let desktop = windows::interactive_desktop().then_some(windows::show_credentials);
+    #[cfg(not(windows))]
+    let desktop = None::<fn(&str) -> bool>;
+    show_on(&text, desktop, |text| {
+        let mut stderr = io::stderr();
+        stderr.is_terminal() && writeln!(stderr, "{text}").is_ok()
+    })
+}
+
+fn show_on(
+    text: &str,
+    desktop: Option<impl FnOnce(&str) -> bool>,
+    terminal: impl FnOnce(&str) -> bool,
+) -> bool {
+    desktop.is_some_and(|show| show(text)) || terminal(text)
 }
 
 #[cfg(any(windows, test))]
@@ -184,8 +193,12 @@ mod windows {
     pub const CREDENTIALS_STYLE: MESSAGEBOX_STYLE =
         MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST;
 
-    pub fn show_credentials(text: &str) {
-        show(text, CREDENTIALS_STYLE);
+    pub fn show_credentials(text: &str) -> bool {
+        shown(show(text, CREDENTIALS_STYLE))
+    }
+
+    fn shown(result: MESSAGEBOX_RESULT) -> bool {
+        result != 0
     }
 
     pub fn show_launch_error(text: &str) {
@@ -267,6 +280,12 @@ mod windows {
             assert_eq!(CREDENTIALS_STYLE & MB_TYPEMASK, MB_OK);
             assert_ne!(CREDENTIALS_STYLE & MB_ICONINFORMATION, 0);
             assert_ne!(CREDENTIALS_STYLE & MB_TOPMOST, 0);
+        }
+
+        #[test]
+        fn a_message_box_that_failed_to_appear_shows_nothing() {
+            assert!(!shown(0));
+            assert!(shown(IDOK));
         }
 
         #[test]
@@ -412,6 +431,22 @@ mod tests {
             assert!(!text.contains("abcd-efgh"), "{text}");
             assert!(!text.contains("jkmn-pqrs-tuvw"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_message_box_that_fails_falls_back_to_the_terminal() {
+        let mut terminal = Vec::new();
+        assert!(show_on("text", Some(|_: &str| false), |text: &str| {
+            terminal.push(text.to_owned());
+            true
+        }));
+        assert_eq!(terminal, ["text"]);
+        assert!(!show_on("text", Some(|_: &str| false), |_: &str| false));
+        assert!(show_on("text", Some(|_: &str| true), |_: &str| -> bool {
+            panic!("shown twice")
+        }));
+        assert!(show_on("text", None::<fn(&str) -> bool>, |_: &str| true));
+        assert!(!show_on("text", None::<fn(&str) -> bool>, |_: &str| false));
     }
 
     #[test]
