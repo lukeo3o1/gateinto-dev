@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn issued() -> SessionCredentials {
-        SessionCredentials::parse("abcd-efgh", "jkmn-pqrs-tuvw").unwrap()
+        SessionCredentials::parse("gateinto", "jkmn-pqrs-tuvw").unwrap()
     }
 
     fn notice(
@@ -391,7 +391,7 @@ mod tests {
         for expected in [
             "Gateinto session 7",
             "Proxy: 127.0.0.1:49152",
-            "Username: abcd-efgh",
+            "Username: gateinto",
             "Password: jkmn-pqrs-tuvw",
             "only in the browser's proxy sign-in dialog that names the proxy 127.0.0.1:49152",
             "Never enter them in a website's sign-in page or dialog",
@@ -408,7 +408,7 @@ mod tests {
         let credentials = issued();
         let text = credentials_text(&notice(&credentials, None));
         assert!(text.contains("Gateinto local proxy"), "{text}");
-        assert!(text.contains("Username: abcd-efgh"), "{text}");
+        assert!(text.contains("Username: gateinto"), "{text}");
         assert!(!text.contains("gateinto session credentials"), "{text}");
     }
 
@@ -428,7 +428,6 @@ mod tests {
             "{local}"
         );
         for text in [text, local] {
-            assert!(!text.contains("abcd-efgh"), "{text}");
             assert!(!text.contains("jkmn-pqrs-tuvw"), "{text}");
         }
     }

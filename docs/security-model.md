@@ -286,12 +286,16 @@ running without local authentication.
 
 Guarantees:
 
-- **Unguessable, per session.** The user name has 8 and the password 12
-  symbols, drawn by rejection sampling from the system CSPRNG over the
-  31-symbol alphabet `abcdefghjkmnpqrstuvwxyz23456789` and grouped by four
-  (`xxxx-xxxx`, `xxxx-xxxx-xxxx`): 20 log2 31, about 99.1 bits. The alphabet
-  leaves out `i`, `l`, `o`, `0` and `1` so that they can be read and typed
-  without confusion. Every session gets new ones.
+- **Unguessable, per session.** The user name is the fixed `gateinto`;
+  browsers show it in clear in their proxy dialog and password manager, so
+  all the entropy is in the password. It has 12 symbols, drawn by rejection
+  sampling from the system CSPRNG over the 31-symbol alphabet
+  `abcdefghjkmnpqrstuvwxyz23456789` and grouped by four (`xxxx-xxxx-xxxx`):
+  12 log2 31, about 59.4 bits. Guessing is online only, against the loopback
+  port, and capped at 10 failures a minute; there is no stored or transmitted
+  hash to attack offline. The alphabet leaves out `i`, `l`, `o`, `0` and `1`
+  so that it can be read and typed without confusion. Every session gets a
+  new password.
 - **An unknown credential never binds.** Nothing is learned from requests:
   the expected value is fixed when the session starts, and a different
   credential, however early it arrives, only gets `407` and counts as a
@@ -305,8 +309,7 @@ Guarantees:
   the process that runs the session (the agent, `gateinto session browser`
   or `gateinto proxy`) and of the command that shows them. They are never
   written to disk, never logged at any level (a test captures `trace` logs
-  and checks that neither the user name, the password nor the base64 form
-  appear), never part of an IPC error message, never shown by
+  and checks that neither the password nor the base64 form appear), never part of an IPC error message, never shown by
   `gateinto status` or `gateinto session list`, never accepted from a URI
   and never forwarded to the upstream. The agent hands them out only in the
   successful answer to a `launch` or `credentials <id>` request on its

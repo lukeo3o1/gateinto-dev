@@ -37,12 +37,12 @@ browser. None of those steps has been executed either.
    `127.0.0.1:49731`) and `realm` (for example
    `Gateinto session 3f9c0a1d2b4e5f60`), then shows a message box titled
    `Gateinto` whose text starts with `Gateinto local proxy` and gives the
-   proxy address, a user name such as `k7mp-2xqa`, a password such as
+   proxy address, the user name `gateinto`, a password such as
    `t9ce-hu4w-38nr` and the warning to enter them only in the browser's proxy
    sign-in dialog. Note the port, the realm and the credentials, and record
    whether the message box was on top and whether its text could be selected
    or copied. The console must not
-   show the user name or password. Choose OK.
+   show the password. Choose OK.
 
 2. Start Chrome against that port with a throwaway profile:
 

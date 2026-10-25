@@ -127,10 +127,11 @@ starts browser sessions for launch URIs and runs the device session too.
 
 ### Local proxy authentication (`session_credentials`)
 
-`SessionCredentials::generate` draws a user name of 8 and a password of 12
-symbols from the 31-symbol alphabet `abcdefghjkmnpqrstuvwxyz23456789` by
-rejection sampling from the system random generator, grouped by four with
-hyphens (about 99 bits). `Verifier` holds, per session: a realm
+`SessionCredentials::generate` pairs the fixed user name `gateinto` with a
+password of 12 symbols from the 31-symbol alphabet
+`abcdefghjkmnpqrstuvwxyz23456789`, drawn by rejection sampling from the system
+random generator and grouped by four with hyphens (about 59.4 bits).
+`SessionCredentials::parse` accepts no other user name. `Verifier` holds, per session: a realm
 `Gateinto session <16 hex digits>`, a random HMAC-SHA-256 key, the tag of the
 issued `user:password` under that key, and a failure counter with the time
 of the first failure in the current window, behind a mutex. The session keeps

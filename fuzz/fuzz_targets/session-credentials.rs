@@ -31,6 +31,7 @@ fuzz_target!(|data: &[u8]| {
 
     let issued_authorization = session.issued_authorization();
     let issued = basic_credential(issued_authorization.as_bytes()).unwrap();
+    assert!(issued.starts_with(b"gateinto:"));
 
     let now = Instant::now();
     let mut failures = 0u32;

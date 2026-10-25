@@ -13,7 +13,7 @@ const MAX_ENCODED_BYTES: usize = 1024;
 
 const ALPHABET: &[u8; 31] = b"abcdefghjkmnpqrstuvwxyz23456789";
 const GROUP_LEN: usize = 4;
-const USERNAME_GROUPS: usize = 2;
+const USERNAME: &str = "gateinto";
 const PASSWORD_GROUPS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,18 +46,16 @@ impl fmt::Debug for SessionCredentials {
 impl SessionCredentials {
     pub(crate) fn generate(random: &SystemRandom) -> Result<Self, Unspecified> {
         Ok(Self {
-            username: grouped(random, USERNAME_GROUPS)?,
+            username: USERNAME.to_owned(),
             password: grouped(random, PASSWORD_GROUPS)?,
         })
     }
 
     pub fn parse(username: &str, password: &str) -> Option<Self> {
-        (is_grouped(username, USERNAME_GROUPS) && is_grouped(password, PASSWORD_GROUPS)).then(
-            || Self {
-                username: username.to_owned(),
-                password: password.to_owned(),
-            },
-        )
+        (username == USERNAME && is_grouped(password, PASSWORD_GROUPS)).then(|| Self {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        })
     }
 
     pub fn username(&self) -> &str {
@@ -336,10 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn credentials_carry_about_100_bits() {
-        let symbols = GROUP_LEN * (USERNAME_GROUPS + PASSWORD_GROUPS);
+    fn the_password_carries_about_59_bits() {
+        let symbols = GROUP_LEN * PASSWORD_GROUPS;
         let bits = symbols as f64 * (ALPHABET.len() as f64).log2();
-        assert!((99.0..101.0).contains(&bits), "{bits}");
+        assert!((59.0..60.0).contains(&bits), "{bits}");
     }
 
     #[test]
@@ -360,12 +358,12 @@ mod tests {
     }
 
     #[test]
-    fn generated_credentials_are_grouped_and_fresh() {
+    fn generated_credentials_have_the_fixed_username_and_a_fresh_grouped_password() {
         let first = issued();
-        assert_grouped(first.username(), USERNAME_GROUPS);
+        assert_eq!(first.username(), "gateinto");
         assert_grouped(first.password(), PASSWORD_GROUPS);
         let second = issued();
-        assert_ne!(first.username(), second.username());
+        assert_eq!(second.username(), "gateinto");
         assert_ne!(first.password(), second.password());
     }
 
@@ -380,12 +378,15 @@ mod tests {
         for (user, pass) in [
             (pass, user),
             (&user.to_uppercase()[..], pass),
+            ("k7mp-2xqa", pass),
+            (&format!("{user} ")[..], pass),
+            (&format!("{user}x")[..], pass),
             (user, &pass.replace('-', "")[..]),
-            (&format!("{user}-abcd")[..], pass),
+            (user, &format!("{pass}-abcd")[..]),
             (user, &format!("{pass} ")[..]),
             (
-                &user.replacen(|c: char| c.is_ascii_alphanumeric(), "l", 1)[..],
-                pass,
+                user,
+                &pass.replacen(|c: char| c.is_ascii_alphanumeric(), "l", 1)[..],
             ),
             ("", pass),
             (user, ""),
@@ -474,7 +475,8 @@ mod tests {
         let (user, pass) = (credentials.username(), credentials.password());
         for wrong in [
             format!("{user}:{}", issued().password()),
-            format!("{}:{pass}", issued().username()),
+            format!("k7mp-2xqa:{pass}"),
+            format!("Gateinto:{pass}"),
             format!("{pass}:{user}"),
             format!("{}:{pass}", user.to_uppercase()),
             format!("{user}:{}", pass.replace('-', "")),

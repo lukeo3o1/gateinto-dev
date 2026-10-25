@@ -89,7 +89,6 @@ async fn logs_never_contain_the_credentials() {
         assert!(logs.contains(expected), "{expected} missing from\n{logs}");
     }
     for secret in [
-        username,
         password,
         wrong_password,
         &right["Basic ".len()..],

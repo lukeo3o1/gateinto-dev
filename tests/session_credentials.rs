@@ -347,7 +347,7 @@ async fn sessions_issue_distinct_credentials_that_work_only_on_their_own_proxy()
         .unwrap();
     assert!(sessions.session(device).unwrap().credentials().is_none());
     let (one, two) = (issued(&sessions, first), issued(&sessions, second));
-    assert_ne!(one.username(), two.username());
+    assert_eq!(one.username(), two.username());
     assert_ne!(one.password(), two.password());
     assert_ne!(realm(&sessions, first), realm(&sessions, second));
 
