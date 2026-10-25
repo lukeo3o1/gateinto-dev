@@ -938,6 +938,12 @@ mod interrupt {
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
+            let deadline = std::time::Instant::now() + WAIT;
+            while !launcher.run(&["session", "list"]).await.status.success() {
+                assert!(agent.try_wait().unwrap().is_none(), "{name}: agent exited");
+                assert!(std::time::Instant::now() < deadline, "{name}: no agent");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
             let (_, browser) = launcher.opened("main").await;
 
             let status = signal(&mut agent, name).await;
