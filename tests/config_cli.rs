@@ -726,3 +726,36 @@ async fn proxy_applies_the_device_session_auth() {
     let (_, response) = send(agent, &connect_with(&target, Some(&issued))).await;
     assert_eq!(response.status, 200, "{}", response.head);
 }
+
+#[cfg(all(unix, feature = "test-hooks"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupt_ends_session_browser_while_its_prompt_is_still_open() {
+    let fixture = Fixture::new().await;
+    let config = fixture.config("client_certificate = \"off\"\n");
+    let prompt = temp_dir().join("prompt-that-never-closes");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&prompt)
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let mut session = spawn_browser_session(config, &["--gateway", "main"], &prompt).await;
+    let child = &mut session.child.0;
+    let sent = std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still running with its prompt open"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(status.success(), "{status}");
+}

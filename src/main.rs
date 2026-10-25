@@ -453,8 +453,27 @@ fn tls_mode_parser() -> impl clap::builder::TypedValueParser<Value = TlsMode> {
         .map(|name| name.parse().expect("possible values are valid TLS modes"))
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "error: starting the runtime failed: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let code = runtime.block_on(run());
+    // A prompt still open on a blocking thread waits for the user; exiting must not.
+    runtime.shutdown_background();
+    code
+}
+
+async fn run() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().collect();
     let cli = match Cli::try_parse_from(&arguments) {
         Ok(cli) => cli,
