@@ -226,9 +226,18 @@ fn without_a_credentials_prompt(mut command: Command) -> Command {
     #[cfg(windows)]
     command.env(
         "GATEINTO_TEST_CREDENTIALS_FILE",
-        isolated::no_config_home().join("prompt.txt"),
+        temp_dir().join("no-desktop").join("prompt.txt"),
     );
     command
+}
+
+fn credentials_prompt(command: &Command) -> PathBuf {
+    command
+        .get_envs()
+        .find(|(name, _)| *name == "GATEINTO_TEST_CREDENTIALS_FILE")
+        .and_then(|(_, value)| value)
+        .map(PathBuf::from)
+        .expect("no credentials prompt hook")
 }
 
 async fn spawn_proxy(config: PathBuf, extra: &[&str]) -> (Child, SocketAddr) {
@@ -240,10 +249,20 @@ async fn spawn_proxy_showing(
     extra: &[&str],
     prompt: Option<&Path>,
 ) -> (Child, SocketAddr) {
+    let mut command = isolated::gateinto();
+    if let Some(prompt) = prompt {
+        command.env("GATEINTO_TEST_CREDENTIALS_FILE", prompt);
+    }
+    spawn_proxy_from(command, config, extra).await
+}
+
+async fn spawn_proxy_from(
+    mut command: Command,
+    config: PathBuf,
+    extra: &[&str],
+) -> (Child, SocketAddr) {
     let extra = args(extra);
-    let prompt = prompt.map(Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
-        let mut command = isolated::gateinto();
         command
             .arg("proxy")
             .arg("--config")
@@ -251,9 +270,6 @@ async fn spawn_proxy_showing(
             .args(&extra)
             .env("RUST_LOG", "info")
             .stderr(Stdio::piped());
-        if let Some(prompt) = prompt {
-            command.env("GATEINTO_TEST_CREDENTIALS_FILE", prompt);
-        }
         let mut child = Child(command.spawn().unwrap());
         let mut lines = std::io::BufReader::new(child.0.stderr.take().unwrap()).lines();
         loop {
@@ -723,17 +739,27 @@ async fn every_isolated_run_routes_the_credentials_prompt_to_the_test_hook() {
         "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
     );
 
-    let (_child, agent) = spawn_proxy(config, &[]).await;
+    let command = isolated::gateinto();
+    let prompt = credentials_prompt(&command);
+    assert!(
+        prompt.starts_with(env!("CARGO_TARGET_TMPDIR")),
+        "{}",
+        prompt.display()
+    );
+    assert_ne!(credentials_prompt(&isolated::gateinto()), prompt);
+
+    let (_child, agent) = spawn_proxy_from(command, config, &[]).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let proxy = format!("Proxy: {agent}");
-    while !std::fs::read_to_string(isolated::credentials_prompt())
+    while !std::fs::read_to_string(&prompt)
         .unwrap_or_default()
         .contains(&proxy)
     {
         assert!(std::time::Instant::now() < deadline, "{proxy} not shown");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    std::fs::remove_file(&prompt).unwrap();
 }
 
 #[cfg(feature = "test-hooks")]

@@ -440,8 +440,8 @@ user. Each session has one policy:
 
 - `none`: every local client is accepted. The device session's default.
 - `session_credentials`: when the session starts, Gateinto generates a random
-  password for it; the user name is always `gateinto`. A `CONNECT` without a `Proxy-Authorization`
-  header gets `407 Proxy Authentication Required` with
+  password for it; the user name is always `gateinto`. A `CONNECT` without a
+  `Proxy-Authorization` header gets `407 Proxy Authentication Required` with
   `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
   so a browser shows its own proxy sign-in dialog. Only the issued user name
   and password are accepted; any other credential gets `407` again and never

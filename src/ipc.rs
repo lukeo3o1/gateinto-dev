@@ -1246,7 +1246,10 @@ mod tests {
         for lines in [
             vec![username.clone()],
             vec![password.clone()],
-            vec![username.to_uppercase(), password.clone()],
+            vec![
+                format!("username: {}", credentials.username().to_uppercase()),
+                password.clone(),
+            ],
             vec![username.clone(), password.replace('-', "")],
             vec![format!("{username}x"), password.clone()],
             vec!["username: k7mp-2xqa".to_owned(), password.clone()],
