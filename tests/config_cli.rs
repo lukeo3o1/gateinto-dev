@@ -673,7 +673,7 @@ async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_por
             output.contains("TRACE") || output.contains("DEBUG"),
             "{output}"
         );
-        for secret in [&mine.0, &mine.1, &theirs.0, &theirs.1] {
+        for secret in [&mine.1, &theirs.1] {
             assert!(!output.contains(secret.as_str()), "{output}");
         }
         assert!(

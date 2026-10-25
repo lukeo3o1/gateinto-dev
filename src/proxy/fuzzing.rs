@@ -123,7 +123,10 @@ mod tests {
         );
         let issued = session.issued_authorization();
         let token = issued.strip_prefix("Basic ").unwrap();
-        assert_eq!(basic_credential(issued.as_bytes()).unwrap().len(), 24);
+        assert_eq!(
+            basic_credential(issued.as_bytes()).unwrap(),
+            format!("gateinto:{}", session.credentials.password()).as_bytes()
+        );
         for header in [issued.clone(), format!("bAsIc {token}")] {
             assert_eq!(respond(&session, &request(Some(&header))), Outcome::Tunnel);
         }

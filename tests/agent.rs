@@ -393,7 +393,7 @@ async fn repeated_launches_open_separate_sessions_profiles_and_browsers() {
     assert_ne!(field(&first, "session"), field(&second, "session"));
     assert_ne!(field(&first, "listen"), field(&second, "listen"));
     assert_ne!(field(&first, "realm"), field(&second, "realm"));
-    assert_ne!(field(&first, "username"), field(&second, "username"));
+    assert_eq!(field(&first, "username"), field(&second, "username"));
     assert_ne!(field(&first, "password"), field(&second, "password"));
     assert_ne!(first_browser.profile(), second_browser.profile());
     assert_ne!(first_browser.pid, second_browser.pid);

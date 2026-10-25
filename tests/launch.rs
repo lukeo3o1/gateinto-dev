@@ -678,7 +678,6 @@ async fn session_close_revokes_the_credentials_and_ends_the_tunnels() {
         panic!("a closed session still answered with credentials: {answer:?}");
     };
     assert!(message.contains(&format!("no session {id}")), "{message}");
-    assert!(!message.contains(cached.username()), "{message}");
     assert!(!message.contains(cached.password()), "{message}");
 }
 
@@ -753,7 +752,6 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
         PORTAL,
         "ca.pem",
         field(&lines, "realm"),
-        field(&shown, "username"),
         field(&shown, "password"),
     ] {
         assert!(!text.contains(secret), "{secret}: {text}");
@@ -1356,7 +1354,6 @@ async fn without_a_desktop_or_terminal_the_credentials_are_not_shown_but_named()
     let issued =
         gateinto::ipc::issued_credentials(&launcher.shown_credentials(listen).await).unwrap();
     for text in [&output.stdout, &output.stderr] {
-        assert!(!text.contains(issued.username()), "{text}");
         assert!(!text.contains(issued.password()), "{text}");
     }
     assert!(

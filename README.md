@@ -440,7 +440,7 @@ user. Each session has one policy:
 
 - `none`: every local client is accepted. The device session's default.
 - `session_credentials`: when the session starts, Gateinto generates a random
-  user name and password for it. A `CONNECT` without a `Proxy-Authorization`
+  password for it; the user name is always `gateinto`. A `CONNECT` without a `Proxy-Authorization`
   header gets `407 Proxy Authentication Required` with
   `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
   so a browser shows its own proxy sign-in dialog. Only the issued user name
@@ -454,11 +454,14 @@ a link, the IPC request) with an error naming `session_credentials`.
 
 Details of `session_credentials`:
 
-- The user name is 8 and the password 12 symbols from the 31-letter alphabet
-  `abcdefghjkmnpqrstuvwxyz23456789` (lowercase, without `i`, `l`, `o`, `0`
-  and `1`), grouped by four with hyphens, such as `k7mp-2xqa` and
-  `t9ce-hu4w-38nr`. Both come from the operating system's CSPRNG by rejection
-  sampling, about 99 bits together.
+- The user name is the fixed `gateinto`: browsers show it in clear in their
+  proxy dialog and password manager, so it carries no secret. The password is
+  12 symbols from the 31-letter alphabet `abcdefghjkmnpqrstuvwxyz23456789`
+  (lowercase, without `i`, `l`, `o`, `0` and `1`), grouped by four with
+  hyphens, such as `t9ce-hu4w-38nr`. It comes from the operating system's
+  CSPRNG by rejection sampling, about 59.4 bits. That is ample against the
+  only attack open to it, online guessing capped at 10 failures a minute;
+  there is nothing to attack offline.
 - They exist only in the memory of the process that runs the session and of
   the command that shows them. They are never written to disk, never logged at
   any log level, never part of an IPC error message, never shown by
