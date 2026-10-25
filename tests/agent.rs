@@ -97,7 +97,7 @@ fn link(
     gateway: Option<&str>,
     portal: Option<&str>,
 ) -> LaunchRequest {
-    LaunchRequest::new(profile, "basic_tofu")
+    LaunchRequest::new(profile, "session_credentials")
         .unwrap()
         .with_link(url, gateway, portal)
         .unwrap()
@@ -217,7 +217,7 @@ impl TestAgent {
 
     async fn launch(&self, profile: &str) -> Response {
         self.send(Request::Launch(
-            LaunchRequest::new(profile, "basic_tofu").unwrap(),
+            LaunchRequest::new(profile, "session_credentials").unwrap(),
         ))
         .await
     }
@@ -311,7 +311,7 @@ async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
     assert!(agent._upstream.requests().is_empty());
     let (plain, plain_browser) = agent
         .opened(Request::Launch(
-            LaunchRequest::new("newco", "basic_tofu").unwrap(),
+            LaunchRequest::new("newco", "session_credentials").unwrap(),
         ))
         .await;
     assert!(!plain.iter().any(|line| line.starts_with("route:")));
@@ -560,10 +560,10 @@ async fn the_agent_validates_requests_itself() {
         Response::Error(error) if error.contains("unknown gateway \"nope\"")
     ));
     for request in [
-        b"launch ../main basic_tofu\n".as_slice(),
-        b"launch -main basic_tofu\n",
+        b"launch ../main session_credentials\n".as_slice(),
+        b"launch -main session_credentials\n",
         b"launch main none\n",
-        b"launch main basic_tofu --config x\n",
+        b"launch main session_credentials --config x\n",
         b"open gateinto://connect?profile=main\n",
         b"\xff\n",
         b"list\r\n",

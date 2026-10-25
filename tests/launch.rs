@@ -195,7 +195,7 @@ impl Launcher {
     async fn opened(&self, profile: &str) -> (Vec<String>, FakeBrowser) {
         let output = self
             .open(&format!(
-                "gateinto://connect?profile={profile}&auth=basic_tofu"
+                "gateinto://connect?profile={profile}&auth=session_credentials"
             ))
             .await;
         assert_no_credentials(&output);
@@ -288,11 +288,16 @@ async fn gateway_only_open_reuses_configured_trust_and_can_start_blank_in_mixed_
         .replace(&format!("portal_url = \"{PORTAL}\"\n"), "");
     std::fs::write(&launcher.config, &original).unwrap();
     let gateway = format!("[::ffff:127.0.0.1]:{}", launcher.upstream_port);
-    let request =
-        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
-            .unwrap()
-            .with_route("mixed")
-            .unwrap();
+    let request = gateinto::uri::LaunchRequest::from_fields(
+        None,
+        "session_credentials",
+        None,
+        Some(&gateway),
+        None,
+    )
+    .unwrap()
+    .with_route("mixed")
+    .unwrap();
     let uri = request.to_string();
     assert!(!uri.contains("profile="));
     assert!(!uri.contains("portal="));
@@ -320,9 +325,14 @@ async fn gateway_only_open_refuses_ambiguous_configured_profiles() {
     ));
     std::fs::write(&launcher.config, &text).unwrap();
     let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
-    let request =
-        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
-            .unwrap();
+    let request = gateinto::uri::LaunchRequest::from_fields(
+        None,
+        "session_credentials",
+        None,
+        Some(&gateway),
+        None,
+    )
+    .unwrap();
     let output = launcher.open(&request.to_string()).await;
     assert!(
         output
@@ -335,7 +345,7 @@ async fn gateway_only_open_refuses_ambiguous_configured_profiles() {
     assert!(browsers(&launcher.profiles_root).is_empty());
     let explicit = gateinto::uri::LaunchRequest::from_fields(
         Some("main"),
-        "basic_tofu",
+        "session_credentials",
         None,
         Some(&gateway),
         None,
@@ -361,11 +371,16 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
         .success();
     let endpoint = launcher.endpoint();
     let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
-    let request =
-        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
-            .unwrap()
-            .with_route("mixed")
-            .unwrap();
+    let request = gateinto::uri::LaunchRequest::from_fields(
+        None,
+        "session_credentials",
+        None,
+        Some(&gateway),
+        None,
+    )
+    .unwrap()
+    .with_route("mixed")
+    .unwrap();
     let generated = request.proposed_profile().unwrap();
     let Response::Ok(lines) = ipc::send(&endpoint, &Request::Launch(request.clone()))
         .await
@@ -425,10 +440,15 @@ async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_
 {
     let launcher = Launcher::without_gateways().await;
     let gateway = format!("127.0.0.1:{}", launcher.upstream_port);
-    let uri =
-        gateinto::uri::LaunchRequest::from_fields(None, "basic_tofu", None, Some(&gateway), None)
-            .unwrap()
-            .to_string();
+    let uri = gateinto::uri::LaunchRequest::from_fields(
+        None,
+        "session_credentials",
+        None,
+        Some(&gateway),
+        None,
+    )
+    .unwrap()
+    .to_string();
     let output = launcher.open(&uri).await;
     assert!(
         output.failure().stderr.contains("no desktop or terminal"),
@@ -530,7 +550,7 @@ async fn open_without_config_uses_the_default_config_file_like_the_installed_han
         .run(&[
             "open",
             "--",
-            "gateinto://connect?profile=main&auth=basic_tofu",
+            "gateinto://connect?profile=main&auth=session_credentials",
         ])
         .await;
 
@@ -885,13 +905,21 @@ mod interrupt {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ctrl_c_stops_proxy_and_session_browser_cleanly() {
-        let launcher =
+        #[allow(unused_mut)]
+        let mut launcher =
             Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
         let config = launcher.config.to_str().unwrap().to_owned();
-        for args in [
-            vec!["proxy", "--config", &config],
-            vec!["session", "browser", "--config", &config],
-        ] {
+        #[allow(unused_mut)]
+        let mut commands = vec![vec!["proxy", "--config", &config]];
+        #[cfg(feature = "test-hooks")]
+        {
+            let prompt = launcher.dir.join("credentials-prompt.txt");
+            launcher
+                .env
+                .push(("GATEINTO_TEST_CREDENTIALS_FILE", prompt.into()));
+            commands.push(vec!["session", "browser", "--config", &config]);
+        }
+        for args in commands {
             let mut child = launcher
                 .command(&args)
                 .stdout(Stdio::null())
@@ -939,7 +967,7 @@ fn link_uri(
     gateway: Option<&str>,
     portal: Option<&str>,
 ) -> String {
-    gateinto::uri::LaunchRequest::new(profile, "basic_tofu")
+    gateinto::uri::LaunchRequest::new(profile, "session_credentials")
         .unwrap()
         .with_link(url, gateway, portal)
         .unwrap()
@@ -1188,7 +1216,7 @@ async fn launch_errors_notify_once_but_a_successful_launch_does_not() {
     let (_, browser) = launcher.opened("main").await;
     assert!(!notification.exists());
     let output = launcher
-        .open("gateinto://connect?profile=missing&auth=basic_tofu")
+        .open("gateinto://connect?profile=missing&auth=session_credentials")
         .await;
     output.failure();
     let text = std::fs::read_to_string(notification).unwrap();
@@ -1244,7 +1272,7 @@ async fn open_shows_the_credentials_in_a_prompt_and_session_credentials_shows_th
 async fn without_a_desktop_or_terminal_the_credentials_are_not_shown_but_named() {
     let launcher = Launcher::new("").await;
     let output = launcher
-        .open("gateinto://connect?profile=main&auth=basic_tofu")
+        .open("gateinto://connect?profile=main&auth=session_credentials")
         .await;
     let lines = output.success().lines();
     let id = field(&lines, "session");

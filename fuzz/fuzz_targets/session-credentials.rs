@@ -8,6 +8,7 @@ use gateinto::proxy::fuzzing::{LocalAuthSession, Outcome, basic_credential};
 use libfuzzer_sys::fuzz_target;
 
 const WINDOW: Duration = Duration::from_secs(60);
+const ISSUED: u8 = 0x01;
 
 fuzz_target!(|data: &[u8]| {
     let Some((&config, values)) = data.split_first() else {
@@ -28,10 +29,17 @@ fuzz_target!(|data: &[u8]| {
     let nonce = realm.strip_prefix("Gateinto session ").unwrap();
     assert!(nonce.len() == 16 && nonce.bytes().all(|b| b.is_ascii_hexdigit()));
 
+    let issued_authorization = session.issued_authorization();
+    let issued = basic_credential(issued_authorization.as_bytes()).unwrap();
+
     let now = Instant::now();
-    let mut bound: Option<Vec<u8>> = None;
     let mut failures = 0u32;
     for value in values.split(|&b| b == 0) {
+        let value = if value == [ISSUED] {
+            issued_authorization.as_bytes()
+        } else {
+            value
+        };
         let head = request(value);
         let outcome = session.respond(&head, DEFAULT_MAX_HEADER_BYTES, now);
         let parsed = match parse_connect_request(&head, DEFAULT_MAX_HEADER_BYTES) {
@@ -51,19 +59,13 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(rejected(&outcome, &realm), 407);
             continue;
         };
-        match (basic_credential(&authorization), &bound) {
-            (Some(credential), None) => {
-                assert_eq!(outcome, Outcome::Tunnel { bound: true });
-                bound = Some(credential);
-            }
-            (Some(credential), Some(first)) if credential == *first => {
-                assert_eq!(outcome, Outcome::Tunnel { bound: false });
-            }
-            (Some(_), Some(_)) => {
+        match basic_credential(&authorization) {
+            Some(credential) if credential == issued => assert_eq!(outcome, Outcome::Tunnel),
+            Some(_) => {
                 assert_eq!(rejected(&outcome, &realm), 407);
                 failures += 1;
             }
-            (None, _) => {
+            None => {
                 assert_eq!(rejected(&outcome, &realm), refused_status(&authorization));
                 failures += 1;
             }

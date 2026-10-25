@@ -8,6 +8,7 @@ use std::time::Duration;
 use fixture::*;
 use gateinto::identity::certificates::SelfSignedCertificates;
 use gateinto::identity::client_cert::ClientCertificate;
+use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::proxy::{Config, FailureLimit, LocalAuth, Proxy, Route, SessionCredentials};
 use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use rcgen::{KeyPair, PublicKeyData};
@@ -348,6 +349,10 @@ async fn sessions_issue_distinct_credentials_that_work_only_on_their_own_proxy()
     assert_ne!(one.password(), two.password());
     assert_ne!(realm(&sessions, first), realm(&sessions, second));
 
+    let last_fingerprint = || {
+        let chains = upstream.client_certificates();
+        sha256_fingerprint(&chains.last().unwrap()[0])
+    };
     let (one, two) = (header(&one), header(&two));
     echo_through(
         addr(&sessions, first),
@@ -355,13 +360,25 @@ async fn sessions_issue_distinct_credentials_that_work_only_on_their_own_proxy()
         b"1",
     )
     .await;
+    let first_sha256 = last_fingerprint();
     echo_through(
         addr(&sessions, second),
         &connect_with(&target, Some(&two)),
         b"2",
     )
     .await;
+    let second_sha256 = last_fingerprint();
     echo_through(addr(&sessions, device), &connect_with(&target, None), b"d").await;
+    let device_sha256 = last_fingerprint();
+    echo_through(
+        addr(&sessions, device),
+        &connect_with(&target, Some(&one)),
+        b"d",
+    )
+    .await;
+    assert_ne!(first_sha256, second_sha256);
+    assert_ne!(first_sha256, device_sha256);
+    assert_ne!(second_sha256, device_sha256);
     assert_eq!(
         status(addr(&sessions, first), &connect_with(&target, Some(&two))).await,
         407

@@ -1,1 +1,1 @@
-launch corp basic_tofu url=https://p.example/app gateway=proxy.example:443 portal=https://p.example/
+launch corp session_credentials url=https://p.example/app gateway=proxy.example:443 portal=https://p.example/

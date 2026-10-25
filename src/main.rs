@@ -141,8 +141,8 @@ struct ResetArgs {
 
 #[derive(Subcommand)]
 enum SessionCommand {
-    /// Start a browser session with basic_tofu proxy authentication on an ephemeral loopback port
-    /// and run it until interrupted
+    /// Start a browser session with session credentials on an ephemeral loopback port, show the
+    /// credentials, and run it until interrupted
     Browser(BrowserSessionArgs),
     /// List the sessions of the running agent
     List,
@@ -646,15 +646,39 @@ async fn proxy(args: ProxyArgs) -> Result {
         ..proxy_config(&settings)?
     };
     let mut sessions = SessionManager::new();
-    sessions
+    let id = sessions
         .start(SessionConfig {
             kind: SessionKind::Device,
             gateway: settings.gateway.name,
             proxy: config,
         })
         .await?;
-    shutdown.await;
+    let session = sessions.session(id).expect("the session just started");
+    let shown = serve_showing(
+        session.local_addr(),
+        session.credentials().cloned(),
+        shutdown,
+    );
+    let result = shown.await;
     sessions.close_all().await;
+    result
+}
+
+async fn serve_showing(
+    listen: SocketAddr,
+    credentials: Option<SessionCredentials>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result {
+    let Some(credentials) = credentials else {
+        shutdown.await;
+        return Ok(());
+    };
+    tokio::pin!(shutdown);
+    tokio::select! {
+        shown = show_credentials(None, listen, credentials) => shown?,
+        () = &mut shutdown => return Ok(()),
+    }
+    shutdown.await;
     Ok(())
 }
 
@@ -687,7 +711,7 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     args.upstream.config.log_default();
     let config = Config {
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        local_auth: LocalAuth::BasicTofu,
+        local_auth: LocalAuth::SessionCredentials,
         ..proxy_config(&settings)?
     };
     let mut sessions = SessionManager::new();
@@ -705,9 +729,14 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     println!("listen: {}", session.local_addr());
     println!("realm: {}", session.realm().unwrap_or_default());
     println!("Press Ctrl-C to close the session.");
-    shutdown.await;
+    let shown = serve_showing(
+        session.local_addr(),
+        session.credentials().cloned(),
+        shutdown,
+    );
+    let result = shown.await;
     sessions.close_all().await;
-    Ok(())
+    result
 }
 
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {

@@ -1,1 +1,1 @@
-launch basic_tofu gateway=proxy.example:443
+launch session_credentials gateway=proxy.example:443

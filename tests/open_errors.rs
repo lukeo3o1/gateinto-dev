@@ -128,7 +128,10 @@ fn agent_start_failure_notification_names_the_configuration_to_diagnose() {
         .arg("open")
         .arg("--config")
         .arg(&config)
-        .args(["--", "gateinto://connect?profile=main&auth=basic_tofu"])
+        .args([
+            "--",
+            "gateinto://connect?profile=main&auth=session_credentials",
+        ])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));

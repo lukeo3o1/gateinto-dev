@@ -139,18 +139,21 @@ impl FromStr for Request {
         let invalid = ProtocolError("invalid request");
         let words: Vec<&str> = line.split(' ').collect();
         match words.as_slice() {
-            ["launch", profile, auth @ "basic_tofu", link @ ..] => {
+            ["launch", profile, auth @ "session_credentials", link @ ..] => {
                 let request = launch(Some(profile), auth, link)
                     .filter(|request| request.to_string() == line)
                     .ok_or(ProtocolError("invalid launch request"))?;
                 Ok(request)
             }
-            ["launch", auth @ "basic_tofu", link @ ..] => {
+            ["launch", auth @ "session_credentials", link @ ..] => {
                 let request = launch(None, auth, link)
                     .filter(|request| request.to_string() == line)
                     .ok_or(ProtocolError("invalid launch request"))?;
                 Ok(request)
             }
+            ["launch", "basic_tofu", ..] | ["launch", _, "basic_tofu", ..] => Err(ProtocolError(
+                "the basic_tofu local proxy authentication was removed; use session_credentials",
+            )),
             ["approve", token] => token.parse().map(Self::Approve),
             ["deny", token] => token.parse().map(Self::Deny),
             ["list"] => Ok(Self::List),
@@ -1004,7 +1007,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn launch(profile: &str) -> Request {
-        Request::Launch(LaunchRequest::new(profile, "basic_tofu").unwrap())
+        Request::Launch(LaunchRequest::new(profile, "session_credentials").unwrap())
     }
 
     #[test]
@@ -1023,8 +1026,8 @@ mod tests {
     #[test]
     fn gateway_only_launches_round_trip_without_a_profile_or_portal() {
         for line in [
-            "launch basic_tofu gateway=proxy.example:443",
-            "launch basic_tofu route=mixed gateway=[::1]:8443",
+            "launch session_credentials gateway=proxy.example:443",
+            "launch session_credentials route=mixed gateway=[::1]:8443",
         ] {
             let request: Request = line.parse().unwrap();
             assert_eq!(request.to_string(), line);
@@ -1037,27 +1040,46 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_profile_named_basic_tofu_remains_unambiguous() {
-        let line = "launch basic_tofu basic_tofu";
+    fn a_legacy_profile_named_session_credentials_remains_unambiguous() {
+        let line = "launch session_credentials session_credentials";
         let request: Request = line.parse().unwrap();
         assert_eq!(request.to_string(), line);
         let Request::Launch(launch) = request else {
             panic!("not launch")
         };
-        assert_eq!(launch.profile.unwrap().as_str(), "basic_tofu");
+        assert_eq!(launch.profile.unwrap().as_str(), "session_credentials");
         for line in [
-            "launch basic_tofu",
-            "launch basic_tofu gateway=proxy.example:443 gateway=other.example:443",
-            "launch basic_tofu gateway=proxy.example:443 profile=corp",
-            "launch basic_tofu auth=basic_tofu gateway=proxy.example:443",
+            "launch session_credentials",
+            "launch session_credentials gateway=proxy.example:443 gateway=other.example:443",
+            "launch session_credentials gateway=proxy.example:443 profile=corp",
+            "launch session_credentials auth=session_credentials gateway=proxy.example:443",
         ] {
             assert!(line.parse::<Request>().is_err());
         }
     }
 
     #[test]
+    fn the_removed_basic_tofu_auth_fails_closed_naming_its_replacement() {
+        for line in [
+            "launch corp basic_tofu",
+            "launch basic_tofu",
+            "launch basic_tofu gateway=proxy.example:443",
+            "launch corp basic_tofu url=https://p.example/",
+        ] {
+            let error = line.parse::<Request>().unwrap_err().to_string();
+            assert!(error.contains("basic_tofu"), "{error}");
+            assert!(error.contains("session_credentials"), "{error}");
+        }
+        let line = "launch basic_tofu session_credentials";
+        let Request::Launch(launch) = line.parse().unwrap() else {
+            panic!("not launch")
+        };
+        assert_eq!(launch.profile.unwrap().as_str(), "basic_tofu");
+    }
+
+    #[test]
     fn mixed_launch_route_round_trips_without_changing_legacy_requests() {
-        let line = "launch corp basic_tofu route=mixed";
+        let line = "launch corp session_credentials route=mixed";
         let parsed: Request = line.parse().unwrap();
         assert_eq!(parsed.to_string(), line);
         let Request::Launch(link) = parsed else {
@@ -1065,16 +1087,16 @@ mod tests {
         };
         assert!(link.to_string().contains("&route=mixed"));
         assert_eq!(
-            "launch corp basic_tofu"
+            "launch corp session_credentials"
                 .parse::<Request>()
                 .unwrap()
                 .to_string(),
-            "launch corp basic_tofu"
+            "launch corp session_credentials"
         );
         for invalid in [
-            "launch corp basic_tofu route=direct",
-            "launch corp basic_tofu route=mixed route=mixed",
-            "launch corp basic_tofu route=gateway",
+            "launch corp session_credentials route=direct",
+            "launch corp session_credentials route=mixed route=mixed",
+            "launch corp session_credentials route=gateway",
         ] {
             assert!(invalid.parse::<Request>().is_err());
         }
@@ -1083,7 +1105,7 @@ mod tests {
     #[test]
     fn requests_round_trip_as_single_lines() {
         for (request, line) in [
-            (launch("office"), "launch office basic_tofu"),
+            (launch("office"), "launch office session_credentials"),
             (Request::List, "list"),
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
@@ -1096,7 +1118,7 @@ mod tests {
 
     fn linked_launch() -> Request {
         Request::Launch(
-            LaunchRequest::new("corp", "basic_tofu")
+            LaunchRequest::new("corp", "session_credentials")
                 .unwrap()
                 .with_link(
                     Some("https://p.example/app?a=b&c=d"),
@@ -1112,7 +1134,7 @@ mod tests {
     #[test]
     fn launch_link_fields_and_answers_round_trip_as_single_lines() {
         let start = Request::Launch(
-            LaunchRequest::new("corp", "basic_tofu")
+            LaunchRequest::new("corp", "session_credentials")
                 .unwrap()
                 .with_link(Some("https://p.example/"), None, None)
                 .unwrap(),
@@ -1120,10 +1142,13 @@ mod tests {
         for (request, line) in [
             (
                 linked_launch(),
-                "launch corp basic_tofu url=https://p.example/app?a=b&c=d \
+                "launch corp session_credentials url=https://p.example/app?a=b&c=d \
                  gateway=proxy.example:443 portal=https://p.example/",
             ),
-            (start, "launch corp basic_tofu url=https://p.example/"),
+            (
+                start,
+                "launch corp session_credentials url=https://p.example/",
+            ),
             (
                 Request::Approve(TOKEN.parse().unwrap()),
                 "approve 0123456789abcdef0123456789abcdef",
@@ -1141,24 +1166,24 @@ mod tests {
     #[test]
     fn malformed_launch_link_fields_are_rejected() {
         for line in [
-            "launch corp basic_tofu url=",
-            "launch corp basic_tofu url=http://p.example/",
-            "launch corp basic_tofu url=https://p.example/ x",
-            "launch corp basic_tofu url=https://p.example/  ",
-            "launch corp basic_tofu  url=https://p.example/",
-            "launch corp basic_tofu url=https://p.example/\r",
-            "launch corp basic_tofu url=https://p.example/ url=https://p.example/",
-            "launch corp basic_tofu URL=https://p.example/",
-            "launch corp basic_tofu ca_file=/tmp/ca.pem",
-            "launch corp basic_tofu url",
-            "launch corp basic_tofu gateway=user@proxy.example portal=https://p.example/",
-            "launch corp basic_tofu gateway=proxy.example portal=https://p.example/",
-            "launch corp basic_tofu portal=https://p.example/ gateway=proxy.example:443",
-            "launch corp basic_tofu gateway=proxy.example:443 portal=https://p.example/ \
+            "launch corp session_credentials url=",
+            "launch corp session_credentials url=http://p.example/",
+            "launch corp session_credentials url=https://p.example/ x",
+            "launch corp session_credentials url=https://p.example/  ",
+            "launch corp session_credentials  url=https://p.example/",
+            "launch corp session_credentials url=https://p.example/\r",
+            "launch corp session_credentials url=https://p.example/ url=https://p.example/",
+            "launch corp session_credentials URL=https://p.example/",
+            "launch corp session_credentials ca_file=/tmp/ca.pem",
+            "launch corp session_credentials url",
+            "launch corp session_credentials gateway=user@proxy.example portal=https://p.example/",
+            "launch corp session_credentials gateway=proxy.example portal=https://p.example/",
+            "launch corp session_credentials portal=https://p.example/ gateway=proxy.example:443",
+            "launch corp session_credentials gateway=proxy.example:443 portal=https://p.example/ \
              url=https://p.example/",
-            "launch corp basic_tofu url=https://evil.example/ gateway=proxy.example:443 \
+            "launch corp session_credentials url=https://evil.example/ gateway=proxy.example:443 \
              portal=https://p.example/",
-            "launch corp basic_tofu url=https://p.example/ gateway=proxy.example:443 \
+            "launch corp session_credentials url=https://p.example/ gateway=proxy.example:443 \
              portal=https://p.example/ extra",
             "approve",
             "approve 0123456789ABCDEF0123456789ABCDEF",
@@ -1179,7 +1204,7 @@ mod tests {
         let url = format!("https://p.example/{}", path(2048));
         let host = format!("{}example", format!("{}.", "a".repeat(63)).repeat(3));
         let request = Request::Launch(
-            LaunchRequest::new(&"a".repeat(64), "basic_tofu")
+            LaunchRequest::new(&"a".repeat(64), "session_credentials")
                 .unwrap()
                 .with_link(Some(&url), Some(&format!("{host}:65535")), Some(&url))
                 .unwrap(),
@@ -1247,7 +1272,7 @@ mod tests {
 
     #[test]
     fn malformed_requests_are_rejected() {
-        let long = format!("launch {} basic_tofu", "a".repeat(65));
+        let long = format!("launch {} session_credentials", "a".repeat(65));
         for line in [
             "",
             " ",
@@ -1259,15 +1284,15 @@ mod tests {
             "stop now",
             "launch",
             "launch office",
-            "launch office basic_tofu extra",
-            "launch  office basic_tofu",
+            "launch office session_credentials extra",
+            "launch  office session_credentials",
             "launch office none",
-            "launch ../office basic_tofu",
-            "launch -office basic_tofu",
-            "launch --config basic_tofu",
-            "launch off\"ice basic_tofu",
-            "launch office%20x basic_tofu",
-            "launch caf\u{e9} basic_tofu",
+            "launch ../office session_credentials",
+            "launch -office session_credentials",
+            "launch --config session_credentials",
+            "launch off\"ice session_credentials",
+            "launch office%20x session_credentials",
+            "launch caf\u{e9} session_credentials",
             long.as_str(),
             "close",
             "close x",

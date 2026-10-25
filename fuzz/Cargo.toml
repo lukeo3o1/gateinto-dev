@@ -21,8 +21,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "basic-tofu"
-path = "fuzz_targets/basic-tofu.rs"
+name = "session-credentials"
+path = "fuzz_targets/session-credentials.rs"
 test = false
 doc = false
 bench = false

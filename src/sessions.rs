@@ -161,7 +161,7 @@ impl SessionManager {
         let realm = proxy.realm().map(str::to_owned);
         let credentials = proxy.credentials().cloned();
         if let Some(realm) = &realm {
-            span.in_scope(|| info!(realm, "local proxy authentication: basic_tofu"));
+            span.in_scope(|| info!(realm, "local proxy authentication: session_credentials"));
         }
         let (close, closed) = oneshot::channel();
         let shutdown = async {

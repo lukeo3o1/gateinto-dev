@@ -1,28 +1,43 @@
 use std::time::Instant;
 
 use aws_lc_rs::error::Unspecified;
+use aws_lc_rs::rand::SystemRandom;
 
-use super::basic_tofu::BasicTofu;
-use super::session_credentials::parse_basic;
-use super::{FailureLimit, HeadError, authorize};
+use super::session_credentials::{Verifier, encode, parse_basic};
+use super::{FailureLimit, HeadError, SessionCredentials, authenticate};
 use crate::http::parse_connect_request;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Incomplete,
-    Tunnel { bound: bool },
+    Tunnel,
     Reject(String),
 }
 
-pub struct LocalAuthSession(BasicTofu);
+pub struct LocalAuthSession {
+    credentials: SessionCredentials,
+    verifier: Verifier,
+}
 
 impl LocalAuthSession {
     pub fn new(limit: FailureLimit) -> Result<Self, Unspecified> {
-        BasicTofu::new(limit).map(Self)
+        let random = SystemRandom::new();
+        let credentials = SessionCredentials::generate(&random)?;
+        let verifier = Verifier::new(&credentials, limit, &random)?;
+        Ok(Self {
+            credentials,
+            verifier,
+        })
     }
 
     pub fn realm(&self) -> &str {
-        self.0.realm()
+        self.verifier.realm()
+    }
+
+    pub fn issued_authorization(&self) -> String {
+        let credentials = &self.credentials;
+        let pair = format!("{}:{}", credentials.username(), credentials.password());
+        format!("Basic {}", encode(pair.as_bytes()))
     }
 
     pub fn respond(&self, buf: &[u8], max_header_bytes: usize, now: Instant) -> Outcome {
@@ -33,8 +48,8 @@ impl LocalAuthSession {
                 return Outcome::Reject(HeadError::Parse(error).local_status().response());
             }
         };
-        match authorize(&self.0, request.proxy_authorization.as_deref(), now) {
-            Ok(bound) => Outcome::Tunnel { bound },
+        match authenticate(&self.verifier, request.proxy_authorization.as_deref(), now) {
+            Ok(()) => Outcome::Tunnel,
             Err(status) => Outcome::Reject(status.response_in(self.realm())),
         }
     }
@@ -82,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn follows_the_proxy_answers_for_a_basic_tofu_session() {
+    fn follows_the_proxy_answers_for_a_session_credentials_session() {
         let session = session(100);
         assert_eq!(respond(&session, &HEAD[..10]), Outcome::Incomplete);
         let challenge = respond(&session, &request(None));
@@ -103,17 +118,15 @@ mod tests {
             400
         );
         assert_eq!(
-            respond(&session, &request(Some("Basic dTpw"))),
-            Outcome::Tunnel { bound: true }
-        );
-        assert_eq!(
-            respond(&session, &request(Some("basic dTpw"))),
-            Outcome::Tunnel { bound: false }
-        );
-        assert_eq!(
-            rejected_status(respond(&session, &request(Some("Basic dTpx")))),
+            rejected_status(respond(&session, &request(Some("Basic dTpw")))),
             407
         );
+        let issued = session.issued_authorization();
+        let token = issued.strip_prefix("Basic ").unwrap();
+        assert_eq!(basic_credential(issued.as_bytes()).unwrap().len(), 24);
+        for header in [issued.clone(), format!("bAsIc {token}")] {
+            assert_eq!(respond(&session, &request(Some(&header))), Outcome::Tunnel);
+        }
         let oversized = session.respond(&request(None), 16, Instant::now());
         assert_eq!(rejected_status(oversized), 431);
     }
@@ -125,7 +138,11 @@ mod tests {
             rejected_status(respond(&session, &request(Some("Basic !")))),
             400
         );
-        assert_eq!(rejected_status(respond(&session, &request(None))), 429);
+        let issued = session.issued_authorization();
+        assert_eq!(
+            rejected_status(respond(&session, &request(Some(&issued)))),
+            429
+        );
     }
 
     #[test]

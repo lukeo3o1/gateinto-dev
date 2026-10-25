@@ -24,7 +24,6 @@ use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
 use crate::tls::{self, NegotiationError, TlsMode};
 
-mod basic_tofu;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -36,9 +35,8 @@ mod session_credentials;
 
 pub use routing::Route;
 
-use basic_tofu::{BasicTofu, Verdict};
-use session_credentials::Verifier;
 pub use session_credentials::{FailureLimit, SessionCredentials};
+use session_credentials::{Verdict, Verifier};
 
 pub const MAX_TUNNELS: u32 = h2::MAX_STREAMS;
 
@@ -78,13 +76,29 @@ pub struct Upstream {
     pub roots: RootCertStore,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LocalAuth {
     #[default]
     None,
-    BasicTofu,
     SessionCredentials,
+}
+
+impl<'de> serde::Deserialize<'de> for LocalAuth {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        match String::deserialize(deserializer)?.as_str() {
+            "none" => Ok(Self::None),
+            "session_credentials" => Ok(Self::SessionCredentials),
+            "basic_tofu" => Err(D::Error::custom(
+                "auth = \"basic_tofu\" was removed; use \"session_credentials\"",
+            )),
+            other => Err(D::Error::unknown_variant(
+                other,
+                &["none", "session_credentials"],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -217,7 +231,6 @@ struct Shared {
     endpoint: Endpoint,
     pool: pool::Pool,
     route: Route,
-    basic_tofu: Option<BasicTofu>,
     verifier: Option<Verifier>,
     limits: Limits,
     tunnels: Arc<Semaphore>,
@@ -256,12 +269,6 @@ impl Proxy {
             )),
         )
         .map_err(Error::Tls)?;
-        let basic_tofu = match config.local_auth {
-            LocalAuth::BasicTofu => {
-                Some(BasicTofu::new(config.limits.local_auth_failures).map_err(|_| Error::Random)?)
-            }
-            _ => None,
-        };
         let (credentials, verifier) = match config.local_auth {
             LocalAuth::SessionCredentials => {
                 let random = SystemRandom::new();
@@ -272,7 +279,7 @@ impl Proxy {
                         .map_err(|_| Error::Random)?;
                 (Some(credentials), Some(verifier))
             }
-            _ => (None, None),
+            LocalAuth::None => (None, None),
         };
         let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
         let tunnels = Arc::new(Semaphore::new(
@@ -288,7 +295,6 @@ impl Proxy {
             endpoint,
             pool: pool::Pool::default(),
             route: config.route,
-            basic_tofu,
             verifier,
             limits: config.limits,
             tunnels,
@@ -308,11 +314,7 @@ impl Proxy {
     }
 
     pub fn realm(&self) -> Option<&str> {
-        match (&self.shared.basic_tofu, &self.shared.verifier) {
-            (Some(tofu), _) => Some(tofu.realm()),
-            (_, Some(verifier)) => Some(verifier.realm()),
-            _ => None,
-        }
+        self.shared.verifier.as_ref().map(Verifier::realm)
     }
 
     pub fn credentials(&self) -> Option<&SessionCredentials> {
@@ -398,14 +400,6 @@ impl Shared {
             }
             Ok(Ok(request)) => request,
         };
-        if let Some(tofu) = &self.basic_tofu {
-            let authorization = request.proxy_authorization.as_deref();
-            if let Err(status) = authorize(tofu, authorization, Instant::now()) {
-                debug!(?status, "rejecting");
-                let response = status.response_in(tofu.realm());
-                return reject_with(client, &response, limits.reject_linger).await;
-            }
-        }
         if let Some(verifier) = &self.verifier {
             let authorization = request.proxy_authorization.as_deref();
             if let Err(status) = authenticate(verifier, authorization, Instant::now()) {
@@ -469,16 +463,16 @@ impl Shared {
     }
 }
 
-fn authorize(tofu: &BasicTofu, authorization: Option<&[u8]>, now: Instant) -> Result<bool, Status> {
-    match tofu.check(authorization, now) {
-        Verdict::Bound => {
-            info!("bound the first local proxy credential to this session");
-            Ok(true)
-        }
-        Verdict::Accepted => Ok(false),
+fn authenticate(
+    verifier: &Verifier,
+    authorization: Option<&[u8]>,
+    now: Instant,
+) -> Result<(), Status> {
+    match verifier.check(authorization, now) {
+        Verdict::Accepted => Ok(()),
         Verdict::Challenge => Err(Status::ProxyAuthenticationRequired),
         Verdict::Rejected => {
-            warn!("local proxy credential differs from the one bound to this session");
+            warn!("local proxy credentials differ from the ones issued to this session");
             Err(Status::ProxyAuthenticationRequired)
         }
         Verdict::Malformed => {
@@ -486,29 +480,6 @@ fn authorize(tofu: &BasicTofu, authorization: Option<&[u8]>, now: Instant) -> Re
             Err(Status::BadRequest)
         }
         Verdict::RateLimited { retry_after } => {
-            warn!("local proxy authentication rate limited");
-            Err(Status::TooManyRequests { retry_after })
-        }
-    }
-}
-
-fn authenticate(
-    verifier: &Verifier,
-    authorization: Option<&[u8]>,
-    now: Instant,
-) -> Result<(), Status> {
-    match verifier.check(authorization, now) {
-        session_credentials::Verdict::Accepted => Ok(()),
-        session_credentials::Verdict::Challenge => Err(Status::ProxyAuthenticationRequired),
-        session_credentials::Verdict::Rejected => {
-            warn!("local proxy credentials differ from the ones issued to this session");
-            Err(Status::ProxyAuthenticationRequired)
-        }
-        session_credentials::Verdict::Malformed => {
-            warn!("malformed local proxy credential");
-            Err(Status::BadRequest)
-        }
-        session_credentials::Verdict::RateLimited { retry_after } => {
             warn!("local proxy authentication rate limited");
             Err(Status::TooManyRequests { retry_after })
         }

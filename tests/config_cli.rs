@@ -222,19 +222,29 @@ impl Drop for Child {
 }
 
 async fn spawn_proxy(config: PathBuf, extra: &[&str]) -> (Child, SocketAddr) {
+    spawn_proxy_showing(config, extra, None).await
+}
+
+async fn spawn_proxy_showing(
+    config: PathBuf,
+    extra: &[&str],
+    prompt: Option<&Path>,
+) -> (Child, SocketAddr) {
     let extra = args(extra);
+    let prompt = prompt.map(Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
-        let mut child = Child(
-            isolated::gateinto()
-                .arg("proxy")
-                .arg("--config")
-                .arg(&config)
-                .args(&extra)
-                .env("RUST_LOG", "info")
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap(),
-        );
+        let mut command = isolated::gateinto();
+        command
+            .arg("proxy")
+            .arg("--config")
+            .arg(&config)
+            .args(&extra)
+            .env("RUST_LOG", "info")
+            .stderr(Stdio::piped());
+        if let Some(prompt) = prompt {
+            command.env("GATEINTO_TEST_CREDENTIALS_FILE", prompt);
+        }
+        let mut child = Child(command.spawn().unwrap());
         let mut lines = std::io::BufReader::new(child.0.stderr.take().unwrap()).lines();
         loop {
             let line = lines
@@ -480,6 +490,7 @@ fn proxy_refuses_tunnel_limits_beyond_the_http2_window_bound() {
     assert!(!error.contains("config file"), "{error}");
 }
 
+#[cfg(feature = "test-hooks")]
 struct BrowserSession {
     child: Child,
     agent: SocketAddr,
@@ -488,6 +499,7 @@ struct BrowserSession {
     rest: std::thread::JoinHandle<String>,
 }
 
+#[cfg(feature = "test-hooks")]
 impl BrowserSession {
     fn stop(self) -> String {
         drop(self.child);
@@ -498,6 +510,7 @@ impl BrowserSession {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 fn read_all(mut reader: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -506,8 +519,10 @@ fn read_all(mut reader: impl std::io::Read + Send + 'static) -> std::thread::Joi
     })
 }
 
-async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSession {
+#[cfg(feature = "test-hooks")]
+async fn spawn_browser_session(config: PathBuf, extra: &[&str], prompt: &Path) -> BrowserSession {
     let extra = args(extra);
+    let prompt = prompt.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut child = Child(
             isolated::gateinto()
@@ -515,6 +530,7 @@ async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSessio
                 .arg(&config)
                 .args(&extra)
                 .env("RUST_LOG", "trace")
+                .env("GATEINTO_TEST_CREDENTIALS_FILE", &prompt)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -552,8 +568,30 @@ async fn spawn_browser_session(config: PathBuf, extra: &[&str]) -> BrowserSessio
     .unwrap()
 }
 
+#[cfg(feature = "test-hooks")]
+fn shown_credentials(prompt: &Path) -> (String, String) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(prompt).unwrap_or_default();
+        let value = |name: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(name))
+                .map(str::to_owned)
+        };
+        if let (Some(username), Some(password)) = (value("Username: "), value("Password: ")) {
+            return (username, password);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no credentials were shown: {text:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
+async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_port() {
     let fixture = Fixture::new().await;
     let target = echo_server().await.to_string();
     let closed = unused_port().await.port();
@@ -562,9 +600,13 @@ async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
          [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n\
          [device_session]\ngateway = \"closed\"\nlisten = \"127.0.0.1:18736\"\n"
     ));
+    let dir = temp_dir();
+    let prompts = [dir.join("first-prompt"), dir.join("second-prompt")];
 
-    let first = spawn_browser_session(config.clone(), &["--gateway", "main"]).await;
-    let second = spawn_browser_session(config, &["--gateway", "main"]).await;
+    let first = spawn_browser_session(config.clone(), &["--gateway", "main"], &prompts[0]).await;
+    let second = spawn_browser_session(config, &["--gateway", "main"], &prompts[1]).await;
+    let mine = shown_credentials(&prompts[0]);
+    let theirs = shown_credentials(&prompts[1]);
 
     for session in [&first, &second] {
         assert!(session.agent.ip().is_loopback(), "{}", session.agent);
@@ -576,8 +618,16 @@ async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
             session.stdout
         );
     }
+    for (prompt, session) in [(&prompts[0], &first), (&prompts[1], &second)] {
+        let text = std::fs::read_to_string(prompt).unwrap();
+        assert!(
+            text.contains(&format!("Proxy: {}", session.agent)),
+            "{text}"
+        );
+    }
     assert_ne!(first.agent, second.agent);
     assert_ne!(first.realm, second.realm);
+    assert_ne!(mine, theirs);
 
     let (_, challenge) = send(first.agent, &connect_with(&target, None)).await;
     assert_eq!(challenge.status, 407, "{}", challenge.head);
@@ -589,8 +639,8 @@ async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
         "{}",
         challenge.head
     );
-    let mine = basic("me", "browser secret");
-    let (mut stream, response) = send(first.agent, &connect_with(&target, Some(&mine))).await;
+    let issued = basic(&mine.0, &mine.1);
+    let (mut stream, response) = send(first.agent, &connect_with(&target, Some(&issued))).await;
     assert_eq!(response.status, 200, "{}", response.head);
     stream.write_all(b"browser").await.unwrap();
     stream.shutdown().await.unwrap();
@@ -598,37 +648,81 @@ async fn session_browser_requires_basic_tofu_on_an_ephemeral_loopback_port() {
         read_to_end_within(&mut stream, std::time::Duration::from_secs(5)).await,
         b"browser"
     );
-    let (_, other) = send(first.agent, &connect_with(&target, Some(&basic("me", "x")))).await;
-    assert_eq!(other.status, 407);
-    let (_, fresh) = send(
+    let (_, guess) = send(first.agent, &connect_with(&target, Some(&basic("me", "x")))).await;
+    assert_eq!(guess.status, 407, "{}", guess.head);
+    let (_, foreign) = send(second.agent, &connect_with(&target, Some(&issued))).await;
+    assert_eq!(foreign.status, 407, "{}", foreign.head);
+    let (_, own) = send(
         second.agent,
-        &connect_with(&target, Some(&basic("me", "x"))),
+        &connect_with(&target, Some(&basic(&theirs.0, &theirs.1))),
     )
     .await;
-    assert_eq!(fresh.status, 200, "{}", fresh.head);
-    let token = mine.strip_prefix("Basic ").unwrap();
+    assert_eq!(own.status, 200, "{}", own.head);
     for output in [first.stop(), second.stop()] {
         assert!(
             output.contains("TRACE") || output.contains("DEBUG"),
             "{output}"
         );
-        assert!(!output.contains("browser secret"), "{output}");
-        assert!(!output.contains(token), "{output}");
+        for secret in [&mine.0, &mine.1, &theirs.0, &theirs.1] {
+            assert!(!output.contains(secret.as_str()), "{output}");
+        }
+        assert!(
+            !output.contains(issued.strip_prefix("Basic ").unwrap()),
+            "{output}"
+        );
     }
 }
 
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn foreground_sessions_refuse_to_serve_credentials_nobody_can_see() {
+    let fixture = Fixture::new().await;
+    let config = fixture.config(
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
+    );
+    for args in [&["session", "browser"][..], &["proxy"]] {
+        let output = isolated::gateinto()
+            .args(args)
+            .arg("--config")
+            .arg(&config)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let error = stderr(&output);
+        assert!(error.contains("were not shown"), "{error}");
+        assert!(
+            error.contains("start the session from a terminal"),
+            "{error}"
+        );
+        for text in [
+            &error,
+            &String::from_utf8_lossy(&output.stdout).into_owned(),
+        ] {
+            assert!(!text.contains("Username"), "{text}");
+            assert!(!text.contains("Password"), "{text}");
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn proxy_applies_the_device_session_auth() {
     let fixture = Fixture::new().await;
     let target = echo_server().await.to_string();
     let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"basic_tofu\"\n",
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
     );
+    let prompt = temp_dir().join("prompt");
 
-    let (_child, agent) = spawn_proxy(config, &[]).await;
+    let (_child, agent) = spawn_proxy_showing(config, &[], Some(&prompt)).await;
+    let (username, password) = shown_credentials(&prompt);
 
     let (_, challenge) = send(agent, &connect_with(&target, None)).await;
     assert_eq!(challenge.status, 407, "{}", challenge.head);
-    let (_, response) = send(agent, &connect_with(&target, Some(&basic("d", "pw")))).await;
+    let (_, guess) = send(agent, &connect_with(&target, Some(&basic("d", "pw")))).await;
+    assert_eq!(guess.status, 407, "{}", guess.head);
+    let issued = basic(&username, &password);
+    let (_, response) = send(agent, &connect_with(&target, Some(&issued))).await;
     assert_eq!(response.status, 200, "{}", response.head);
 }
