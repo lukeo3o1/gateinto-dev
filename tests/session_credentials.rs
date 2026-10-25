@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 mod fixture;
 
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,8 @@ use gateinto::proxy::{Config, FailureLimit, LocalAuth, Proxy, Route, SessionCred
 use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use rcgen::{KeyPair, PublicKeyData};
 use rustls::pki_types::UnixTime;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 
@@ -387,4 +389,40 @@ async fn sessions_issue_distinct_credentials_that_work_only_on_their_own_proxy()
         status(addr(&sessions, second), &connect_with(&target, Some(&one))).await,
         407
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_session_revokes_its_credentials_and_ends_its_tunnels() {
+    let setup = Setup::start().await;
+    let mut sessions = SessionManager::new();
+    let closed = sessions.start(setup.browser()).await.unwrap();
+    let closed_addr = addr(&sessions, closed);
+    let cached = header(&issued(&sessions, closed));
+    let (mut tunnel, response) = send(closed_addr, &setup.connect(Some(&cached))).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    tunnel.write_all(b"open").await.unwrap();
+    let mut echoed = [0; 4];
+    tokio::time::timeout(CLOSE_WITHIN, tunnel.read_exact(&mut echoed))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&echoed, b"open");
+
+    assert!(sessions.close(closed).await);
+
+    let mut rest = [0; 16];
+    match tokio::time::timeout(CLOSE_WITHIN, tunnel.read(&mut rest)).await {
+        Ok(Ok(0) | Err(_)) => {}
+        Ok(Ok(n)) => panic!("the closed session's tunnel delivered {:?}", &rest[..n]),
+        Err(_) => panic!("the closed session's tunnel stayed open"),
+    }
+    let error = TcpStream::connect(closed_addr).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::ConnectionRefused, "{error}");
+    let fresh = sessions.start(setup.browser()).await.unwrap();
+    let fresh_addr = addr(&sessions, fresh);
+    let fresh_header = header(&issued(&sessions, fresh));
+    assert_ne!(fresh_header, cached);
+    assert_eq!(status(fresh_addr, &setup.connect(Some(&cached))).await, 407);
+    echo_through(fresh_addr, &setup.connect(Some(&fresh_header)), b"fresh").await;
+    assert_eq!(setup.upstream.requests().len(), 2);
 }

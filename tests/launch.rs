@@ -617,6 +617,52 @@ async fn the_agent_rejects_a_profile_missing_from_its_configuration() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn session_close_revokes_the_credentials_and_ends_the_tunnels() {
+    use gateinto::ipc::{self, Request, Response};
+    use tokio::io::AsyncReadExt;
+
+    let launcher = Launcher::new("").await;
+    let (lines, _browser) = launcher.opened("main").await;
+    let id = field(&lines, "session");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let shown = launcher.shown_credentials(listen).await;
+    let cached = ipc::issued_credentials(&shown).unwrap();
+    let target = echo_server().await.to_string();
+    let (mut tunnel, response) =
+        send(listen, &connect_with(&target, Some(&session_auth(&shown)))).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    tunnel.write_all(b"open").await.unwrap();
+    let mut echoed = [0; 4];
+    tokio::time::timeout(WAIT, tunnel.read_exact(&mut echoed))
+        .await
+        .unwrap()
+        .unwrap();
+
+    launcher.run(&["session", "close", id]).await.success();
+
+    let mut rest = [0; 16];
+    match tokio::time::timeout(WAIT, tunnel.read(&mut rest)).await {
+        Ok(Ok(0) | Err(_)) => {}
+        Ok(Ok(n)) => panic!("the closed session's tunnel delivered {:?}", &rest[..n]),
+        Err(_) => panic!("the closed session's tunnel stayed open"),
+    }
+    let error = tokio::net::TcpStream::connect(listen).await.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused,
+        "{error}"
+    );
+    let request = Request::Credentials(id.parse().unwrap());
+    let answer = ipc::send(&launcher.endpoint(), &request).await.unwrap();
+    let Response::Error(message) = answer else {
+        panic!("a closed session still answered with credentials: {answer:?}");
+    };
+    assert!(message.contains(&format!("no session {id}")), "{message}");
+    assert!(!message.contains(cached.username()), "{message}");
+    assert!(!message.contains(cached.password()), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sessions_can_be_closed_explicitly_and_stop_closes_the_rest() {
     let launcher = Launcher::new("").await;
     let (first, first_browser) = launcher.opened("main").await;
