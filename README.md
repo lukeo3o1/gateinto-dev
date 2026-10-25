@@ -18,7 +18,7 @@ security reviewed. Implemented: the double `CONNECT` relay, the device key
 modes, `gateinto check-upstream`, a TOML configuration file with named gateway
 profiles, the device session with per-session isolation, short-lived
 self-signed client certificates issued with the device key, and browser
-sessions with trust-on-first-use local proxy authentication (`basic_tofu`),
+sessions with random per-session local proxy credentials (`session_credentials`),
 started from the command line or from a `gateinto://` launch URI by a per-user
 agent that opens Chrome or Edge with an isolated profile, a per-user MSI
 installer, `gateinto setup`, `gateinto status`, and deleting the device
@@ -86,10 +86,11 @@ be uninstalled before a release MSI is installed.
 | --- | --- |
 | `gateinto proxy` | Run the local `CONNECT` proxy. |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
-| `gateinto session browser` | Run one browser session with `basic_tofu` local proxy authentication on an ephemeral loopback port. |
+| `gateinto session browser` | Run one browser session with `session_credentials` local proxy authentication on an ephemeral loopback port and show its credentials. |
 | `gateinto agent` | Run the per-user agent: the device session if `[device_session] gateway` is set, and the endpoint that starts browser sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
-| `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped and its profile deleted). |
+| `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped, its profile deleted and its credentials revoked). |
+| `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
 | `gateinto stop` | Close all of the agent's sessions and stop it. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
@@ -315,19 +316,26 @@ share only the device key.
   stopped. Its log lines carry `session{id=1 kind=device gateway=<name>}`.
 - `gateinto session browser` runs one browser session: its own listener on
   an ephemeral port of `127.0.0.1`, its own client certificate and upstream
-  connections, and `basic_tofu` local proxy authentication. It relays through
-  `--gateway` (or the device session's gateway, or the only configured
+  connections, and `session_credentials` local proxy authentication. It relays
+  through `--gateway` (or the device session's gateway, or the only configured
   gateway) and accepts the same upstream flags as `check-upstream`. It prints
-  its id, kind, gateway, `listen` address and `realm`, never a credential,
-  and runs until Ctrl+C. Each start is a new session with a new port, realm
-  and authentication state.
+  its id, kind, gateway, `listen` address and `realm` on stdout, never a
+  credential, shows the credentials in a prompt (see
+  [Local proxy authentication](#local-proxy-authentication)) and runs until
+  Ctrl+C. If the credentials cannot be shown it closes the session and exits
+  with an error. Each start is a new session with a new port, realm and
+  credentials. `gateinto proxy` with `[device_session] auth =
+  "session_credentials"` shows its credentials the same way.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or
   `CurrentUser\My` certificate is the same in every session.
 - Closing a session stops it from accepting immediately: its port refuses new
   connections, its established tunnels are aborted, and its certificate is
-  discarded, so no new `CONNECT` can use it. Other sessions keep running.
+  discarded, so no new `CONNECT` can use it. Its credentials are dropped with
+  it: a browser that cached them gets connection errors on the closed port, and
+  a later session on any port has other credentials. Other sessions keep
+  running.
   `gateinto proxy` and `gateinto session browser` close their session on
   Ctrl+C (or SIGTERM on Unix) and then exit.
 
@@ -344,9 +352,11 @@ The format, its limits and everything it can never do are specified in
 [docs/protocol/launch-uri.md](docs/protocol/launch-uri.md). In short:
 
 - Any website can open such a link, so the URI is strictly limited: at most
-  8192 bytes, only `profile` (a gateway name), `auth` (`basic_tofu`), `v`
+  8192 bytes, only `profile` (a gateway name), `auth` (`session_credentials`), `v`
   (`1`), `url`, `gateway`, `portal` and `route` (`gateway` or `mixed`), each once, percent-encoded. It never
-  carries a credential, CA, TLS setting, certificate or command.
+  carries a credential, CA, TLS setting, certificate or command. A link with
+  `auth=basic_tofu`, the removed trust-on-first-use mode, is refused with an
+  error naming `session_credentials`.
 - `url` must have exactly the origin (https, host, port) of the gateway's
   portal and applies to that launch only; a gateway without a portal refuses
   it.
@@ -395,11 +405,13 @@ The format, its limits and everything it can never do are specified in
   successful launches, help and version requests show no error notification.
 - The agent accepts at most 5 launches a minute (asking included), one open
   confirmation and 4 browser sessions at a time. Each launch is a new session
-  with its own port, realm and `basic_tofu` state, and a new browser process
+  with its own port, realm and credentials, and a new browser process
   with its own profile directory under `%LOCALAPPDATA%\Gateinto\profiles`,
   started with `--user-data-dir`, `--proxy-server=http://127.0.0.1:<port>` and
   the start page: the link's `url`, else the gateway's `portal_url`, else
-  `about:blank`.
+  `about:blank`. `gateinto open` then shows the session's credentials (see
+  [Local proxy authentication](#local-proxy-authentication)); the agent never
+  shows them itself.
 - When the browser exits, the session is closed and its profile directory is
   deleted. `gateinto session close <id>` and `gateinto stop` do the same
   explicitly; profiles left by a crashed agent are deleted when the next one
@@ -426,46 +438,69 @@ It is not authorization by the remote upstream, and it does not identify a
 user. Each session has one policy:
 
 - `none`: every local client is accepted. The device session's default.
-- `basic_tofu` (trust on first use): the first `CONNECT` without a
-  `Proxy-Authorization` header gets
-  `407 Proxy Authentication Required` with
+- `session_credentials`: when the session starts, Gateinto generates a random
+  user name and password for it. A `CONNECT` without a `Proxy-Authorization`
+  header gets `407 Proxy Authentication Required` with
   `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
-  so a browser shows its own credential prompt. The first well-formed Basic
-  credential the session receives is bound to it; from then on only that exact
-  credential (user name and password, compared in constant time) is accepted,
-  and any other one gets `407` again. Browser sessions always use it; the
-  device session uses it with `[device_session] auth = "basic_tofu"`.
+  so a browser shows its own proxy sign-in dialog. Only the issued user name
+  and password are accepted; any other credential gets `407` again and never
+  becomes valid. Browser sessions always use it; the device session uses it
+  with `[device_session] auth = "session_credentials"`.
 
-Details of `basic_tofu`:
+The removed trust-on-first-use mode `basic_tofu` is refused wherever it
+appears (`auth = "basic_tofu"` in the configuration file, `auth=basic_tofu` in
+a link, the IPC request) with an error naming `session_credentials`.
 
-- Credentials are chosen in the browser prompt. They are never pre-provisioned,
-  never taken from a URI, never printed and never logged, at any log level.
-  The session keeps only an HMAC-SHA-256 of the credential under a random
-  per-session key, not the credential itself. The credential is never
-  forwarded to the upstream.
-- If several clients send different first credentials at the same time,
-  exactly one is bound; the others are treated as different credentials and
-  get `407`.
+Details of `session_credentials`:
+
+- The user name is 8 and the password 12 symbols from the 31-letter alphabet
+  `abcdefghjkmnpqrstuvwxyz23456789` (lowercase, without `i`, `l`, `o`, `0`
+  and `1`), grouped by four with hyphens, such as `k7mp-2xqa` and
+  `t9ce-hu4w-38nr`. Both come from the operating system's CSPRNG by rejection
+  sampling, about 99 bits together.
+- They exist only in the memory of the process that runs the session and of
+  the command that shows them. They are never written to disk, never logged at
+  any log level, never part of an IPC error message, never shown by
+  `gateinto status` or `gateinto session list`, never taken from a URI and
+  never forwarded to the upstream. The check compares an HMAC-SHA-256 of the
+  received `user:password` under a random per-session key with the tag of the
+  issued one, in constant time.
+- They are shown by the command that started the session, not by the agent:
+  `gateinto open`, `gateinto session browser` and `gateinto proxy`. On Windows
+  with an interactive desktop they appear in a message box; elsewhere on the
+  command's terminal (stderr). The prompt names the proxy address
+  (`127.0.0.1:<port>`) the browser's sign-in dialog shows, and says to enter
+  the credentials only there and never in a website's sign-in page or dialog.
+  `gateinto session credentials <id>` asks the agent for them over its
+  per-user IPC endpoint and shows the same prompt again. Without a desktop or
+  terminal `gateinto open` prints a warning naming that command instead, and
+  `gateinto session browser` and `gateinto proxy` close their session and exit
+  with an error, because nobody could use it.
+- Authentication runs right after the request head is parsed, before any DNS
+  lookup, routing decision, upstream connection or certificate signing. An
+  unknown credential reaches nothing and is never remembered.
 - The header must be exactly one `Proxy-Authorization` with the scheme
   `Basic` (any case), then spaces, then canonical padded base64 of at most
   1024 characters that decodes to `user:password` with a non-empty password
-  and no control characters (UTF-8 is accepted). A malformed `Basic`
-  credential or a repeated header gets `400` and binds nothing; another scheme
-  (for example `Bearer`) gets `407`.
+  and no control characters. A malformed `Basic` credential or a repeated
+  header gets `400`; another scheme (for example `Bearer`) gets `407`.
 - Rate limit: wrong, malformed or other-scheme credentials count as failures.
   After 10 failures within 60 seconds of the first one, the session answers
-  every request, even one with the bound credential, with
+  every request, even one with the issued credentials, with
   `429 Too Many Requests` and `Retry-After` until those 60 seconds are over.
-  A request without credentials is not a failure. The state is two numbers
-  per session.
-- The realm, the listen port, the bound credential and the failure count
-  belong to one session and are never shared with another session. If another
-  local program took the binding first, your browser keeps getting prompts:
-  stop the session (Ctrl+C) and start a new one, which has a new port, a new
-  realm and nothing bound.
-- Trust on first use does not prove which local program connected first. Any
-  local program that reaches the new port before the browser can bind its own
-  credential; see [docs/security-model.md](docs/security-model.md#local-proxy-authentication-basic_tofu).
+  A request without credentials is not a failure.
+- The realm, the listen port, the credentials and the failure count belong to
+  one session and are never shared with another session. Closing the session
+  revokes its credentials: the port is closed, its tunnels end, and a new
+  session has new credentials. There is no expiry or rotation while a session
+  runs.
+- The credentials keep out local programs that do not know them. They do not
+  protect against malware running as the same user, which can read the
+  agent's memory or the prompt, a copied password on the clipboard, or a
+  website dialog that imitates the proxy sign-in; see
+  [docs/security-model.md](docs/security-model.md#local-proxy-authentication-session_credentials).
+  How Chrome and Edge on Windows cache and prompt for these credentials has
+  not been verified.
 
 ## Configuration file
 
@@ -481,7 +516,7 @@ See [config.example.toml](config.example.toml).
 [device_session]
 gateway = "default"              # optional when exactly one gateway is configured
 listen = "127.0.0.1:18736"
-auth = "none"                    # none | basic_tofu
+auth = "none"                    # none | session_credentials
 
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
@@ -711,9 +746,11 @@ that prove it.
 The device session's loopback listener has no authentication by default. Any
 local process, including those of other users on the same machine, can connect
 to it and use the agent, including its device identity, to reach the remote
-proxy. Browser sessions (and a device session with `auth = "basic_tofu"`)
-accept only the first credential they receive, which keeps other programs out
-only if the browser is first. Do not run it on shared hosts you do not trust.
+proxy. Browser sessions (and a device session with
+`auth = "session_credentials"`) accept only the random credentials issued to
+them and shown to the user, which keeps out other programs that do not know
+them but not malware running as the same user. Do not run it on shared hosts
+you do not trust.
 
 Any website can open a `gateinto://` link. With the handler registered, such a
 link can at most make the agent start a browser session for a known gateway

@@ -12,9 +12,9 @@ proxy's status line.
 | Status | Meaning | What to check |
 | --- | --- | --- |
 | `200` | The upstream proxy accepted the tunnel with a `2xx` status. | If the request still fails, the problem is between the client and the target, inside the tunnel. |
-| `400` | The request was malformed, or the client closed the connection before finishing it. Only `CONNECT host:port HTTP/1.1` with exactly one `Host` header and at most one `Proxy-Authorization` header is accepted; with `basic_tofu`, a malformed Basic credential (bad base64, no `:`, empty password, control characters, over 1024 characters) is also `400`. | Configure the client to use Gateinto as an HTTP proxy for HTTPS, not as a SOCKS proxy or an HTTPS proxy. |
-| `407` | Browser sessions and `[device_session] auth = "basic_tofu"` only: the request had no credential, another scheme than Basic, or a credential other than the one bound to the session. Browsers show their credential prompt. | If the prompt keeps coming back with the credential you chose, another local program bound its credential first: stop the session and start a new one. Gateinto never logs credentials; a `warn` line says when a different credential was refused. |
-| `429` | `basic_tofu` only: 10 wrong or malformed credentials within 60 seconds. Every request gets `429` until `Retry-After` seconds have passed. | Which local program is sending wrong credentials (`warn` lines name the client's local port). |
+| `400` | The request was malformed, or the client closed the connection before finishing it. Only `CONNECT host:port HTTP/1.1` with exactly one `Host` header and at most one `Proxy-Authorization` header is accepted; with `session_credentials`, a malformed Basic credential (bad base64, no `:`, empty password, control characters, over 1024 characters) is also `400`. | Configure the client to use Gateinto as an HTTP proxy for HTTPS, not as a SOCKS proxy or an HTTPS proxy. |
+| `407` | Browser sessions and `[device_session] auth = "session_credentials"` only: the request had no credential, another scheme than Basic, or a credential other than the user name and password issued to this session. Browsers show their proxy sign-in dialog. | Enter the issued credentials exactly, including the hyphens. To see them again run `gateinto session credentials <id>` (`gateinto session list` shows the id); for `gateinto session browser` or `gateinto proxy` they are in the prompt shown at start. Credentials of a closed or another session never work: a browser that keeps sending old cached ones needs the new ones, or a new session. Gateinto never logs credentials; a `warn` line says when different credentials were refused. |
+| `429` | `session_credentials` only: 10 wrong or malformed credentials within 60 seconds. Every request gets `429` until `Retry-After` seconds have passed, even one with the issued credentials. | Which local program is sending wrong credentials (`warn` lines name the client's local port). If it keeps the session locked, close the session and start a new one. |
 | `403` | The upstream proxy answered `403`. | The upstream proxy's access policy for this target or this device. |
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
 | `408` | The request head was not complete within `--connect-timeout-secs`. | A client that opens the connection but does not send a request, or a very slow client. |
@@ -114,6 +114,10 @@ gateway "default": unknown field `hostname`, expected one of `host`, `port`, `se
   values for `tls_mode`, `client_certificate` or `preferred` are rejected, as
   are gateway names other than 1 to 64 characters from `A-Z`, `a-z`, `0-9`,
   `_` and `-`.
+- `auth = "basic_tofu" was removed; use "session_credentials"`: the
+  trust-on-first-use local proxy authentication no longer exists. Set
+  `[device_session] auth = "session_credentials"` (or `"none"`); a browser
+  session needs no setting.
 - Relative `ca_file` and `client_cert_file` paths are relative to the
   configuration file, not to the current directory.
 - Command line flags override the file. If a value seems ignored, check that
@@ -154,11 +158,23 @@ supplied; run `gateinto agent` with that same `--config` to see the underlying
 startup failure. The detached agent's stderr is not retained in a log file.
 
 Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
-`gateinto session close` and `gateinto stop`
+`gateinto session close`, `gateinto session credentials` and `gateinto stop`
 ([protocol/launch-uri.md](protocol/launch-uri.md)):
 
 - `invalid launch URI: ...`: the link breaks a rule of the format; the
-  message names the rule. Nothing was started.
+  message names the rule. Nothing was started. `auth=basic_tofu was removed`
+  means the link comes from an older portal: leave `auth` out or use
+  `auth=session_credentials`.
+- `warning: the credentials for Gateinto session <id> on 127.0.0.1:<port>
+  were not shown: ...`: `gateinto open` had neither an interactive desktop
+  nor a terminal. The session runs; run `gateinto session credentials <id>`
+  in a terminal to see its user name and password. `gateinto session browser`
+  and `gateinto proxy` with `session_credentials` instead close their session
+  and fail with this error; start them from a terminal or a desktop.
+- `no session <id>` from `gateinto session credentials`: the session was
+  closed (its browser exited, or `session close` or `stop` ran), and its
+  credentials no longer exist. Sessions of `gateinto session browser` are not
+  run by the agent; their credentials are only in the prompt shown at start.
 - `unknown gateway "<name>": it is not set up on this device and the link
   does not bring one; ...`: neither the agent's configuration file nor the
   gateways added from links has `<name>`, and the link has no `gateway` and
@@ -206,7 +222,8 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
 - `linked-gateways: error: ... not a directory`: `gateways/` is a file, a
   link or a reparse point. Only gateways of the configuration file work
   until it is replaced by a plain directory or removed.
-- `no agent is running`: from `session list`, `session close` or `stop`.
+- `no agent is running`: from `session list`, `session close`,
+  `session credentials` or `stop`.
   `gateinto open` starts one by itself.
 - `an agent is already running for this user at ...`: only one agent per user
   (and per `GATEINTO_INSTANCE`) can run. Use `gateinto stop` to replace it.
