@@ -99,9 +99,11 @@ that requires client certificates from a test CA you control.
     ```powershell
     gateinto proxy --upstream-host <host> --upstream-port <port> --ca-file <upstream-ca.pem> `
       --key-name gateinto-tpm-mtls --client-certificate required --client-cert-file client.pem
-    curl.exe --proxy http://127.0.0.1:18736 https://example.com/
+    curl.exe --proxy http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com/
     ```
 
+    The proxy shows its session credentials in a box at start; use the
+    password from it. Without `--proxy-user` the request gets `407`.
     Expect the log line `client certificate authentication enabled` with
     `backend=tpm`, a successful request, and the upstream logging the client
     certificate. Record whether Windows showed any PIN or consent prompt; the

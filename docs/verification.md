@@ -24,7 +24,8 @@ each job built its own binary. The `quickstart` job on `windows-latest` then fol
 [quickstart](quickstart.md) with that release build, starting with
 `gateinto.exe --version`: `gateinto key init` (on the
 TPM-less runner it must report a software key created after the TPM fallback),
-`gateinto key info`, a configuration file derived from `config.example.toml`,
+`gateinto key info`, a configuration file derived from `config.example.toml`
+(with `[device_session] auth = "none"`, so curl needs no credentials),
 `gateinto check-upstream` (asserting `TLSv1_3` and `X25519MLKEM768`), then
 `gateinto proxy` with `curl.exe -x http://127.0.0.1:18736 https://example.com/`
 (asserting `200`, with curl verifying the certificate of `example.com`) and a
