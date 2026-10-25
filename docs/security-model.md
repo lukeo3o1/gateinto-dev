@@ -276,8 +276,11 @@ style and answer handling and by integration tests of the agent's side.
 ### Local proxy authentication (`session_credentials`)
 
 Browser sessions, and the device session unless the configuration sets
-`[device_session] auth = "none"`, accept only the user name and password
-generated for them when they start. This is local proxy access
+`[device_session] auth = "none"` or leaves `session_credentials` out of its
+`auth` list, accept the user name and password generated for them when they
+start. On Windows browser sessions in a job object also offer `os_user`
+([below](#local-proxy-authentication-os_user)), and passing either method is
+enough. This is local proxy access
 control, not authorization by the upstream, and it does not identify a user.
 The trust-on-first-use mode `basic_tofu` it replaces is refused in the
 configuration file, in links and in IPC requests with an error naming
@@ -330,7 +333,8 @@ Guarantees:
   control characters. Malformed credentials get `400`.
 - **Bounded failures.** Wrong and malformed Basic credentials and every
   other scheme (`Bearer`, `Negotiate`, `NTLM` and so on, which get `407`)
-  count as failed attempts; a request without credentials does not. After 10
+  count as failed attempts; a request without credentials does not, and
+  neither does a connection that `os_user` denied. After 10
   failed attempts within 60 seconds every request to the session gets `429`
   until the window ends, so guessing is limited to 10 attempts a minute per
   session. The limiter keeps a counter and a timestamp per session, nothing
@@ -378,6 +382,105 @@ Non-guarantees:
   this one session's port.
 - **Memory.** The credentials, the decoded request credential and the request
   head are ordinary heap buffers, not locked and not zeroized when dropped.
+
+### Local proxy authentication (`os_user`)
+
+`os_user` is available on Windows only; elsewhere a configuration that names
+it fails to load and the proxy refuses to start with it. It is offered by
+browser sessions on Windows, next to `session_credentials`, and by the device
+session when `[device_session] auth` names it. The client sends nothing for
+it: Gateinto identifies the process at the other end of the connection.
+
+Guarantees:
+
+- **Only the same Windows account.** For each accepted connection Gateinto
+  reads the Windows TCP connection table (`GetExtendedTcpTable`, IPv4 or
+  IPv6 by the client's address; for an IPv4 client with no IPv4 row, also
+  the IPv6 table for an IPv4-mapped row) and takes the process ID of the
+  row whose local end is the client's address and port and whose remote end
+  is the listener's. Rows without an owning process (ID 0) are skipped. It
+  opens that process with `PROCESS_QUERY_LIMITED_INFORMATION` and its token
+  with `TOKEN_QUERY`, and accepts the connection only if the token's user
+  SID equals the user SID of Gateinto's own process token, compared with
+  `EqualSid`, never as strings.
+- **No trust in a reused process ID.** After opening the process, Gateinto
+  reads the table again while it holds the process handle and requires the
+  same row to still name the same process ID. A process that exited in
+  between, and a process ID that was reused, are denied.
+- **Browser sessions: only the browser's job.** Agent-launched browsers on
+  Windows start through `CreateProcessW` with
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so the browser is in a job object created
+  for that session before its first instruction runs. Where that attribute
+  is not available (it needs Windows 10), the browser is created suspended,
+  assigned to the job with `AssignProcessToJobObject` and only then resumed,
+  so it still runs no instruction outside the job; if the assignment fails,
+  the suspended process is terminated, and a failure to terminate it is
+  logged as a warning. The job is unnamed and its handle is
+  not inheritable, and the session additionally requires `IsProcessInJob` to
+  place the connecting process in that job. Other programs of the same user,
+  which run outside the job, are denied.
+- **No job, no `os_user`.** If no job can be created or the browser cannot
+  be put in one (for example on a Windows version that does not allow the
+  process into another job), the agent logs one warning for that launch and
+  starts the browser without a job, in a session that accepts only
+  `session_credentials`; the launch answer then carries the credentials as
+  on other platforms. A browser outside a job never gets a session that
+  offers `os_user`.
+- **No browser process outlives its session.** The job has
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. When the browser exits or the
+  session is closed, the agent terminates the job and waits, for at most 5
+  seconds, until `JobObjectBasicAccountingInformation` reports no active
+  process, before closing the session and deleting the profile directory
+  (which it still retries). A process that has not ended after 5 seconds is
+  logged as a warning. These waits run on the blocking thread pool, not on
+  the async runtime; if the browser process is dropped without being
+  stopped, the job is terminated and the wait continues in the background.
+- **Fail closed.** No matching row after a few short retries, a process or
+  token that cannot be opened, a different user SID, a process outside the
+  job and any error from Windows all deny the connection.
+- **Before anything else.** The check runs right after the connection is
+  accepted, before the request is read, and therefore before any DNS lookup,
+  routing decision, upstream connection or use of the device key. It runs on
+  the blocking thread pool, not on the async runtime, and shares the connect
+  timeout with reading the request; a check that does not finish in time
+  gets `408` and is logged with its reason.
+- **Clear fallback.** When `session_credentials` is offered too, a denied
+  connection is handled exactly like a request without credentials (`407`
+  with the `Basic` challenge), and the session credentials keep working.
+  When `os_user` is the only method, a denied connection gets `403` and is
+  closed. Denials do not count toward the `session_credentials` failure
+  limit, because they involve no guess; that limit is unchanged.
+- **Nothing secret in logs.** No credentials are involved. The first denial
+  of a session logs a warning with its reason (no owner found, another user,
+  outside the browser's job, a lookup past the deadline, or the Windows
+  error) and the fallback: the command that shows the session credentials,
+  or the advice to add `session_credentials`. Later denials of the same
+  session are logged at debug level.
+
+Non-guarantees:
+
+- **Not a boundary against code of the same user.** On the device session
+  every program of the user is accepted. In a browser session a program of
+  the same user can still get in, for example by injecting code into the
+  browser or by duplicating the job handle out of Gateinto's process, both
+  of which the user's own account allows, or by creating a process with
+  `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` set to the browser, which then
+  inherits the browser's job. Processes the browser starts inherit the job
+  and are accepted as well. `os_user` keeps out other users
+  of the machine and, in browser sessions, ordinary programs of the same
+  user; it does not keep out malware running as the user.
+- **A point-in-time check.** The owner is checked once per connection. Every
+  answer other than an established tunnel closes the connection, so every new
+  connection is checked again, but an open tunnel is not re-checked.
+- **Elevation is not verified.** With a real UAC split token, a Gateinto that
+  is not elevated may be unable to open the process or token of an elevated
+  client. The check then fails closed, so such a client may get `403`, or the
+  `Basic` challenge when `session_credentials` is offered. See
+  [verification.md](verification.md#local-proxy-authentication-os_user).
+- **Not verified:** domain-joined machines, Chrome inside the job,
+  browsers launched by Gateinto itself rather than by a test probe, a run on
+  Windows CI, and the suspended-and-assign fallback and the launch without a
+  job on real Windows 7 and 8.1.
 
 ### The tunnel content
 
@@ -473,8 +576,11 @@ Non-guarantees:
   from the prompt. A device session with an explicit
   `[device_session] auth = "none"` has no authentication: any local process,
   including other users' processes, can use the tunnel and the device
-  identity behind it. See
-  [above](#local-proxy-authentication-session_credentials).
+  identity behind it. `os_user` keeps out other users and, in browser
+  sessions, programs outside the browser's job, but not code of the same user
+  that injects into the browser or takes the job handle. See
+  [above](#local-proxy-authentication-session_credentials) and
+  [`os_user`](#local-proxy-authentication-os_user).
 - **Administrators and malware running as the user.** They can use or steal
   the identity (a software key can be copied), read traffic before it enters
   the tunnel, change the configuration, add CAs or replace the binary.

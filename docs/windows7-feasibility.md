@@ -152,6 +152,22 @@ added three kernel32 functions that the 32-bit static CRT imports:
 checks the function's minimum supported client and either adds it to the list
 or removes the import.
 
+`os_user` added `iphlpapi.dll GetExtendedTcpTable` (Vista) and these
+kernel32 functions to the list: `CreateJobObjectW`, `SetInformationJobObject`,
+`TerminateJobObject`, `QueryInformationJobObject`, `AssignProcessToJobObject`,
+`IsProcessInJob` and `ResumeThread` (XP or earlier), and
+`InitializeProcThreadAttributeList`, `UpdateProcThreadAttribute` and
+`DeleteProcThreadAttributeList` (Vista). All are static imports that exist on
+Windows 7 SP1. The `PROC_THREAD_ATTRIBUTE_JOB_LIST` attribute itself needs
+Windows 10, so on Windows 7 and 8.1 the agent is expected to fall back to
+creating the browser suspended, assigning it to the job with
+`AssignProcessToJobObject` and resuming it. Windows 7 does not allow nested
+jobs, so the assignment fails when the agent itself already runs in a job
+(as under some launchers and terminals); the agent then terminates the
+suspended browser, logs one warning for that launch and starts it again
+without a job, in a session that accepts only `session_credentials`. None of
+this has been run on Windows 7 or 8.1.
+
 `Tbsi_GetDeviceInfo` now appears in the string scan for both targets. That is
 expected: it is the name passed to `GetProcAddress`, not a static import.
 

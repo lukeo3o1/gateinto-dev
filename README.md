@@ -317,8 +317,10 @@ share only the device key.
   programs. It listens on `[device_session] listen` (or `--listen`), relays
   through `[device_session] gateway` (or the only configured gateway, or the
   upstream flags alone) and uses the local proxy authentication set by
-  `[device_session] auth` (`session_credentials` by default). It runs until the process is
-  stopped. Its log lines carry `session{id=1 kind=device gateway=<name>}`.
+  `[device_session] auth` (`session_credentials` by default; see
+  [Local proxy authentication](#local-proxy-authentication)). It runs until
+  the process is stopped. Its log lines carry
+  `session{id=1 kind=device gateway=<name>}`.
 - `gateinto session browser` runs one browser session: its own listener on
   an ephemeral port of `127.0.0.1`, its own client certificate and upstream
   connections, and `session_credentials` local proxy authentication. It relays
@@ -414,13 +416,22 @@ The format, its limits and everything it can never do are specified in
   with its own profile directory under `%LOCALAPPDATA%\Gateinto\profiles`,
   started with `--user-data-dir`, `--proxy-server=http://127.0.0.1:<port>` and
   the start page: the link's `url`, else the gateway's `portal_url`, else
-  `about:blank`. `gateinto open` then shows the session's credentials (see
-  [Local proxy authentication](#local-proxy-authentication)); the agent never
-  shows them itself.
-- When the browser exits, the session is closed and its profile directory is
-  deleted. `gateinto session close <id>` and `gateinto stop` do the same
-  explicitly; profiles left by a crashed agent are deleted when the next one
-  starts.
+  `about:blank`. Outside Windows `gateinto open` then shows the session's
+  credentials (see [Local proxy authentication](#local-proxy-authentication));
+  the agent never shows them itself. On Windows the browser is started inside
+  a job object of its own and the session also offers `os_user`, so the
+  browser connects without a dialog and `gateinto open` shows no credentials;
+  `gateinto session credentials <id>` still shows them for a client that
+  `os_user` does not accept. If no job can be used for the browser (for
+  example where Windows does not allow it, which may be the case on Windows
+  7 and 8.1), the agent logs one warning for that launch and starts the
+  browser without a job; that session then accepts only session credentials
+  and `gateinto open` shows them.
+- When the browser exits, the agent ends every process left in its job,
+  waits up to 5 seconds for the job to be empty, then closes the session
+  and deletes its profile directory. `gateinto session close <id>` and
+  `gateinto stop` do the same explicitly; profiles left by a crashed agent
+  are deleted when the next one starts.
 
 For development on Windows, `gateinto uri register --config <file>` writes
 `HKCU\Software\Classes\gateinto` for the current user, with the command
@@ -439,8 +450,9 @@ See [docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
 ### Local proxy authentication
 
 Local proxy authentication controls which local programs may use a session.
-It is not authorization by the remote upstream, and it does not identify a
-user. Each session has one policy:
+It is not authorization by the remote upstream. A session offers `none`, or
+one or more of these methods, and accepts a client that passes any one of
+them:
 
 - `none`: every local client is accepted, including processes of other users
   on the same machine, and each of them can use the device identity toward the
@@ -452,8 +464,27 @@ user. Each session has one policy:
   `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
   so a browser shows its own proxy sign-in dialog. Only the issued user name
   and password are accepted; any other credential gets `407` again and never
-  becomes valid. Browser sessions always use it, and it is the device
+  becomes valid. Browser sessions always offer it, and it is the device
   session's default.
+- `os_user` (Windows only): the client sends no credentials. Gateinto looks
+  up the process that owns the client's end of the connection and accepts the
+  connection only when that process runs as the Windows account that runs
+  Gateinto (the user SIDs of both process tokens are compared with
+  `EqualSid`). In a browser session the process must also be inside the job
+  object Gateinto started that session's browser in. Browser sessions on
+  Windows offer it together with `session_credentials`; the device session
+  offers it only when configured. On the device session it keeps out other
+  users of the machine, not other programs of the same user. In a browser
+  session it also keeps out programs of the same user that run outside the
+  browser's job, but it is not a boundary against code of the same user that
+  is determined to get in (see
+  [docs/threat-model.md](docs/threat-model.md)).
+
+`[device_session] auth` takes one method name or a list, such as
+`auth = ["os_user", "session_credentials"]`. A list must name each method
+once and cannot be empty; `none` cannot be combined with another method.
+`os_user` outside Windows is refused when the configuration is loaded, with
+an error saying that it is only available on Windows.
 
 The removed trust-on-first-use mode `basic_tofu` is refused wherever it
 appears (`auth = "basic_tofu"` in the configuration file, `auth=basic_tofu` in
@@ -477,21 +508,25 @@ Details of `session_credentials`:
   received `user:password` under a random per-session key with the tag of the
   issued one, in constant time.
 - They are shown by the command that started the session, not by the agent:
-  `gateinto open`, `gateinto session browser` and `gateinto proxy`. On Windows
-  with an interactive desktop they appear in a message box; elsewhere on the
-  command's terminal (stderr). The prompt names the proxy address
-  (`127.0.0.1:<port>`) the browser's sign-in dialog shows, and says to enter
-  the credentials only there and never in a website's sign-in page or dialog.
+  `gateinto open`, `gateinto session browser` and `gateinto proxy`. On
+  Windows, browser sessions started by the agent offer `os_user` and
+  `gateinto open` shows nothing, unless the browser could not be put in a job
+  object; that session then accepts only session credentials and `open`
+  shows them. On Windows with an interactive desktop they appear in a
+  message box; elsewhere on the command's terminal (stderr). The prompt
+  names the proxy address (`127.0.0.1:<port>`) the browser's sign-in dialog
+  shows, and says to enter the credentials only there and never in a
+  website's sign-in page or dialog.
   `gateinto session credentials <id>` asks the agent for them over its
   per-user IPC endpoint and shows the same prompt again. The device session
   that `gateinto agent` runs is started by the agent itself, so nothing shows
   its credentials at start. Instead the agent logs one `info` line saying
-  that the device session requires session credentials and naming
+  which methods the device session accepts and naming
   `gateinto session credentials <id>`, which shows them; the line never
-  contains the credentials. Without a desktop or
-  terminal `gateinto open` prints a warning naming that command instead, and
-  `gateinto session browser` and `gateinto proxy` close their session and exit
-  with an error, because nobody could use it.
+  contains the credentials. Without a desktop or terminal `gateinto open`
+  prints a warning naming that command instead, and `gateinto session
+  browser` and `gateinto proxy` close their session and exit with an error,
+  because nobody could use it.
 - Authentication runs right after the request head is parsed, before any DNS
   lookup, routing decision, upstream connection or certificate signing. An
   unknown credential reaches nothing and is never remembered.
@@ -518,6 +553,42 @@ Details of `session_credentials`:
   How Chrome and Edge on Windows cache and prompt for these credentials has
   not been verified.
 
+Details of `os_user`:
+
+- The check runs once per connection, as soon as it is accepted and before
+  the request is read, and shares the connect timeout with reading the
+  request: a check that does not finish in time gets `408` and logs the
+  reason. Every answer other than an established tunnel closes the
+  connection, so every new connection is checked again.
+- Gateinto finds the row of the Windows TCP connection table whose local
+  end is the client's address and whose remote end is the listener, retrying
+  briefly when the row is not there yet. For an IPv4 client it also looks
+  for an IPv4-mapped row in the IPv6 table, and rows without an owning
+  process are skipped. It opens the owning process with
+  `PROCESS_QUERY_LIMITED_INFORMATION`, looks the row up again while it holds
+  the process handle (so a process ID reused in between is not trusted),
+  reads the user SID of the process token and compares it with its own. In
+  a browser session it then asks `IsProcessInJob` about the session's job.
+- Any failure denies the connection: no matching row, a process or token
+  that cannot be opened, another Windows account, a process outside the
+  job, or an error from Windows. When `session_credentials` is offered too,
+  a denied connection is treated like one without credentials: `407` with
+  the `Basic` challenge, and the session credentials work as usual. When
+  `os_user` is the only method, a denied connection gets `403 Forbidden` and
+  is closed.
+- Denials do not count toward the failure limit of `session_credentials`;
+  wrong session credentials count as before. The first denial of a session
+  logs a warning with its reason and the fallback (`gateinto session
+  credentials <session>`, or adding `session_credentials` to `auth`); later
+  denials of that session are logged at debug level. No credentials are
+  involved, and nothing secret is logged.
+- Not verified: a client running elevated while Gateinto is not, under a
+  real UAC split token. Gateinto may then be unable to open the client's
+  process or token; the check fails closed, so such a client may get `403`,
+  or the `Basic` challenge when `session_credentials` is offered. See
+  [docs/compatibility.md](docs/compatibility.md#local-proxy-authentication-os_user)
+  and [docs/security-model.md](docs/security-model.md#local-proxy-authentication-os_user).
+
 ## Configuration file
 
 `gateinto proxy`, `gateinto check-upstream`, `gateinto session browser`,
@@ -532,7 +603,7 @@ See [config.example.toml](config.example.toml).
 [device_session]
 gateway = "default"              # optional when exactly one gateway is configured
 listen = "127.0.0.1:18736"
-auth = "session_credentials"     # session_credentials (default) | none
+auth = "session_credentials"     # session_credentials (default) | os_user (Windows) | a list of both | none
 
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
@@ -761,7 +832,10 @@ that prove it.
 
 Every session, including the device session by default, accepts only the
 random credentials issued to it and shown to the user, which keeps out other
-programs that do not know them but not malware running as the same user. A
+programs that do not know them but not malware running as the same user.
+On the device session `os_user` accepts every program of the Windows user
+running Gateinto and keeps out other users of the machine only; browser
+sessions also require the client to be inside the browser's job object. A
 device session with `[device_session] auth = "none"` has no authentication:
 any local process, including those of other users on the same machine, can
 connect to it and use the agent, including its device identity, to reach the

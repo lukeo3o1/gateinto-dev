@@ -16,6 +16,11 @@ listen = "127.0.0.1:18736"
 # starts, and accepts only them. "none" accepts every local client, including
 # processes of other users on this machine, and lets each of them use this
 # device's identity toward the gateway; set it only if you accept that.
+# "os_user" (Windows only) accepts a connection, without credentials, when the
+# process that opened it runs as the same Windows user that runs Gateinto. It
+# keeps out other users of this machine, not other programs of the same user.
+# A list such as ["os_user", "session_credentials"] accepts a client that
+# passes any one of them; "none" cannot be combined.
 auth = "session_credentials"
 
 # One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,

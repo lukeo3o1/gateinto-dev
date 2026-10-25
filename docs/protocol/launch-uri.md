@@ -143,7 +143,7 @@ Fields:
 | Name | Required | Value |
 | --- | --- | --- |
 | `profile` | unless `gateway` is present | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
-| `auth` | no | `session_credentials`, the only local proxy authentication a browser session uses. Default `session_credentials`. The removed `basic_tofu` is refused with an error naming `session_credentials`. |
+| `auth` | no | `session_credentials`, the only value. Browser sessions always offer it, and on Windows they offer `os_user` too. Default `session_credentials`. The removed `basic_tofu` is refused with an error naming `session_credentials`. |
 | `route` | no | `gateway` (default) or `mixed`; applies only to this browser session, as described above. |
 | `v` | no | `1`, the format version. Default `1`. |
 | `url` | no | Start page for this launch: an `https://` URL that passes the `portal_url` checks of the configuration file (at most 2048 characters, a host, no user information, no spaces, quotes, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) and whose host is a DNS name or an IP address (below). It must have the same origin (scheme, host, port; port 443 when omitted) as the gateway's portal. |
@@ -200,10 +200,15 @@ Error messages say which rule was broken and never repeat the URI.
    and the gateways added from links, which it reads again for every launch
    (see [Resolution](#resolution)).
 5. For a known gateway it starts a browser session on a new ephemeral
-   loopback port with `session_credentials`, creates a new browser profile
-   directory and starts Chrome or Edge with that profile, that session's proxy
-   and the start page. It returns the session's credentials to `open`, which
-   shows them in a prompt and never prints them.
+   loopback port with `session_credentials` (and `os_user` on Windows),
+   creates a new browser profile directory and starts Chrome or Edge with
+   that profile, that session's proxy and the start page. Outside Windows it
+   returns the session's credentials to `open`, which shows them in a prompt
+   and never prints them. On Windows `os_user` accepts the browser, so
+   the answer carries no credentials and `open` shows no prompt;
+   `gateinto session credentials <id>` still shows them. If the browser
+   cannot be put in a job object, its session accepts only
+   `session_credentials` and the answer carries them as elsewhere.
 6. For a new gateway it starts nothing. It keeps the validated request and
    answers `open` with a one-time confirmation token and the gateway name,
    address and portal origin it validated. `open` checks that these equal
@@ -473,7 +478,7 @@ they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch [<profile>] session_credentials [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>`; or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
+| `launch [<profile>] session_credentials [route=mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>` (the last two not on Windows when the browser is in a job and the session offers `os_user`); or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
 | `approve <token>` | as for a started `launch` |
 | `deny <token>` | none |
 | `list` | `session: <id> <device or browser> <gateway> <listen address>` per session, with ` route=mixed` appended for mixed sessions |
