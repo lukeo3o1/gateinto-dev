@@ -217,6 +217,7 @@ ws2_32.dll closesocket
 ws2_32.dll connect
 ws2_32.dll freeaddrinfo
 ws2_32.dll getaddrinfo
+ws2_32.dll getpeername
 ws2_32.dll getsockname
 ws2_32.dll getsockopt
 ws2_32.dll ioctlsocket

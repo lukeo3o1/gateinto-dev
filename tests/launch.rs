@@ -1267,7 +1267,11 @@ async fn a_linked_gateway_trusts_only_the_public_roots() {
     };
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let target = echo_server().await.to_string();
-    let (_, response) = send(listen, &connect_with(&target, Some(&session_auth(&lines)))).await;
+    let (_, response) = send(
+        listen,
+        &connect_with(&target, Some(&launcher.session_auth(listen).await)),
+    )
+    .await;
     assert_eq!(response.status, 502, "{}", response.head);
 
     launcher.run(&["stop"]).await.success();
