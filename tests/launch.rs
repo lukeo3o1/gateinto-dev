@@ -15,6 +15,7 @@ use launch_support::*;
 use tokio::io::AsyncWriteExt;
 
 const PORTAL: &str = "https://portal.example.test/welcome";
+const CREDENTIALS_PROMPT: &str = "credentials-prompt.txt";
 
 struct Output {
     status: ExitStatus,
@@ -144,6 +145,10 @@ impl Launcher {
             ("XDG_CONFIG_HOME", dir.join("config").into()),
             ("APPDATA", dir.join("roaming").into()),
             ("RUST_LOG", OsString::from("info")),
+            (
+                "GATEINTO_TEST_CREDENTIALS_FILE",
+                dir.join(CREDENTIALS_PROMPT).into(),
+            ),
         ];
         Self {
             dir,
@@ -153,6 +158,21 @@ impl Launcher {
             upstream_port: upstream.as_ref().map_or(0, |upstream| upstream.addr.port()),
             _upstream: upstream,
         }
+    }
+
+    fn credentials_prompt(&self) -> PathBuf {
+        self.dir.join(CREDENTIALS_PROMPT)
+    }
+
+    fn without_a_credentials_prompt(mut self) -> Self {
+        self.env
+            .retain(|(name, _)| *name != "GATEINTO_TEST_CREDENTIALS_FILE");
+        #[cfg(windows)]
+        self.env.push((
+            "GATEINTO_TEST_CREDENTIALS_FILE",
+            self.dir.join("no-desktop").join("prompt.txt").into(),
+        ));
+        self
     }
 
     fn sibling(&self) -> Self {
@@ -957,20 +977,13 @@ mod interrupt {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ctrl_c_stops_proxy_and_session_browser_cleanly() {
-        #[allow(unused_mut)]
-        let mut launcher =
+        let launcher =
             Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
         let config = launcher.config.to_str().unwrap().to_owned();
         #[allow(unused_mut)]
         let mut commands = vec![vec!["proxy", "--config", &config]];
         #[cfg(feature = "test-hooks")]
-        {
-            let prompt = launcher.dir.join("credentials-prompt.txt");
-            launcher
-                .env
-                .push(("GATEINTO_TEST_CREDENTIALS_FILE", prompt.into()));
-            commands.push(vec!["session", "browser", "--config", &config]);
-        }
+        commands.push(vec!["session", "browser", "--config", &config]);
         for args in commands {
             let mut child = launcher
                 .command(&args)
@@ -1259,6 +1272,19 @@ async fn a_damaged_gateway_file_blocks_only_its_own_gateway() {
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
+async fn every_launcher_routes_the_credentials_prompt_to_the_test_hook() {
+    let launcher = Launcher::new("").await;
+    let (lines, browser) = launcher.opened("main").await;
+    let shown = std::fs::read_to_string(launcher.credentials_prompt()).unwrap();
+    assert!(
+        shown.contains(&format!("Gateinto session {}", field(&lines, "session"))),
+        "{shown}"
+    );
+    browser.exit();
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
 async fn launch_errors_notify_once_but_a_successful_launch_does_not() {
     let mut launcher = Launcher::new("").await;
     let notification = launcher.dir.join("launch-notification.txt");
@@ -1280,11 +1306,8 @@ async fn launch_errors_notify_once_but_a_successful_launch_does_not() {
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn open_shows_the_credentials_in_a_prompt_and_session_credentials_shows_them_again() {
-    let mut launcher = Launcher::new("").await;
-    let prompt = launcher.dir.join("credentials-prompt.txt");
-    launcher
-        .env
-        .push(("GATEINTO_TEST_CREDENTIALS_FILE", prompt.clone().into()));
+    let launcher = Launcher::new("").await;
+    let prompt = launcher.credentials_prompt();
     let (lines, browser) = launcher.opened("main").await;
     let id = field(&lines, "session");
     let listen = browser.proxy();
@@ -1319,10 +1342,10 @@ async fn open_shows_the_credentials_in_a_prompt_and_session_credentials_shows_th
     browser.exit();
 }
 
-#[cfg(not(windows))]
+#[cfg(any(not(windows), feature = "test-hooks"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_desktop_or_terminal_the_credentials_are_not_shown_but_named() {
-    let launcher = Launcher::new("").await;
+    let launcher = Launcher::new("").await.without_a_credentials_prompt();
     let output = launcher
         .open("gateinto://connect?profile=main&auth=session_credentials")
         .await;
