@@ -5,7 +5,7 @@ mod isolated;
 use std::io::BufRead;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use fixture::*;
 use tokio::io::AsyncWriteExt;
@@ -219,6 +219,16 @@ impl Drop for Child {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+fn without_a_credentials_prompt(mut command: Command) -> Command {
+    command.env_remove("GATEINTO_TEST_CREDENTIALS_FILE");
+    #[cfg(windows)]
+    command.env(
+        "GATEINTO_TEST_CREDENTIALS_FILE",
+        isolated::no_config_home().join("prompt.txt"),
+    );
+    command
 }
 
 async fn spawn_proxy(config: PathBuf, extra: &[&str]) -> (Child, SocketAddr) {
@@ -673,7 +683,7 @@ async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_por
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(any(not(windows), feature = "test-hooks"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn foreground_sessions_refuse_to_serve_credentials_nobody_can_see() {
     let fixture = Fixture::new().await;
@@ -681,7 +691,7 @@ async fn foreground_sessions_refuse_to_serve_credentials_nobody_can_see() {
         "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
     );
     for args in [&["session", "browser"][..], &["proxy"]] {
-        let output = isolated::gateinto()
+        let output = without_a_credentials_prompt(isolated::gateinto())
             .args(args)
             .arg("--config")
             .arg(&config)
@@ -702,6 +712,27 @@ async fn foreground_sessions_refuse_to_serve_credentials_nobody_can_see() {
             assert!(!text.contains("Username"), "{text}");
             assert!(!text.contains("Password"), "{text}");
         }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread")]
+async fn every_isolated_run_routes_the_credentials_prompt_to_the_test_hook() {
+    let fixture = Fixture::new().await;
+    let config = fixture.config(
+        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
+    );
+
+    let (_child, agent) = spawn_proxy(config, &[]).await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let proxy = format!("Proxy: {agent}");
+    while !std::fs::read_to_string(isolated::credentials_prompt())
+        .unwrap_or_default()
+        .contains(&proxy)
+    {
+        assert!(std::time::Instant::now() < deadline, "{proxy} not shown");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
