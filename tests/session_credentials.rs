@@ -38,7 +38,7 @@ impl Setup {
 
     fn config(&self) -> Config {
         let mut config = agent_config(self.upstream.addr, self.ca.roots(), PROXY_NAME);
-        config.local_auth = LocalAuth::SessionCredentials;
+        config.local_auth = LocalAuth::SESSION_CREDENTIALS;
         config
     }
 
@@ -333,16 +333,16 @@ async fn sessions_issue_distinct_credentials_that_work_only_on_their_own_proxy()
         .start(SessionConfig {
             kind: SessionKind::Device,
             gateway: "office".parse().unwrap(),
-            proxy: config(LocalAuth::None),
+            proxy: config(LocalAuth::NONE),
         })
         .await
         .unwrap();
     let first = sessions
-        .start(session(config(LocalAuth::SessionCredentials)))
+        .start(session(config(LocalAuth::SESSION_CREDENTIALS)))
         .await
         .unwrap();
     let second = sessions
-        .start(session(config(LocalAuth::SessionCredentials)))
+        .start(session(config(LocalAuth::SESSION_CREDENTIALS)))
         .await
         .unwrap();
     assert!(sessions.session(device).unwrap().credentials().is_none());

@@ -6,6 +6,7 @@ mod dns;
 pub mod http;
 pub mod identity;
 pub mod ipc;
+pub mod job;
 pub mod lifecycle;
 pub mod link;
 pub mod process;
@@ -18,4 +19,6 @@ pub mod sessions;
 #[cfg(test)]
 mod test_support;
 pub mod tls;
+#[cfg(windows)]
+mod token;
 pub mod uri;

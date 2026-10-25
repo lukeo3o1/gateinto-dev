@@ -189,9 +189,29 @@ impl TestAgent {
             Response::Error(error) => panic!("launch failed: {error}"),
         };
         assert_eq!(ipc::confirm_token(&lines), None, "{lines:?}");
+        let lines = self.with_credentials(lines).await;
         let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
         let browser = wait_for_browser(&self.profiles_root, listen).await;
         (lines, browser)
+    }
+
+    async fn with_credentials(&self, mut lines: Vec<String>) -> Vec<String> {
+        let launched = ipc::issued_credentials(&lines);
+        assert_eq!(
+            launched.is_some(),
+            !cfg!(windows),
+            "a launch shows credentials only when os_user is not offered: {lines:?}"
+        );
+        if launched.is_none() {
+            let id = field(&lines, "session").parse().unwrap();
+            let Response::Ok(shown) = self.send(Request::Credentials(id)).await else {
+                panic!("the credentials of session {id} were not shown");
+            };
+            lines.extend(ipc::credential_lines(
+                &ipc::issued_credentials(&shown).unwrap(),
+            ));
+        }
+        lines
     }
 
     async fn asks(&self, request: LaunchRequest) -> (Vec<String>, ConfirmToken) {
@@ -227,6 +247,7 @@ impl TestAgent {
             Response::Ok(lines) => lines,
             Response::Error(error) => panic!("launch failed: {error}"),
         };
+        let lines = self.with_credentials(lines).await;
         let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
         let browser = wait_for_browser(&self.profiles_root, listen).await;
         (lines, browser)

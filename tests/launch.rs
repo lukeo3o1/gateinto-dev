@@ -942,7 +942,7 @@ async fn the_agent_logs_how_to_show_the_device_session_credentials_but_not_them(
     let text = std::fs::read_to_string(&log).unwrap();
     let line = text
         .lines()
-        .find(|line| line.contains("device session 1 requires session credentials"))
+        .find(|line| line.contains("device session 1 accepts session_credentials"))
         .unwrap_or_else(|| panic!("{text}"));
     assert!(line.contains(" INFO "), "{line}");
     assert!(
@@ -1334,6 +1334,13 @@ async fn a_damaged_gateway_file_blocks_only_its_own_gateway() {
 async fn every_launcher_routes_the_credentials_prompt_to_the_test_hook() {
     let launcher = Launcher::new("").await;
     let (lines, browser) = launcher.opened("main").await;
+    if cfg!(windows) {
+        let id = field(&lines, "session");
+        launcher
+            .run(&["session", "credentials", id])
+            .await
+            .success();
+    }
     let shown = std::fs::read_to_string(launcher.credentials_prompt()).unwrap();
     assert!(
         shown.contains(&format!("Gateinto session {}", field(&lines, "session"))),
@@ -1364,12 +1371,23 @@ async fn launch_errors_notify_once_but_a_successful_launch_does_not() {
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn open_shows_the_credentials_in_a_prompt_and_session_credentials_shows_them_again() {
+async fn open_prompts_for_credentials_unless_os_user_is_offered_and_session_credentials_shows_them()
+{
     let launcher = Launcher::new("").await;
     let prompt = launcher.credentials_prompt();
     let (lines, browser) = launcher.opened("main").await;
     let id = field(&lines, "session");
     let listen = browser.proxy();
+    if cfg!(windows) {
+        assert!(
+            !prompt.exists(),
+            "os_user browser sessions open without a prompt"
+        );
+        launcher
+            .run(&["session", "credentials", id])
+            .await
+            .success();
+    }
     let issued =
         gateinto::ipc::issued_credentials(&launcher.shown_credentials(listen).await).unwrap();
     let shown = std::fs::read_to_string(&prompt).unwrap();
@@ -1403,7 +1421,7 @@ async fn open_shows_the_credentials_in_a_prompt_and_session_credentials_shows_th
 
 #[cfg(any(not(windows), feature = "test-hooks"))]
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_desktop_or_terminal_the_credentials_are_not_shown_but_named() {
+async fn without_a_desktop_or_terminal_the_credentials_are_not_shown() {
     let launcher = Launcher::new("").await.without_a_credentials_prompt();
     let output = launcher
         .open("gateinto://connect?profile=main&auth=session_credentials")
@@ -1417,18 +1435,22 @@ async fn without_a_desktop_or_terminal_the_credentials_are_not_shown_but_named()
     for text in [&output.stdout, &output.stderr] {
         assert!(!text.contains(issued.password()), "{text}");
     }
-    assert!(
-        output.stderr.contains("were not shown"),
-        "{}",
-        output.stderr
-    );
-    assert!(
-        output.stderr.contains(&format!(
-            "run `gateinto session credentials {id}` in a terminal"
-        )),
-        "{}",
-        output.stderr
-    );
+    let named = format!("run `gateinto session credentials {id}` in a terminal");
+    if cfg!(windows) {
+        assert!(
+            !output.stderr.contains("were not shown"),
+            "{}",
+            output.stderr
+        );
+        assert!(!output.stderr.contains(&named), "{}", output.stderr);
+    } else {
+        assert!(
+            output.stderr.contains("were not shown"),
+            "{}",
+            output.stderr
+        );
+        assert!(output.stderr.contains(&named), "{}", output.stderr);
+    }
 
     let again = launcher.run(&["session", "credentials", id]).await;
     again.failure();

@@ -795,7 +795,7 @@ port = 443
             settings,
             Settings {
                 listen: "127.0.0.2:8080".parse().unwrap(),
-                device_session_auth: LocalAuth::SessionCredentials,
+                device_session_auth: LocalAuth::SESSION_CREDENTIALS,
                 gateway: GatewayProfile {
                     name: name("office"),
                     upstream: UpstreamSettings {
@@ -933,13 +933,15 @@ port = 443
     fn the_device_session_auth_defaults_to_session_credentials() {
         assert_eq!(
             settings(MINIMAL).unwrap().device_session_auth,
-            LocalAuth::SessionCredentials
+            LocalAuth::SESSION_CREDENTIALS
         );
         for (value, expected) in [
-            ("none", LocalAuth::None),
-            ("session_credentials", LocalAuth::SessionCredentials),
+            ("\"none\"", LocalAuth::NONE),
+            ("\"session_credentials\"", LocalAuth::SESSION_CREDENTIALS),
+            ("[\"none\"]", LocalAuth::NONE),
+            ("[\"session_credentials\"]", LocalAuth::SESSION_CREDENTIALS),
         ] {
-            let text = format!("[device_session]\nauth = \"{value}\"\n{MINIMAL}");
+            let text = format!("[device_session]\nauth = {value}\n{MINIMAL}");
             assert_eq!(settings(&text).unwrap().device_session_auth, expected);
         }
         let error = ConfigFile::parse("[device_session]\nauth = \"basic\"\n")
@@ -947,6 +949,65 @@ port = 443
             .to_string();
         assert!(error.contains("none"), "{error}");
         assert!(error.contains("session_credentials"), "{error}");
+    }
+
+    fn auth_error(value: &str) -> String {
+        ConfigFile::parse(&format!("[device_session]\nauth = {value}\n"))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn an_auth_list_names_each_method_once_and_none_alone() {
+        let error = auth_error("[]");
+        assert!(error.contains("at least one"), "{error}");
+        let error = auth_error("[\"session_credentials\", \"session_credentials\"]");
+        assert!(error.contains("more than once"), "{error}");
+        for value in [
+            "[\"none\", \"session_credentials\"]",
+            "[\"session_credentials\", \"none\"]",
+        ] {
+            let error = auth_error(value);
+            assert!(error.contains("\"none\" cannot be combined"), "{error}");
+        }
+        let error = auth_error("[\"session_credentials\", \"basic\"]");
+        assert!(error.contains("session_credentials"), "{error}");
+        assert_eq!(error.contains("os_user"), cfg!(windows), "{error}");
+        let error = auth_error("[\"basic_tofu\"]");
+        assert!(error.contains("was removed"), "{error}");
+        let error = auth_error("1");
+        assert!(error.contains("a method name or a list"), "{error}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn os_user_auth_fails_closed_outside_windows() {
+        for value in [
+            "\"os_user\"",
+            "[\"os_user\"]",
+            "[\"os_user\", \"session_credentials\"]",
+        ] {
+            let error = auth_error(value);
+            assert!(error.contains("only available on Windows"), "{error}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn os_user_auth_is_offered_alone_or_with_session_credentials() {
+        let both = LocalAuth {
+            os_user: true,
+            session_credentials: true,
+        };
+        for (value, expected) in [
+            ("\"os_user\"", LocalAuth::OS_USER),
+            ("[\"os_user\"]", LocalAuth::OS_USER),
+            ("[\"os_user\", \"session_credentials\"]", both),
+            ("[\"session_credentials\", \"os_user\"]", both),
+        ] {
+            let text = format!("[device_session]\nauth = {value}\n{MINIMAL}");
+            assert_eq!(settings(&text).unwrap().device_session_auth, expected);
+        }
     }
 
     #[test]

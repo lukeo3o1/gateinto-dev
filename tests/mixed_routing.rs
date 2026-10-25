@@ -139,7 +139,7 @@ async fn mixed_direct_connections_require_local_auth_and_close_on_shutdown() {
     let gateway = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Status(403)).await;
     let mut config = agent_config(gateway.addr, ca.roots(), PROXY_NAME);
     config.route = Route::Mixed;
-    config.local_auth = LocalAuth::SessionCredentials;
+    config.local_auth = LocalAuth::SESSION_CREDENTIALS;
     let proxy = Proxy::bind(config).await.unwrap();
     let agent = proxy.local_addr();
     let issued = proxy.credentials().unwrap();

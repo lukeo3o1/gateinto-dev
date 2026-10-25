@@ -11,7 +11,7 @@ use crate::config::GatewayName;
 use crate::identity::certificates::IssueError;
 use crate::identity::client_cert::ClientCertificate;
 use crate::identity::encoding::sha256_fingerprint;
-use crate::proxy::{self, Proxy};
+use crate::proxy::{self, LocalAuth, Proxy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -94,6 +94,7 @@ pub struct Session {
     route: proxy::Route,
     local_addr: SocketAddr,
     realm: Option<String>,
+    local_auth: LocalAuth,
     credentials: Option<proxy::SessionCredentials>,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
@@ -122,6 +123,10 @@ impl Session {
 
     pub fn realm(&self) -> Option<&str> {
         self.realm.as_deref()
+    }
+
+    pub fn local_auth(&self) -> LocalAuth {
+        self.local_auth
     }
 
     pub fn credentials(&self) -> Option<&proxy::SessionCredentials> {
@@ -154,14 +159,20 @@ impl SessionManager {
             session_certificate(proxy_config.client_certificate.as_ref(), UnixTime::now())
         })?;
         let route = proxy_config.route;
+        let local_auth = proxy_config.local_auth;
         let proxy = Proxy::bind(proxy_config)
             .await
             .map_err(SessionError::Proxy)?;
         let local_addr = proxy.local_addr();
         let realm = proxy.realm().map(str::to_owned);
         let credentials = proxy.credentials().cloned();
-        if let Some(realm) = &realm {
-            span.in_scope(|| info!(realm, "local proxy authentication: session_credentials"));
+        if !local_auth.is_none() {
+            span.in_scope(|| {
+                info!(
+                    realm = realm.as_deref(),
+                    "local proxy authentication: {local_auth}"
+                )
+            });
         }
         let (close, closed) = oneshot::channel();
         let shutdown = async {
@@ -175,6 +186,7 @@ impl SessionManager {
             route,
             local_addr,
             realm,
+            local_auth,
             credentials,
             close,
             task,

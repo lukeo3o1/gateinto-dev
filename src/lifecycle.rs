@@ -69,37 +69,27 @@ pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::erro
 #[cfg(windows)]
 mod windows {
     use std::io;
-    use std::ptr::null_mut;
 
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
+
+    use crate::token::current_token;
 
     pub fn elevated() -> io::Result<bool> {
-        let mut token = null_mut();
-        // SAFETY: GetCurrentProcess returns a pseudo handle; token receives an owned handle.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let token = current_token()?;
         let mut elevation = TOKEN_ELEVATION::default();
         let mut len = 0;
-        // SAFETY: elevation is a TOKEN_ELEVATION of the size passed; token is closed below.
-        let queried = unsafe {
+        // SAFETY: elevation is a TOKEN_ELEVATION of the size passed and token is open.
+        if unsafe {
             GetTokenInformation(
-                token,
+                token.0,
                 TokenElevation,
                 (&raw mut elevation).cast(),
                 size_of::<TOKEN_ELEVATION>() as u32,
                 &mut len,
             )
-        };
-        let error = io::Error::last_os_error();
-        // SAFETY: token is an owned handle closed once.
-        unsafe { CloseHandle(token) };
-        if queried == 0 {
-            return Err(error);
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
         }
         Ok(elevation.TokenIsElevated != 0)
     }

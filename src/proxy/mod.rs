@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -22,19 +22,24 @@ use crate::http::{
 };
 use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
+use crate::job::Job;
 use crate::tls::{self, NegotiationError, TlsMode};
 
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
 pub(crate) mod h2;
+mod local_auth;
+mod os_user;
 mod pool;
 mod relay;
 mod routing;
 mod session_credentials;
 
+pub use local_auth::LocalAuth;
 pub use routing::Route;
 
+use local_auth::Authenticator;
 pub use session_credentials::{FailureLimit, SessionCredentials};
 use session_credentials::{Verdict, Verifier};
 
@@ -76,31 +81,6 @@ pub struct Upstream {
     pub roots: RootCertStore,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum LocalAuth {
-    None,
-    #[default]
-    SessionCredentials,
-}
-
-impl<'de> serde::Deserialize<'de> for LocalAuth {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error as _;
-
-        match String::deserialize(deserializer)?.as_str() {
-            "none" => Ok(Self::None),
-            "session_credentials" => Ok(Self::SessionCredentials),
-            "basic_tofu" => Err(D::Error::custom(
-                "auth = \"basic_tofu\" was removed; use \"session_credentials\"",
-            )),
-            other => Err(D::Error::unknown_variant(
-                other,
-                &["none", "session_credentials"],
-            )),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -111,6 +91,7 @@ pub struct Config {
     pub tls_mode: TlsMode,
     pub client_certificate: Option<ClientCertificate>,
     pub limits: Limits,
+    pub os_user_job: Option<Arc<Job>>,
 }
 
 #[derive(Debug)]
@@ -118,6 +99,7 @@ pub enum Error {
     NonLoopbackListen(SocketAddr),
     TunnelLimit(usize),
     Random,
+    OsUser(io::Error),
     Tls(rustls::Error),
     Io(io::Error),
 }
@@ -134,6 +116,7 @@ impl fmt::Display for Error {
                 "the tunnel limit is {limit}; the maximum is {MAX_TUNNELS}"
             ),
             Self::Random => f.write_str("the system random number generator failed"),
+            Self::OsUser(error) => write!(f, "os_user authentication is unavailable: {error}"),
             Self::Tls(error) => write!(f, "invalid upstream TLS configuration: {error}"),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -231,7 +214,7 @@ struct Shared {
     endpoint: Endpoint,
     pool: pool::Pool,
     route: Route,
-    verifier: Option<Verifier>,
+    auth: Authenticator,
     limits: Limits,
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
@@ -269,17 +252,19 @@ impl Proxy {
             )),
         )
         .map_err(Error::Tls)?;
-        let (credentials, verifier) = match config.local_auth {
-            LocalAuth::SessionCredentials => {
-                let random = SystemRandom::new();
-                let credentials =
-                    SessionCredentials::generate(&random).map_err(|_| Error::Random)?;
-                let verifier =
-                    Verifier::new(&credentials, config.limits.local_auth_failures, &random)
-                        .map_err(|_| Error::Random)?;
-                (Some(credentials), Some(verifier))
-            }
-            LocalAuth::None => (None, None),
+        let (credentials, verifier) = if config.local_auth.session_credentials {
+            let random = SystemRandom::new();
+            let credentials = SessionCredentials::generate(&random).map_err(|_| Error::Random)?;
+            let verifier = Verifier::new(&credentials, config.limits.local_auth_failures, &random)
+                .map_err(|_| Error::Random)?;
+            (Some(credentials), Some(verifier))
+        } else {
+            (None, None)
+        };
+        let owners = if config.local_auth.os_user {
+            Some(os_user::system(config.os_user_job).map_err(Error::OsUser)?)
+        } else {
+            None
         };
         let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
         let tunnels = Arc::new(Semaphore::new(
@@ -295,7 +280,7 @@ impl Proxy {
             endpoint,
             pool: pool::Pool::default(),
             route: config.route,
-            verifier,
+            auth: Authenticator::new(verifier, owners),
             limits: config.limits,
             tunnels,
             rejects,
@@ -314,7 +299,7 @@ impl Proxy {
     }
 
     pub fn realm(&self) -> Option<&str> {
-        self.shared.verifier.as_ref().map(Verifier::realm)
+        self.shared.auth.realm()
     }
 
     pub fn credentials(&self) -> Option<&SessionCredentials> {
@@ -389,8 +374,15 @@ impl Shared {
     async fn handle(&self, mut client: TcpStream) {
         let _ = client.set_nodelay(true);
         let limits = &self.limits;
+        let deadline = tokio::time::Instant::now() + limits.handshake_timeout;
+        let os_user = self
+            .auth
+            .os_user(client.peer_addr(), client.local_addr(), deadline);
+        let Some(os_user) = os_user.await else {
+            return reject(client, Status::RequestTimeout, limits.reject_linger).await;
+        };
         let request = read_head(&mut client, limits.max_header_bytes, parse_connect_request);
-        let (request, client_early) = match timeout(limits.handshake_timeout, request).await {
+        let (request, client_early) = match timeout_at(deadline, request).await {
             Err(_) => {
                 return reject(client, Status::RequestTimeout, limits.reject_linger).await;
             }
@@ -400,13 +392,10 @@ impl Shared {
             }
             Ok(Ok(request)) => request,
         };
-        if let Some(verifier) = &self.verifier {
-            let authorization = request.proxy_authorization.as_deref();
-            if let Err(status) = authenticate(verifier, authorization, Instant::now()) {
-                debug!(?status, "rejecting");
-                let response = status.response_in(verifier.realm());
-                return reject_with(client, &response, limits.reject_linger).await;
-            }
+        let authorization = request.proxy_authorization.as_deref();
+        if let Err(response) = self.auth.check(os_user, authorization, Instant::now()) {
+            debug!("rejecting");
+            return reject_with(client, &response, limits.reject_linger).await;
         }
         let target = request.target;
         debug!(%target, "opening tunnel");
@@ -650,7 +639,142 @@ async fn reject_with(mut stream: TcpStream, response: &str, linger: Duration) {
 mod tests {
     use rustls::NamedGroup;
 
+    use super::os_user::tests::{Fake, fake, slow};
+    use super::os_user::{Denial, Owners};
     use super::*;
+
+    async fn closed_port() -> SocketAddr {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        listener.local_addr().unwrap()
+    }
+
+    async fn config(local_auth: LocalAuth, handshake: Duration) -> Config {
+        let upstream = closed_port().await;
+        Config {
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            allow_non_loopback: false,
+            local_auth,
+            route: Route::Gateway,
+            upstream: Upstream {
+                host: upstream.ip().to_string(),
+                port: upstream.port(),
+                server_name: ServerName::try_from("upstream.test").unwrap(),
+                roots: RootCertStore::empty(),
+            },
+            tls_mode: TlsMode::default(),
+            client_certificate: None,
+            limits: Limits {
+                handshake_timeout: handshake,
+                reject_linger: Duration::ZERO,
+                ..Limits::default()
+            },
+            os_user_job: None,
+        }
+    }
+
+    async fn start(local_auth: LocalAuth, owners: Arc<Fake>, handshake: Duration) -> Proxy {
+        assert!(local_auth.os_user);
+        let without = LocalAuth {
+            os_user: false,
+            ..local_auth
+        };
+        let mut proxy = Proxy::bind(config(without, handshake).await).await.unwrap();
+        let shared = Arc::get_mut(&mut proxy.shared).unwrap();
+        let auth = std::mem::replace(&mut shared.auth, Authenticator::new(None, None));
+        shared.auth = auth.with_owners(owners as Arc<dyn Owners>);
+        proxy
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn binding_with_os_user_fails_outside_windows() {
+        for local_auth in [
+            LocalAuth::OS_USER,
+            LocalAuth {
+                os_user: true,
+                session_credentials: true,
+            },
+        ] {
+            let config = config(local_auth, Duration::from_secs(5)).await;
+            match Proxy::bind(config).await {
+                Err(Error::OsUser(error)) => {
+                    assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
+                }
+                Err(other) => panic!("unexpected error: {other}"),
+                Ok(_) => panic!("os_user was accepted outside Windows"),
+            }
+        }
+    }
+
+    async fn exchange(proxy: Proxy, request: &[u8]) -> (String, TcpStream) {
+        let addr = proxy.local_addr();
+        tokio::spawn(proxy.run());
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        (String::from_utf8(response).unwrap(), client)
+    }
+
+    const CONNECT: &[u8] = b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\n\r\n";
+
+    const OS_USER: LocalAuth = LocalAuth {
+        os_user: true,
+        session_credentials: false,
+    };
+
+    const BOTH: LocalAuth = LocalAuth {
+        os_user: true,
+        session_credentials: true,
+    };
+
+    #[tokio::test]
+    async fn a_connection_from_the_same_user_opens_a_tunnel_without_credentials() {
+        let owners = fake(Ok(()));
+        let proxy = start(BOTH, owners.clone(), Duration::from_secs(5)).await;
+        let (response, client) = exchange(proxy, CONNECT).await;
+        assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+        assert_eq!(
+            *owners.seen.lock().unwrap(),
+            [(client.local_addr().unwrap(), client.peer_addr().unwrap())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_from_another_user_is_forbidden_without_session_credentials() {
+        let proxy = start(
+            OS_USER,
+            fake(Err(Denial::OtherUser)),
+            Duration::from_secs(5),
+        )
+        .await;
+        let (response, _) = exchange(proxy, CONNECT).await;
+        assert_eq!(
+            response,
+            "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_connection_is_challenged_when_session_credentials_are_offered() {
+        let proxy = start(BOTH, fake(Err(Denial::NotFound)), Duration::from_secs(5)).await;
+        let realm = proxy.realm().unwrap().to_owned();
+        let (response, _) = exchange(proxy, CONNECT).await;
+        assert_eq!(
+            response,
+            Status::ProxyAuthenticationRequired.response_in(&realm)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_owner_lookup_is_bounded_by_the_handshake_timeout() {
+        let owners = slow(Ok(()), Duration::from_secs(1));
+        let proxy = start(OS_USER, owners, Duration::from_millis(50)).await;
+        let started = Instant::now();
+        let (response, _) = exchange(proxy, CONNECT).await;
+        assert!(response.starts_with("HTTP/1.1 408 "), "{response}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 
     #[test]
     fn refused_negotiation_answers_bad_gateway() {
