@@ -591,7 +591,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
     Config {
         listen: SocketAddr::from((LOOPBACK, 0)),
         allow_non_loopback: false,
-        local_auth: LocalAuth::None,
+        local_auth: LocalAuth::NONE,
         route: gateinto::proxy::Route::Gateway,
         upstream: Upstream {
             host: upstream.ip().to_string(),
@@ -602,6 +602,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
         tls_mode: TlsMode::default(),
         client_certificate: None,
         limits: Limits::default(),
+        os_user_job: None,
     }
 }
 

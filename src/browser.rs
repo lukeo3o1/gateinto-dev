@@ -4,13 +4,15 @@ use std::fs::DirBuilder;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use tokio::process::{Child, Command};
 use tracing::warn;
 
 use crate::config::PortalUrl;
+use crate::job::{Job, SpawnError};
 use crate::sessions::SessionId;
 
 pub const MARKER: &str = "gateinto-profile";
@@ -150,7 +152,50 @@ pub fn profiles_root_from(env: impl Fn(&str) -> Option<OsString>) -> Option<Path
     base.map(|dir| dir.join(profiles))
 }
 
-pub fn spawn(executable: &Path, args: Vec<OsString>) -> io::Result<Child> {
+#[derive(Debug)]
+pub enum BrowserProcess {
+    Child(Box<Child>),
+    #[cfg(windows)]
+    Job(crate::job::Process),
+}
+
+impl BrowserProcess {
+    pub async fn wait(&mut self) -> io::Result<ExitStatus> {
+        match self {
+            Self::Child(child) => child.wait().await,
+            #[cfg(windows)]
+            Self::Job(process) => process.wait().await,
+        }
+    }
+
+    pub async fn kill(&mut self) -> io::Result<()> {
+        match self {
+            Self::Child(child) => child.kill().await,
+            #[cfg(windows)]
+            Self::Job(process) => process.kill().await,
+        }
+    }
+
+    pub async fn release(&mut self) -> io::Result<()> {
+        match self {
+            Self::Child(_) => Ok(()),
+            #[cfg(windows)]
+            Self::Job(process) => process.kill().await,
+        }
+    }
+}
+
+pub fn spawn(
+    executable: &Path,
+    args: Vec<OsString>,
+    job: Option<&Arc<Job>>,
+) -> Result<BrowserProcess, SpawnError> {
+    #[cfg(windows)]
+    if let Some(job) = job {
+        return job.spawn(executable, &args).map(BrowserProcess::Job);
+    }
+    #[cfg(not(windows))]
+    let _ = job;
     Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
@@ -158,6 +203,8 @@ pub fn spawn(executable: &Path, args: Vec<OsString>) -> io::Result<Child> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
+        .map(|child| BrowserProcess::Child(Box::new(child)))
+        .map_err(SpawnError::Process)
 }
 
 #[derive(Debug)]

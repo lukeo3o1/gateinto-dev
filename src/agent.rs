@@ -1,18 +1,19 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsString;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::process::Child;
 use tokio::sync::{Mutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, info, info_span, warn};
 
-use crate::browser::{self, ProfileDir};
+use crate::browser::{self, BrowserProcess, ProfileDir};
 use crate::config::GatewayName;
 use crate::ipc::{self, ConfirmToken, Connection, Request, Response, Server};
+use crate::job::{Job, SpawnError};
 use crate::link::{self, Decision, Known, Launch, LinkedGateway, Resolution};
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionError, SessionId, SessionKind, SessionManager};
@@ -138,8 +139,36 @@ struct Browser {
     task: JoinHandle<()>,
 }
 
+trait Launcher: Send + Sync + 'static {
+    fn job(&self) -> Option<Arc<Job>>;
+    fn spawn(
+        &self,
+        executable: &Path,
+        args: Vec<OsString>,
+        job: Option<&Arc<Job>>,
+    ) -> Result<BrowserProcess, SpawnError>;
+}
+
+struct System;
+
+impl Launcher for System {
+    fn job(&self) -> Option<Arc<Job>> {
+        browser_job()
+    }
+
+    fn spawn(
+        &self,
+        executable: &Path,
+        args: Vec<OsString>,
+        job: Option<&Arc<Job>>,
+    ) -> Result<BrowserProcess, SpawnError> {
+        browser::spawn(executable, args, job)
+    }
+}
+
 struct Inner {
     profiles: Box<dyn Profiles>,
+    launcher: Arc<dyn Launcher>,
     options: AgentOptions,
     sessions: Mutex<SessionManager>,
     browsers: Mutex<BTreeMap<SessionId, Browser>>,
@@ -155,10 +184,19 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(options: AgentOptions, profiles: impl Profiles) -> Self {
+        Self::with_launcher(options, profiles, Arc::new(System))
+    }
+
+    fn with_launcher(
+        options: AgentOptions,
+        profiles: impl Profiles,
+        launcher: Arc<dyn Launcher>,
+    ) -> Self {
         let limiter = LaunchLimiter::new(options.limits.launches, options.limits.launch_window);
         Self {
             inner: Arc::new(Inner {
                 profiles: Box::new(profiles),
+                launcher,
                 options,
                 sessions: Mutex::new(SessionManager::new()),
                 browsers: Mutex::new(BTreeMap::new()),
@@ -390,44 +428,62 @@ impl Agent {
         let mut proxy = plan.proxy;
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         proxy.allow_non_loopback = false;
-        proxy.local_auth = LocalAuth::SessionCredentials;
         proxy.route = launch.route;
+        let mut job = self.inner.launcher.job();
         let mut sessions = self.inner.sessions.lock().await;
-        let id = sessions
-            .start(SessionConfig {
-                kind: SessionKind::Browser,
-                gateway: profile.clone(),
-                proxy,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let session = sessions.session(id).expect("the session just started");
-        let (listen, realm, credentials) = (
-            session.local_addr(),
-            session.realm().unwrap_or_default().to_owned(),
-            session
-                .credentials()
-                .map(ipc::credential_lines)
-                .expect("browser sessions authenticate with session credentials"),
-        );
-        let span = info_span!("session", %id, kind = %SessionKind::Browser, gateway = %profile);
-        let started = ProfileDir::create(&self.inner.options.profiles_root, id).and_then(|dir| {
-            let args = browser::browser_args(dir.path(), listen, launch.start_page.as_ref());
-            match browser::spawn(&executable, args) {
-                Ok(child) => Ok((dir, child)),
-                Err(error) => {
-                    let _ = dir.remove();
-                    Err(error)
+        let (id, listen, realm, credentials, span, dir, child) = loop {
+            let local_auth = browser_local_auth(job.is_some());
+            let id = sessions
+                .start(SessionConfig {
+                    kind: SessionKind::Browser,
+                    gateway: profile.clone(),
+                    proxy: proxy::Config {
+                        local_auth,
+                        os_user_job: job.clone(),
+                        ..proxy.clone()
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let session = sessions.session(id).expect("the session just started");
+            let (listen, realm, credentials) = (
+                session.local_addr(),
+                session.realm().unwrap_or_default().to_owned(),
+                launch_credentials(local_auth, session.credentials().map(ipc::credential_lines)),
+            );
+            let span = info_span!("session", %id, kind = %SessionKind::Browser, gateway = %profile);
+            let started = match ProfileDir::create(&self.inner.options.profiles_root, id) {
+                Ok(dir) => {
+                    let args =
+                        browser::browser_args(dir.path(), listen, launch.start_page.as_ref());
+                    match self.spawn_browser(&executable, args, job.clone()).await {
+                        Ok(child) => Ok((dir, child)),
+                        Err(error) => {
+                            let _ = dir.remove();
+                            Err(error)
+                        }
+                    }
                 }
-            }
-        });
-        let (dir, child) = match started {
-            Ok(started) => started,
-            Err(error) => {
-                sessions.close(id).await;
-                let message = format!("starting {} failed: {error}", executable.display());
-                span.in_scope(|| warn!("{message}"));
-                return Err(message);
+                Err(error) => Err(SpawnError::Process(error)),
+            };
+            match started {
+                Ok((dir, child)) => break (id, listen, realm, credentials, span, dir, child),
+                Err(SpawnError::Job(error)) if job.is_some() => {
+                    sessions.close(id).await;
+                    span.in_scope(|| {
+                        warn!(
+                            "putting the browser in a job object failed: {error}; starting it \
+                             without one, so its session accepts only session credentials"
+                        )
+                    });
+                    job = None;
+                }
+                Err(error) => {
+                    sessions.close(id).await;
+                    let message = format!("starting {} failed: {error}", executable.display());
+                    span.in_scope(|| warn!("{message}"));
+                    return Err(message);
+                }
             }
         };
         drop(sessions);
@@ -455,6 +511,19 @@ impl Agent {
         let task = tokio::spawn(watch(self.inner.clone(), id, child, dir, closed).instrument(span));
         browsers.insert(id, Browser { close, task });
         Ok(lines)
+    }
+
+    async fn spawn_browser(
+        &self,
+        executable: &Path,
+        args: Vec<OsString>,
+        job: Option<Arc<Job>>,
+    ) -> Result<BrowserProcess, SpawnError> {
+        let launcher = self.inner.launcher.clone();
+        let executable = executable.to_owned();
+        tokio::task::spawn_blocking(move || launcher.spawn(&executable, args, job.as_ref()))
+            .await
+            .map_err(|error| SpawnError::Process(std::io::Error::other(error)))?
     }
 
     async fn list(&self) -> Vec<String> {
@@ -534,14 +603,24 @@ fn unix_now() -> u64 {
 async fn watch(
     inner: Arc<Inner>,
     id: SessionId,
-    mut child: Child,
+    mut child: BrowserProcess,
     profile: ProfileDir,
     closed: oneshot::Receiver<()>,
 ) {
     tokio::select! {
         status = child.wait() => match status {
-            Ok(status) => info!("the browser exited with {status}; closing the session"),
-            Err(error) => warn!("waiting for the browser failed: {error}; closing the session"),
+            Ok(status) => {
+                info!("the browser exited with {status}; closing the session");
+                if let Err(error) = child.release().await {
+                    warn!("stopping the processes the browser left failed: {error}");
+                }
+            }
+            Err(error) => {
+                warn!("waiting for the browser failed: {error}; closing the session");
+                if let Err(error) = child.release().await {
+                    warn!("stopping the processes the browser left failed: {error}");
+                }
+            }
         },
         _ = closed => {
             if let Err(error) = child.kill().await {
@@ -550,6 +629,7 @@ async fn watch(
             info!("stopped the browser; closing the session");
         }
     }
+    drop(child);
     inner.sessions.lock().await.close(id).await;
     remove_profile(&profile).await;
     inner.browsers.lock().await.remove(&id);
@@ -568,9 +648,73 @@ async fn remove_profile(profile: &ProfileDir) {
     }
 }
 
+fn browser_job() -> Option<Arc<Job>> {
+    if !cfg!(windows) {
+        return None;
+    }
+    match Job::new() {
+        Ok(job) => Some(Arc::new(job)),
+        Err(error) => {
+            warn!(
+                "creating a job object for the browser failed: {error}; its session accepts only \
+                 session credentials"
+            );
+            None
+        }
+    }
+}
+
+fn browser_local_auth(in_job: bool) -> LocalAuth {
+    LocalAuth {
+        os_user: cfg!(windows) && in_job,
+        session_credentials: true,
+    }
+}
+
+fn launch_credentials(local_auth: LocalAuth, lines: Option<[String; 2]>) -> Vec<String> {
+    match lines {
+        Some(lines) if !local_auth.os_user => lines.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_sessions_offer_the_os_user_on_windows_with_session_credentials_as_a_fallback() {
+        let expected = LocalAuth {
+            os_user: cfg!(windows),
+            session_credentials: true,
+        };
+        assert_eq!(browser_local_auth(true), expected);
+    }
+
+    #[test]
+    fn a_browser_outside_a_job_gets_only_session_credentials_and_sees_them() {
+        assert_eq!(browser_local_auth(false), LocalAuth::SESSION_CREDENTIALS);
+        let credentials = ["username: u".to_owned(), "password: p".to_owned()];
+        assert_eq!(
+            launch_credentials(browser_local_auth(false), Some(credentials.clone())),
+            credentials.to_vec()
+        );
+    }
+
+    #[test]
+    fn launch_lines_carry_the_credentials_only_when_they_are_the_only_method() {
+        let credentials = ["username: u".to_owned(), "password: p".to_owned()];
+        assert_eq!(
+            launch_credentials(LocalAuth::SESSION_CREDENTIALS, Some(credentials.clone())),
+            credentials.to_vec()
+        );
+        let both = LocalAuth {
+            os_user: true,
+            session_credentials: true,
+        };
+        assert!(launch_credentials(both, Some(credentials)).is_empty());
+        assert!(launch_credentials(LocalAuth::OS_USER, None).is_empty());
+    }
 
     #[test]
     fn the_limiter_allows_a_burst_up_to_the_limit_per_window() {
@@ -632,5 +776,154 @@ mod tests {
     fn a_zero_limit_refuses_everything() {
         let mut limiter = LaunchLimiter::new(0, Duration::from_secs(10));
         assert!(!limiter.allow(Instant::now()));
+    }
+
+    #[cfg(unix)]
+    mod no_job_retry {
+        use std::io;
+
+        use rustls::RootCertStore;
+        use rustls::pki_types::ServerName;
+
+        use super::*;
+        use crate::sessions::Session;
+
+        struct Plan(proxy::Config);
+
+        impl Profiles for Plan {
+            fn known(&self) -> Result<Known, String> {
+                Ok(Known::default())
+            }
+
+            fn link(&self, _: &LinkedGateway) -> Result<(), String> {
+                Err("not used".to_owned())
+            }
+
+            fn browser_session(&self, _: &GatewayName) -> Result<BrowserSessionPlan, String> {
+                Ok(BrowserSessionPlan {
+                    proxy: self.0.clone(),
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct JobFailsOnce {
+            jobs: std::sync::Mutex<Vec<bool>>,
+        }
+
+        impl Launcher for JobFailsOnce {
+            fn job(&self) -> Option<Arc<Job>> {
+                Some(Arc::new(Job::fake()))
+            }
+
+            fn spawn(
+                &self,
+                executable: &Path,
+                _: Vec<OsString>,
+                job: Option<&Arc<Job>>,
+            ) -> Result<BrowserProcess, SpawnError> {
+                let mut jobs = self.jobs.lock().unwrap();
+                jobs.push(job.is_some());
+                if jobs.len() == 1 {
+                    return Err(SpawnError::Job(io::Error::other("assigning refused")));
+                }
+                browser::spawn(executable, vec!["30".into()], None)
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl io::Write for Logs {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Logs {
+            fn warnings(&self) -> Vec<String> {
+                String::from_utf8(self.0.lock().unwrap().clone())
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.contains("WARN"))
+                    .map(str::to_owned)
+                    .collect()
+            }
+        }
+
+        fn proxy_config() -> proxy::Config {
+            proxy::Config {
+                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                allow_non_loopback: false,
+                local_auth: LocalAuth::SESSION_CREDENTIALS,
+                route: proxy::Route::Gateway,
+                upstream: proxy::Upstream {
+                    host: "127.0.0.1".to_owned(),
+                    port: 9,
+                    server_name: ServerName::try_from("upstream.test").unwrap(),
+                    roots: RootCertStore::empty(),
+                },
+                tls_mode: crate::tls::TlsMode::default(),
+                client_certificate: None,
+                limits: proxy::Limits::default(),
+                os_user_job: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn a_refused_job_closes_the_session_and_retries_with_session_credentials_only() {
+            let root = std::env::temp_dir().join(format!("gateinto-no-job-{}", std::process::id()));
+            let launcher = Arc::new(JobFailsOnce::default());
+            let agent = Agent::with_launcher(
+                AgentOptions {
+                    browser: Some(PathBuf::from("/bin/sleep")),
+                    profiles_root: root.clone(),
+                    limits: AgentLimits::default(),
+                },
+                Plan(proxy_config()),
+                launcher.clone(),
+            );
+            let logs = Logs::default();
+            let writer = logs.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+
+            let lines = agent
+                .start(Launch {
+                    route: proxy::Route::Gateway,
+                    profile: "work".parse().unwrap(),
+                    start_page: None,
+                    add: None,
+                })
+                .await
+                .unwrap();
+            drop(guard);
+
+            assert_eq!(*launcher.jobs.lock().unwrap(), [true, false]);
+            let warnings = logs.warnings();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("putting the browser in a job object failed"));
+            {
+                let sessions = agent.inner.sessions.lock().await;
+                let ids: Vec<_> = sessions.sessions().map(Session::id).collect();
+                assert_eq!(ids.len(), 1);
+                let session = sessions.session(ids[0]).unwrap();
+                assert_eq!(session.local_auth(), LocalAuth::SESSION_CREDENTIALS);
+                let credentials = ipc::credential_lines(session.credentials().unwrap());
+                assert_eq!(lines[0], format!("session: {}", ids[0]));
+                for line in credentials {
+                    assert!(lines.contains(&line), "{lines:?}");
+                }
+            }
+            agent.close_all().await;
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

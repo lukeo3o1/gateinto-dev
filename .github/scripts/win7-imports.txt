@@ -19,9 +19,11 @@ crypt32.dll CertFindCertificateInStore
 crypt32.dll CertFreeCertificateContext
 crypt32.dll CertOpenStore
 crypt32.dll CryptEncodeObjectEx
+iphlpapi.dll GetExtendedTcpTable
 kernel32.dll AcquireSRWLockExclusive
 kernel32.dll AcquireSRWLockShared
 kernel32.dll AddVectoredExceptionHandler
+kernel32.dll AssignProcessToJobObject
 kernel32.dll CancelIoEx
 kernel32.dll CloseHandle
 kernel32.dll CompareStringOrdinal
@@ -30,6 +32,7 @@ kernel32.dll ConnectNamedPipe
 kernel32.dll CreateDirectoryW
 kernel32.dll CreateFileW
 kernel32.dll CreateIoCompletionPort
+kernel32.dll CreateJobObjectW
 kernel32.dll CreateMutexA
 kernel32.dll CreateNamedPipeW
 kernel32.dll CreateProcessW
@@ -38,6 +41,7 @@ kernel32.dll CreateWaitableTimerExW
 kernel32.dll DecodePointer
 kernel32.dll DeleteCriticalSection
 kernel32.dll DeleteFileW
+kernel32.dll DeleteProcThreadAttributeList
 kernel32.dll DuplicateHandle
 kernel32.dll EncodePointer
 kernel32.dll EnterCriticalSection
@@ -100,6 +104,7 @@ kernel32.dll HeapReAlloc
 kernel32.dll HeapSize
 kernel32.dll InitializeCriticalSectionAndSpinCount
 kernel32.dll InitializeCriticalSectionEx
+kernel32.dll InitializeProcThreadAttributeList
 kernel32.dll InitializeSListHead
 kernel32.dll InitializeSRWLock
 kernel32.dll InitOnceBeginInitialize
@@ -108,6 +113,7 @@ kernel32.dll InitOnceExecuteOnce
 kernel32.dll InterlockedFlushSList
 kernel32.dll InterlockedPushEntrySList
 kernel32.dll IsDebuggerPresent
+kernel32.dll IsProcessInJob
 kernel32.dll IsProcessorFeaturePresent
 kernel32.dll IsThreadAFiber
 kernel32.dll IsValidCodePage
@@ -124,6 +130,7 @@ kernel32.dll OpenProcess
 kernel32.dll OutputDebugStringW
 kernel32.dll PostQueuedCompletionStatus
 kernel32.dll QueryDosDeviceW
+kernel32.dll QueryInformationJobObject
 kernel32.dll QueryPerformanceCounter
 kernel32.dll QueryPerformanceFrequency
 kernel32.dll RaiseException
@@ -135,6 +142,7 @@ kernel32.dll ReleaseMutex
 kernel32.dll ReleaseSRWLockExclusive
 kernel32.dll ReleaseSRWLockShared
 kernel32.dll RemoveDirectoryW
+kernel32.dll ResumeThread
 kernel32.dll RtlCaptureContext
 kernel32.dll RtlLookupFunctionEntry
 kernel32.dll RtlPcToFileHeader
@@ -151,6 +159,7 @@ kernel32.dll SetFileInformationByHandle
 kernel32.dll SetFilePointerEx
 kernel32.dll SetFileTime
 kernel32.dll SetHandleInformation
+kernel32.dll SetInformationJobObject
 kernel32.dll SetLastError
 kernel32.dll SetNamedPipeHandleState
 kernel32.dll SetStdHandle
@@ -161,6 +170,7 @@ kernel32.dll Sleep
 kernel32.dll SleepConditionVariableSRW
 kernel32.dll SleepEx
 kernel32.dll SwitchToThread
+kernel32.dll TerminateJobObject
 kernel32.dll TerminateProcess
 kernel32.dll TlsAlloc
 kernel32.dll TlsFree
@@ -169,6 +179,7 @@ kernel32.dll TlsSetValue
 kernel32.dll TryAcquireSRWLockExclusive
 kernel32.dll UnhandledExceptionFilter
 kernel32.dll UnregisterWaitEx
+kernel32.dll UpdateProcThreadAttribute
 kernel32.dll VirtualProtect
 kernel32.dll WaitForSingleObject
 kernel32.dll WaitForSingleObjectEx

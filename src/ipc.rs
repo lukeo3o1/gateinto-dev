@@ -753,18 +753,18 @@ mod windows {
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
     };
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SUCCESS, HANDLE, LocalFree,
+        ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SUCCESS, HANDLE, LocalFree,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     };
     use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, SECURITY_IDENTIFICATION};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    use crate::token::TokenUserInfo;
 
     use super::{
         BindError, Connection, Endpoint, Instances, REQUEST_TIMEOUT, RequestError,
@@ -935,52 +935,6 @@ mod windows {
         let me = TokenUserInfo::current()?;
         // SAFETY: owner points into _descriptor and the user SID into me; both are alive.
         Ok(!owner.is_null() && unsafe { EqualSid(owner, me.sid()) } != 0)
-    }
-
-    struct Handle(HANDLE);
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: the handle is owned by this value and closed once.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-
-    struct TokenUserInfo(Vec<u64>);
-
-    impl TokenUserInfo {
-        fn current() -> io::Result<Self> {
-            let mut token = null_mut();
-            // SAFETY: the current process pseudo handle needs no closing; token receives an owned
-            // handle.
-            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let token = Handle(token);
-            let mut len = 0;
-            // SAFETY: a null buffer of length 0 asks for the required length.
-            unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut len) };
-            let mut buffer = vec![0u64; (len as usize).div_ceil(8)];
-            // SAFETY: buffer is 8-byte aligned and holds at least len bytes.
-            if unsafe {
-                GetTokenInformation(
-                    token.0,
-                    TokenUser,
-                    buffer.as_mut_ptr().cast(),
-                    len,
-                    &mut len,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Self(buffer))
-        }
-
-        fn sid(&self) -> windows_sys::Win32::Security::PSID {
-            // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the aligned buffer.
-            unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
-        }
     }
 
     pub fn user_sid() -> io::Result<String> {

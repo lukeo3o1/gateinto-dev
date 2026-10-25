@@ -36,7 +36,7 @@ async fn logs_never_contain_the_credentials() {
     let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
     let target = echo_server().await.to_string();
     let mut config = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
-    config.local_auth = LocalAuth::SessionCredentials;
+    config.local_auth = LocalAuth::SESSION_CREDENTIALS;
     config.limits.local_auth_failures = FailureLimit {
         max_failures: 4,
         window: Duration::from_secs(600),

@@ -706,7 +706,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
     Ok(Config {
         listen: settings.listen,
         allow_non_loopback: false,
-        local_auth: LocalAuth::None,
+        local_auth: LocalAuth::NONE,
         route: gateinto::proxy::Route::Gateway,
         upstream: upstream(settings)?,
         tls_mode: settings.gateway.tls_mode,
@@ -718,6 +718,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
             idle_timeout: Duration::from_secs(limits.idle_timeout_seconds),
             ..Limits::default()
         },
+        os_user_job: None,
     })
 }
 
@@ -730,7 +731,7 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     args.upstream.config.log_default();
     let config = Config {
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        local_auth: LocalAuth::SessionCredentials,
+        local_auth: LocalAuth::SESSION_CREDENTIALS,
         ..proxy_config(&settings)?
     };
     let mut sessions = SessionManager::new();
@@ -892,15 +893,21 @@ async fn agent(args: ConfigArg) -> Result {
                 proxy: config,
             })
             .await?;
-        if settings.device_session_auth == LocalAuth::SessionCredentials {
-            tracing::info!(
-                "device session {id} requires session credentials; run `gateinto session credentials {id}`"
-            );
+        if let Some(hint) = device_session_hint(id, settings.device_session_auth) {
+            tracing::info!("{hint}");
         }
     }
     tracing::info!(%endpoint, "agent ready");
     agent.serve(server, shutdown).await;
     Ok(())
+}
+
+fn device_session_hint(id: SessionId, local_auth: LocalAuth) -> Option<String> {
+    local_auth.session_credentials.then(|| {
+        format!(
+            "device session {id} accepts {local_auth}; run `gateinto session credentials {id}` for the credentials"
+        )
+    })
 }
 
 async fn agent_detach(config: Option<&Path>) -> Result {
@@ -1509,6 +1516,29 @@ async fn reset(args: ResetArgs) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_device_session_hint_names_the_accepted_methods() {
+        let id: SessionId = "3".parse().unwrap();
+        assert_eq!(
+            device_session_hint(id, LocalAuth::SESSION_CREDENTIALS).as_deref(),
+            Some(
+                "device session 3 accepts session_credentials; run `gateinto session credentials 3` for the credentials"
+            )
+        );
+        let both = LocalAuth {
+            os_user: true,
+            session_credentials: true,
+        };
+        assert_eq!(
+            device_session_hint(id, both).as_deref(),
+            Some(
+                "device session 3 accepts os_user, session_credentials; run `gateinto session credentials 3` for the credentials"
+            )
+        );
+        assert_eq!(device_session_hint(id, LocalAuth::OS_USER), None);
+        assert_eq!(device_session_hint(id, LocalAuth::NONE), None);
+    }
 
     fn key_init_temp_path() -> std::path::PathBuf {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
