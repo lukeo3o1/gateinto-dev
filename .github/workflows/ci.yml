@@ -85,6 +85,8 @@ jobs:
       - run: cargo test --workspace --target $env:TARGET --all-targets --all-features --locked
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto.exe"
+      - name: Check that gateinto-gui.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto-gui.exe"
       - uses: actions/upload-artifact@v7
         with:
           name: windows-i686-debug
