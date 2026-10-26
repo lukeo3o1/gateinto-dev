@@ -40,7 +40,7 @@ use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
-use crate::menu::{self, Choice, Entry, Popup};
+use crate::menu::{self, Choice, Entry, Popup, Wheel};
 use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
@@ -106,6 +106,7 @@ struct App {
     view: View,
     targets: Vec<(Rect, Zone)>,
     pane: Option<Pane>,
+    popup: Option<Pane>,
     icons: Icons,
     update: Option<Update>,
     launches: Launches,
@@ -134,6 +135,7 @@ impl App {
             view: View::default(),
             targets: Vec::new(),
             pane: None,
+            popup: None,
             update: None,
             launches: Launches::default(),
             link: Link::start(hwnd),
@@ -196,8 +198,13 @@ impl App {
             let page = self.view.nav.selected();
             self.view.scroll.set(page, pane.offset);
         }
+        self.popup = board.popup;
+        if let Some(pane) = board.popup {
+            self.view.popup_scroll = pane.offset;
+        }
         if board.anchor.is_none() {
             self.view.popup = None;
+            self.view.popup_scroll = 0;
         }
         board.ops
     }
@@ -209,6 +216,7 @@ impl App {
 
     fn open(&mut self, popup: Popup) {
         self.view.popup = Some(popup);
+        self.view.popup_scroll = 0;
         self.retarget();
         self.invalidate();
     }
@@ -224,6 +232,7 @@ impl App {
         if self.view.popup.take().is_none() {
             return false;
         }
+        self.view.popup_scroll = 0;
         self.retarget();
         self.invalidate();
         true
@@ -561,16 +570,29 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     let delta = i32::from((wp >> 16) as u16 as i16);
     let lines = sys::wheel_lines();
     let moved = with_app(hwnd, |app| {
-        let Some(pane) = app.pane else {
-            return false;
-        };
-        if !app.layout.content.contains(p.x, p.y) {
-            return false;
-        }
-        let offset = pane.scrolled(delta, lines, app.s.px(20.0));
-        let page = app.view.nav.selected();
-        if !app.view.scroll.set(page, offset) {
-            return false;
+        let open = app.view.popup.is_some();
+        let inside = app.layout.content.contains(p.x, p.y);
+        let line = app.s.px(20.0);
+        match menu::wheel(open, app.zone(p.x, p.y), inside) {
+            Some(Wheel::Menu) => {
+                let Some(pane) = app.popup else {
+                    return false;
+                };
+                let offset = pane.scrolled(delta, lines, line);
+                if std::mem::replace(&mut app.view.popup_scroll, offset) == offset {
+                    return false;
+                }
+            }
+            Some(Wheel::Page) => {
+                let Some(pane) = app.pane else {
+                    return false;
+                };
+                let page = app.view.nav.selected();
+                if !app.view.scroll.set(page, pane.scrolled(delta, lines, line)) {
+                    return false;
+                }
+            }
+            None => return false,
         }
         app.retarget();
         app.invalidate();

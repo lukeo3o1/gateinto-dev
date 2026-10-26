@@ -104,12 +104,27 @@ pub fn dismisses(zone: Zone) -> bool {
 pub fn place(anchor: Rect, (w, h): (i32, i32), bounds: Rect, gap: i32) -> Rect {
     let x = (anchor.right() - w).min(bounds.right() - w).max(bounds.x);
     let below = anchor.bottom() + gap;
-    let y = if below + h > bounds.bottom() && anchor.y - gap - h >= bounds.y {
-        anchor.y - gap - h
+    let (under, over) = (bounds.bottom() - below, anchor.y - gap - bounds.y);
+    if h > under && (h <= over || over > under) {
+        let h = h.min(over);
+        Rect::new(x, anchor.y - gap - h, w, h)
     } else {
-        below
-    };
-    Rect::new(x, y, w, h)
+        Rect::new(x, below, w, h.min(under))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wheel {
+    Menu,
+    Page,
+}
+
+pub fn wheel(open: bool, zone: Zone, in_content: bool) -> Option<Wheel> {
+    if open {
+        (!dismisses(zone)).then_some(Wheel::Menu)
+    } else {
+        in_content.then_some(Wheel::Page)
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +301,30 @@ mod tests {
             place(anchor, (200, 110), BOUNDS, 6),
             Rect::new(796, 484, 200, 110)
         );
+    }
+
+    #[test]
+    fn a_tall_menu_is_clamped_to_the_roomier_side() {
+        let anchor = Rect::new(711, 110, 143, 32);
+        assert_eq!(
+            place(anchor, (200, 800), BOUNDS, 6),
+            Rect::new(654, 148, 200, 532)
+        );
+        let anchor = Rect::new(964, 600, 32, 32);
+        assert_eq!(
+            place(anchor, (200, 800), BOUNDS, 6),
+            Rect::new(796, 0, 200, 594)
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_an_open_menu_and_never_the_page_under_it() {
+        assert_eq!(wheel(true, Zone::Entry(2), true), Some(Wheel::Menu));
+        assert_eq!(wheel(true, Zone::Menu, true), Some(Wheel::Menu));
+        assert_eq!(wheel(true, Zone::Revoke(1), true), None);
+        assert_eq!(wheel(true, Zone::Client, false), None);
+        assert_eq!(wheel(false, Zone::Revoke(1), true), Some(Wheel::Page));
+        assert_eq!(wheel(false, Zone::Caption, false), None);
     }
 
     #[test]

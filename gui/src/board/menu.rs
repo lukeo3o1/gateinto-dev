@@ -6,6 +6,7 @@ use crate::menu::{Entry, place};
 use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
+use crate::scroll::{self, Pane};
 use crate::theme::Theme;
 
 pub fn overlay(
@@ -22,18 +23,38 @@ pub fn overlay(
     };
     let mut p = Painter::new(l, s, t, v, m);
     let (pad, line) = (s.px(4.0), s.px(34.0));
-    let size = (s.px(200.0), 2 * pad + entries.len() as i32 * line);
-    let panel = place(anchor, size, l.content, s.px(6.0));
+    let content = entries.len() as i32 * line;
+    let panel = place(
+        anchor,
+        (s.px(200.0), 2 * pad + content),
+        l.content,
+        s.px(6.0),
+    );
     p.framed(panel, 8.0, t.card);
-    for (i, entry) in entries.iter().enumerate() {
-        let item = Rect::new(
-            panel.x + pad,
-            panel.y + pad + i as i32 * line,
-            panel.w - 2 * pad,
-            line,
-        );
-        p.item(item, i, entry);
+    let view = Rect::new(panel.x, panel.y + pad, panel.w, panel.h - 2 * pad);
+    let (mut offset, mut width) = (0, panel.w - 2 * pad);
+    let pane = (content > view.h).then(|| Pane::new(view, content, v.popup_scroll));
+    if let Some(pane) = pane {
+        offset = pane.offset;
+        width -= s.px(8.0);
+        p.push(Op::Clip(view));
+        p.clip = view;
     }
+    for (i, entry) in entries.iter().enumerate() {
+        let item = Rect::new(view.x + pad, view.y + i as i32 * line - offset, width, line);
+        if item.bottom() > view.y && item.y < view.bottom() {
+            p.item(item, i, entry);
+        }
+    }
+    if let Some(pane) = pane {
+        p.push(Op::Unclip);
+        p.clip = l.content;
+        let track = Rect::new(view.x + pad + width + s.px(2.0), view.y, s.px(4.0), view.h);
+        if let Some(r) = scroll::thumb(track, pane.content, pane.offset, s.px(24.0)) {
+            p.push(Op::Round(r, s.pxf(2.0), t.eyes_idle));
+        }
+    }
+    board.popup = pane;
     p.target(panel, Zone::Menu);
     p.push(Op::Unclip);
     board.ops.append(&mut p.board.ops);
@@ -75,6 +96,7 @@ mod tests {
     use crate::layout::Rect;
     use crate::menu::{Choice, NO_GATEWAYS};
     use crate::scene::{Op, stroke};
+    use crate::scroll::Pane;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
@@ -146,6 +168,52 @@ mod tests {
                 (PICK, Zone::Picker),
             ]
         );
+        assert_eq!(b.popup, None);
+    }
+
+    fn many(n: usize) -> Vec<Entry> {
+        (0..n)
+            .map(|i| entry("office", Some(Choice::Launch(i))))
+            .collect()
+    }
+
+    const VIEW: Rect = Rect::new(654, 152, 200, 500);
+
+    fn row(i: i32, offset: i32) -> Rect {
+        Rect::new(658, 152 + 34 * i - offset, 184, 34)
+    }
+
+    #[test]
+    fn a_long_menu_is_clamped_to_the_content_and_scrolls() {
+        let b = draw(&View::default(), &many(20));
+        let panel = Rect::new(654, 148, 200, 508);
+        assert_eq!(b.popup, Some(Pane::new(VIEW, 680, 0)));
+        assert_eq!(b.ops[1], Op::Round(panel, 8.0, T.border));
+        assert_eq!(b.ops[3], Op::Clip(VIEW));
+        let thumb = Op::Round(Rect::new(844, 152, 4, 367), 2.0, T.eyes_idle);
+        assert_eq!(b.ops[b.ops.len() - 3..], [Op::Unclip, thumb, Op::Unclip]);
+        let entries: Vec<_> = b.targets.iter().take(16).copied().collect();
+        assert_eq!(entries[0], (row(0, 0), Zone::Entry(0)));
+        assert_eq!(entries[14], (Rect::new(658, 628, 184, 24), Zone::Entry(14)));
+        assert_eq!(entries[15], (panel, Zone::Menu));
+    }
+
+    #[test]
+    fn a_scrolled_menu_shifts_its_items_and_clamps_the_offset() {
+        let v = View {
+            popup_scroll: 102,
+            ..View::default()
+        };
+        let b = draw(&v, &many(20));
+        assert_eq!(b.popup.map(|p| p.offset), Some(102));
+        assert_eq!(b.targets[0], (row(3, 102), Zone::Entry(3)));
+        let v = View {
+            popup_scroll: 10_000,
+            ..View::default()
+        };
+        let b = draw(&v, &many(20));
+        assert_eq!(b.popup.map(|p| p.offset), Some(180));
+        assert_eq!(b.targets[14], (row(19, 180), Zone::Entry(19)));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub struct Board {
     pub targets: Vec<(Rect, Zone)>,
     pub pane: Option<Pane>,
     pub anchor: Option<Rect>,
+    pub popup: Option<Pane>,
 }
 
 const STOP_LABEL: &str = "Stop agent";

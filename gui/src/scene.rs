@@ -29,6 +29,7 @@ pub struct View {
     pub maximized: bool,
     pub scroll: Offsets,
     pub popup: Option<Popup>,
+    pub popup_scroll: i32,
 }
 
 const RAIL_ICON: f32 = 20.0;
