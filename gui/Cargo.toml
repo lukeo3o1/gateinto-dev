@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 gateinto = { path = ".." }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }

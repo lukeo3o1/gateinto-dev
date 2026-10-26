@@ -16,6 +16,7 @@ mod scene;
 mod theme;
 #[cfg(windows)]
 mod win;
+mod worker;
 
 fn main() {
     #[cfg(windows)]

@@ -353,6 +353,7 @@ name = "gateinto-gui"
 version = "0.1.0"
 dependencies = [
  "gateinto",
+ "tokio",
  "windows",
  "windows-numerics",
  "windows-sys 0.61.2",
