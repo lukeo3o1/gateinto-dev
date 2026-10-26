@@ -9,7 +9,9 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
-use windows_sys::Win32::UI::WindowsAndMessaging::{AdjustWindowRectEx, SetProcessDPIAware};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    AdjustWindowRectEx, GetSystemMetrics, SYSTEM_METRICS_INDEX, SetProcessDPIAware,
+};
 
 use crate::color;
 
@@ -45,6 +47,7 @@ type SetContext = unsafe extern "system" fn(isize) -> i32;
 type DpiForWindow = unsafe extern "system" fn(HWND) -> u32;
 type AdjustForDpi = unsafe extern "system" fn(*mut RECT, u32, i32, u32, u32) -> i32;
 type SetAttribute = unsafe extern "system" fn(HWND, u32, *const c_void, u32) -> i32;
+type MetricsForDpi = unsafe extern "system" fn(SYSTEM_METRICS_INDEX, u32) -> i32;
 
 pub fn enable_dpi_awareness() {
     let context = resolve!(
@@ -76,6 +79,18 @@ pub fn window_dpi(hwnd: HWND) -> u32 {
             dpi => dpi,
         },
         None => screen_dpi(hwnd),
+    }
+}
+
+pub fn metric_for_dpi(index: SYSTEM_METRICS_INDEX, dpi: u32) -> i32 {
+    match resolve!(
+        "user32.dll",
+        c"GetSystemMetricsForDpi",
+        false,
+        MetricsForDpi
+    ) {
+        Some(f) => unsafe { f(index, dpi) },
+        None => unsafe { GetSystemMetrics(index) },
     }
 }
 

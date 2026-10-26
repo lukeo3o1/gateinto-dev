@@ -6,7 +6,7 @@ mod text;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, PAINTSTRUCT,
@@ -18,15 +18,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CallWindowProcW, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetDlgCtrlID, GetMessageW,
-    GetWindowLongPtrW, HMENU, IDC_ARROW, IDC_HAND, IDI_APPLICATION, IDOK, IsDialogMessageW,
-    LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MINMAXINFO, MSG, MessageBoxW,
-    PostQuitMessage, RegisterClassExW, SPI_GETKEYBOARDCUES, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    DestroyIcon, DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetDlgCtrlID,
+    GetMessageW, GetWindowLongPtrW, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, IDOK,
+    IMAGE_ICON, IsDialogMessageW, LoadCursorW, LoadImageW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+    MINMAXINFO, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON,
+    SPI_GETKEYBOARDCUES, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW,
     SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
     TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
     WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_SIZE, WM_SYSKEYDOWN,
+    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::cue::FocusCue;
@@ -52,11 +53,47 @@ struct App {
     buttons: Vec<(Control, HWND)>,
     last_focus: HWND,
     cue: FocusCue,
+    icons: WindowIcons,
+}
+
+const APP_ICON: usize = 1;
+
+fn load_icon(instance: HINSTANCE, metric: SYSTEM_METRICS_INDEX, dpi: u32) -> HICON {
+    let size = sys::metric_for_dpi(metric, dpi);
+    unsafe { LoadImageW(instance, APP_ICON as *const u16, IMAGE_ICON, size, size, 0) }
+}
+
+struct WindowIcons([HICON; 2]);
+
+impl WindowIcons {
+    fn apply(hwnd: HWND, dpi: u32) -> Self {
+        let instance = unsafe { GetModuleHandleW(null()) };
+        Self(
+            [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)].map(|(kind, metric)| {
+                let icon = load_icon(instance, metric, dpi);
+                if !icon.is_null() {
+                    unsafe { SendMessageW(hwnd, WM_SETICON, kind as WPARAM, icon as LPARAM) };
+                }
+                icon
+            }),
+        )
+    }
+}
+
+impl Drop for WindowIcons {
+    fn drop(&mut self) {
+        for icon in self.0 {
+            if !icon.is_null() {
+                unsafe { DestroyIcon(icon) };
+            }
+        }
+    }
 }
 
 impl App {
     fn new(hwnd: HWND, gfx: Graphics) -> Option<Self> {
-        let s = Scale::new(sys::window_dpi(hwnd));
+        let dpi = sys::window_dpi(hwnd);
+        let s = Scale::new(dpi);
         let fonts = Fonts::new(gfx.dwrite(), s).ok()?;
         Some(Self {
             hwnd,
@@ -67,6 +104,7 @@ impl App {
             buttons: Vec::new(),
             last_focus: null_mut(),
             cue: FocusCue::new(keyboard_cues_always()),
+            icons: WindowIcons::apply(hwnd, dpi),
         })
     }
 
@@ -281,7 +319,9 @@ fn on_command(hwnd: HWND, wp: WPARAM) {
 
 fn on_dpi_changed(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     if let Some(app) = app(hwnd) {
-        let s = Scale::new((wp & 0xffff) as u32);
+        let dpi = (wp & 0xffff) as u32;
+        app.icons = WindowIcons::apply(hwnd, dpi);
+        let s = Scale::new(dpi);
         if let Ok(fonts) = Fonts::new(app.gfx.dwrite(), s) {
             app.s = s;
             app.fonts = fonts;
@@ -447,13 +487,15 @@ pub fn run() {
     };
     let mut gfx = Some(gfx);
     let instance = unsafe { GetModuleHandleW(null()) };
+    let system_dpi = sys::window_dpi(null_mut());
     let class = wide("GateintoSessions");
     let title = wide(model::APP_NAME);
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(window_proc),
         hInstance: instance,
-        hIcon: unsafe { LoadIconW(null_mut(), IDI_APPLICATION) },
+        hIcon: load_icon(instance, SM_CXICON, system_dpi),
+        hIconSm: load_icon(instance, SM_CXSMICON, system_dpi),
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
         lpszClassName: class.as_ptr(),
         ..Default::default()
