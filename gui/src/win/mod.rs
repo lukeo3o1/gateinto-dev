@@ -36,7 +36,7 @@ use gateinto::clock::unix_now;
 
 use crate::board::{self, Board, board, tips};
 use crate::frame::Frame;
-use crate::gateways;
+use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
@@ -104,6 +104,7 @@ struct App {
     targets: Vec<(Rect, Zone)>,
     icons: Icons,
     update: Option<Update>,
+    launches: Launches,
     link: Link,
     tips: Tips,
 }
@@ -129,6 +130,7 @@ impl App {
             view: View::default(),
             targets: Vec::new(),
             update: None,
+            launches: Launches::default(),
             link: Link::start(hwnd),
             tips: Tips::new(hwnd),
         })
@@ -148,7 +150,8 @@ impl App {
         let failure = update.failure.as_deref();
         match v.nav.selected() {
             NavPage::Gateways => {
-                let page = gateways::page(&update.gateways, &update.state, failure);
+                let busy = self.launches.busy();
+                let page = gateways::page(&update.gateways, &update.state, failure, busy);
                 board::gateways::board(l, s, t, v, &page, m)
             }
             _ => board(
@@ -279,8 +282,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         Some(Action::StartBrowser(row)) => {
             with_app(hwnd, |app| {
                 let names = app.update.as_ref().map(|u| gateways::names(&u.gateways));
-                if let Some(name) = names.and_then(|names| names.into_iter().nth(row)) {
+                if let Some(name) = app.launches.start(&names.unwrap_or_default(), row) {
                     app.link.send(Command::Launch(name));
+                    app.retarget();
+                    app.invalidate();
                 }
             });
             return;
@@ -326,6 +331,7 @@ fn on_agent(hwnd: HWND) {
         if before != Some(gateways::names(&update.gateways)) {
             app.view.pointer.gateways_changed();
         }
+        app.launches.settle(update.launched);
         app.update = Some(update);
         app.retarget();
         app.invalidate();

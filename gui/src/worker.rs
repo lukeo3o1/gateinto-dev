@@ -39,6 +39,7 @@ pub struct Update {
     pub state: AgentState,
     pub gateways: Result<Known, String>,
     pub failure: Option<String>,
+    pub launched: u64,
 }
 
 #[derive(Debug)]
@@ -109,17 +110,21 @@ pub async fn serve<F, R>(
     R: Future<Output = Result<Response, RequestError>>,
 {
     let mut failure = None;
+    let mut launched = 0;
     loop {
         let state = AgentState::from_list(send(Request::List).await);
         deliver(Update {
             state,
             gateways: load(),
             failure: failure.take(),
+            launched,
         });
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { return };
+                let launch = matches!(command, Command::Launch(_));
                 failure = run(command, &send).await;
+                launched += u64::from(launch);
             }
             () = tokio::time::sleep(POLL) => {}
         }
@@ -154,6 +159,14 @@ mod tests {
             state: AgentState::Running(Vec::new()),
             gateways: Ok(Known::default()),
             failure: failure.map(str::to_owned),
+            launched: 0,
+        }
+    }
+
+    fn launched(update: Update) -> Update {
+        Update {
+            launched: 1,
+            ..update
         }
     }
 
@@ -266,7 +279,7 @@ mod tests {
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), polled(None)]);
+        assert_eq!(updates, [polled(None), launched(polled(None))]);
         assert_eq!(
             *log.borrow(),
             [Request::List, launch("office"), Request::List]
@@ -288,7 +301,10 @@ mod tests {
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), polled(Some(CONFIRMATION))]);
+        assert_eq!(
+            updates,
+            [polled(None), launched(polled(Some(CONFIRMATION)))]
+        );
         assert_eq!(
             *log.borrow(),
             [

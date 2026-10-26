@@ -50,6 +50,7 @@ impl Link {
                             state: AgentState::Unreachable(error.to_string()),
                             gateways: known(),
                             failure: None,
+                            launched: 0,
                         });
                         return;
                     }
