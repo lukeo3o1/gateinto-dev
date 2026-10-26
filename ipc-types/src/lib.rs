@@ -8,7 +8,7 @@ macro_rules! named {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
         pub enum $name {
             $(#[serde(rename = $text)] $variant,)+
-            #[serde(other)]
+            #[serde(other, rename = "unknown")]
             Unknown,
         }
 
@@ -173,6 +173,21 @@ mod tests {
             }]
         );
         assert_eq!(BrowserKind::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn an_unknown_value_is_written_as_unknown() {
+        let line = SessionInfo {
+            kind: SessionKind::Unknown,
+            route: SessionRoute::Unknown,
+            auth: SessionAuth::Unknown,
+            browser: Some(BrowserKind::Unknown),
+            ..info(None)
+        }
+        .to_line();
+        for field in ["kind", "route", "auth", "browser"] {
+            assert!(line.contains(&format!(r#""{field}":"unknown""#)), "{line}");
+        }
     }
 
     #[test]
