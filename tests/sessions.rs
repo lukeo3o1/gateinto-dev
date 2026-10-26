@@ -4,9 +4,10 @@ mod fixture;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use fixture::*;
+use gateinto::clock::unix_now;
 use gateinto::config::GatewayName;
 use gateinto::identity::certificates::SelfSignedCertificates;
 use gateinto::identity::client_cert::ClientCertificate;
@@ -361,13 +362,6 @@ async fn a_session_refuses_a_non_loopback_listen_address() {
             .contains("--unsafe-allow-non-loopback-listen"),
         "{error}"
     );
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
 }
 
 #[tokio::test(flavor = "multi_thread")]

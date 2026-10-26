@@ -12,6 +12,7 @@ use std::time::Duration;
 use fixture::*;
 use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
 use gateinto::browser::ProfileDir;
+use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::{
     self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server, SessionAuth,
@@ -395,13 +396,6 @@ async fn a_launch_opens_the_portal_in_a_browser_with_its_own_profile_and_session
             .any(|session| session.id == id)
     );
     agent.stop().await;
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
 }
 
 impl TestAgent {

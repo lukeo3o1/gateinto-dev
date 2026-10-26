@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod browser;
 pub mod check;
+pub mod clock;
 pub mod config;
 mod dns;
 pub mod http;

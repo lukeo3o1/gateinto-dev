@@ -11,6 +11,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::browser::{self, BrowserProcess, ProfileDir};
+use crate::clock::unix_now;
 use crate::config::GatewayName;
 use crate::ipc::{self, BrowserKind, ConfirmToken, Connection, Request, Response, Server};
 use crate::job::{Job, SpawnError};
@@ -589,12 +590,6 @@ fn warned(mut lines: Vec<String>, known: &Known) -> Vec<String> {
         lines.push(line);
     }
     lines
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 async fn watch(

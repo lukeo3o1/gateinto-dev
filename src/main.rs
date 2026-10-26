@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
@@ -1166,19 +1166,13 @@ async fn session_list(json: bool) -> Result {
 }
 
 fn print_session_table(sessions: &[SessionInfo]) {
-    for line in gateinto::session_table::session_table(sessions, unix_now()) {
+    for line in gateinto::session_table::session_table(sessions, gateinto::clock::unix_now()) {
         println!("{line}");
     }
 }
 
 fn listed_sessions(lines: &[String]) -> Result<Vec<SessionInfo>, String> {
     SessionInfo::parse_list(lines).map_err(|error| error.to_string())
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 async fn agent_request(request: Request) -> Result {

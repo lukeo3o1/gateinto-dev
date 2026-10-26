@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use rustls::pki_types::UnixTime;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, info, info_span, warn};
 
+use crate::clock::unix_seconds;
 use crate::config::GatewayName;
 use crate::identity::certificates::IssueError;
 use crate::identity::client_cert::ClientCertificate;
@@ -133,10 +134,7 @@ impl Session {
                 proxy::Route::Mixed => SessionRoute::Mixed,
             },
             auth: auth_kind(self.local_auth),
-            started: self
-                .started
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_secs()),
+            started: unix_seconds(self.started),
             tunnels: self.open_tunnels.count() as u64,
             browser,
         }
