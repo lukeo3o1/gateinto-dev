@@ -264,13 +264,14 @@ fn on_paint(hwnd: HWND) {
 fn on_nc_calc_size(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     let app = custom(hwnd).filter(|_| wp != 0)?;
     let frame_y = app.frame_y();
-    let params = unsafe { &mut *(lp as *mut NCCALCSIZE_PARAMS) };
-    let top = params.rgrc[0].top;
+    let params = lp as *mut NCCALCSIZE_PARAMS;
+    let top = unsafe { (*params).rgrc[0].top };
     let result = unsafe { DefWindowProcW(hwnd, WM_NCCALCSIZE, wp, lp) };
     if result != 0 {
         return Some(result);
     }
     let maximized = unsafe { IsZoomed(hwnd) } != 0;
+    let params = unsafe { &mut *params };
     params.rgrc[0].top = Frame::client_top(top, maximized, frame_y);
     Some(0)
 }
