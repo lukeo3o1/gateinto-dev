@@ -29,18 +29,6 @@ pub fn choose_family<'a, S: AsRef<str>>(installed: &[S], preferred: &[&'a str]) 
         .unwrap_or_default()
 }
 
-pub fn semibold_family<S: AsRef<str>>(installed: &[S], regular: &str) -> String {
-    let semibold = format!("{regular} Semibold");
-    if installed
-        .iter()
-        .any(|have| have.as_ref().eq_ignore_ascii_case(&semibold))
-    {
-        semibold
-    } else {
-        regular.to_owned()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spec {
     pub size: u16,
@@ -94,26 +82,6 @@ mod tests {
     fn every_font_is_listed_once() {
         let seen: std::collections::HashSet<Font> = ALL.into_iter().collect();
         assert_eq!(seen.len(), ALL.len());
-    }
-
-    #[test]
-    fn semibold_uses_the_dedicated_gdi_family_when_installed() {
-        let installed = [
-            "Segoe UI",
-            "Segoe UI Semibold",
-            "Segoe UI Variable Text Semibold",
-        ];
-        assert_eq!(semibold_family(&installed, "Segoe UI"), "Segoe UI Semibold");
-        assert_eq!(
-            semibold_family(&installed, "Segoe UI Variable Text"),
-            "Segoe UI Variable Text Semibold"
-        );
-    }
-
-    #[test]
-    fn semibold_falls_back_to_the_regular_family() {
-        let installed = ["Segoe UI"];
-        assert_eq!(semibold_family(&installed, "Segoe UI"), "Segoe UI");
     }
 
     #[test]

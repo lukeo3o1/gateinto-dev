@@ -1,8 +1,7 @@
-use windows_sys::Win32::Graphics::Gdi::HDC;
-
-use super::gdi::{self, Align, Fonts};
-use super::gdip::{Graphics, Path, RectF};
+use super::d2d::Canvas;
+use super::text::{Align, Fonts};
 use crate::color;
+use crate::geom::RectF;
 use crate::icons::{self, Icon};
 use crate::layout::{Font, Layout, Rect};
 use crate::model::{self, Session, SessionKind};
@@ -31,10 +30,10 @@ impl Ctx<'_> {
     fn hairline(&self) -> f32 {
         self.s.hairline() as f32
     }
-}
 
-fn rect_path(r: Rect) -> Path {
-    Path::round_rect(r.into(), 0.0)
+    fn icon_stroke(&self) -> f32 {
+        self.s.stroke(icons::STROKE)
+    }
 }
 
 const LEFT: Align = Align {
@@ -50,64 +49,25 @@ const CENTER: Align = Align {
     ellipsis: false,
 };
 
-pub fn scene(dc: HDC, w: i32, h: i32, ctx: &Ctx) {
+pub fn scene(g: &Canvas, w: i32, h: i32, ctx: &Ctx) {
     let l = ctx.layout;
-    let bw = ctx.hairline();
-    if let Some(g) = Graphics::new(dc) {
-        g.fill(&rect_path(Rect::new(0, 0, w, h)), color::WINDOW);
-        let panel = RectF::from(l.panel);
-        let radius = ctx.dip(8.0);
-        g.fill(&Path::top_left_round(panel, radius), color::STROKE);
-        let inner = RectF {
-            x: panel.x + bw,
-            y: panel.y + bw,
-            w: panel.w - bw,
-            h: panel.h - bw,
-        };
-        g.fill(&Path::top_left_round(inner, radius - bw), color::PANEL);
-
-        for (card, session) in l.cards.iter().zip(ctx.sessions) {
-            g.bordered_round(
-                card.frame.into(),
-                ctx.dip(6.0),
-                bw,
-                color::STROKE,
-                color::CARD,
-            );
-            g.fill_round(card.tile.into(), ctx.dip(8.0), color::TILE);
-            let icon = match session.kind {
-                SessionKind::Device => icons::DEVICE,
-                SessionKind::Browser => icons::BROWSER,
-            };
-            g.icon(&icon, card.icon, color::ACCENT);
-            let pill = ctx.dip(10.0);
-            g.fill_round(card.badges[0].into(), pill, color::BADGE_OK_BG);
-            g.fill_round(card.badges[1].into(), pill, color::BADGE_BG);
-        }
-
-        let device = &l.device;
-        g.bordered_round(
-            device.frame.into(),
-            ctx.dip(6.0),
-            bw,
-            color::STROKE,
-            color::CARD,
-        );
-        g.icon(&icons::SHIELD, device.icon, color::SHIELD);
-    }
-
     let f = ctx.fonts;
-    gdi::text(
-        dc,
-        f,
-        Font::Title,
-        model::TITLE,
-        l.title,
-        color::TEXT,
-        CLIPPED,
-    );
-    gdi::text(
-        dc,
+    let bw = ctx.hairline();
+    let stroke = ctx.icon_stroke();
+    g.fill_rect(Rect::new(0, 0, w, h), color::WINDOW);
+    let panel = RectF::from(l.panel);
+    let radius = ctx.dip(8.0);
+    g.fill_top_left_round(panel, radius, color::STROKE);
+    let inner = RectF {
+        x: panel.x + bw,
+        y: panel.y + bw,
+        w: panel.w - bw,
+        h: panel.h - bw,
+    };
+    g.fill_top_left_round(inner, radius - bw, color::PANEL);
+
+    g.text(f, Font::Title, model::TITLE, l.title, color::TEXT, CLIPPED);
+    g.text(
         f,
         Font::Subtitle,
         model::SUBTITLE,
@@ -117,8 +77,18 @@ pub fn scene(dc: HDC, w: i32, h: i32, ctx: &Ctx) {
     );
 
     for (card, session) in l.cards.iter().zip(ctx.sessions) {
-        gdi::text(
-            dc,
+        g.bordered_round(card.frame, ctx.dip(6.0), bw, color::STROKE, color::CARD);
+        g.fill_round(card.tile, ctx.dip(8.0), color::TILE);
+        let icon = match session.kind {
+            SessionKind::Device => icons::DEVICE,
+            SessionKind::Browser => icons::BROWSER,
+        };
+        g.icon(&icon, card.icon, stroke, color::ACCENT);
+        let pill = ctx.dip(10.0);
+        g.fill_round(card.badges[0], pill, color::BADGE_OK_BG);
+        g.fill_round(card.badges[1], pill, color::BADGE_BG);
+
+        g.text(
             f,
             Font::CardTitle,
             session.title,
@@ -126,8 +96,7 @@ pub fn scene(dc: HDC, w: i32, h: i32, ctx: &Ctx) {
             color::TEXT,
             LEFT,
         );
-        gdi::text(
-            dc,
+        g.text(
             f,
             Font::Small,
             &session.tag(),
@@ -137,20 +106,21 @@ pub fn scene(dc: HDC, w: i32, h: i32, ctx: &Ctx) {
         );
         for (&(part, mono), &r) in session.detail().iter().zip(&card.detail) {
             let font = if mono { Font::Mono } else { Font::Small };
-            gdi::text(dc, f, font, part, r, color::TEXT_SECONDARY, LEFT);
+            g.text(f, font, part, r, color::TEXT_SECONDARY, LEFT);
         }
         let badges = [
             (session.auth, color::BADGE_OK_FG),
             (session.route, color::BADGE_FG),
         ];
         for ((label, fg), &r) in badges.into_iter().zip(&card.badges) {
-            gdi::text(dc, f, Font::Small, label, r, fg, CENTER);
+            g.text(f, Font::Small, label, r, fg, CENTER);
         }
     }
 
     let device = &l.device;
-    gdi::text(
-        dc,
+    g.bordered_round(device.frame, ctx.dip(6.0), bw, color::STROKE, color::CARD);
+    g.icon(&icons::SHIELD, device.icon, stroke, color::SHIELD);
+    g.text(
         f,
         Font::DeviceTitle,
         model::DEVICE_KEY,
@@ -158,8 +128,7 @@ pub fn scene(dc: HDC, w: i32, h: i32, ctx: &Ctx) {
         color::TEXT,
         LEFT,
     );
-    gdi::text(
-        dc,
+    g.text(
         f,
         Font::Mono,
         model::FINGERPRINT,
@@ -169,26 +138,18 @@ pub fn scene(dc: HDC, w: i32, h: i32, ctx: &Ctx) {
     );
 }
 
-fn surface(g: &Graphics, local: Rect, radius: f32, look: style::Look, bw: f32) {
-    g.fill(&rect_path(local), look.surface);
+fn surface(g: &Canvas, local: Rect, radius: f32, look: style::Look, bw: f32) {
+    g.fill_rect(local, look.surface);
     match (look.border, look.fill) {
-        (Some(border), Some(fill)) => g.bordered_round(local.into(), radius, bw, border, fill),
-        (None, Some(fill)) => g.fill_round(local.into(), radius, fill),
+        (Some(border), Some(fill)) => g.bordered_round(local, radius, bw, border, fill),
+        (None, Some(fill)) => g.fill_round(local, radius, fill),
         _ => {}
     }
 }
 
-fn focus_ring(g: &Graphics, local: Rect, radius: f32, width: f32) {
-    let ring = RectF::from(local).inset(width / 2.0);
-    g.stroke(
-        &Path::round_rect(ring, radius - width / 2.0),
-        color::FOCUS,
-        width,
-    );
-}
-
-pub fn control(dc: HDC, bounds: Rect, control: Control, state: State, ctx: &Ctx) {
+pub fn control(g: &Canvas, bounds: Rect, control: Control, state: State, ctx: &Ctx) {
     let l = ctx.layout;
+    let f = ctx.fonts;
     let (dx, dy) = (-bounds.x, -bounds.y);
     let local = Rect::new(0, 0, bounds.w, bounds.h);
     let look = style::look(control, state);
@@ -197,44 +158,43 @@ pub fn control(dc: HDC, bounds: Rect, control: Control, state: State, ctx: &Ctx)
         Control::Details => ctx.dip(2.0),
         _ => ctx.dip(4.0),
     };
+    let stroke = ctx.icon_stroke();
 
-    if let Some(g) = Graphics::new(dc) {
-        surface(&g, local, radius, look, ctx.hairline());
-        match control {
-            Control::Nav(i) => {
-                let item = &l.nav[i];
-                if i == model::SELECTED_NAV {
-                    let bar = item.indicator.translate(dx, dy);
-                    g.fill_round(bar.into(), ctx.dip(2.0), color::ACCENT);
-                }
-                g.icon(&NAV_ICONS[i], item.icon.translate(dx, dy), color::TEXT);
+    surface(g, local, radius, look, ctx.hairline());
+    match control {
+        Control::Nav(i) => {
+            let item = &l.nav[i];
+            if i == model::SELECTED_NAV {
+                let bar = item.indicator.translate(dx, dy);
+                g.fill_round(bar, ctx.dip(2.0), color::ACCENT);
             }
-            Control::NewSession => g.icon(&icons::PLUS, l.plus.translate(dx, dy), look.text),
-            _ => {}
+            let icon = item.icon.translate(dx, dy);
+            g.icon(&NAV_ICONS[i], icon, stroke, color::TEXT);
         }
-        if state.focused {
-            focus_ring(&g, local, radius, ctx.dip(2.0).round().max(1.0));
-        }
+        Control::NewSession => g.icon(&icons::PLUS, l.plus.translate(dx, dy), stroke, look.text),
+        _ => {}
+    }
+    if state.focused {
+        g.stroke_round(local, radius, ctx.s.stroke(2.0), color::FOCUS);
     }
 
-    let f = ctx.fonts;
     let text = control.label();
     match control {
         Control::Nav(i) => {
             let r = l.nav[i].label.translate(dx, dy);
-            gdi::text(dc, f, Font::Nav, text, r, look.text, CLIPPED);
+            g.text(f, Font::Nav, text, r, look.text, CLIPPED);
         }
-        Control::OpenLog => gdi::text(dc, f, Font::Button, text, local, look.text, CENTER),
+        Control::OpenLog => g.text(f, Font::Button, text, local, look.text, CENTER),
         Control::NewSession => {
             let r = l.new_session_label.translate(dx, dy);
-            gdi::text(dc, f, Font::Button, text, r, look.text, LEFT);
+            g.text(f, Font::Button, text, r, look.text, LEFT);
         }
         Control::Credentials(_) | Control::Revoke(_) => {
-            gdi::text(dc, f, Font::CardButton, text, local, look.text, CENTER);
+            g.text(f, Font::CardButton, text, local, look.text, CENTER);
         }
         Control::Details => {
             let r = l.device.details.translate(dx, dy);
-            gdi::text(dc, f, Font::Link, text, r, look.text, LEFT);
+            g.text(f, Font::Link, text, r, look.text, LEFT);
         }
     }
 }

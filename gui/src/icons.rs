@@ -35,8 +35,6 @@ pub enum Shape {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Icon {
     pub view: f32,
-    pub stroke: f32,
-    pub round_caps: bool,
     pub shapes: &'static [Shape],
 }
 
@@ -65,6 +63,168 @@ impl Transform {
     }
 }
 
+pub const STROKE: f32 = 1.4;
+
+pub type Point = (f32, f32);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Seg {
+    Line(Point),
+    Cubic(Point, Point, Point),
+    Arc { to: Point, r: f32, sweep: f32 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Prim {
+    RoundRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+    },
+    Circle {
+        cx: f32,
+        cy: f32,
+        r: f32,
+    },
+    Figure {
+        start: Point,
+        segs: Vec<Seg>,
+        closed: bool,
+    },
+}
+
+pub fn snap(v: f32, width: f32) -> f32 {
+    if width.round() as i64 % 2 == 1 {
+        (v - 0.5).round() + 0.5
+    } else {
+        v.round()
+    }
+}
+
+struct Grid {
+    t: Transform,
+    width: f32,
+}
+
+impl Grid {
+    fn raw(&self, (x, y): Point) -> Point {
+        self.t.point(x, y)
+    }
+
+    fn snap(&self, p: Point) -> Point {
+        let (x, y) = self.raw(p);
+        (snap(x, self.width), snap(y, self.width))
+    }
+
+    fn shift(&self, p: Point, from: Point, to: Point) -> Point {
+        let (x, y) = self.raw(p);
+        (x + to.0 - from.0, y + to.1 - from.1)
+    }
+}
+
+fn distance(a: Point, b: Point) -> f32 {
+    (a.0 - b.0).hypot(a.1 - b.1)
+}
+
+fn figures(cmds: &[Cmd], g: &Grid, out: &mut Vec<Prim>) {
+    let mut current: Option<(Point, Vec<Seg>, bool)> = None;
+    let (mut raw, mut at) = ((0.0, 0.0), (0.0, 0.0));
+    for cmd in cmds {
+        let (next_raw, seg) = match *cmd {
+            Cmd::Move(x, y) => {
+                out.extend(current.take().map(|(start, segs, closed)| Prim::Figure {
+                    start,
+                    segs,
+                    closed,
+                }));
+                raw = g.raw((x, y));
+                at = g.snap((x, y));
+                current = Some((at, Vec::new(), false));
+                continue;
+            }
+            Cmd::Line(x, y) => (g.raw((x, y)), Seg::Line(g.snap((x, y)))),
+            Cmd::Cubic(x1, y1, x2, y2, x, y) => {
+                let to = g.snap((x, y));
+                let to_raw = g.raw((x, y));
+                let c1 = g.shift((x1, y1), raw, at);
+                let c2 = g.shift((x2, y2), to_raw, to);
+                (to_raw, Seg::Cubic(c1, c2, to))
+            }
+            Cmd::Arc {
+                cx,
+                cy,
+                r,
+                start,
+                sweep,
+            } => {
+                let end = arc_end(cx, cy, r, start, sweep);
+                let (to_raw, to) = (g.raw(end), g.snap(end));
+                let chord = distance(raw, to_raw);
+                let scale = if chord > 0.0 {
+                    distance(at, to) / chord
+                } else {
+                    1.0
+                };
+                let r = g.t.len(r) * scale;
+                (to_raw, Seg::Arc { to, r, sweep })
+            }
+            Cmd::Close => {
+                if let Some(figure) = current.as_mut() {
+                    figure.2 = true;
+                }
+                continue;
+            }
+        };
+        raw = next_raw;
+        at = match seg {
+            Seg::Line(p) | Seg::Cubic(_, _, p) | Seg::Arc { to: p, .. } => p,
+        };
+        if let Some(figure) = current.as_mut() {
+            figure.1.push(seg);
+        }
+    }
+    out.extend(current.map(|(start, segs, closed)| Prim::Figure {
+        start,
+        segs,
+        closed,
+    }));
+}
+
+pub fn trace(icon: &Icon, target: Rect, width: f32) -> Vec<Prim> {
+    let g = Grid {
+        t: Transform::fit(icon.view, target),
+        width,
+    };
+    let mut out = Vec::new();
+    for shape in icon.shapes {
+        match *shape {
+            Shape::RoundRect { x, y, w, h, r } => {
+                let (x0, y0) = g.snap((x, y));
+                let (x1, y1) = g.snap((x + w, y + h));
+                out.push(Prim::RoundRect {
+                    x: x0,
+                    y: y0,
+                    w: x1 - x0,
+                    h: y1 - y0,
+                    r: g.t.len(r),
+                });
+            }
+            Shape::Circle { cx, cy, r } => {
+                let (cx, cy) = g.snap((cx, cy));
+                out.push(Prim::Circle {
+                    cx,
+                    cy,
+                    r: g.t.len(r).round().max(1.0),
+                });
+            }
+            Shape::Path(cmds) => figures(cmds, &g, &mut out),
+        }
+    }
+    out
+}
+
 pub fn arc_end(cx: f32, cy: f32, r: f32, start: f32, sweep: f32) -> (f32, f32) {
     let a = (start + sweep).to_radians();
     (cx + r * a.cos(), cy + r * a.sin())
@@ -76,8 +236,6 @@ const fn line(x1: f32, y1: f32, x2: f32, y2: f32) -> [Cmd; 2] {
 
 pub const SESSIONS: Icon = Icon {
     view: 24.0,
-    stroke: 1.6,
-    round_caps: false,
     shapes: &[
         Shape::RoundRect {
             x: 3.0,
@@ -93,8 +251,6 @@ pub const SESSIONS: Icon = Icon {
 
 pub const GATEWAYS: Icon = Icon {
     view: 24.0,
-    stroke: 1.6,
-    round_caps: false,
     shapes: &[
         Shape::Circle {
             cx: 12.0,
@@ -115,8 +271,6 @@ pub const GATEWAYS: Icon = Icon {
 
 pub const IDENTITY: Icon = Icon {
     view: 24.0,
-    stroke: 1.6,
-    round_caps: false,
     shapes: &[
         Shape::RoundRect {
             x: 5.0,
@@ -142,8 +296,6 @@ pub const IDENTITY: Icon = Icon {
 
 pub const SETTINGS: Icon = Icon {
     view: 24.0,
-    stroke: 1.6,
-    round_caps: false,
     shapes: &[
         Shape::Circle {
             cx: 12.0,
@@ -163,8 +315,6 @@ pub const SETTINGS: Icon = Icon {
 
 pub const DEVICE: Icon = Icon {
     view: 24.0,
-    stroke: 1.7,
-    round_caps: false,
     shapes: &[
         Shape::RoundRect {
             x: 3.0,
@@ -180,8 +330,6 @@ pub const DEVICE: Icon = Icon {
 
 pub const BROWSER: Icon = Icon {
     view: 24.0,
-    stroke: 1.7,
-    round_caps: false,
     shapes: &[
         Shape::Circle {
             cx: 12.0,
@@ -201,8 +349,6 @@ pub const BROWSER: Icon = Icon {
 
 pub const SHIELD: Icon = Icon {
     view: 24.0,
-    stroke: 1.7,
-    round_caps: false,
     shapes: &[
         Shape::Path(&[
             Cmd::Move(12.0, 3.0),
@@ -223,8 +369,6 @@ pub const SHIELD: Icon = Icon {
 
 pub const PLUS: Icon = Icon {
     view: 14.0,
-    stroke: 1.6,
-    round_caps: true,
     shapes: &[
         Shape::Path(&line(7.0, 1.0, 7.0, 13.0)),
         Shape::Path(&line(1.0, 7.0, 13.0, 7.0)),
@@ -249,5 +393,130 @@ mod tests {
         assert!((x - 16.0).abs() < 1e-4 && (y - 7.0).abs() < 1e-4);
         let (x, y) = arc_end(0.0, 0.0, 2.0, 0.0, 90.0);
         assert!(x.abs() < 1e-4 && (y - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn odd_strokes_snap_to_pixel_centres() {
+        assert_eq!(snap(6.0, 1.0), 6.5);
+        assert_eq!(snap(6.75, 1.0), 6.5);
+        assert_eq!(snap(7.2, 1.0), 7.5);
+        assert_eq!(snap(6.4, 3.0), 6.5);
+    }
+
+    #[test]
+    fn even_strokes_snap_to_pixel_edges() {
+        assert_eq!(snap(6.75, 2.0), 7.0);
+        assert_eq!(snap(6.2, 2.0), 6.0);
+    }
+
+    #[test]
+    fn traces_rects_and_lines_on_the_pixel_grid() {
+        let prims = trace(&SESSIONS, Rect::new(20, 19, 18, 18), 1.0);
+        assert_eq!(
+            prims[0],
+            Prim::RoundRect {
+                x: 22.5,
+                y: 22.5,
+                w: 13.0,
+                h: 10.0,
+                r: 1.5
+            }
+        );
+        assert_eq!(
+            prims[1],
+            Prim::Figure {
+                start: (22.5, 25.5),
+                segs: vec![Seg::Line((35.5, 25.5))],
+                closed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn circles_get_whole_pixel_radii_around_a_snapped_centre() {
+        let prims = trace(&GATEWAYS, Rect::new(20, 19, 18, 18), 1.0);
+        assert_eq!(
+            prims[0],
+            Prim::Circle {
+                cx: 29.5,
+                cy: 28.5,
+                r: 7.0
+            }
+        );
+    }
+
+    #[test]
+    fn arcs_end_on_snapped_points_with_the_radius_following_the_chord() {
+        let prims = trace(&IDENTITY, Rect::new(20, 19, 18, 18), 1.0);
+        assert_eq!(
+            prims[1],
+            Prim::Figure {
+                start: (26.5, 26.5),
+                segs: vec![
+                    Seg::Line((26.5, 24.5)),
+                    Seg::Arc {
+                        to: (32.5, 24.5),
+                        r: 3.0,
+                        sweep: 180.0
+                    },
+                    Seg::Line((32.5, 26.5)),
+                ],
+                closed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn cubic_control_points_move_with_their_end_points() {
+        let prims = trace(&GATEWAYS, Rect::new(0, 0, 24, 24), 2.0);
+        assert_eq!(
+            prims[2],
+            Prim::Figure {
+                start: (12.0, 3.0),
+                segs: vec![Seg::Cubic((15.0, 6.5), (15.0, 17.5), (12.0, 21.0))],
+                closed: false,
+            }
+        );
+        let prims = trace(&GATEWAYS, Rect::new(0, 0, 18, 18), 1.0);
+        let Prim::Figure { start, segs, .. } = &prims[2] else {
+            panic!("expected a figure");
+        };
+        assert_eq!(*start, (9.5, 2.5));
+        assert_eq!(
+            segs[0],
+            Seg::Cubic((11.75, 5.125), (11.75, 12.875), (9.5, 15.5))
+        );
+    }
+
+    #[test]
+    fn every_anchor_of_every_icon_sits_on_a_pixel_centre_for_odd_strokes() {
+        let half = |v: f32| (v - v.floor() - 0.5).abs() < 1e-4;
+        for icon in [
+            SESSIONS, GATEWAYS, IDENTITY, SETTINGS, DEVICE, BROWSER, SHIELD, PLUS,
+        ] {
+            for size in [14, 18, 20, 27, 30] {
+                for prim in trace(&icon, Rect::new(3, 7, size, size), 1.0) {
+                    let mut points = Vec::new();
+                    match prim {
+                        Prim::RoundRect { x, y, w, h, .. } => {
+                            points.extend([(x, y), (x + w, y + h)])
+                        }
+                        Prim::Circle { cx, cy, r } => {
+                            assert_eq!(r, r.round());
+                            points.push((cx, cy));
+                        }
+                        Prim::Figure { start, segs, .. } => {
+                            points.push(start);
+                            points.extend(segs.iter().map(|seg| match *seg {
+                                Seg::Line(p) | Seg::Cubic(_, _, p) | Seg::Arc { to: p, .. } => p,
+                            }));
+                        }
+                    }
+                    for (x, y) in points {
+                        assert!(half(x) && half(y), "{x},{y} at {size}px");
+                    }
+                }
+            }
+        }
     }
 }

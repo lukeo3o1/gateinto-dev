@@ -2,10 +2,6 @@
 pub struct Rgb(pub u32);
 
 impl Rgb {
-    pub const fn argb(self) -> u32 {
-        0xff00_0000 | self.0
-    }
-
     pub const fn colorref(self) -> u32 {
         ((self.0 & 0xff) << 16) | (self.0 & 0xff00) | ((self.0 >> 16) & 0xff)
     }
@@ -44,11 +40,6 @@ pub const FOCUS: Rgb = Rgb(0x1a1a1a);
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn argb_is_opaque() {
-        assert_eq!(Rgb(0x005fb8).argb(), 0xff005fb8);
-    }
 
     #[test]
     fn colorref_swaps_red_and_blue() {

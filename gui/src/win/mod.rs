@@ -1,15 +1,15 @@
-mod gdi;
-mod gdip;
+mod d2d;
 mod paint;
 mod sys;
+mod text;
 
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetDC, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromWindow, PAINTSTRUCT, ReleaseDC,
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED, WM_MOUSELEAVE};
@@ -17,16 +17,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BN_CLICKED, BS_OWNERDRAW, CallWindowProcW, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetDlgCtrlID, GetMessageW, GetWindowLongPtrW,
-    HMENU, IDC_ARROW, IDC_HAND, IDI_APPLICATION, IDOK, IsDialogMessageW, LoadCursorW, LoadIconW,
-    MB_ICONINFORMATION, MB_OK, MINMAXINFO, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
-    SPI_GETKEYBOARDCUES, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT,
-    WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
-    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    BN_CLICKED, BS_OWNERDRAW, CREATESTRUCTW, CallWindowProcW, CreateWindowExW, DefWindowProcW,
+    DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC, GetClientRect, GetDlgCtrlID, GetMessageW,
+    GetWindowLongPtrW, HMENU, IDC_ARROW, IDC_HAND, IDI_APPLICATION, IDOK, IsDialogMessageW,
+    LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MINMAXINFO, MSG, MessageBoxW,
+    PostQuitMessage, RegisterClassExW, SPI_GETKEYBOARDCUES, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::cue::FocusCue;
@@ -34,8 +34,9 @@ use crate::layout::{self, Layout, Rect};
 use crate::model::{self, SESSIONS};
 use crate::scale::Scale;
 use crate::style::{Control, State};
-use gdi::{Buffer, Fonts, Measurer};
+use d2d::Graphics;
 use sys::wide;
+use text::Fonts;
 
 const STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 const EX_STYLE: u32 = 0;
@@ -45,7 +46,7 @@ static BUTTON_PROC: AtomicIsize = AtomicIsize::new(0);
 struct App {
     hwnd: HWND,
     s: Scale,
-    families: Vec<String>,
+    gfx: Graphics,
     fonts: Fonts,
     layout: Layout,
     buttons: Vec<(Control, HWND)>,
@@ -54,25 +55,19 @@ struct App {
 }
 
 impl App {
-    fn new(hwnd: HWND) -> Self {
+    fn new(hwnd: HWND, gfx: Graphics) -> Option<Self> {
         let s = Scale::new(sys::window_dpi(hwnd));
-        let families = unsafe {
-            let dc = GetDC(hwnd);
-            let families = gdi::installed_families(dc);
-            ReleaseDC(hwnd, dc);
-            families
-        };
-        let fonts = Fonts::new(&families, s);
-        Self {
+        let fonts = Fonts::new(gfx.dwrite(), s).ok()?;
+        Some(Self {
             hwnd,
             s,
             layout: measure(hwnd, &fonts, s),
-            families,
+            gfx,
             fonts,
             buttons: Vec::new(),
             last_focus: null_mut(),
             cue: FocusCue::new(keyboard_cues_always()),
-        }
+        })
     }
 
     fn relayout(&mut self) {
@@ -99,16 +94,7 @@ impl App {
 fn measure(hwnd: HWND, fonts: &Fonts, s: Scale) -> Layout {
     let (w, h) = client_size(hwnd);
     let (min_w, min_h) = layout::min_client_size(s);
-    let dc = unsafe { GetDC(hwnd) };
-    let layout = layout::compute(
-        w.max(min_w),
-        h.max(min_h),
-        s,
-        &Measurer { dc, fonts },
-        &SESSIONS,
-    );
-    unsafe { ReleaseDC(hwnd, dc) };
-    layout
+    layout::compute(w.max(min_w), h.max(min_h), s, fonts, &SESSIONS)
 }
 
 fn client_size(hwnd: HWND) -> (i32, i32) {
@@ -173,8 +159,8 @@ fn create_buttons(hwnd: HWND, app: &mut App) {
             continue;
         }
         let original =
-            unsafe { SetWindowLongPtrW(button, GWLP_WNDPROC, button_proc as *const () as isize) };
-        BUTTON_PROC.store(original, Ordering::Relaxed);
+            unsafe { SetWindowLongPtrW(button, GWLP_WNDPROC, button_proc as *const () as _) };
+        BUTTON_PROC.store(original as isize, Ordering::Relaxed);
         app.buttons.push((control, button));
     }
     place(&app.placements());
@@ -221,9 +207,12 @@ fn on_paint(hwnd: HWND) {
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
     if let Some(app) = app(hwnd) {
         let (w, h) = client_size(hwnd);
-        if let Some(buffer) = Buffer::new(dc, w, h) {
-            paint::scene(buffer.dc(), w, h, &app.ctx());
-            buffer.present(0, 0);
+        let ctx = app.ctx();
+        let drawn = app.gfx.draw(dc, Rect::new(0, 0, w, h), |g| {
+            paint::scene(g, w, h, &ctx);
+        });
+        if !drawn {
+            unsafe { InvalidateRect(hwnd, null(), 0) };
         }
     }
     unsafe { EndPaint(hwnd, &ps) };
@@ -242,10 +231,16 @@ fn on_draw_item(hwnd: HWND, dis: &DRAWITEMSTRUCT) -> bool {
         focused: dis.itemState & ODS_FOCUS != 0 && app.cue.visible(),
     };
     let rc = dis.rcItem;
-    if let Some(buffer) = Buffer::new(dis.hDC, rc.right - rc.left, rc.bottom - rc.top) {
-        let bounds = Rect::new(bounds.x, bounds.y, rc.right - rc.left, rc.bottom - rc.top);
-        paint::control(buffer.dc(), bounds, control, state, &app.ctx());
-        buffer.present(rc.left, rc.top);
+    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+    let bounds = Rect::new(bounds.x, bounds.y, w, h);
+    let ctx = app.ctx();
+    let drawn = app
+        .gfx
+        .draw(dis.hDC, Rect::new(rc.left, rc.top, w, h), |g| {
+            paint::control(g, bounds, control, state, &ctx);
+        });
+    if !drawn {
+        unsafe { InvalidateRect(dis.hwndItem, null(), 0) };
     }
     true
 }
@@ -286,8 +281,11 @@ fn on_command(hwnd: HWND, wp: WPARAM) {
 
 fn on_dpi_changed(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     if let Some(app) = app(hwnd) {
-        app.s = Scale::new((wp & 0xffff) as u32);
-        app.fonts = Fonts::new(&app.families, app.s);
+        let s = Scale::new((wp & 0xffff) as u32);
+        if let Ok(fonts) = Fonts::new(app.gfx.dwrite(), s) {
+            app.s = s;
+            app.fonts = fonts;
+        }
     }
     let r = unsafe { &*(lp as *const RECT) };
     unsafe {
@@ -348,9 +346,14 @@ fn on_activate(hwnd: HWND, wp: WPARAM) {
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
-            let mut state = Box::new(App::new(hwnd));
+            let create = unsafe { &*(lp as *const CREATESTRUCTW) };
+            let gfx = unsafe { &mut *create.lpCreateParams.cast::<Option<Graphics>>() };
+            let Some(mut state) = gfx.take().and_then(|gfx| App::new(hwnd, gfx)) else {
+                return -1;
+            };
             create_buttons(hwnd, &mut state);
-            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize) };
+            let state = Box::into_raw(Box::new(state));
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as _) };
             sys::apply_window_chrome(hwnd);
             0
         }
@@ -423,11 +426,26 @@ fn center_on_monitor(hwnd: HWND) {
     unsafe { SetWindowPos(hwnd, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
 }
 
+fn fail() {
+    let text = wide("Gateinto could not initialise Direct2D and DirectWrite rendering.");
+    let caption = wide(model::APP_NAME);
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+}
+
 pub fn run() {
     sys::enable_dpi_awareness();
-    let Some(_gdiplus) = gdip::Runtime::start() else {
+    let Ok(gfx) = Graphics::new() else {
+        fail();
         return;
     };
+    let mut gfx = Some(gfx);
     let instance = unsafe { GetModuleHandleW(null()) };
     let class = wide("GateintoSessions");
     let title = wide(model::APP_NAME);
@@ -456,10 +474,11 @@ pub fn run() {
             null_mut(),
             null_mut(),
             instance,
-            null(),
+            (&raw mut gfx).cast(),
         )
     };
     if hwnd.is_null() {
+        fail();
         return;
     }
     center_on_monitor(hwnd);

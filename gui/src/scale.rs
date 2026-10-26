@@ -18,6 +18,10 @@ impl Scale {
         dip * self.dpi as f32 / Self::BASE_DPI as f32
     }
 
+    pub fn stroke(self, dip: f32) -> f32 {
+        self.pxf(dip).round().max(1.0)
+    }
+
     pub fn hairline(self) -> i32 {
         (self.dpi / Self::BASE_DPI).max(1) as i32
     }
@@ -51,5 +55,14 @@ mod tests {
         assert_eq!(Scale::new(144).hairline(), 1);
         assert_eq!(Scale::new(192).hairline(), 2);
         assert_eq!(Scale::new(288).hairline(), 3);
+    }
+
+    #[test]
+    fn stroke_rounds_to_whole_device_pixels_never_below_one() {
+        assert_eq!(Scale::new(96).stroke(1.4), 1.0);
+        assert_eq!(Scale::new(120).stroke(1.4), 2.0);
+        assert_eq!(Scale::new(144).stroke(1.4), 2.0);
+        assert_eq!(Scale::new(192).stroke(1.4), 3.0);
+        assert_eq!(Scale::new(96).stroke(0.2), 1.0);
     }
 }
