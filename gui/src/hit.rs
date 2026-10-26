@@ -13,6 +13,7 @@ pub enum Zone {
     Nav(Page),
     StopAgent,
     Revoke(u64),
+    More(u64),
     StartBrowser(usize),
     Picker,
     Entry(usize),

@@ -450,6 +450,16 @@ pub const PLUS: Icon = Icon {
     ],
 };
 
+pub const MORE: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        circle(5.5, 12.0, 0.6),
+        circle(12.0, 12.0, 0.6),
+        circle(18.5, 12.0, 0.6),
+    ],
+};
+
 pub fn rail_icon(page: Page) -> Icon {
     match page {
         Page::Sessions => SESSIONS,
@@ -464,9 +474,9 @@ pub fn rail_icon(page: Page) -> Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 14] = [
+    const ALL: [Icon; 15] = [
         SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, GLOBE,
-        POWER, STOP, LOCK, PLUS,
+        POWER, STOP, LOCK, PLUS, MORE,
     ];
 
     #[test]
@@ -657,7 +667,7 @@ mod tests {
     #[test]
     fn mirror_symmetric_icons_trace_symmetrically_about_the_snapped_axis() {
         for icon in [
-            GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE, GLOBE, POWER, STOP, LOCK, PLUS,
+            GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE, GLOBE, POWER, STOP, LOCK, PLUS, MORE,
         ] {
             for size in [10, 15, 20, 25, 30, 40] {
                 for width in [1.0, 2.0, 3.0] {
@@ -673,6 +683,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_more_icon_is_three_dots_in_a_row() {
+        let prims = trace(&MORE, Rect::new(0, 0, 24, 24), 1.0);
+        let dot = |cx| Prim::Circle {
+            cx,
+            cy: 12.5,
+            r: 1.0,
+        };
+        assert_eq!(prims, [dot(5.5), dot(12.5), dot(19.5)]);
     }
 
     #[test]

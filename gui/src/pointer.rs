@@ -9,6 +9,7 @@ pub enum Action {
     Close,
     StopAgent,
     Revoke(u64),
+    More(u64),
     StartBrowser(usize),
     OpenPicker,
     Choose(usize),
@@ -35,6 +36,7 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::Close => Some(Action::Close),
         Zone::StopAgent => Some(Action::StopAgent),
         Zone::Revoke(id) => Some(Action::Revoke(id)),
+        Zone::More(id) => Some(Action::More(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
         Zone::Picker => Some(Action::OpenPicker),
         Zone::Entry(i) => Some(Action::Choose(i)),
@@ -79,7 +81,10 @@ impl Pointer {
     }
 
     pub fn sessions_changed(&mut self) -> bool {
-        matches!(self.pressed, Some(Zone::Revoke(_) | Zone::Entry(_))) && self.cancel()
+        matches!(
+            self.pressed,
+            Some(Zone::Revoke(_) | Zone::More(_) | Zone::Entry(_))
+        ) && self.cancel()
     }
 
     pub fn gateways_changed(&mut self) -> bool {
@@ -220,6 +225,26 @@ mod tests {
         assert_eq!(p.look(Zone::Entry(1)), Look::Rest);
         assert!(!p.moved(Zone::Menu));
         assert!(!p.down(Zone::Menu));
+    }
+
+    #[test]
+    fn a_more_button_opens_its_session_menu() {
+        let mut p = Pointer::default();
+        assert!(p.moved(Zone::More(3)));
+        assert_eq!(p.look(Zone::More(3)), Look::Hover);
+        p.down(Zone::More(3));
+        assert_eq!(p.up(Zone::More(3)), Some(Action::More(3)));
+        p.down(Zone::More(3));
+        assert_eq!(p.up(Zone::More(4)), None);
+    }
+
+    #[test]
+    fn a_changed_session_list_drops_a_pressed_more_button() {
+        let mut p = Pointer::default();
+        p.down(Zone::More(3));
+        assert!(!p.gateways_changed());
+        assert!(p.sessions_changed());
+        assert_eq!(p.up(Zone::More(3)), None);
     }
 
     #[test]

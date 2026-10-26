@@ -12,13 +12,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::sys::wide;
-use crate::board::REVOKE_TIP;
 use crate::layout::Rect;
+
+type Tip = (Rect, &'static str);
 
 pub struct Tips {
     window: HWND,
     owner: HWND,
-    shown: Vec<(u64, Rect)>,
+    shown: Vec<Tip>,
 }
 
 impl Tips {
@@ -51,7 +52,7 @@ impl Tips {
         }
     }
 
-    pub fn replace(&mut self, tips: Vec<(u64, Rect)>) -> Option<Change> {
+    pub fn replace(&mut self, tips: Vec<Tip>) -> Option<Change> {
         if self.window.is_null() || tips == self.shown {
             return None;
         }
@@ -67,16 +68,14 @@ impl Tips {
 pub struct Change {
     window: HWND,
     owner: HWND,
-    old: Vec<(u64, Rect)>,
-    new: Vec<(u64, Rect)>,
+    old: Vec<Tip>,
+    new: Vec<Tip>,
 }
 
 impl Change {
     // Sends messages that reach the owner window, so it must run outside `with_app`.
     pub fn apply(self) {
-        let mut buffer = wide(REVOKE_TIP);
-        let text = buffer.as_mut_ptr();
-        let tool = |index: usize, r: Rect| TTTOOLINFOW {
+        let tool = |index: usize, r: Rect, text: *mut u16| TTTOOLINFOW {
             cbSize: offset_of!(TTTOOLINFOW, lpReserved) as u32,
             uFlags: TTF_SUBCLASS,
             hwnd: self.owner,
@@ -90,12 +89,13 @@ impl Change {
             lpszText: text,
             ..Default::default()
         };
-        for (index, &(_, r)) in self.old.iter().enumerate() {
-            let info = tool(index, r);
+        for (index, &(r, _)) in self.old.iter().enumerate() {
+            let info = tool(index, r, null_mut());
             unsafe { SendMessageW(self.window, TTM_DELTOOLW, 0, &raw const info as LPARAM) };
         }
-        for (index, &(_, r)) in self.new.iter().enumerate() {
-            let info = tool(index, r);
+        for (index, &(r, text)) in self.new.iter().enumerate() {
+            let mut buffer = wide(text);
+            let info = tool(index, r, buffer.as_mut_ptr());
             unsafe { SendMessageW(self.window, TTM_ADDTOOLW, 0, &raw const info as LPARAM) };
         }
     }

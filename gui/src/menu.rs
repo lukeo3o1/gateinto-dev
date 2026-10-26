@@ -12,11 +12,13 @@ pub const NO_GATEWAYS: &str = "No gateways";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Popup {
     Picker,
+    Session(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     Launch(usize),
+    Details,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +49,14 @@ pub fn picker(listing: &Result<Known, String>) -> Vec<Entry> {
         }];
     }
     entries
+}
+
+pub fn session() -> Vec<Entry> {
+    vec![Entry {
+        icon: icons::GATEWAYS,
+        label: "Gateway details".into(),
+        choice: Some(Choice::Details),
+    }]
 }
 
 pub fn dismisses(zone: Zone) -> bool {
@@ -121,6 +131,18 @@ mod tests {
     }
 
     #[test]
+    fn a_session_menu_leads_to_the_gateway_details() {
+        assert_eq!(
+            session(),
+            [Entry {
+                icon: icons::GATEWAYS,
+                label: "Gateway details".into(),
+                choice: Some(Choice::Details),
+            }]
+        );
+    }
+
+    #[test]
     fn clicks_outside_the_menu_dismiss_it() {
         assert!(!dismisses(Zone::Entry(0)));
         assert!(!dismisses(Zone::Menu));
@@ -129,6 +151,7 @@ mod tests {
             Zone::Picker,
             Zone::StopAgent,
             Zone::Revoke(1),
+            Zone::More(1),
             Zone::Nav(crate::nav::Page::Gateways),
         ] {
             assert!(dismisses(zone), "{zone:?}");

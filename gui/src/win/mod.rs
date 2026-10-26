@@ -177,6 +177,7 @@ impl App {
     fn entries(&self) -> Vec<Entry> {
         match (self.view.popup, &self.update) {
             (Some(Popup::Picker), Some(update)) => menu::picker(&update.gateways),
+            (Some(Popup::Session(_)), Some(_)) => menu::session(),
             _ => Vec::new(),
         }
     }
@@ -197,6 +198,19 @@ impl App {
             self.view.popup = None;
         }
         board.ops
+    }
+
+    fn open(&mut self, popup: Popup) {
+        self.view.popup = Some(popup);
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn select(&mut self, page: NavPage) {
+        if self.view.nav.select(page) {
+            self.retarget();
+            self.invalidate();
+        }
     }
 
     fn dismiss(&mut self) -> bool {
@@ -295,6 +309,7 @@ fn hit_code(zone: Zone) -> u32 {
         Zone::Nav(_)
         | Zone::StopAgent
         | Zone::Revoke(_)
+        | Zone::More(_)
         | Zone::StartBrowser(_)
         | Zone::Picker
         | Zone::Entry(_)
@@ -316,12 +331,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
     let command = match action {
         None => return,
         Some(Action::Select(page)) => {
-            with_app(hwnd, |app| {
-                if app.view.nav.select(page) {
-                    app.retarget();
-                    app.invalidate();
-                }
-            });
+            with_app(hwnd, |app| app.select(page));
             return;
         }
         Some(Action::StopAgent) => {
@@ -337,11 +347,12 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::OpenPicker) => {
-            with_app(hwnd, |app| {
-                app.view.popup = Some(Popup::Picker);
-                app.retarget();
-                app.invalidate();
-            });
+            with_app(hwnd, |app| app.open(Popup::Picker));
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::More(id)) => {
+            with_app(hwnd, |app| app.open(Popup::Session(id)));
             rehover(hwnd);
             return;
         }
@@ -349,8 +360,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             with_app(hwnd, |app| {
                 let choice = app.entries().get(index).and_then(|entry| entry.choice);
                 app.dismiss();
-                if let Some(Choice::Launch(row)) = choice {
-                    app.launch(row);
+                match choice {
+                    Some(Choice::Launch(row)) => app.launch(row),
+                    Some(Choice::Details) => app.select(NavPage::Gateways),
+                    None => {}
                 }
             });
             rehover(hwnd);

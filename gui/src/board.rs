@@ -26,16 +26,18 @@ pub struct Board {
 }
 
 const STOP_LABEL: &str = "Stop agent";
-pub const REVOKE_TIP: &str = "Revoke session";
+const REVOKE_TIP: &str = "Revoke session";
+const MORE_TIP: &str = "More";
 
-pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(u64, Rect)> {
+pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
     if targets.iter().any(|&(_, zone)| zone == Zone::Menu) {
         return Vec::new();
     }
     targets
         .iter()
         .filter_map(|&(r, zone)| match zone {
-            Zone::Revoke(id) => Some((id, r)),
+            Zone::Revoke(_) => Some((r, REVOKE_TIP)),
+            Zone::More(_) => Some((r, MORE_TIP)),
             _ => None,
         })
         .collect()
@@ -375,13 +377,33 @@ impl<'a, M: Measure> Painter<'a, M> {
         let state = Rect::new(x, r.y, c.activity.right() - x, r.h);
         self.text(Font::Small, label, state, t.muted);
 
-        self.revoke(c.actions, row.id);
+        let size = s.px(32.0);
+        let y = c.actions.y + (c.actions.h - size) / 2;
+        self.revoke(Rect::new(c.actions.x, y, size, size), row.id);
+        self.more(Rect::new(c.actions.right() - size, y, size, size), row.id);
     }
 
-    fn revoke(&mut self, col: Rect, id: u64) {
+    fn more(&mut self, button: Rect, id: u64) {
         let (s, t) = (self.s, self.t);
-        let size = s.px(32.0);
-        let button = Rect::new(col.right() - size, col.y + (col.h - size) / 2, size, size);
+        let zone = Zone::More(id);
+        let (fill, ink) = match self.v.pointer.look(zone) {
+            Look::Rest => (None, t.muted),
+            Look::Hover => (Some(t.caption_hover), t.text),
+            Look::Pressed => (Some(t.caption_pressed), t.text),
+        };
+        if let Some(fill) = fill {
+            self.push(Op::Round(button, s.pxf(6.0), fill));
+        }
+        self.icon(icons::MORE, button, 18.0, ink);
+        let before = self.board.targets.len();
+        self.target(button, zone);
+        if self.board.targets.len() > before && self.v.popup == Some(Popup::Session(id)) {
+            self.board.anchor = Some(button);
+        }
+    }
+
+    fn revoke(&mut self, button: Rect, id: u64) {
+        let (s, t) = (self.s, self.t);
         let zone = Zone::Revoke(id);
         let (fill, ink) = match self.v.pointer.look(zone) {
             Look::Rest => (None, t.muted),
@@ -425,16 +447,19 @@ mod tests {
     }
 
     #[test]
-    fn only_revoke_targets_get_a_tip() {
+    fn revoke_and_more_buttons_get_their_own_tips() {
         let a = Rect::new(1, 2, 3, 4);
         let b = Rect::new(5, 6, 7, 8);
         let targets = [
             (a, Zone::StopAgent),
             (b, Zone::Revoke(9)),
+            (a, Zone::More(9)),
             (a, Zone::Revoke(3)),
         ];
-        assert_eq!(tips(&targets), [(9, b), (3, a)]);
-        assert_eq!(REVOKE_TIP, "Revoke session");
+        assert_eq!(
+            tips(&targets),
+            [(b, "Revoke session"), (a, "More"), (a, "Revoke session")]
+        );
     }
 
     #[test]
@@ -788,7 +813,8 @@ mod tests {
                 Op::Round(Rect::new(846, y + 26, 5, 7), 2.5, T.accent),
                 Op::Round(Rect::new(855, y + 26, 5, 7), 2.5, T.accent),
                 text(Font::Small, "Active", Rect::new(868, y, 48, 60), T.muted),
-                Op::Icon(icons::POWER, Rect::new(971, y + 21, 18, 18), 1.0, T.muted),
+                Op::Icon(icons::POWER, Rect::new(939, y + 21, 18, 18), 1.0, T.muted),
+                Op::Icon(icons::MORE, Rect::new(971, y + 21, 18, 18), 1.0, T.muted),
             ]
         );
     }
@@ -827,21 +853,24 @@ mod tests {
     #[test]
     fn every_row_has_a_revoke_target_that_tints_red() {
         let b = draw(&running(vec![row(1), row(2)]));
-        let button = |i: i32| Rect::new(964, FIRST_ROW + 60 * i + 14, 32, 32);
+        let button = |i: i32| Rect::new(932, FIRST_ROW + 60 * i + 14, 32, 32);
+        let more = |i: i32| Rect::new(964, FIRST_ROW + 60 * i + 14, 32, 32);
         assert_eq!(
             b.targets,
             [
                 (PICK, Zone::Picker),
                 (STOP, Zone::StopAgent),
                 (button(0), Zone::Revoke(1)),
+                (more(0), Zone::More(1)),
                 (button(1), Zone::Revoke(2)),
+                (more(1), Zone::More(2)),
             ]
         );
         let mut v = View::default();
         v.pointer.moved(Zone::Revoke(2));
         let glyph = Op::Icon(
             icons::POWER,
-            Rect::new(971, FIRST_ROW + 81, 18, 18),
+            Rect::new(939, FIRST_ROW + 81, 18, 18),
             1.0,
             T.revoke_glyph,
         );
@@ -854,6 +883,52 @@ mod tests {
         assert_eq!(
             inside(&draw_with(&page, &v).ops, button(1)),
             [Op::Round(button(1), 6.0, T.revoke_pressed), glyph]
+        );
+    }
+
+    #[test]
+    fn every_row_has_a_more_button_that_tints_on_hover_and_press() {
+        let page = running(vec![row(1), row(2)]);
+        let more = Rect::new(964, FIRST_ROW + 74, 32, 32);
+        let glyph = |c| Op::Icon(icons::MORE, Rect::new(971, FIRST_ROW + 81, 18, 18), 1.0, c);
+        let mut v = View::default();
+        v.pointer.moved(Zone::More(2));
+        assert_eq!(
+            inside(&draw_with(&page, &v).ops, more),
+            [Op::Round(more, 6.0, T.caption_hover), glyph(T.text)]
+        );
+        v.pointer.down(Zone::More(2));
+        assert_eq!(
+            inside(&draw_with(&page, &v).ops, more),
+            [Op::Round(more, 6.0, T.caption_pressed), glyph(T.text)]
+        );
+    }
+
+    #[test]
+    fn an_open_session_menu_hangs_from_its_more_button() {
+        let page = running(vec![row(1), row(2)]);
+        let open = |id| View {
+            popup: Some(Popup::Session(id)),
+            ..View::default()
+        };
+        assert_eq!(
+            draw_with(&page, &open(2)).anchor,
+            Some(Rect::new(964, FIRST_ROW + 74, 32, 32))
+        );
+        assert_eq!(draw_with(&page, &open(7)).anchor, None);
+        assert_eq!(draw_with(&stopped(), &open(2)).anchor, None);
+    }
+
+    #[test]
+    fn a_session_menu_closes_when_its_row_scrolls_out_of_view() {
+        let page = running((1..=9).map(row).collect());
+        let mut v = scrolled(148);
+        v.popup = Some(Popup::Session(1));
+        assert_eq!(draw_with(&page, &v).anchor, None);
+        v.popup = Some(Popup::Session(9));
+        assert_eq!(
+            draw_with(&page, &v).anchor,
+            Some(Rect::new(964, 610, 32, 32))
         );
     }
 
@@ -898,8 +973,12 @@ mod tests {
         let rows = (1..=9).map(row).collect();
         let b = draw(&running(rows));
         let ids: Vec<_> = b.targets.iter().map(|(_, z)| *z).collect();
-        assert_eq!(ids[2..], (1..=7).map(Zone::Revoke).collect::<Vec<_>>()[..]);
-        assert_eq!(b.targets[8].0, Rect::new(964, 638, 32, 18));
+        let buttons: Vec<_> = (1..=7)
+            .flat_map(|id| [Zone::Revoke(id), Zone::More(id)])
+            .collect();
+        assert_eq!(ids[2..], buttons[..]);
+        assert_eq!(b.targets[14].0, Rect::new(932, 638, 32, 18));
+        assert_eq!(b.targets[15].0, Rect::new(964, 638, 32, 18));
         assert!(
             !b.ops
                 .iter()
@@ -933,10 +1012,12 @@ mod tests {
                 .any(|op| matches!(op, Op::Text(_, s, ..) if s == " #1"))
         );
         assert_eq!(
-            b.targets[2..4],
+            b.targets[2..6],
             [
-                (Rect::new(964, 228, 32, 22), Zone::Revoke(2)),
-                (Rect::new(964, 278, 32, 32), Zone::Revoke(3)),
+                (Rect::new(932, 228, 32, 22), Zone::Revoke(2)),
+                (Rect::new(964, 228, 32, 22), Zone::More(2)),
+                (Rect::new(932, 278, 32, 32), Zone::Revoke(3)),
+                (Rect::new(964, 278, 32, 32), Zone::More(3)),
             ]
         );
     }
