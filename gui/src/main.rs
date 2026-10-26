@@ -5,6 +5,7 @@ mod agent;
 mod board;
 mod fonts;
 mod frame;
+mod gateways;
 mod hit;
 mod icons;
 mod layout;

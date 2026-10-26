@@ -11,6 +11,8 @@ use crate::scene::{Op, View, stroke};
 use crate::sessions::{EMPTY, Eyes, Kind, Page, Row};
 use crate::theme::{Rgb, Theme};
 
+pub mod gateways;
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Board {
     pub ops: Vec<Op>,
@@ -51,15 +53,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     if v.nav.selected() != NavPage::Sessions {
         return Board::default();
     }
-    let mut p = Painter {
-        s,
-        t,
-        v,
-        m,
-        clip: l.content,
-        board: Board::default(),
-    };
-    p.push(Op::Clip(l.content));
+    let mut p = Painter::new(l, s, t, v, m);
     let card = p.status(l.content, page);
     if let Some(rows) = &page.rows {
         let heading = Rect::new(card.x, card.bottom() + s.px(18.0), card.w, s.px(20.0));
@@ -77,7 +71,20 @@ fn inset(r: Rect, d: i32) -> Rect {
     Rect::new(r.x + d, r.y + d, r.w - 2 * d, r.h - 2 * d)
 }
 
-impl<M: Measure> Painter<'_, M> {
+impl<'a, M: Measure> Painter<'a, M> {
+    fn new(l: &Layout, s: Scale, t: &'a Theme, v: &'a View, m: &'a M) -> Self {
+        let mut p = Self {
+            s,
+            t,
+            v,
+            m,
+            clip: l.content,
+            board: Board::default(),
+        };
+        p.push(Op::Clip(l.content));
+        p
+    }
+
     fn push(&mut self, op: Op) {
         self.board.ops.push(op);
     }
@@ -326,7 +333,7 @@ mod tests {
     const STOP: Rect = Rect::new(870, 110, 122, 32);
     const FIRST_ROW: i32 = 264;
 
-    struct Chars;
+    pub(super) struct Chars;
 
     impl Measure for Chars {
         fn width(&self, _font: Font, text: &str) -> i32 {
@@ -334,7 +341,7 @@ mod tests {
         }
     }
 
-    fn layout() -> Layout {
+    pub(super) fn layout() -> Layout {
         Layout::new(1040, 680, S, true)
     }
 
@@ -399,7 +406,7 @@ mod tests {
         draw_with(page, &View::default())
     }
 
-    fn inside(ops: &[Op], r: Rect) -> Vec<Op> {
+    pub(super) fn inside(ops: &[Op], r: Rect) -> Vec<Op> {
         let within = |o: Rect| {
             o.x >= r.x && o.y >= r.y && o.right() <= r.right() && o.bottom() <= r.bottom()
         };
@@ -416,7 +423,7 @@ mod tests {
             .collect()
     }
 
-    fn text(font: Font, s: &str, r: Rect, c: crate::theme::Rgb) -> Op {
+    pub(super) fn text(font: Font, s: &str, r: Rect, c: crate::theme::Rgb) -> Op {
         Op::Text(font, s.to_owned().into(), r, c)
     }
 

@@ -34,10 +34,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use gateinto::clock::unix_now;
 
-use crate::board::{Board, board, tips};
+use crate::board::{self, Board, board, tips};
 use crate::frame::Frame;
+use crate::gateways;
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
+use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
 use crate::scene::{View, scene};
@@ -142,15 +144,22 @@ impl App {
         let Some(update) = &self.update else {
             return Board::default();
         };
-        let page = sessions::page(&update.state, update.failure.as_deref(), unix_now());
-        board(
-            &self.layout,
-            self.s,
-            &Theme::LIGHT,
-            &self.view,
-            &page,
-            &self.fonts,
-        )
+        let (l, s, t, v, m) = (&self.layout, self.s, &Theme::LIGHT, &self.view, &self.fonts);
+        let failure = update.failure.as_deref();
+        match v.nav.selected() {
+            NavPage::Gateways => {
+                let page = gateways::page(&update.gateways, &update.state, failure);
+                board::gateways::board(l, s, t, v, &page, m)
+            }
+            _ => board(
+                l,
+                s,
+                t,
+                v,
+                &sessions::page(&update.state, failure, unix_now()),
+                m,
+            ),
+        }
     }
 
     fn retarget(&mut self) {

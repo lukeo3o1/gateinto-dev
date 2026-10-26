@@ -2,6 +2,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use gateinto::ipc::{Request, RequestError, Response};
+use gateinto::link::Known;
 use gateinto::sessions::SessionId;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -27,6 +28,7 @@ impl Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
     pub state: AgentState,
+    pub gateways: Result<Known, String>,
     pub failure: Option<String>,
 }
 
@@ -72,6 +74,7 @@ pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Optio
 pub async fn serve<F, R>(
     mut commands: UnboundedReceiver<Command>,
     send: F,
+    mut load: impl FnMut() -> Result<Known, String>,
     mut deliver: impl FnMut(Update),
 ) where
     F: Fn(Request) -> R,
@@ -82,6 +85,7 @@ pub async fn serve<F, R>(
         let state = AgentState::from_list(send(Request::List).await);
         deliver(Update {
             state,
+            gateways: load(),
             failure: failure.take(),
         });
         tokio::select! {
@@ -118,6 +122,7 @@ mod tests {
     fn polled(failure: Option<&str>) -> Update {
         Update {
             state: AgentState::Running(Vec::new()),
+            gateways: Ok(Known::default()),
             failure: failure.map(str::to_owned),
         }
     }
@@ -127,7 +132,12 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let (_tx, rx) = unbounded_channel();
         let mut updates = Vec::new();
-        let run = serve(rx, agent(&log), |u| updates.push(u));
+        let run = serve(
+            rx,
+            agent(&log),
+            || Ok(Known::default()),
+            |u| updates.push(u),
+        );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
         assert_eq!(updates, [polled(None), polled(None), polled(None)]);
         assert_eq!(*log.borrow(), [Request::List, Request::List, Request::List]);
@@ -139,7 +149,12 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         tx.send(Command::Close(5)).unwrap();
         let mut updates = Vec::new();
-        let run = serve(rx, agent(&log), |u| updates.push(u));
+        let run = serve(
+            rx,
+            agent(&log),
+            || Ok(Known::default()),
+            |u| updates.push(u),
+        );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert_eq!(
             updates,
@@ -162,9 +177,32 @@ mod tests {
         let (tx, rx) = unbounded_channel::<Command>();
         drop(tx);
         let mut updates = Vec::new();
-        let run = serve(rx, agent(&log), |u| updates.push(u));
+        let run = serve(
+            rx,
+            agent(&log),
+            || Ok(Known::default()),
+            |u| updates.push(u),
+        );
         assert!(timeout(Duration::from_secs(10), run).await.is_ok());
         assert_eq!(updates, [polled(None)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_poll_rereads_the_gateways() {
+        let log = RefCell::new(Vec::new());
+        let (_tx, rx) = unbounded_channel();
+        let reads = RefCell::new(0);
+        let load = || {
+            *reads.borrow_mut() += 1;
+            Err(format!("read {}", reads.borrow()))
+        };
+        let mut updates = Vec::new();
+        let run = serve(rx, agent(&log), load, |u| updates.push(u.gateways));
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        assert_eq!(
+            updates,
+            [Err("read 1".to_owned()), Err("read 2".to_owned())]
+        );
     }
 
     #[test]

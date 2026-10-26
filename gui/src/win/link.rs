@@ -1,13 +1,16 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use gateinto::config;
 use gateinto::ipc::{self, Endpoint, Request, RequestError};
+use gateinto::link::{Known, store};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::agent::AgentState;
+use crate::gateways;
 use crate::worker::{Command, Mailbox, Update, serve};
 
 pub const WM_AGENT: u32 = WM_APP;
@@ -19,6 +22,10 @@ pub struct Link {
 
 fn open(mailbox: &Mutex<Mailbox>) -> MutexGuard<'_, Mailbox> {
     mailbox.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn known() -> Result<Known, String> {
+    gateways::load(config::default_path(), store::default_dir())
 }
 
 impl Link {
@@ -41,6 +48,7 @@ impl Link {
                     Err(error) => {
                         deliver(Update {
                             state: AgentState::Unreachable(error.to_string()),
+                            gateways: known(),
                             failure: None,
                         });
                         return;
@@ -59,7 +67,7 @@ impl Link {
                         }
                     }
                 };
-                runtime.block_on(serve(inbox, send, deliver));
+                runtime.block_on(serve(inbox, send, known, deliver));
             });
         Self { commands, mailbox }
     }
