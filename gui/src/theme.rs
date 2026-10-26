@@ -26,6 +26,15 @@ pub struct Theme {
     pub close_hover: Rgb,
     pub close_pressed: Rgb,
     pub close_glyph_hover: Rgb,
+    pub card: Rgb,
+    pub border: Rgb,
+    pub muted: Rgb,
+    pub tile: Rgb,
+    pub pill_text: Rgb,
+    pub eyes_idle: Rgb,
+    pub revoke_hover: Rgb,
+    pub revoke_pressed: Rgb,
+    pub revoke_glyph: Rgb,
 }
 
 impl Theme {
@@ -46,6 +55,15 @@ impl Theme {
         close_hover: Rgb(0xc42b1c),
         close_pressed: Rgb(0xc84031),
         close_glyph_hover: Rgb(0xffffff),
+        card: Rgb(0xffffff),
+        border: Rgb(0xe4e2dc),
+        muted: Rgb(0x5f636d),
+        tile: Rgb(0xefeee9),
+        pill_text: Rgb(0x3d4049),
+        eyes_idle: Rgb(0x9aa1b1),
+        revoke_hover: Rgb(0xfde7e5),
+        revoke_pressed: Rgb(0xfad4d0),
+        revoke_glyph: Rgb(0xc42b1c),
     };
 }
 
@@ -75,11 +93,26 @@ mod tests {
     }
 
     #[test]
+    fn sessions_page_uses_the_board_palette() {
+        let t = Theme::LIGHT;
+        assert_eq!(t.card, Rgb(0xffffff));
+        assert_eq!(t.border, Rgb(0xe4e2dc));
+        assert_eq!(t.muted, Rgb(0x5f636d));
+        assert_eq!(t.tile, Rgb(0xefeee9));
+        assert_eq!(t.pill_text, Rgb(0x3d4049));
+        assert_eq!(t.eyes_idle, Rgb(0x9aa1b1));
+        assert_eq!(t.revoke_hover, Rgb(0xfde7e5));
+        assert_eq!(t.revoke_glyph, Rgb(0xc42b1c));
+    }
+
+    #[test]
     fn hover_fills_differ_from_what_they_cover() {
         let t = Theme::LIGHT;
         assert_ne!(t.rail_hover, t.rail);
         assert_ne!(t.rail_hover, t.rail_selected);
         assert_ne!(t.caption_hover, t.bg);
         assert_ne!(t.close_glyph_hover, t.close_hover);
+        assert_ne!(t.revoke_pressed, t.revoke_hover);
+        assert_ne!(t.revoke_hover, t.card);
     }
 }
