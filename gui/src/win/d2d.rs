@@ -2,8 +2,8 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
-    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_IGNORE, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
@@ -249,6 +249,11 @@ impl Canvas<'_> {
             for seg in segs {
                 match *seg {
                     Seg::Line(to) => sink.AddLine(point(to)),
+                    Seg::Cubic { c1, c2, to } => sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: point(c1),
+                        point2: point(c2),
+                        point3: point(to),
+                    }),
                     Seg::Arc { to, r, sweep } => sink.AddArc(&D2D1_ARC_SEGMENT {
                         point: point(to),
                         size: D2D_SIZE_F {
