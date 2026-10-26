@@ -108,8 +108,9 @@ mod tests {
     }
 
     #[test]
-    fn without_caption_buttons_their_corner_is_caption() {
+    fn the_system_frame_leaves_the_content_top_to_the_client() {
         let l = Layout::new(1040, 680, Scale::new(96), false);
-        assert_eq!(hit(&l, 1000, 20, RESIZE), Zone::Caption);
+        assert_eq!(hit(&l, 1000, 20, 0), Zone::Client);
+        assert_eq!(hit(&l, 600, 0, 0), Zone::Client);
     }
 }

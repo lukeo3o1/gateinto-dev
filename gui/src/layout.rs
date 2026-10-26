@@ -109,7 +109,12 @@ impl Layout {
         });
 
         let content_w = width - rail.w;
-        let caption_row = Rect::new(rail.w, 0, content_w, s.px(40.0));
+        let (caption_h, title_gap) = if caption_buttons {
+            (s.px(40.0), s.px(4.0))
+        } else {
+            (0, s.px(20.0))
+        };
+        let caption_row = Rect::new(rail.w, 0, content_w, caption_h);
         let button = |i: i32| {
             let w = s.px(46.0);
             Rect::new(width - w * i, 0, w, caption_row.h)
@@ -131,7 +136,7 @@ impl Layout {
             }),
             title: Rect::new(
                 rail.w + pad,
-                caption_row.h + s.px(4.0),
+                caption_row.h + title_gap,
                 content_w - 2 * pad,
                 s.px(32.0),
             ),
@@ -217,8 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn no_caption_buttons_with_the_system_frame() {
-        assert_eq!(Layout::new(1040, 680, Scale::new(96), false).buttons, None);
+    fn the_system_frame_collapses_the_caption_row() {
+        let l = Layout::new(1040, 680, Scale::new(96), false);
+        assert_eq!(l.buttons, None);
+        assert_eq!(l.caption_row, Rect::new(220, 0, 820, 0));
+        assert_eq!(l.title, Rect::new(248, 20, 764, 32));
     }
 
     #[test]
