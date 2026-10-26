@@ -346,6 +346,19 @@ impl Canvas<'_> {
         }
     }
 
+    pub fn glyph(&self, fonts: &Fonts, glyph: char, box_dip: f32, r: Rect, c: Rgb) -> bool {
+        let Some((px, layout)) = fonts.glyph(glyph, box_dip) else {
+            return false;
+        };
+        let at = |start: i32, len: i32| (start as f32 + (len as f32 - px) / 2.0).round();
+        let origin = Vector2::new(at(r.x, r.w), at(r.y, r.h));
+        unsafe {
+            self.rt
+                .DrawTextLayout(origin, &layout, self.paint(c), D2D1_DRAW_TEXT_OPTIONS_NONE)
+        };
+        true
+    }
+
     pub fn text(&self, fonts: &Fonts, font: Font, s: &str, r: Rect, c: Rgb, align: Align) {
         let Some(layout) = fonts.layout(font, s, r.w as f32, r.h as f32, align) else {
             return;

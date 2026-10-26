@@ -5,6 +5,7 @@ mod color;
 mod cue;
 mod fonts;
 mod geom;
+mod glyphs;
 mod icons;
 mod layout;
 mod model;

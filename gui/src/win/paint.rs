@@ -1,6 +1,6 @@
 use super::d2d::Canvas;
 use super::text::{Align, Fonts};
-use crate::color;
+use crate::color::{self, Rgb};
 use crate::geom::RectF;
 use crate::icons::{self, Icon};
 use crate::layout::{Font, Layout, Rect};
@@ -34,6 +34,12 @@ impl Ctx<'_> {
     fn icon_stroke(&self) -> f32 {
         self.s.stroke(icons::STROKE)
     }
+
+    fn symbol(&self, g: &Canvas, icon: &Icon, box_dip: f32, r: Rect, c: Rgb) {
+        if !g.glyph(self.fonts, icon.glyph, box_dip, r, c) {
+            g.icon(icon, r, self.icon_stroke(), c);
+        }
+    }
 }
 
 const LEFT: Align = Align {
@@ -53,7 +59,6 @@ pub fn scene(g: &Canvas, w: i32, h: i32, ctx: &Ctx) {
     let l = ctx.layout;
     let f = ctx.fonts;
     let bw = ctx.hairline();
-    let stroke = ctx.icon_stroke();
     g.fill_rect(Rect::new(0, 0, w, h), color::WINDOW);
     let panel = RectF::from(l.panel);
     let radius = ctx.dip(8.0);
@@ -83,7 +88,7 @@ pub fn scene(g: &Canvas, w: i32, h: i32, ctx: &Ctx) {
             SessionKind::Device => icons::DEVICE,
             SessionKind::Browser => icons::BROWSER,
         };
-        g.icon(&icon, card.icon, stroke, color::ACCENT);
+        ctx.symbol(g, &icon, 20.0, card.icon, color::ACCENT);
         let pill = ctx.dip(10.0);
         g.fill_round(card.badges[0], pill, color::BADGE_OK_BG);
         g.fill_round(card.badges[1], pill, color::BADGE_BG);
@@ -119,7 +124,7 @@ pub fn scene(g: &Canvas, w: i32, h: i32, ctx: &Ctx) {
 
     let device = &l.device;
     g.bordered_round(device.frame, ctx.dip(6.0), bw, color::STROKE, color::CARD);
-    g.icon(&icons::SHIELD, device.icon, stroke, color::SHIELD);
+    ctx.symbol(g, &icons::SHIELD, 20.0, device.icon, color::SHIELD);
     g.text(
         f,
         Font::DeviceTitle,
@@ -158,7 +163,6 @@ pub fn control(g: &Canvas, bounds: Rect, control: Control, state: State, ctx: &C
         Control::Details => ctx.dip(2.0),
         _ => ctx.dip(4.0),
     };
-    let stroke = ctx.icon_stroke();
 
     surface(g, local, radius, look, ctx.hairline());
     match control {
@@ -169,9 +173,11 @@ pub fn control(g: &Canvas, bounds: Rect, control: Control, state: State, ctx: &C
                 g.fill_round(bar, ctx.dip(2.0), color::ACCENT);
             }
             let icon = item.icon.translate(dx, dy);
-            g.icon(&NAV_ICONS[i], icon, stroke, color::TEXT);
+            ctx.symbol(g, &NAV_ICONS[i], 18.0, icon, color::TEXT);
         }
-        Control::NewSession => g.icon(&icons::PLUS, l.plus.translate(dx, dy), stroke, look.text),
+        Control::NewSession => {
+            ctx.symbol(g, &icons::PLUS, 14.0, l.plus.translate(dx, dy), look.text)
+        }
         _ => {}
     }
     if state.focused {

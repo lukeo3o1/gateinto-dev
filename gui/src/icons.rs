@@ -35,6 +35,7 @@ pub enum Shape {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Icon {
     pub view: f32,
+    pub glyph: char,
     pub shapes: &'static [Shape],
 }
 
@@ -252,6 +253,7 @@ const fn line(x1: f32, y1: f32, x2: f32, y2: f32) -> [Cmd; 2] {
 
 pub const SESSIONS: Icon = Icon {
     view: 24.0,
+    glyph: '\u{E737}',
     shapes: &[
         Shape::RoundRect {
             x: 3.0,
@@ -267,6 +269,7 @@ pub const SESSIONS: Icon = Icon {
 
 pub const GATEWAYS: Icon = Icon {
     view: 24.0,
+    glyph: '\u{E774}',
     shapes: &[
         Shape::Circle {
             cx: 12.0,
@@ -287,6 +290,7 @@ pub const GATEWAYS: Icon = Icon {
 
 pub const IDENTITY: Icon = Icon {
     view: 24.0,
+    glyph: '\u{E72E}',
     shapes: &[
         Shape::RoundRect {
             x: 5.0,
@@ -312,6 +316,7 @@ pub const IDENTITY: Icon = Icon {
 
 pub const SETTINGS: Icon = Icon {
     view: 24.0,
+    glyph: '\u{E713}',
     shapes: &[
         Shape::Circle {
             cx: 12.0,
@@ -331,6 +336,7 @@ pub const SETTINGS: Icon = Icon {
 
 pub const DEVICE: Icon = Icon {
     view: 24.0,
+    glyph: '\u{E7F4}',
     shapes: &[
         Shape::RoundRect {
             x: 3.0,
@@ -346,6 +352,7 @@ pub const DEVICE: Icon = Icon {
 
 pub const BROWSER: Icon = Icon {
     view: 24.0,
+    glyph: '\u{E909}',
     shapes: &[
         Shape::Circle {
             cx: 12.0,
@@ -365,6 +372,7 @@ pub const BROWSER: Icon = Icon {
 
 pub const SHIELD: Icon = Icon {
     view: 24.0,
+    glyph: '\u{EA18}',
     shapes: &[
         Shape::Path(&[
             Cmd::Move(12.0, 3.0),
@@ -385,6 +393,7 @@ pub const SHIELD: Icon = Icon {
 
 pub const PLUS: Icon = Icon {
     view: 14.0,
+    glyph: '\u{E710}',
     shapes: &[
         Shape::Path(&line(7.0, 1.0, 7.0, 13.0)),
         Shape::Path(&line(1.0, 7.0, 13.0, 7.0)),

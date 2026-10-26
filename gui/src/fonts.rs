@@ -16,15 +16,19 @@ pub const ALL: [Font; 10] = [
 pub const UI_FAMILIES: &[&str] = &["Segoe UI Variable Text", "Segoe UI"];
 pub const MONO_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas"];
 
+pub fn first_installed<'a, S: AsRef<str>>(
+    installed: &[S],
+    preferred: &[&'a str],
+) -> Option<&'a str> {
+    preferred.iter().copied().find(|want| {
+        installed
+            .iter()
+            .any(|have| have.as_ref().eq_ignore_ascii_case(want))
+    })
+}
+
 pub fn choose_family<'a, S: AsRef<str>>(installed: &[S], preferred: &[&'a str]) -> &'a str {
-    preferred
-        .iter()
-        .copied()
-        .find(|want| {
-            installed
-                .iter()
-                .any(|have| have.as_ref().eq_ignore_ascii_case(want))
-        })
+    first_installed(installed, preferred)
         .or(preferred.last().copied())
         .unwrap_or_default()
 }
