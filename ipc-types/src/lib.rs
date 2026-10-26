@@ -7,13 +7,16 @@ macro_rules! named {
     ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
         pub enum $name {
-            $(#[serde(rename = $text)] $variant),+
+            $(#[serde(rename = $text)] $variant,)+
+            #[serde(other)]
+            Unknown,
         }
 
         impl $name {
             pub fn as_str(self) -> &'static str {
                 match self {
-                    $(Self::$variant => $text),+
+                    $(Self::$variant => $text,)+
+                    Self::Unknown => "unknown",
                 }
             }
         }
@@ -65,17 +68,44 @@ pub struct SessionInfo {
 
 impl SessionInfo {
     pub fn to_line(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        serde_json::to_string(self).expect("a session has only string keys and serializable values")
     }
 
-    pub fn parse_list(lines: &[String]) -> Result<Vec<Self>, serde_json::Error> {
+    pub fn parse_list(lines: &[String]) -> Result<Vec<Self>, ListError> {
         lines
             .iter()
-            .filter(|line| line.starts_with('{'))
-            .map(|line| serde_json::from_str(line))
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                if line.starts_with('{') {
+                    serde_json::from_str(line).map_err(ListError::Malformed)
+                } else {
+                    Err(ListError::OlderAgent(line.clone()))
+                }
+            })
             .collect()
     }
 }
+
+#[derive(Debug)]
+pub enum ListError {
+    OlderAgent(String),
+    Malformed(serde_json::Error),
+}
+
+impl fmt::Display for ListError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OlderAgent(_) => f.write_str(
+                "the running agent is older than this version of gateinto and cannot list its sessions here; restart it with `gateinto stop` and start it again",
+            ),
+            Self::Malformed(error) => {
+                write!(f, "the agent listed a session this version cannot read: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ListError {}
 
 #[cfg(test)]
 mod tests {
@@ -117,17 +147,46 @@ mod tests {
     }
 
     #[test]
-    fn a_list_skips_lines_that_are_not_json_objects_and_ignores_unknown_fields() {
+    fn a_list_skips_empty_lines_and_ignores_unknown_fields() {
         let mut line = info(None).to_line();
         line.insert_str(1, r#""added_later":true,"#);
-        let lines = ["agent-pid: 42".to_owned(), line];
+        let lines = [String::new(), line];
         assert_eq!(SessionInfo::parse_list(&lines).unwrap(), [info(None)]);
     }
 
     #[test]
-    fn a_malformed_session_line_fails_the_list() {
-        let lines = [r#"{"id":"x"}"#.to_owned()];
-        assert!(SessionInfo::parse_list(&lines).is_err());
+    fn values_added_by_a_newer_agent_are_read_as_unknown() {
+        let line = info(Some(BrowserKind::Chrome))
+            .to_line()
+            .replace(r#""browser":"chrome""#, r#""browser":"firefox""#)
+            .replace(r#""auth":"os_user""#, r#""auth":"token""#)
+            .replace(r#""kind":"browser""#, r#""kind":"tunnel""#)
+            .replace(r#""route":"mixed""#, r#""route":"split""#);
+        assert_eq!(
+            SessionInfo::parse_list(&[line]).unwrap(),
+            [SessionInfo {
+                kind: SessionKind::Unknown,
+                route: SessionRoute::Unknown,
+                auth: SessionAuth::Unknown,
+                browser: Some(BrowserKind::Unknown),
+                ..info(None)
+            }]
+        );
+        assert_eq!(BrowserKind::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn a_line_that_is_not_a_json_object_comes_from_an_older_agent() {
+        let lines = [
+            info(None).to_line(),
+            "session: 1 device office 127.0.0.1:8080".to_owned(),
+        ];
+        let error = SessionInfo::parse_list(&lines).unwrap_err();
+        assert!(matches!(&error, ListError::OlderAgent(line) if *line == lines[1]));
+        assert_eq!(
+            error.to_string(),
+            "the running agent is older than this version of gateinto and cannot list its sessions here; restart it with `gateinto stop` and start it again"
+        );
     }
 
     #[test]

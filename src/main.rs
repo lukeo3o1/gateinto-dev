@@ -1172,8 +1172,7 @@ fn print_session_table(sessions: &[SessionInfo]) {
 }
 
 fn listed_sessions(lines: &[String]) -> Result<Vec<SessionInfo>, String> {
-    SessionInfo::parse_list(lines)
-        .map_err(|error| format!("the agent listed a session this version cannot read: {error}"))
+    SessionInfo::parse_list(lines).map_err(|error| error.to_string())
 }
 
 fn unix_now() -> u64 {
