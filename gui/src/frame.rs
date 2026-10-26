@@ -25,6 +25,11 @@ impl Frame {
         }
     }
 
+    pub fn outer_size(self, [left, top, right, bottom]: [i32; 4]) -> (i32, i32) {
+        let top = if self.draws_caption() { 0 } else { top };
+        (right - left, bottom - top)
+    }
+
     pub fn top_resize_band(self, maximized: bool, frame_y: i32) -> i32 {
         if self.draws_caption() && !maximized {
             frame_y
@@ -64,5 +69,12 @@ mod tests {
         assert_eq!(Frame::Custom.top_resize_band(false, 8), 8);
         assert_eq!(Frame::Custom.top_resize_band(true, 8), 0);
         assert_eq!(Frame::System.top_resize_band(false, 8), 0);
+    }
+
+    #[test]
+    fn outer_size_drops_the_caption_of_a_custom_frame() {
+        let adjusted = [-8, -31, 1048, 688];
+        assert_eq!(Frame::System.outer_size(adjusted), (1056, 719));
+        assert_eq!(Frame::Custom.outer_size(adjusted), (1056, 688));
     }
 }

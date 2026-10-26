@@ -138,6 +138,14 @@ impl Layout {
         }
     }
 
+    pub fn default_size(s: Scale) -> (i32, i32) {
+        (s.px(1040.0), s.px(680.0))
+    }
+
+    pub fn min_size(s: Scale) -> (i32, i32) {
+        (s.px(760.0), s.px(520.0))
+    }
+
     pub fn item(&self, page: Page) -> NavItem {
         self.nav[page as usize]
     }
@@ -226,5 +234,24 @@ mod tests {
         assert_eq!(l.item(Page::Settings).frame, Rect::new(15, 939, 299, 60));
         assert_eq!(l.buttons.unwrap().close, Rect::new(1491, 0, 69, 60));
         assert_eq!(l.title, Rect::new(372, 66, 1146, 48));
+    }
+
+    #[test]
+    fn default_and_minimum_sizes_scale() {
+        assert_eq!(Layout::default_size(Scale::new(96)), (1040, 680));
+        assert_eq!(Layout::default_size(Scale::new(144)), (1560, 1020));
+        assert_eq!(Layout::min_size(Scale::new(96)), (760, 520));
+        assert_eq!(Layout::min_size(Scale::new(192)), (1520, 1040));
+    }
+
+    #[test]
+    fn minimum_size_keeps_the_rail_groups_and_title_apart() {
+        let (w, h) = Layout::min_size(Scale::new(96));
+        let l = Layout::new(w, h, Scale::new(96), true);
+        assert!(l.item(Page::Device).frame.bottom() < l.item(Page::Log).frame.y);
+        let b = l.buttons.unwrap();
+        assert!(l.caption_row.x < b.minimize.x);
+        assert!(l.title.y >= b.close.bottom());
+        assert!(l.title.w > 0);
     }
 }
