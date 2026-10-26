@@ -385,7 +385,7 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
     assert_eq!(
         info,
         SessionInfo {
-            id: id.to_string().parse().unwrap(),
+            id: id.into(),
             kind: SessionKind::Device,
             gateway: "office".to_owned(),
             upstream: upstream.addr.to_string(),

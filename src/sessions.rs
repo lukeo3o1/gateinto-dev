@@ -27,6 +27,18 @@ impl fmt::Display for SessionId {
     }
 }
 
+impl From<u64> for SessionId {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl From<SessionId> for u64 {
+    fn from(id: SessionId) -> Self {
+        id.0
+    }
+}
+
 impl std::str::FromStr for SessionId {
     type Err = InvalidSessionId;
 
@@ -124,7 +136,7 @@ impl Session {
 
     pub fn info(&self, browser: Option<BrowserKind>) -> SessionInfo {
         SessionInfo {
-            id: self.id.0,
+            id: self.id.into(),
             kind: self.kind,
             gateway: self.gateway.to_string(),
             upstream: self.upstream.clone(),
@@ -277,6 +289,12 @@ fn auth_kind(local_auth: LocalAuth) -> SessionAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_id_is_its_listed_number() {
+        assert_eq!(u64::from(SessionId::from(7)), 7);
+        assert_eq!(SessionId::from(7).to_string(), "7");
+    }
 
     #[test]
     fn the_listed_auth_kind_prefers_the_os_user_when_it_is_in_effect() {

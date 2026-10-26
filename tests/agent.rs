@@ -513,7 +513,7 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     let agent = TestAgent::start(limits()).await;
     let (lines, browser) = agent.launched("main").await;
     let (other_lines, other) = agent.launched("main").await;
-    let id = field(&lines, "session").parse().unwrap();
+    let id: SessionId = field(&lines, "session").parse().unwrap();
 
     assert_eq!(
         agent.send(Request::Close(id)).await,
@@ -525,7 +525,7 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     assert!(
         !sessions
             .iter()
-            .any(|session| session.id.to_string() == id.to_string()),
+            .any(|session| SessionId::from(session.id) == id),
         "{sessions:?}"
     );
     assert!(other.profile().exists());

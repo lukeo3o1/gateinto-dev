@@ -264,7 +264,7 @@ impl Launcher {
             .unwrap()
             .iter()
             .find(|session| session.listen == listen)
-            .map(|session| session.id.to_string().parse().unwrap())
+            .map(|session| gateinto::sessions::SessionId::from(session.id))
             .unwrap_or_else(|| panic!("no session listens on {listen}: {list:?}"));
         let Response::Ok(lines) = ipc::send(&endpoint, &Request::Credentials(id))
             .await
