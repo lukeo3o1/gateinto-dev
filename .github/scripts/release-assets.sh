@@ -29,10 +29,7 @@ payloads=(
   "gateinto-$short-i686-pc-windows-msvc.msi"
 )
 if [[ $channel != latest ]]; then
-  payloads+=(
-    "gateinto-$short-x86_64-win7-windows-msvc-experimental.exe"
-    "gateinto-$short-i686-win7-windows-msvc-experimental.exe"
-  )
+  payloads+=("gateinto-$short-i686-win7-windows-msvc-experimental.exe")
 fi
 
 declare -A expected=()
