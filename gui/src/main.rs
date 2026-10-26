@@ -13,5 +13,10 @@ mod res;
 mod scale;
 mod scene;
 mod theme;
+#[cfg(windows)]
+mod win;
 
-fn main() {}
+fn main() {
+    #[cfg(windows)]
+    win::run();
+}

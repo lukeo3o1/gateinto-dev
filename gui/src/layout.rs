@@ -146,6 +146,7 @@ impl Layout {
         (s.px(760.0), s.px(520.0))
     }
 
+    #[cfg(test)]
     pub fn item(&self, page: Page) -> NavItem {
         self.nav[page as usize]
     }

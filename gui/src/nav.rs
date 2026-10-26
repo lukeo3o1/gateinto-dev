@@ -40,6 +40,10 @@ impl Page {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the device key is unknown until the Device page reads key data"
+)]
 pub enum KeyKind {
     Hardware,
     Software,
