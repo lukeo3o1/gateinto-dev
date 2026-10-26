@@ -59,6 +59,10 @@ impl Font {
     }
 }
 
+pub trait Measure {
+    fn width(&self, font: Font, text: &str) -> i32;
+}
+
 pub const UI_FAMILIES: &[&str] = &["Segoe UI Variable Text", "Segoe UI"];
 pub const MONO_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas"];
 

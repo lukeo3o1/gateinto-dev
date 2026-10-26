@@ -2,6 +2,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod agent;
+mod board;
 mod fonts;
 mod frame;
 mod hit;

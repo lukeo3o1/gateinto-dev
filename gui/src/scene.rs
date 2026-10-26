@@ -30,7 +30,7 @@ pub struct View {
 const RAIL_ICON: f32 = 20.0;
 const CAPTION_GLYPH: f32 = 10.0;
 
-fn stroke(s: Scale, icon: &Icon, size: f32) -> f32 {
+pub fn stroke(s: Scale, icon: &Icon, size: f32) -> f32 {
     s.stroke(icon.stroke * size / icon.view)
 }
 

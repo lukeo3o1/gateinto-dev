@@ -1,0 +1,745 @@
+use std::borrow::Cow;
+
+use crate::fonts::{Font, Measure};
+use crate::hit::Zone;
+use crate::icons::{self, Icon};
+use crate::layout::{Layout, Rect};
+use crate::nav::Page as NavPage;
+use crate::pointer::Look;
+use crate::scale::Scale;
+use crate::scene::{Op, View, stroke};
+use crate::sessions::{EMPTY, Eyes, Kind, Page, Row};
+use crate::theme::{Rgb, Theme};
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Board {
+    pub ops: Vec<Op>,
+    pub targets: Vec<(Rect, Zone)>,
+}
+
+const STOP_LABEL: &str = "Stop agent";
+
+struct Columns {
+    session: Rect,
+    gateway: Rect,
+    uptime: Rect,
+    activity: Rect,
+    actions: Rect,
+}
+
+struct Painter<'a, M> {
+    s: Scale,
+    t: &'a Theme,
+    v: &'a View,
+    m: &'a M,
+    clip: Rect,
+    board: Board,
+}
+
+pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Measure) -> Board {
+    if v.nav.selected() != NavPage::Sessions {
+        return Board::default();
+    }
+    let mut p = Painter {
+        s,
+        t,
+        v,
+        m,
+        clip: l.content,
+        board: Board::default(),
+    };
+    p.push(Op::Clip(l.content));
+    let card = p.status(l.content, page);
+    if let Some(rows) = &page.rows {
+        let heading = Rect::new(card.x, card.bottom() + s.px(18.0), card.w, s.px(20.0));
+        p.text(Font::Heading, "Sessions", heading, t.text);
+        p.table(
+            Rect::new(card.x, heading.bottom() + s.px(18.0), card.w, 0),
+            rows,
+        );
+    }
+    p.push(Op::Unclip);
+    p.board
+}
+
+fn inset(r: Rect, d: i32) -> Rect {
+    Rect::new(r.x + d, r.y + d, r.w - 2 * d, r.h - 2 * d)
+}
+
+impl<M: Measure> Painter<'_, M> {
+    fn push(&mut self, op: Op) {
+        self.board.ops.push(op);
+    }
+
+    fn text(&mut self, font: Font, text: impl Into<Cow<'static, str>>, r: Rect, c: Rgb) {
+        self.push(Op::Text(font, text.into(), r, c));
+    }
+
+    fn icon(&mut self, icon: Icon, centre: Rect, size: f32, c: Rgb) {
+        let px = self.s.px(size);
+        let r = Rect::new(
+            centre.x + (centre.w - px) / 2,
+            centre.y + (centre.h - px) / 2,
+            px,
+            px,
+        );
+        self.push(Op::Icon(icon, r, stroke(self.s, &icon, size), c));
+    }
+
+    fn framed(&mut self, r: Rect, radius: f32, fill: Rgb) {
+        let edge = self.s.hairline();
+        let radius = self.s.pxf(radius);
+        self.push(Op::Round(r, radius, self.t.border));
+        self.push(Op::Round(inset(r, edge), radius - edge as f32, fill));
+    }
+
+    fn target(&mut self, r: Rect, zone: Zone) {
+        let bottom = r.bottom().min(self.clip.bottom());
+        if bottom > r.y {
+            self.board
+                .targets
+                .push((Rect::new(r.x, r.y, r.w, bottom - r.y), zone));
+        }
+    }
+
+    fn status(&mut self, content: Rect, page: &Page) -> Rect {
+        let (s, t) = (self.s, self.t);
+        let status = &page.status;
+        let card = Rect::new(content.x, content.y, content.w, s.px(92.0));
+        self.framed(card, 12.0, t.card);
+        let logo = s.px(56.0);
+        let eyes = match status.eyes {
+            Eyes::Lit => Some(t.accent),
+            Eyes::Dim => Some(t.eyes_idle),
+            Eyes::Closed => None,
+        };
+        let logo = Rect::new(card.x + s.px(20.0), card.y + s.px(18.0), logo, logo);
+        self.push(Op::Logo(logo, eyes));
+        let x = logo.right() + s.px(16.0);
+        let button = status.stop.then(|| self.stop_button(card));
+        let right = button.map_or(card.right() - s.px(20.0), |b| b.x - s.px(16.0));
+        let (title, sub) = (s.px(28.0), s.px(18.0));
+        let top = card.y + (card.h - title - s.px(2.0) - sub) / 2;
+        let w = right - x;
+        self.text(
+            Font::Status,
+            status.title,
+            Rect::new(x, top, w, title),
+            t.text,
+        );
+        let subtitle = Rect::new(x, top + title + s.px(2.0), w, sub);
+        self.text(Font::Body, status.subtitle.clone(), subtitle, t.muted);
+        if let Some(button) = button {
+            self.stop(button);
+        }
+        card
+    }
+
+    fn stop_button(&self, card: Rect) -> Rect {
+        let s = self.s;
+        let text = self.m.width(Font::BodyStrong, STOP_LABEL);
+        let w = s.px(14.0) + s.px(16.0) + s.px(8.0) + text + s.px(14.0);
+        let h = s.px(32.0);
+        let right = card.right() - s.px(20.0);
+        Rect::new(right - w, card.y + (card.h - h) / 2, w, h)
+    }
+
+    fn stop(&mut self, button: Rect) {
+        let (s, t) = (self.s, self.t);
+        let fill = match self.v.pointer.look(Zone::StopAgent) {
+            Look::Rest => t.card,
+            Look::Hover => t.caption_hover,
+            Look::Pressed => t.caption_pressed,
+        };
+        self.framed(button, 6.0, fill);
+        let glyph = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
+        self.icon(icons::STOP, glyph, 16.0, t.text);
+        let x = glyph.right() + s.px(8.0);
+        let label = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
+        self.text(Font::BodyStrong, STOP_LABEL, label, t.text);
+        self.target(button, Zone::StopAgent);
+    }
+
+    fn columns(&self, row: Rect) -> Columns {
+        let s = self.s;
+        let gap = s.px(16.0);
+        let right = row.right() - s.px(16.0);
+        let column = |right: i32, w: f32| Rect::new(right - s.px(w), row.y, s.px(w), row.h);
+        let actions = column(right, 64.0);
+        let activity = column(actions.x - gap, 70.0);
+        let uptime = column(activity.x - gap, 80.0);
+        let gateway = column(uptime.x - gap, 210.0);
+        let x = row.x + s.px(72.0);
+        Columns {
+            session: Rect::new(x, row.y, (gateway.x - gap - x).max(0), row.h),
+            gateway,
+            uptime,
+            activity,
+            actions,
+        }
+    }
+
+    fn rule(&mut self, table: Rect, bottom: i32) {
+        let edge = self.s.hairline();
+        let line = Rect::new(table.x + edge, bottom - edge, table.w - 2 * edge, edge);
+        self.push(Op::Fill(line, self.t.border));
+    }
+
+    fn table(&mut self, top: Rect, rows: &[Row]) {
+        let (s, t) = (self.s, self.t);
+        let (header_h, row_h) = (s.px(36.0), s.px(60.0));
+        let lines = rows.len().max(1) as i32;
+        let table = Rect::new(top.x, top.y, top.w, header_h + lines * row_h);
+        self.framed(table, 10.0, t.card);
+        let header = Rect::new(table.x, table.y, table.w, header_h);
+        let c = self.columns(header);
+        for (label, col) in [
+            ("Session", c.session),
+            ("Gateway", c.gateway),
+            ("Uptime", c.uptime),
+            ("Activity", c.activity),
+        ] {
+            self.text(Font::Small, label, col, t.muted);
+        }
+        self.rule(table, header.bottom());
+        if rows.is_empty() {
+            let pad = s.px(16.0);
+            let r = Rect::new(table.x + pad, header.bottom(), table.w - 2 * pad, row_h);
+            self.text(Font::Body, EMPTY, r, t.muted);
+            return;
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let r = Rect::new(table.x, header.bottom() + i as i32 * row_h, table.w, row_h);
+            if r.y >= self.clip.bottom() {
+                break;
+            }
+            self.row(r, row);
+            if i + 1 < rows.len() {
+                self.rule(table, r.bottom());
+            }
+        }
+    }
+
+    fn row(&mut self, r: Rect, row: &Row) {
+        let (s, t) = (self.s, self.t);
+        let c = self.columns(r);
+        let tile = s.px(40.0);
+        let tile = Rect::new(r.x + s.px(16.0), r.y + (r.h - tile) / 2, tile, tile);
+        self.push(Op::Round(tile, s.pxf(10.0), t.tile));
+        let icon = match row.kind {
+            Kind::Browser => icons::GLOBE,
+            Kind::Device => icons::DEVICE,
+        };
+        self.icon(icon, tile, 20.0, t.text);
+
+        let line1 = |col: Rect| Rect::new(col.x, r.y + s.px(11.0), col.w, s.px(20.0));
+        let line2 = |col: Rect| Rect::new(col.x, r.y + s.px(31.0), col.w, s.px(18.0));
+
+        let first = line1(c.session);
+        let w = self.m.width(Font::BodyStrong, row.title).min(first.w);
+        self.text(Font::BodyStrong, row.title, Rect { w, ..first }, t.text);
+        let number = Rect::new(first.x + w, first.y, first.w - w, first.h);
+        self.text(Font::Small, row.number.clone(), number, t.muted);
+        self.text(Font::Small, row.auth, line2(c.session), t.muted);
+
+        let first = line1(c.gateway);
+        let (pill_pad, pill_gap) = (s.px(7.0), s.px(6.0));
+        let pill_w = self.m.width(Font::Pill, row.route) + 2 * pill_pad;
+        let room = (first.w - pill_gap - pill_w).max(0);
+        let w = self.m.width(Font::BodyStrong, &row.gateway).min(room);
+        self.text(
+            Font::BodyStrong,
+            row.gateway.clone(),
+            Rect { w, ..first },
+            t.text,
+        );
+        let pill_h = s.px(16.0);
+        let x = first.x + w + pill_gap;
+        let pill = Rect::new(
+            x,
+            first.y + (first.h - pill_h) / 2,
+            pill_w.min(first.right() - x),
+            pill_h,
+        );
+        self.push(Op::Round(pill, s.pxf(8.0), t.tile));
+        let route = Rect::new(pill.x + pill_pad, pill.y, pill.w - 2 * pill_pad, pill.h);
+        self.text(Font::Pill, row.route, route, t.pill_text);
+        self.text(Font::Mono, row.address.clone(), line2(c.gateway), t.muted);
+
+        self.text(Font::Body, row.uptime.clone(), c.uptime, t.text);
+
+        let (dot_w, dot_h, dot_gap) = (s.px(5.0), s.px(7.0), s.px(4.0));
+        let dot = if row.active { t.accent } else { t.eyes_idle };
+        let radius = s.pxf(3.0).min(dot_w as f32 / 2.0);
+        let y = r.y + (r.h - dot_h) / 2;
+        for i in 0..2 {
+            let x = c.activity.x + i * (dot_w + dot_gap);
+            self.push(Op::Round(Rect::new(x, y, dot_w, dot_h), radius, dot));
+        }
+        let x = c.activity.x + 2 * dot_w + dot_gap + s.px(8.0);
+        let label = if row.active { "Active" } else { "Idle" };
+        let state = Rect::new(x, r.y, c.activity.right() - x, r.h);
+        self.text(Font::Small, label, state, t.muted);
+
+        self.revoke(c.actions, row.id);
+    }
+
+    fn revoke(&mut self, col: Rect, id: u64) {
+        let (s, t) = (self.s, self.t);
+        let size = s.px(32.0);
+        let button = Rect::new(col.right() - size, col.y + (col.h - size) / 2, size, size);
+        let zone = Zone::Revoke(id);
+        let (fill, ink) = match self.v.pointer.look(zone) {
+            Look::Rest => (None, t.muted),
+            Look::Hover => (Some(t.revoke_hover), t.revoke_glyph),
+            Look::Pressed => (Some(t.revoke_pressed), t.revoke_glyph),
+        };
+        if let Some(fill) = fill {
+            self.push(Op::Round(button, s.pxf(6.0), fill));
+        }
+        self.icon(icons::POWER, button, 18.0, ink);
+        self.target(button, zone);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fonts::Font;
+    use crate::icons;
+    use crate::nav::{Nav, Page as NavPage};
+    use crate::sessions::{EMPTY, Eyes, Kind, Row, Status};
+
+    const T: Theme = Theme::LIGHT;
+    const S: Scale = Scale { dpi: 96 };
+    const STOP: Rect = Rect::new(870, 110, 122, 32);
+    const FIRST_ROW: i32 = 264;
+
+    struct Chars;
+
+    impl Measure for Chars {
+        fn width(&self, _font: Font, text: &str) -> i32 {
+            7 * text.chars().count() as i32
+        }
+    }
+
+    fn layout() -> Layout {
+        Layout::new(1040, 680, S, true)
+    }
+
+    fn running(rows: Vec<Row>) -> Page {
+        let active = rows.iter().any(|r| r.active);
+        Page {
+            status: Status {
+                title: if active { "Relaying" } else { "Idle" },
+                subtitle: "Agent running on loopback only · 1 session · 1 active".to_owned(),
+                eyes: if active { Eyes::Lit } else { Eyes::Dim },
+                stop: true,
+            },
+            rows: Some(rows),
+        }
+    }
+
+    fn stopped() -> Page {
+        Page {
+            status: Status {
+                title: "Stopped",
+                subtitle: "The agent is not running".to_owned(),
+                eyes: Eyes::Closed,
+                stop: false,
+            },
+            rows: None,
+        }
+    }
+
+    fn row(id: u64) -> Row {
+        Row {
+            id,
+            kind: Kind::Browser,
+            title: "Chrome",
+            number: format!(" #{id}"),
+            auth: "OS user",
+            gateway: "edge.example".to_owned(),
+            route: "All",
+            address: "edge.example".to_owned(),
+            uptime: "5 min".to_owned(),
+            active: true,
+        }
+    }
+
+    fn draw_with(page: &Page, v: &View) -> Board {
+        board(&layout(), S, &T, v, page, &Chars)
+    }
+
+    fn draw(page: &Page) -> Board {
+        draw_with(page, &View::default())
+    }
+
+    fn inside(ops: &[Op], r: Rect) -> Vec<Op> {
+        let within = |o: Rect| {
+            o.x >= r.x && o.y >= r.y && o.right() <= r.right() && o.bottom() <= r.bottom()
+        };
+        ops.iter()
+            .filter(|op| match op {
+                Op::Fill(o, _)
+                | Op::Round(o, ..)
+                | Op::Icon(_, o, ..)
+                | Op::Text(_, _, o, _)
+                | Op::Logo(o, _) => within(*o),
+                Op::Clip(_) | Op::Unclip => false,
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn text(font: Font, s: &str, r: Rect, c: crate::theme::Rgb) -> Op {
+        Op::Text(font, s.to_owned().into(), r, c)
+    }
+
+    #[test]
+    fn other_pages_draw_nothing() {
+        let mut nav = Nav::default();
+        nav.select(NavPage::Gateways);
+        let v = View {
+            nav,
+            ..View::default()
+        };
+        assert_eq!(draw_with(&running(vec![row(1)]), &v), Board::default());
+    }
+
+    #[test]
+    fn the_status_card_shows_the_logo_title_and_subtitle_inside_the_content_clip() {
+        let l = layout();
+        let ops = draw(&running(vec![row(1)])).ops;
+        assert_eq!(ops.first(), Some(&Op::Clip(l.content)));
+        assert_eq!(ops.last(), Some(&Op::Unclip));
+        assert_eq!(
+            ops[1..6],
+            [
+                Op::Round(Rect::new(248, 80, 764, 92), 12.0, T.border),
+                Op::Round(Rect::new(249, 81, 762, 90), 11.0, T.card),
+                Op::Logo(Rect::new(268, 98, 56, 56), Some(T.accent)),
+                text(
+                    Font::Status,
+                    "Relaying",
+                    Rect::new(340, 102, 514, 28),
+                    T.text
+                ),
+                text(
+                    Font::Body,
+                    "Agent running on loopback only · 1 session · 1 active",
+                    Rect::new(340, 132, 514, 18),
+                    T.muted
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_logo_eyes_follow_the_status() {
+        let logo = |page: &Page| {
+            draw(page)
+                .ops
+                .into_iter()
+                .find_map(|op| match op {
+                    Op::Logo(_, eyes) => Some(eyes),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(logo(&running(vec![row(1)])), Some(T.accent));
+        let mut idle = row(1);
+        idle.active = false;
+        assert_eq!(logo(&running(vec![idle])), Some(T.eyes_idle));
+        assert_eq!(logo(&stopped()), None);
+    }
+
+    #[test]
+    fn a_stopped_agent_has_a_wide_subtitle_and_no_button_heading_or_table() {
+        let b = draw(&stopped());
+        assert!(b.targets.is_empty());
+        assert_eq!(
+            b.ops[4..],
+            [
+                text(
+                    Font::Status,
+                    "Stopped",
+                    Rect::new(340, 102, 652, 28),
+                    T.text
+                ),
+                text(
+                    Font::Body,
+                    "The agent is not running",
+                    Rect::new(340, 132, 652, 18),
+                    T.muted
+                ),
+                Op::Unclip,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_stop_button_has_a_border_icon_and_label() {
+        let b = draw(&running(vec![]));
+        assert_eq!(b.targets, [(STOP, Zone::StopAgent)]);
+        assert_eq!(
+            inside(&b.ops, STOP),
+            [
+                Op::Round(STOP, 6.0, T.border),
+                Op::Round(Rect::new(871, 111, 120, 30), 5.0, T.card),
+                Op::Icon(icons::STOP, Rect::new(884, 118, 16, 16), 1.0, T.text),
+                text(
+                    Font::BodyStrong,
+                    "Stop agent",
+                    Rect::new(908, 110, 70, 32),
+                    T.text
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_stop_button_tints_on_hover_and_press() {
+        let fill = |v: &View| inside(&draw_with(&running(vec![]), v).ops, STOP)[1].clone();
+        let mut v = View::default();
+        v.pointer.moved(Zone::StopAgent);
+        assert_eq!(
+            fill(&v),
+            Op::Round(Rect::new(871, 111, 120, 30), 5.0, T.caption_hover)
+        );
+        v.pointer.down(Zone::StopAgent);
+        assert_eq!(
+            fill(&v),
+            Op::Round(Rect::new(871, 111, 120, 30), 5.0, T.caption_pressed)
+        );
+    }
+
+    #[test]
+    fn the_table_has_a_heading_and_column_headers() {
+        let ops = draw(&running(vec![row(1)])).ops;
+        assert!(ops.contains(&text(
+            Font::Heading,
+            "Sessions",
+            Rect::new(248, 190, 764, 20),
+            T.text
+        )));
+        let header = Rect::new(248, 228, 764, 36);
+        assert_eq!(
+            inside(&ops, header),
+            [
+                text(
+                    Font::Small,
+                    "Session",
+                    Rect::new(320, 228, 188, 36),
+                    T.muted
+                ),
+                text(
+                    Font::Small,
+                    "Gateway",
+                    Rect::new(524, 228, 210, 36),
+                    T.muted
+                ),
+                text(Font::Small, "Uptime", Rect::new(750, 228, 80, 36), T.muted),
+                text(
+                    Font::Small,
+                    "Activity",
+                    Rect::new(846, 228, 70, 36),
+                    T.muted
+                ),
+                Op::Fill(Rect::new(249, 263, 762, 1), T.border),
+            ]
+        );
+        let card = Rect::new(248, 228, 764, 96);
+        assert!(ops.contains(&Op::Round(card, 10.0, T.border)));
+        assert!(ops.contains(&Op::Round(Rect::new(249, 229, 762, 94), 9.0, T.card)));
+    }
+
+    #[test]
+    fn a_row_shows_its_session_gateway_uptime_activity_and_revoke_button() {
+        let ops = draw(&running(vec![row(12)])).ops;
+        let y = FIRST_ROW;
+        assert_eq!(
+            inside(&ops, Rect::new(248, y, 764, 60)),
+            [
+                Op::Round(Rect::new(264, y + 10, 40, 40), 10.0, T.tile),
+                Op::Icon(icons::GLOBE, Rect::new(274, y + 20, 20, 20), 1.0, T.text),
+                text(
+                    Font::BodyStrong,
+                    "Chrome",
+                    Rect::new(320, y + 11, 42, 20),
+                    T.text
+                ),
+                text(
+                    Font::Small,
+                    " #12",
+                    Rect::new(362, y + 11, 146, 20),
+                    T.muted
+                ),
+                text(
+                    Font::Small,
+                    "OS user",
+                    Rect::new(320, y + 31, 188, 18),
+                    T.muted
+                ),
+                text(
+                    Font::BodyStrong,
+                    "edge.example",
+                    Rect::new(524, y + 11, 84, 20),
+                    T.text
+                ),
+                Op::Round(Rect::new(614, y + 13, 35, 16), 8.0, T.tile),
+                text(
+                    Font::Pill,
+                    "All",
+                    Rect::new(621, y + 13, 21, 16),
+                    T.pill_text
+                ),
+                text(
+                    Font::Mono,
+                    "edge.example",
+                    Rect::new(524, y + 31, 210, 18),
+                    T.muted
+                ),
+                text(Font::Body, "5 min", Rect::new(750, y, 80, 60), T.text),
+                Op::Round(Rect::new(846, y + 26, 5, 7), 2.5, T.accent),
+                Op::Round(Rect::new(855, y + 26, 5, 7), 2.5, T.accent),
+                text(Font::Small, "Active", Rect::new(868, y, 48, 60), T.muted),
+                Op::Icon(icons::POWER, Rect::new(971, y + 21, 18, 18), 1.0, T.muted),
+            ]
+        );
+    }
+
+    #[test]
+    fn device_rows_use_the_device_icon_and_idle_rows_grey_pills() {
+        let mut device = row(3);
+        device.kind = Kind::Device;
+        device.active = false;
+        let ops = draw(&running(vec![device])).ops;
+        let row = inside(&ops, Rect::new(248, FIRST_ROW, 764, 60));
+        assert!(matches!(row[1], Op::Icon(icon, ..) if icon == icons::DEVICE));
+        assert_eq!(
+            row[10],
+            Op::Round(Rect::new(846, FIRST_ROW + 26, 5, 7), 2.5, T.eyes_idle)
+        );
+        assert_eq!(
+            row[12],
+            text(
+                Font::Small,
+                "Idle",
+                Rect::new(868, FIRST_ROW, 48, 60),
+                T.muted
+            )
+        );
+    }
+
+    #[test]
+    fn rows_are_separated_but_the_last_has_no_border() {
+        let ops = draw(&running(vec![row(1), row(2)])).ops;
+        let border = |y| Op::Fill(Rect::new(249, y, 762, 1), T.border);
+        assert!(ops.contains(&border(FIRST_ROW + 59)));
+        assert!(!ops.contains(&border(FIRST_ROW + 119)));
+    }
+
+    #[test]
+    fn every_row_has_a_revoke_target_that_tints_red() {
+        let b = draw(&running(vec![row(1), row(2)]));
+        let button = |i: i32| Rect::new(964, FIRST_ROW + 60 * i + 14, 32, 32);
+        assert_eq!(
+            b.targets,
+            [
+                (STOP, Zone::StopAgent),
+                (button(0), Zone::Revoke(1)),
+                (button(1), Zone::Revoke(2)),
+            ]
+        );
+        let mut v = View::default();
+        v.pointer.moved(Zone::Revoke(2));
+        let glyph = Op::Icon(
+            icons::POWER,
+            Rect::new(971, FIRST_ROW + 81, 18, 18),
+            1.0,
+            T.revoke_glyph,
+        );
+        let page = running(vec![row(1), row(2)]);
+        assert_eq!(
+            inside(&draw_with(&page, &v).ops, button(1)),
+            [Op::Round(button(1), 6.0, T.revoke_hover), glyph.clone()]
+        );
+        v.pointer.down(Zone::Revoke(2));
+        assert_eq!(
+            inside(&draw_with(&page, &v).ops, button(1)),
+            [Op::Round(button(1), 6.0, T.revoke_pressed), glyph]
+        );
+    }
+
+    #[test]
+    fn an_empty_list_says_how_to_start_a_session() {
+        let ops = draw(&running(vec![])).ops;
+        assert_eq!(
+            inside(&ops, Rect::new(248, FIRST_ROW, 764, 60)),
+            [text(
+                Font::Body,
+                EMPTY,
+                Rect::new(264, FIRST_ROW, 732, 60),
+                T.muted
+            )]
+        );
+        assert!(ops.contains(&Op::Round(Rect::new(248, 228, 764, 96), 10.0, T.border)));
+    }
+
+    #[test]
+    fn long_text_is_given_only_its_column() {
+        let mut long = row(1);
+        long.gateway = "a-very-long-gateway-name.example.com".to_owned();
+        let ops = draw(&running(vec![long])).ops;
+        let row = inside(&ops, Rect::new(248, FIRST_ROW, 764, 60));
+        assert_eq!(
+            row[5],
+            text(
+                Font::BodyStrong,
+                "a-very-long-gateway-name.example.com",
+                Rect::new(524, FIRST_ROW + 11, 169, 20),
+                T.text
+            )
+        );
+        assert_eq!(
+            row[6],
+            Op::Round(Rect::new(699, FIRST_ROW + 13, 35, 16), 8.0, T.tile)
+        );
+    }
+
+    #[test]
+    fn rows_below_the_content_are_clipped_and_lose_their_targets() {
+        let rows = (1..=9).map(row).collect();
+        let b = draw(&running(rows));
+        let ids: Vec<_> = b.targets.iter().map(|(_, z)| *z).collect();
+        assert_eq!(ids[1..], (1..=7).map(Zone::Revoke).collect::<Vec<_>>()[..]);
+        assert_eq!(b.targets[7].0, Rect::new(964, 638, 32, 18));
+        assert!(
+            !b.ops
+                .iter()
+                .any(|op| matches!(op, Op::Text(_, s, ..) if s == " #8"))
+        );
+        assert_eq!(b.ops.last(), Some(&Op::Unclip));
+    }
+
+    #[test]
+    fn sizes_scale_with_dpi() {
+        let s = Scale::new(192);
+        let l = Layout::new(2080, 1360, s, true);
+        let b = board(&l, s, &T, &View::default(), &running(vec![row(1)]), &Chars);
+        assert_eq!(
+            b.ops[1],
+            Op::Round(Rect::new(496, 160, 1528, 184), 24.0, T.border)
+        );
+        assert_eq!(
+            b.ops[2],
+            Op::Round(Rect::new(498, 162, 1524, 180), 22.0, T.card)
+        );
+        assert_eq!(
+            b.ops[3],
+            Op::Logo(Rect::new(536, 196, 112, 112), Some(T.accent))
+        );
+        assert_eq!(b.targets[1].0.w, 64);
+    }
+}
