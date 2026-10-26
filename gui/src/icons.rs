@@ -460,6 +460,47 @@ pub const MORE: Icon = Icon {
     ],
 };
 
+pub const EXTERNAL: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        Shape::Path(&[
+            Cmd::Move(13.5, 4.5),
+            Cmd::Line(19.5, 4.5),
+            Cmd::Line(19.5, 10.5),
+        ]),
+        Shape::Path(&line(19.5, 4.5, 11.5, 12.5)),
+        Shape::Path(&[
+            Cmd::Move(17.5, 14.0),
+            Cmd::Line(17.5, 18.5),
+            Cmd::Arc {
+                cx: 16.0,
+                cy: 18.5,
+                r: 1.5,
+                start: 0.0,
+                sweep: 90.0,
+            },
+            Cmd::Line(6.0, 20.0),
+            Cmd::Arc {
+                cx: 6.0,
+                cy: 18.5,
+                r: 1.5,
+                start: 90.0,
+                sweep: 90.0,
+            },
+            Cmd::Line(4.5, 8.0),
+            Cmd::Arc {
+                cx: 6.0,
+                cy: 8.0,
+                r: 1.5,
+                start: 180.0,
+                sweep: 90.0,
+            },
+            Cmd::Line(10.5, 6.5),
+        ]),
+    ],
+};
+
 pub fn rail_icon(page: Page) -> Icon {
     match page {
         Page::Sessions => SESSIONS,
@@ -474,9 +515,9 @@ pub fn rail_icon(page: Page) -> Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 15] = [
+    const ALL: [Icon; 16] = [
         SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, GLOBE,
-        POWER, STOP, LOCK, PLUS, MORE,
+        POWER, STOP, LOCK, PLUS, MORE, EXTERNAL,
     ];
 
     #[test]

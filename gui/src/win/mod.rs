@@ -177,7 +177,9 @@ impl App {
     fn entries(&self) -> Vec<Entry> {
         match (self.view.popup, &self.update) {
             (Some(Popup::Picker), Some(update)) => menu::picker(&update.gateways),
-            (Some(Popup::Session(_)), Some(_)) => menu::session(),
+            (Some(Popup::Session(id)), Some(update)) => {
+                menu::session(&update.gateways, &update.state, id)
+            }
             _ => Vec::new(),
         }
     }
@@ -198,6 +200,11 @@ impl App {
             self.view.popup = None;
         }
         board.ops
+    }
+
+    fn portal(&self, id: u64) -> Option<String> {
+        let update = self.update.as_ref()?;
+        menu::portal(&update.gateways, &update.state, id).map(str::to_owned)
     }
 
     fn open(&mut self, popup: Popup) {
@@ -357,16 +364,21 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::Choose(index)) => {
-            with_app(hwnd, |app| {
+            let portal = with_app(hwnd, |app| {
                 let choice = app.entries().get(index).and_then(|entry| entry.choice);
                 app.dismiss();
                 match choice {
                     Some(Choice::Launch(row)) => app.launch(row),
                     Some(Choice::Details) => app.select(NavPage::Gateways),
+                    Some(Choice::Portal(id)) => return app.portal(id),
                     None => {}
                 }
+                None
             });
             rehover(hwnd);
+            if let Some(url) = portal.flatten() {
+                sys::open_https(hwnd, &url);
+            }
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,

@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use gateinto::link::Known;
 
+use crate::agent::AgentState;
+
 use crate::gateways;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
@@ -18,6 +20,7 @@ pub enum Popup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     Launch(usize),
+    Portal(u64),
     Details,
 }
 
@@ -51,12 +54,47 @@ pub fn picker(listing: &Result<Known, String>) -> Vec<Entry> {
     entries
 }
 
-pub fn session() -> Vec<Entry> {
-    vec![Entry {
+pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> Vec<Entry> {
+    let portal = portal(listing, state, id).map(|_| Entry {
+        icon: icons::EXTERNAL,
+        label: "Open portal page".into(),
+        choice: Some(Choice::Portal(id)),
+    });
+    let details = Entry {
         icon: icons::GATEWAYS,
         label: "Gateway details".into(),
         choice: Some(Choice::Details),
-    }]
+    };
+    portal.into_iter().chain([details]).collect()
+}
+
+pub fn portal<'a>(
+    listing: &'a Result<Known, String>,
+    state: &AgentState,
+    id: u64,
+) -> Option<&'a str> {
+    let AgentState::Running(sessions) = state else {
+        return None;
+    };
+    let session = sessions.iter().find(|session| session.id == id)?;
+    listing
+        .as_ref()
+        .ok()?
+        .gateways
+        .iter()
+        .find(|gateway| gateway.name.as_str() == session.gateway)?
+        .portal_url
+        .as_ref()
+        .map(|url| url.as_str())
+        .filter(|url| https(url))
+}
+
+pub fn https(url: &str) -> bool {
+    const SCHEME: &str = "https://";
+    url.len() > SCHEME.len()
+        && url
+            .get(..SCHEME.len())
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
 }
 
 pub fn dismisses(zone: Zone) -> bool {
@@ -76,6 +114,7 @@ pub fn place(anchor: Rect, (w, h): (i32, i32), bounds: Rect, gap: i32) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use gateinto::ipc::{SessionAuth, SessionInfo, SessionKind, SessionRoute};
     use gateinto::link::{KnownGateway, Source};
 
     use super::*;
@@ -130,16 +169,87 @@ mod tests {
         assert_eq!(picker(&Err("broken".to_owned())), [none]);
     }
 
+    fn session_info(id: u64, gateway: &str) -> SessionInfo {
+        SessionInfo {
+            id,
+            kind: SessionKind::Browser,
+            gateway: gateway.to_owned(),
+            upstream: "proxy.example.com:443".to_owned(),
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            route: SessionRoute::All,
+            auth: SessionAuth::OsUser,
+            started: 0,
+            tunnels: 0,
+            browser: None,
+        }
+    }
+
+    fn with_portal(name: &str, portal: &str) -> KnownGateway {
+        KnownGateway {
+            portal_url: Some(portal.parse().unwrap()),
+            ..gateway(name, "proxy.example.com")
+        }
+    }
+
+    fn details() -> Entry {
+        Entry {
+            icon: icons::GATEWAYS,
+            label: "Gateway details".into(),
+            choice: Some(Choice::Details),
+        }
+    }
+
+    fn running() -> AgentState {
+        AgentState::Running(vec![session_info(3, "office"), session_info(4, "lab")])
+    }
+
     #[test]
-    fn a_session_menu_leads_to_the_gateway_details() {
+    fn a_session_menu_opens_its_gateway_portal_and_details() {
+        let listing = known(vec![
+            gateway("lab", "lab.example.com"),
+            with_portal("office", "https://portal.example.com/start"),
+        ]);
+        let portal = Entry {
+            icon: icons::EXTERNAL,
+            label: "Open portal page".into(),
+            choice: Some(Choice::Portal(3)),
+        };
+        assert_eq!(session(&listing, &running(), 3), [portal, details()]);
         assert_eq!(
-            session(),
-            [Entry {
-                icon: icons::GATEWAYS,
-                label: "Gateway details".into(),
-                choice: Some(Choice::Details),
-            }]
+            super::portal(&listing, &running(), 3),
+            Some("https://portal.example.com/start")
         );
+    }
+
+    #[test]
+    fn without_a_known_portal_the_session_menu_only_has_details() {
+        let listing = known(vec![gateway("lab", "lab.example.com")]);
+        assert_eq!(session(&listing, &running(), 4), [details()]);
+        assert_eq!(super::portal(&listing, &running(), 4), None);
+        let elsewhere = known(vec![with_portal("lab", "https://lab.example.com/")]);
+        assert_eq!(super::portal(&elsewhere, &running(), 3), None);
+        assert_eq!(super::portal(&elsewhere, &running(), 9), None);
+        assert_eq!(super::portal(&elsewhere, &AgentState::Stopped, 4), None);
+        assert_eq!(
+            session(&Err("broken".to_owned()), &running(), 4),
+            [details()]
+        );
+    }
+
+    #[test]
+    fn only_https_addresses_count_as_portals() {
+        assert!(https("https://portal.example.com/"));
+        assert!(https("HTTPS://portal.example.com/"));
+        for url in [
+            "http://portal.example.com/",
+            "file:///C:/Windows/notepad.exe",
+            "javascript:alert(1)",
+            "C:\\Windows\\notepad.exe",
+            "https:",
+            "",
+        ] {
+            assert!(!https(url), "{url}");
+        }
     }
 
     #[test]

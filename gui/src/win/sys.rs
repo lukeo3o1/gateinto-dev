@@ -1,4 +1,5 @@
 use std::ffi::CStr;
+use std::ptr::null;
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSY, ReleaseDC};
@@ -7,13 +8,33 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, GetSystemMetrics, SM_CXPADDEDBORDER, SM_CYFRAME, SPI_GETWHEELSCROLLLINES,
-    SYSTEM_METRICS_INDEX, SetProcessDPIAware, SystemParametersInfoW,
+    SW_SHOWNORMAL, SYSTEM_METRICS_INDEX, SetProcessDPIAware, SystemParametersInfoW,
 };
+
+use crate::menu;
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+pub fn open_https(hwnd: HWND, url: &str) {
+    if !menu::https(url) {
+        return;
+    }
+    let (verb, url) = (wide("open"), wide(url));
+    unsafe {
+        ShellExecuteW(
+            hwnd,
+            verb.as_ptr(),
+            url.as_ptr(),
+            null(),
+            null(),
+            SW_SHOWNORMAL,
+        )
+    };
 }
 
 fn lookup(module: &str, name: &CStr, load: bool) -> Option<unsafe extern "system" fn() -> isize> {
