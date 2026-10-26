@@ -1,13 +1,13 @@
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
-    IDWriteTextLayout,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory,
+    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::core::{BOOL, PCWSTR, Result};
 
 use super::sys::wide;
-use crate::fonts::{self, Font, MONO_FAMILIES, UI_FAMILIES};
+use crate::fonts::{self, Font, MONO_FAMILIES, Measure, UI_FAMILIES};
 use crate::scale::Scale;
 
 pub struct Fonts {
@@ -78,5 +78,18 @@ impl Fonts {
                 .CreateTextLayout(&text, &self.formats[font as usize], w, h)
         }
         .ok()
+    }
+}
+
+impl Measure for Fonts {
+    fn width(&self, font: Font, text: &str) -> i32 {
+        let Some(layout) = self.layout(font, text, f32::MAX, f32::MAX) else {
+            return 0;
+        };
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        match unsafe { layout.GetMetrics(&mut metrics) } {
+            Ok(()) => metrics.widthIncludingTrailingWhitespace.ceil() as i32,
+            Err(_) => 0,
+        }
     }
 }
