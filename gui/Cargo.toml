@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 gateinto = { path = ".." }
-tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "net", "sync", "time", "macros"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["test-util"] }

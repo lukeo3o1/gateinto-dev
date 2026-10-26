@@ -1,4 +1,5 @@
 mod d2d;
+mod link;
 mod sys;
 mod text;
 
@@ -16,9 +17,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT, HTCLOSE,
-    HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL, IDC_ARROW,
-    IMAGE_ICON, IsZoomed, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG,
+    GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT,
+    HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
+    IDC_ARROW, IMAGE_ICON, IsZoomed, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG,
     MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SC_CLOSE,
     SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_SHOW,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX,
@@ -27,16 +28,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY,
     WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
     WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WindowFromPoint,
 };
 
+use gateinto::clock::unix_now;
+
+use crate::board::{Board, board};
 use crate::frame::Frame;
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
 use crate::pointer::Action;
 use crate::scale::Scale;
 use crate::scene::{View, scene};
+use crate::sessions;
 use crate::theme::Theme;
+use crate::worker::{Command, Update};
 use d2d::Graphics;
+use link::{Link, WM_AGENT};
 use sys::wide;
 use text::Fonts;
 
@@ -91,6 +99,8 @@ struct App {
     view: View,
     targets: Vec<(Rect, Zone)>,
     icons: Icons,
+    update: Option<Update>,
+    link: Link,
 }
 
 fn choose_frame() -> Frame {
@@ -113,12 +123,34 @@ impl App {
             layout,
             view: View::default(),
             targets: Vec::new(),
+            update: None,
+            link: Link::start(hwnd),
         })
     }
 
     fn relayout(&mut self) {
         self.layout = measure(self.hwnd, self.s, self.frame);
+        self.retarget();
         self.invalidate();
+    }
+
+    fn board(&self) -> Board {
+        let Some(update) = &self.update else {
+            return Board::default();
+        };
+        let page = sessions::page(&update.state, update.failure.as_deref(), unix_now());
+        board(
+            &self.layout,
+            self.s,
+            &Theme::LIGHT,
+            &self.view,
+            &page,
+            &self.fonts,
+        )
+    }
+
+    fn retarget(&mut self) {
+        self.targets = self.board().targets;
     }
 
     fn invalidate(&self) {
@@ -215,16 +247,24 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         Some(Action::Select(page)) => {
             with_app(hwnd, |app| {
                 if app.view.nav.select(page) {
+                    app.retarget();
                     app.invalidate();
                 }
             });
+            return;
+        }
+        Some(Action::StopAgent) => {
+            with_app(hwnd, |app| app.link.send(Command::Stop));
+            return;
+        }
+        Some(Action::Revoke(id)) => {
+            with_app(hwnd, |app| app.link.send(Command::Close(id)));
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
         Some(Action::Close) => SC_CLOSE,
-        Some(Action::StopAgent | Action::Revoke(_)) => return,
     };
     unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0) };
 }
@@ -234,12 +274,59 @@ fn on_paint(hwnd: HWND) {
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
     with_app(hwnd, |app| {
         let (w, h) = client_size(hwnd);
-        let ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
+        let mut ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
+        let board = app.board();
+        ops.extend(board.ops);
+        app.targets = board.targets;
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
         }
     });
     unsafe { EndPaint(hwnd, &ps) };
+}
+
+fn on_agent(hwnd: HWND) {
+    let delivered = with_app(hwnd, |app| {
+        let Some(update) = app.link.take() else {
+            return false;
+        };
+        let before = app.update.as_ref().map(|u| u.state.ids());
+        if before != Some(update.state.ids()) {
+            app.view.pointer.sessions_changed();
+        }
+        app.update = Some(update);
+        app.retarget();
+        app.invalidate();
+        true
+    });
+    if delivered == Some(true) {
+        rehover(hwnd);
+    }
+}
+
+fn rehover(hwnd: HWND) {
+    let mut p = POINT::default();
+    if unsafe { GetCursorPos(&mut p) } == 0 || unsafe { WindowFromPoint(p) } != hwnd {
+        return;
+    }
+    unsafe { ScreenToClient(hwnd, &mut p) };
+    let (w, h) = client_size(hwnd);
+    if !Rect::new(0, 0, w, h).contains(p.x, p.y) {
+        return;
+    }
+    let inside = with_app(hwnd, |app| {
+        let zone = app.zone(p.x, p.y);
+        if hit_code(zone) != HTCLIENT {
+            return false;
+        }
+        if app.view.pointer.moved(zone) {
+            app.invalidate();
+        }
+        true
+    });
+    if inside == Some(true) {
+        track(hwnd, TME_LEAVE);
+    }
 }
 
 fn on_nc_calc_size(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
@@ -429,6 +516,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_PAINT => {
             on_paint(hwnd);
+            Some(0)
+        }
+        WM_AGENT => {
+            on_agent(hwnd);
             Some(0)
         }
         WM_ERASEBKGND => Some(1),
