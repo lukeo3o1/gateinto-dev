@@ -241,7 +241,9 @@ fn hit_code(zone: Zone) -> u32 {
         Zone::Minimize => HTMINBUTTON,
         Zone::Maximize => HTMAXBUTTON,
         Zone::Close => HTCLOSE,
-        Zone::Nav(_) | Zone::StopAgent | Zone::Revoke(_) | Zone::Client => HTCLIENT,
+        Zone::Nav(_) | Zone::StopAgent | Zone::Revoke(_) | Zone::StartBrowser(_) | Zone::Client => {
+            HTCLIENT
+        }
     }
 }
 
@@ -272,6 +274,15 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Revoke(id)) => {
             with_app(hwnd, |app| app.link.send(Command::Close(id)));
+            return;
+        }
+        Some(Action::StartBrowser(row)) => {
+            with_app(hwnd, |app| {
+                let names = app.update.as_ref().map(|u| gateways::names(&u.gateways));
+                if let Some(name) = names.and_then(|names| names.into_iter().nth(row)) {
+                    app.link.send(Command::Launch(name));
+                }
+            });
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,
@@ -310,6 +321,10 @@ fn on_agent(hwnd: HWND) {
         let before = app.update.as_ref().map(|u| u.state.ids());
         if before != Some(update.state.ids()) {
             app.view.pointer.sessions_changed();
+        }
+        let before = app.update.as_ref().map(|u| gateways::names(&u.gateways));
+        if before != Some(gateways::names(&update.gateways)) {
+            app.view.pointer.gateways_changed();
         }
         app.update = Some(update);
         app.retarget();

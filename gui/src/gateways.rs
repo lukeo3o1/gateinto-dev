@@ -11,10 +11,10 @@ use crate::sessions::gateway_label;
 pub const SUBTITLE: &str = "Remote HTTPS proxies this device can relay through";
 pub const EMPTY: &str = "No gateways. Open a gateinto:// link or add one to the config file.";
 pub const FOOTNOTE: &str = "From the config file, read-only here.";
+pub const START: &str = "Start browser";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
-    pub name: GatewayName,
     pub label: String,
     pub address: String,
     pub sessions: String,
@@ -71,6 +71,12 @@ pub fn page(listing: &Result<Known, String>, state: &AgentState, failure: Option
     }
 }
 
+pub fn names(listing: &Result<Known, String>) -> Vec<GatewayName> {
+    listing.as_ref().map_or(Vec::new(), |known| {
+        known.gateways.iter().map(|g| g.name.clone()).collect()
+    })
+}
+
 fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
     let open: Vec<_> = sessions
         .iter()
@@ -78,7 +84,6 @@ fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
         .collect();
     let address = address(gateway.host.as_deref(), gateway.port);
     Row {
-        name: gateway.name.clone(),
         label: gateway_label(gateway.name.as_str(), &address),
         sessions: match open.len() {
             0 => "No sessions".to_owned(),
@@ -169,7 +174,6 @@ mod tests {
             Page {
                 subtitle: SUBTITLE.to_owned(),
                 rows: vec![Row {
-                    name: name("office"),
                     label: "office".to_owned(),
                     address: "proxy.example.com".to_owned(),
                     sessions: "1 session".to_owned(),
@@ -264,6 +268,7 @@ mod tests {
             "No gateways. Open a gateinto:// link or add one to the config file."
         );
         assert_eq!(FOOTNOTE, "From the config file, read-only here.");
+        assert_eq!(START, "Start browser");
         assert_eq!(
             SUBTITLE,
             "Remote HTTPS proxies this device can relay through"
@@ -302,6 +307,23 @@ mod tests {
             super::page(&invalid, &AgentState::Stopped, None).subtitle,
             "x.toml: bad"
         );
+    }
+
+    #[test]
+    fn names_follow_the_row_order() {
+        let listing = known(vec![
+            office(),
+            gateway("home", Some("home.example"), None, Source::Linked),
+        ]);
+        let rows = page(&listing, &AgentState::Stopped, None).rows;
+        let names = names(&listing);
+        assert_eq!(names, [name("office"), name("home")]);
+        assert!(
+            rows.iter()
+                .zip(&names)
+                .all(|(row, name)| row.label == name.as_str())
+        );
+        assert!(super::names(&Err("broken".to_owned())).is_empty());
     }
 
     #[test]

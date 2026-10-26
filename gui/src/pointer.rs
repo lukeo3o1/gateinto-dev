@@ -9,6 +9,7 @@ pub enum Action {
     Close,
     StopAgent,
     Revoke(u64),
+    StartBrowser(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +33,7 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::Close => Some(Action::Close),
         Zone::StopAgent => Some(Action::StopAgent),
         Zone::Revoke(id) => Some(Action::Revoke(id)),
+        Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
         _ => None,
     }
 }
@@ -74,6 +76,10 @@ impl Pointer {
 
     pub fn sessions_changed(&mut self) -> bool {
         matches!(self.pressed, Some(Zone::Revoke(_))) && self.cancel()
+    }
+
+    pub fn gateways_changed(&mut self) -> bool {
+        matches!(self.pressed, Some(Zone::StartBrowser(_))) && self.cancel()
     }
 
     pub fn left(&mut self) -> bool {
@@ -173,6 +179,28 @@ mod tests {
         p.down(Zone::StopAgent);
         assert!(!p.sessions_changed());
         assert_eq!(p.up(Zone::StopAgent), Some(Action::StopAgent));
+    }
+
+    #[test]
+    fn a_start_browser_button_starts_its_gateway() {
+        let mut p = Pointer::default();
+        p.down(Zone::StartBrowser(2));
+        assert_eq!(p.up(Zone::StartBrowser(2)), Some(Action::StartBrowser(2)));
+        p.down(Zone::StartBrowser(1));
+        assert_eq!(p.up(Zone::StartBrowser(0)), None);
+    }
+
+    #[test]
+    fn a_changed_gateway_list_drops_a_pressed_start_browser() {
+        let mut p = Pointer::default();
+        p.down(Zone::StartBrowser(1));
+        assert!(!p.sessions_changed());
+        assert!(p.gateways_changed());
+        assert_eq!(p.look(Zone::StartBrowser(1)), Look::Hover);
+        assert_eq!(p.up(Zone::StartBrowser(1)), None);
+        p.down(Zone::Revoke(4));
+        assert!(!p.gateways_changed());
+        assert_eq!(p.up(Zone::Revoke(4)), Some(Action::Revoke(4)));
     }
 
     #[test]

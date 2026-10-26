@@ -1,9 +1,11 @@
 use super::{Board, Painter};
 use crate::fonts::{Font, Measure};
-use crate::gateways::{EMPTY, FOOTNOTE, Page, Row};
+use crate::gateways::{EMPTY, FOOTNOTE, Page, Row, START};
+use crate::hit::Zone;
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
+use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::theme::Theme;
@@ -37,7 +39,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
         if card.bottom() > bottom {
             break;
         }
-        p.gateway(card, row);
+        p.gateway(card, row, (i, page.launch));
     }
     p.push(Op::Unclip);
     p.board
@@ -53,7 +55,7 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Small, FOOTNOTE, text, t.muted);
     }
 
-    fn gateway(&mut self, card: Rect, row: &Row) {
+    fn gateway(&mut self, card: Rect, row: &Row, (index, launch): (usize, bool)) {
         let (s, t) = (self.s, self.t);
         self.framed(card, 10.0, t.card);
         let pad = s.px(20.0);
@@ -64,7 +66,8 @@ impl<M: Measure> Painter<'_, M> {
 
         let gap = s.px(16.0);
         let right = card.right() - pad;
-        let sessions = Rect::new(right - s.px(120.0), card.y, s.px(120.0), card.h);
+        let button = self.start_button(card, right);
+        let sessions = Rect::new(button.x - gap - s.px(120.0), card.y, s.px(120.0), card.h);
         let x = tile.right() + gap;
         let w = (sessions.x - gap - x).max(0);
         let line = s.px(20.0);
@@ -88,6 +91,35 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Mono, row.address.clone(), address, t.muted);
 
         self.eyes(sessions, row);
+        self.start(button, index, launch);
+    }
+
+    fn start_button(&self, card: Rect, right: i32) -> Rect {
+        let s = self.s;
+        let text = self.m.width(Font::BodyStrong, START);
+        let w = s.px(14.0) + s.px(16.0) + s.px(8.0) + text + s.px(14.0);
+        let h = s.px(32.0);
+        Rect::new(right - w, card.y + (card.h - h) / 2, w, h)
+    }
+
+    fn start(&mut self, button: Rect, index: usize, launch: bool) {
+        let (s, t) = (self.s, self.t);
+        let zone = Zone::StartBrowser(index);
+        let (fill, glyph, label) = match (launch, self.v.pointer.look(zone)) {
+            (false, _) => (t.tile, t.eyes_idle, t.eyes_idle),
+            (true, Look::Rest) => (t.button, t.accent, t.button_text),
+            (true, Look::Hover) => (t.button_hover, t.accent, t.button_text),
+            (true, Look::Pressed) => (t.button_pressed, t.accent, t.button_text),
+        };
+        self.push(Op::Round(button, s.pxf(6.0), fill));
+        let icon = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
+        self.icon(icons::PLUS, icon, 16.0, glyph);
+        let x = icon.right() + s.px(8.0);
+        let text = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
+        self.text(Font::BodyStrong, START, text, label);
+        if launch {
+            self.target(button, zone);
+        }
     }
 
     fn eyes(&mut self, col: Rect, row: &Row) {
@@ -111,7 +143,8 @@ mod tests {
     use super::*;
     use crate::board::tests::{Chars, inside, layout, text};
     use crate::fonts::Font;
-    use crate::gateways::{EMPTY, FOOTNOTE, Row, SUBTITLE};
+    use crate::gateways::{EMPTY, FOOTNOTE, Row, START, SUBTITLE};
+    use crate::hit::Zone;
     use crate::icons;
     use crate::nav::{Nav, Page as NavPage};
     use crate::scene::Op;
@@ -123,7 +156,6 @@ mod tests {
 
     fn row(name: &str, config: bool) -> Row {
         Row {
-            name: "office".parse().unwrap(),
             label: name.to_owned(),
             address: "proxy.example.com".to_owned(),
             sessions: "1 session".to_owned(),
@@ -231,12 +263,82 @@ mod tests {
                 text(
                     Font::Mono,
                     "proxy.example.com",
-                    Rect::new(324, y + 37, 532, 18),
+                    Rect::new(324, y + 37, 373, 18),
                     T.muted
                 ),
-                Op::Round(Rect::new(872, y + 32, 5, 7), 2.5, T.eyes_idle),
-                Op::Round(Rect::new(883, y + 32, 5, 7), 2.5, T.eyes_idle),
-                text(Font::Small, "1 session", Rect::new(898, y, 94, 72), T.muted),
+                Op::Round(Rect::new(713, y + 32, 5, 7), 2.5, T.eyes_idle),
+                Op::Round(Rect::new(724, y + 32, 5, 7), 2.5, T.eyes_idle),
+                text(Font::Small, "1 session", Rect::new(739, y, 94, 72), T.muted),
+                Op::Round(Rect::new(849, y + 20, 143, 32), 6.0, T.button),
+                Op::Icon(icons::PLUS, Rect::new(863, y + 28, 16, 16), 1.0, T.accent),
+                text(
+                    Font::BodyStrong,
+                    START,
+                    Rect::new(887, y + 20, 91, 32),
+                    T.button_text
+                ),
+            ]
+        );
+    }
+
+    fn button(ops: &[Op]) -> Vec<Op> {
+        inside(ops, Rect::new(849, FIRST + 20, 143, 32))
+    }
+
+    #[test]
+    fn each_start_browser_button_targets_its_row() {
+        let b = draw(&listed(vec![row("office", true), row("home", false)]));
+        assert_eq!(
+            b.targets,
+            [
+                (Rect::new(849, FIRST + 20, 143, 32), Zone::StartBrowser(0)),
+                (Rect::new(849, FIRST + 102, 143, 32), Zone::StartBrowser(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_start_browser_button_follows_the_pointer() {
+        let page = listed(vec![row("office", true)]);
+        let mut v = view();
+        v.pointer.moved(Zone::StartBrowser(0));
+        let hover = board(&layout(), S, &T, &v, &page, &Chars).ops;
+        assert_eq!(
+            button(&hover)[0],
+            Op::Round(Rect::new(849, FIRST + 20, 143, 32), 6.0, T.button_hover)
+        );
+        v.pointer.down(Zone::StartBrowser(0));
+        let pressed = board(&layout(), S, &T, &v, &page, &Chars).ops;
+        assert_eq!(
+            button(&pressed)[0],
+            Op::Round(Rect::new(849, FIRST + 20, 143, 32), 6.0, T.button_pressed)
+        );
+    }
+
+    #[test]
+    fn without_a_running_agent_the_button_is_disabled() {
+        let mut page = listed(vec![row("office", true)]);
+        page.launch = false;
+        let mut v = view();
+        v.pointer.moved(Zone::StartBrowser(0));
+        let b = board(&layout(), S, &T, &v, &page, &Chars);
+        assert!(b.targets.is_empty());
+        assert_eq!(
+            button(&b.ops),
+            [
+                Op::Round(Rect::new(849, FIRST + 20, 143, 32), 6.0, T.tile),
+                Op::Icon(
+                    icons::PLUS,
+                    Rect::new(863, FIRST + 28, 16, 16),
+                    1.0,
+                    T.eyes_idle
+                ),
+                text(
+                    Font::BodyStrong,
+                    START,
+                    Rect::new(887, FIRST + 20, 91, 32),
+                    T.eyes_idle
+                ),
             ]
         );
     }
@@ -252,7 +354,7 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, Op::Icon(i, ..) if *i == icons::LOCK))
         );
-        assert!(card.contains(&Op::Round(Rect::new(872, FIRST + 32, 5, 7), 2.5, T.accent)));
+        assert!(card.contains(&Op::Round(Rect::new(713, FIRST + 32, 5, 7), 2.5, T.accent)));
         assert!(
             !ops.iter()
                 .any(|op| matches!(op, Op::Text(_, s, ..) if s == FOOTNOTE))
@@ -263,12 +365,12 @@ mod tests {
     fn a_long_name_leaves_room_for_its_lock() {
         let ops = draw(&listed(vec![row(&"n".repeat(100), true)])).ops;
         let card = inside(&ops, Rect::new(248, FIRST, 764, 72));
-        assert!(matches!(&card[4], Op::Text(Font::Heading, _, r, _) if r.w == 510));
+        assert!(matches!(&card[4], Op::Text(Font::Heading, _, r, _) if r.w == 351));
         assert_eq!(
             card[5],
             Op::Icon(
                 icons::LOCK,
-                Rect::new(842, FIRST + 20, 14, 14),
+                Rect::new(683, FIRST + 20, 14, 14),
                 1.0,
                 T.muted
             )

@@ -441,6 +441,15 @@ pub const LOCK: Icon = Icon {
     ],
 };
 
+pub const PLUS: Icon = Icon {
+    view: RAIL,
+    stroke: 2.0,
+    shapes: &[
+        Shape::Path(&line(12.0, 5.0, 12.0, 19.0)),
+        Shape::Path(&line(5.0, 12.0, 19.0, 12.0)),
+    ],
+};
+
 pub fn rail_icon(page: Page) -> Icon {
     match page {
         Page::Sessions => SESSIONS,
@@ -455,9 +464,9 @@ pub fn rail_icon(page: Page) -> Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 13] = [
+    const ALL: [Icon; 14] = [
         SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, GLOBE,
-        POWER, STOP, LOCK,
+        POWER, STOP, LOCK, PLUS,
     ];
 
     #[test]
@@ -648,7 +657,7 @@ mod tests {
     #[test]
     fn mirror_symmetric_icons_trace_symmetrically_about_the_snapped_axis() {
         for icon in [
-            GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE, GLOBE, POWER, STOP, LOCK,
+            GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE, GLOBE, POWER, STOP, LOCK, PLUS,
         ] {
             for size in [10, 15, 20, 25, 30, 40] {
                 for width in [1.0, 2.0, 3.0] {

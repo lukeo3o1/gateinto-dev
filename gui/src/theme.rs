@@ -35,6 +35,10 @@ pub struct Theme {
     pub revoke_hover: Rgb,
     pub revoke_pressed: Rgb,
     pub revoke_glyph: Rgb,
+    pub button: Rgb,
+    pub button_hover: Rgb,
+    pub button_pressed: Rgb,
+    pub button_text: Rgb,
 }
 
 impl Theme {
@@ -64,6 +68,10 @@ impl Theme {
         revoke_hover: Rgb(0xfde7e5),
         revoke_pressed: Rgb(0xfad4d0),
         revoke_glyph: Rgb(0xc42b1c),
+        button: Rgb(0x262b36),
+        button_hover: Rgb(0x353b48),
+        button_pressed: Rgb(0x1b1f27),
+        button_text: Rgb(0xffffff),
     };
 }
 
@@ -103,6 +111,16 @@ mod tests {
         assert_eq!(t.eyes_idle, Rgb(0x9aa1b1));
         assert_eq!(t.revoke_hover, Rgb(0xfde7e5));
         assert_eq!(t.revoke_glyph, Rgb(0xc42b1c));
+    }
+
+    #[test]
+    fn gateways_page_uses_the_board_palette() {
+        let t = Theme::LIGHT;
+        assert_eq!(t.button, Rgb(0x262b36));
+        assert_eq!(t.button_text, Rgb(0xffffff));
+        assert_ne!(t.button_hover, t.button);
+        assert_ne!(t.button_pressed, t.button_hover);
+        assert_ne!(t.button_pressed, t.button);
     }
 
     #[test]

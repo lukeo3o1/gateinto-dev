@@ -13,6 +13,7 @@ pub enum Zone {
     Nav(Page),
     StopAgent,
     Revoke(u64),
+    StartBrowser(usize),
     Client,
 }
 
@@ -118,6 +119,7 @@ mod tests {
         let targets = [
             (Rect::new(900, 100, 100, 32), Zone::StopAgent),
             (Rect::new(960, 300, 32, 32), Zone::Revoke(7)),
+            (Rect::new(700, 400, 130, 32), Zone::StartBrowser(1)),
         ];
         let at = |x, y| hit(&l, x, y, RESIZE, &targets);
         assert_eq!(at(900, 100), Zone::StopAgent);
@@ -125,6 +127,7 @@ mod tests {
         assert_eq!(at(1000, 100), Zone::Client);
         assert_eq!(at(975, 315), Zone::Revoke(7));
         assert_eq!(at(975, 332), Zone::Client);
+        assert_eq!(at(829, 431), Zone::StartBrowser(1));
     }
 
     #[test]
