@@ -144,7 +144,8 @@ enum SessionCommand {
     /// Start a browser session with session credentials on an ephemeral loopback port, show the
     /// credentials, and run it until interrupted
     Browser(BrowserSessionArgs),
-    /// List the sessions of the running agent
+    /// List the sessions of the running agent: id, kind, gateway name and listen address, then
+    /// the gateway address, local auth, start time, open tunnels and browser as key=value pairs
     List,
     /// Show the proxy credentials of a session of the running agent again, in a dialog on an
     /// interactive Windows desktop or otherwise on the terminal; never on standard output

@@ -396,6 +396,83 @@ async fn a_launch_opens_the_portal_in_a_browser_with_its_own_profile_and_session
     agent.stop().await;
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+impl TestAgent {
+    async fn listed_details(&self, lines: &[String]) -> BTreeMap<String, String> {
+        let prefix = format!(
+            "session: {} browser main {} ",
+            field(lines, "session"),
+            field(lines, "listen")
+        );
+        let list = self.list().await;
+        let details = list
+            .iter()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("{list:?}"));
+        details
+            .split(' ')
+            .map(|token| {
+                let (key, value) = token.split_once('=').unwrap();
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_list_shows_the_gateway_address_auth_start_time_and_open_tunnels() {
+    let agent = TestAgent::start(limits()).await;
+    let before = unix_now();
+    let (lines, browser) = agent.launched("main").await;
+    let after = unix_now();
+
+    let details = agent.listed_details(&lines).await;
+    let started: u64 = details["started"].parse().unwrap();
+    assert!((before..=after).contains(&started), "{details:?}");
+    let auth = if cfg!(windows) { "os_user" } else { "password" };
+    let expected = BTreeMap::from([
+        ("gateway", agent._upstream.addr.to_string()),
+        ("auth", auth.to_owned()),
+        ("started", started.to_string()),
+        ("tunnels", "0".to_owned()),
+    ])
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(details, expected);
+    let list = agent.list().await;
+    for secret in ["username", "password"] {
+        let value = field(&lines, secret);
+        assert!(list.iter().all(|line| !line.contains(value)), "{list:?}");
+    }
+
+    let target = echo_server().await.to_string();
+    let (mut stream, response) = send(
+        browser.proxy(),
+        &connect_with(&target, Some(&session_auth(&lines))),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    assert_eq!(agent.listed_details(&lines).await["tunnels"], "1");
+    stream.shutdown().await.unwrap();
+    assert!(read_to_end_within(&mut stream, WAIT).await.is_empty());
+    let deadline = std::time::Instant::now() + WAIT;
+    while agent.listed_details(&lines).await["tunnels"] != "0" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tunnel is still listed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    agent.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_portal_url_the_browser_starts_blank() {
     let agent = TestAgent::start(limits()).await;
@@ -421,11 +498,14 @@ async fn repeated_launches_open_separate_sessions_profiles_and_browsers() {
     let list = agent.list().await;
     for lines in [&first, &second] {
         let expected = format!(
-            "session: {} browser main {}",
+            "session: {} browser main {} ",
             field(lines, "session"),
             field(lines, "listen")
         );
-        assert!(list.contains(&expected), "{list:?}");
+        assert!(
+            list.iter().any(|line| line.starts_with(&expected)),
+            "{list:?}"
+        );
     }
     tunnel_echoes(first_browser.proxy(), &first).await;
     tunnel_echoes(second_browser.proxy(), &second).await;

@@ -293,11 +293,12 @@ fn assert_no_credentials(output: &Output) {
 }
 
 fn listed(list: &[String], lines: &[String]) -> bool {
-    list.contains(&format!(
-        "session: {} browser main {}",
+    let prefix = format!(
+        "session: {} browser main {} ",
         field(lines, "session"),
         field(lines, "listen")
-    ))
+    );
+    list.iter().any(|line| line.starts_with(&prefix))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -504,11 +505,15 @@ async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_sessio
     }
     assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
     let list = launcher.list().await;
-    assert!(list.contains(&format!(
-        "session: {} browser main {} route=mixed",
+    let prefix = format!(
+        "session: {} browser main {} route=mixed ",
         field(&mixed, "session"),
         field(&mixed, "listen")
-    )));
+    );
+    assert!(
+        list.iter().any(|line| line.starts_with(&prefix)),
+        "{list:?}"
+    );
     assert!(listed(&list, &gateway));
     mixed_browser.exit();
     gateway_browser.exit();
@@ -975,6 +980,7 @@ async fn device_session_listen(launcher: &Launcher) -> SocketAddr {
     let list = launcher.list().await;
     list.iter()
         .find_map(|line| line.strip_prefix("session: 1 device main "))
+        .and_then(|rest| rest.split(' ').next())
         .unwrap_or_else(|| panic!("{list:?}"))
         .parse()
         .unwrap()

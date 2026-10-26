@@ -4,7 +4,7 @@ use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Mutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
@@ -135,6 +135,7 @@ impl LaunchLimiter {
 }
 
 struct Browser {
+    name: Option<&'static str>,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -509,7 +510,8 @@ impl Agent {
         let (close, closed) = oneshot::channel();
         let mut browsers = self.inner.browsers.lock().await;
         let task = tokio::spawn(watch(self.inner.clone(), id, child, dir, closed).instrument(span));
-        browsers.insert(id, Browser { close, task });
+        let name = browser::browser_name(&executable);
+        browsers.insert(id, Browser { name, close, task });
         Ok(lines)
     }
 
@@ -527,24 +529,41 @@ impl Agent {
     }
 
     async fn list(&self) -> Vec<String> {
+        let names: BTreeMap<SessionId, &str> = self
+            .inner
+            .browsers
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(&id, browser)| Some((id, browser.name?)))
+            .collect();
         self.inner
             .sessions
             .lock()
             .await
             .sessions()
             .map(|session| {
-                format!(
-                    "session: {} {} {} {}{}",
+                let mut line = format!(
+                    "session: {} {} {} {}",
                     session.id(),
                     session.kind(),
                     session.gateway(),
                     session.local_addr(),
-                    if session.route() == proxy::Route::Mixed {
-                        " route=mixed"
-                    } else {
-                        ""
-                    }
-                )
+                );
+                if session.route() == proxy::Route::Mixed {
+                    line.push_str(" route=mixed");
+                }
+                line.push_str(&format!(
+                    " gateway={} auth={} started={} tunnels={}",
+                    session.gateway_address(),
+                    auth_kind(session.local_auth()),
+                    unix_seconds(session.started()),
+                    session.open_tunnels(),
+                ));
+                if let Some(name) = names.get(&session.id()) {
+                    line.push_str(&format!(" browser={name}"));
+                }
+                line
             })
             .collect()
     }
@@ -595,8 +614,11 @@ fn warned(mut lines: Vec<String>, known: &Known) -> Vec<String> {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    unix_seconds(SystemTime::now())
+}
+
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
@@ -671,6 +693,16 @@ fn browser_local_auth(in_job: bool) -> LocalAuth {
     }
 }
 
+fn auth_kind(local_auth: LocalAuth) -> &'static str {
+    if local_auth.os_user {
+        "os_user"
+    } else if local_auth.session_credentials {
+        "password"
+    } else {
+        "none"
+    }
+}
+
 fn launch_credentials(local_auth: LocalAuth, lines: Option<[String; 2]>) -> Vec<String> {
     match lines {
         Some(lines) if !local_auth.os_user => lines.to_vec(),
@@ -714,6 +746,18 @@ mod tests {
         };
         assert!(launch_credentials(both, Some(credentials)).is_empty());
         assert!(launch_credentials(LocalAuth::OS_USER, None).is_empty());
+    }
+
+    #[test]
+    fn the_listed_auth_kind_prefers_the_os_user_when_it_is_in_effect() {
+        let both = LocalAuth {
+            os_user: true,
+            session_credentials: true,
+        };
+        assert_eq!(auth_kind(both), "os_user");
+        assert_eq!(auth_kind(LocalAuth::OS_USER), "os_user");
+        assert_eq!(auth_kind(LocalAuth::SESSION_CREDENTIALS), "password");
+        assert_eq!(auth_kind(LocalAuth::NONE), "none");
     }
 
     #[test]

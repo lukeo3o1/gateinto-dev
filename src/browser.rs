@@ -56,6 +56,16 @@ pub fn browser_args(
     ]
 }
 
+pub fn browser_name(executable: &Path) -> Option<&'static str> {
+    let name = executable.file_name()?.to_str()?.to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
+        "chrome" | "google-chrome" | "google-chrome-stable" => Some("chrome"),
+        "msedge" | "microsoft-edge" | "microsoft-edge-stable" => Some("edge"),
+        "chromium" | "chromium-browser" => Some("chromium"),
+        _ => None,
+    }
+}
+
 pub fn find_browser(configured: Option<&Path>) -> Result<PathBuf, BrowserError> {
     if let Some(path) = configured {
         return if path.is_file() {
@@ -363,6 +373,31 @@ mod tests {
             expected("https://portal.example.test/start")
         );
         assert_eq!(browser_args(&dir, proxy, None), expected("about:blank"));
+    }
+
+    #[test]
+    fn known_browser_executables_are_named_and_others_are_not() {
+        for (path, name) in [
+            (
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                Some("chrome"),
+            ),
+            (
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                Some("edge"),
+            ),
+            ("/usr/bin/google-chrome", Some("chrome")),
+            ("/usr/bin/google-chrome-stable", Some("chrome")),
+            ("/usr/bin/chromium", Some("chromium")),
+            ("/usr/bin/chromium-browser", Some("chromium")),
+            ("/usr/bin/microsoft-edge", Some("edge")),
+            ("/opt/CHROME.EXE", Some("chrome")),
+            ("/opt/brave", None),
+            ("", None),
+        ] {
+            let path = PathBuf::from(path.replace('\\', std::path::MAIN_SEPARATOR_STR));
+            assert_eq!(browser_name(&path), name, "{}", path.display());
+        }
     }
 
     #[test]

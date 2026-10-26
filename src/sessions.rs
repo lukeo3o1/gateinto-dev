@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
+use std::time::SystemTime;
 
 use rustls::pki_types::UnixTime;
 use tokio::sync::oneshot;
@@ -11,7 +12,7 @@ use crate::config::GatewayName;
 use crate::identity::certificates::IssueError;
 use crate::identity::client_cert::ClientCertificate;
 use crate::identity::encoding::sha256_fingerprint;
-use crate::proxy::{self, LocalAuth, Proxy};
+use crate::proxy::{self, LocalAuth, OpenTunnels, Proxy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -92,7 +93,10 @@ pub struct Session {
     kind: SessionKind,
     gateway: GatewayName,
     route: proxy::Route,
+    gateway_address: String,
+    started: SystemTime,
     local_addr: SocketAddr,
+    open_tunnels: OpenTunnels,
     realm: Option<String>,
     local_auth: LocalAuth,
     credentials: Option<proxy::SessionCredentials>,
@@ -117,8 +121,20 @@ impl Session {
         self.route
     }
 
+    pub fn gateway_address(&self) -> &str {
+        &self.gateway_address
+    }
+
+    pub fn started(&self) -> SystemTime {
+        self.started
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    pub fn open_tunnels(&self) -> usize {
+        self.open_tunnels.count()
     }
 
     pub fn realm(&self) -> Option<&str> {
@@ -160,10 +176,12 @@ impl SessionManager {
         })?;
         let route = proxy_config.route;
         let local_auth = proxy_config.local_auth;
+        let gateway_address = proxy_config.upstream.address();
         let proxy = Proxy::bind(proxy_config)
             .await
             .map_err(SessionError::Proxy)?;
         let local_addr = proxy.local_addr();
+        let open_tunnels = proxy.open_tunnels();
         let realm = proxy.realm().map(str::to_owned);
         let credentials = proxy.credentials().cloned();
         if !local_auth.is_none() {
@@ -184,7 +202,10 @@ impl SessionManager {
             kind: config.kind,
             gateway: config.gateway,
             route,
+            gateway_address,
+            started: SystemTime::now(),
             local_addr,
+            open_tunnels,
             realm,
             local_auth,
             credentials,

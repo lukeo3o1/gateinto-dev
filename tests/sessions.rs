@@ -4,7 +4,7 @@ mod fixture;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use fixture::*;
 use gateinto::config::GatewayName;
@@ -360,4 +360,35 @@ async fn a_session_refuses_a_non_loopback_listen_address() {
             .contains("--unsafe-allow-non-loopback-listen"),
         "{error}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_reports_its_gateway_address_start_time_and_open_tunnels() {
+    let ca = TestCa::new();
+    let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
+    let target = echo_server().await;
+    let before = SystemTime::now();
+    let mut sessions = SessionManager::new();
+    let id = sessions
+        .start(device_session(
+            "office",
+            agent_config(upstream.addr, ca.roots(), PROXY_NAME),
+        ))
+        .await
+        .unwrap();
+    let session = sessions.session(id).unwrap();
+
+    assert_eq!(session.gateway_address(), upstream.addr.to_string());
+    assert!(before <= session.started() && session.started() <= SystemTime::now());
+    assert_eq!(session.open_tunnels(), 0);
+    let mut stream = open_tunnel(session.local_addr(), target).await;
+    echo_open(&mut stream, b"open").await;
+    assert_eq!(session.open_tunnels(), 1);
+    stream.shutdown().await.unwrap();
+    assert_eq!(read_to_end_within(&mut stream, CLOSE_WITHIN).await, b"");
+    let deadline = Instant::now() + CLOSE_WITHIN;
+    while session.open_tunnels() != 0 {
+        assert!(Instant::now() < deadline, "the tunnel is still counted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
