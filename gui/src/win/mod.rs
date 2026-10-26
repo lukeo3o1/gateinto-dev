@@ -513,8 +513,8 @@ fn center_on_monitor(hwnd: HWND) {
     unsafe { SetWindowPos(hwnd, null_mut(), x, y, w, h, flags) };
 }
 
-fn fail() {
-    let text = wide("Gateinto could not start Direct2D and DirectWrite rendering.");
+fn fail(message: &str) {
+    let text = wide(message);
     let caption = wide(TITLE);
     unsafe {
         MessageBoxW(
@@ -529,7 +529,7 @@ fn fail() {
 pub fn run() {
     sys::enable_dpi_awareness();
     let Ok(gfx) = Graphics::new() else {
-        fail();
+        fail("Gateinto could not start Direct2D and DirectWrite rendering.");
         return;
     };
     let mut gfx = Some(gfx);
@@ -548,7 +548,7 @@ pub fn run() {
         ..Default::default()
     };
     if unsafe { RegisterClassExW(&wc) } == 0 {
-        fail();
+        fail("Gateinto could not register its window class.");
         return;
     }
     let hwnd = unsafe {
@@ -568,7 +568,7 @@ pub fn run() {
         )
     };
     if hwnd.is_null() {
-        fail();
+        fail("Gateinto could not create its window.");
         return;
     }
     center_on_monitor(hwnd);
