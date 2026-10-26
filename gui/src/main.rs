@@ -3,6 +3,7 @@
 
 mod frame;
 mod hit;
+mod icons;
 mod layout;
 mod nav;
 mod pointer;
