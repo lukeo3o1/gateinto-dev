@@ -2,10 +2,6 @@
 pub struct Rgb(pub u32);
 
 impl Rgb {
-    pub const fn colorref(self) -> u32 {
-        ((self.0 & 0xff) << 16) | (self.0 & 0xff00) | ((self.0 >> 16) & 0xff)
-    }
-
     pub fn channels(self) -> [f32; 4] {
         let c = |shift: u32| ((self.0 >> shift) & 0xff) as f32 / 255.0;
         [c(16), c(8), c(0), 1.0]
@@ -56,11 +52,6 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn colorref_swaps_red_and_blue() {
-        assert_eq!(Rgb(0xc42b1c).colorref(), 0x001c2bc4);
-    }
 
     #[test]
     fn channels_are_unit_floats() {
