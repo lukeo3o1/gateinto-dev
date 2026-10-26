@@ -18,7 +18,7 @@ use gateinto::identity::client_cert::{
 use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
-use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
+use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
 use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
@@ -144,8 +144,14 @@ enum SessionCommand {
     /// Start a browser session with session credentials on an ephemeral loopback port, show the
     /// credentials, and run it until interrupted
     Browser(BrowserSessionArgs),
-    /// List the sessions of the running agent
-    List,
+    /// List the sessions of the running agent as a table: id, kind, gateway, listen address,
+    /// route, local auth, open tunnels, uptime and browser; never credentials
+    List {
+        /// Print one JSON object per session and line instead, with the gateway's upstream
+        /// address and the start time in Unix seconds
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the proxy credentials of a session of the running agent again, in a dialog on an
     /// interactive Windows desktop or otherwise on the terminal; never on standard output
     Credentials {
@@ -491,7 +497,7 @@ async fn run() -> ExitCode {
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
-        Command::Session(SessionCommand::List) => agent_request(Request::List).await,
+        Command::Session(SessionCommand::List { json }) => session_list(json).await,
         Command::Session(SessionCommand::Credentials { id }) => session_credentials(id).await,
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
         Command::Agent(args) if args.detach => agent_detach(args.config.config.as_deref()).await,
@@ -1142,6 +1148,41 @@ async fn session_credentials(id: SessionId) -> Result {
     Ok(show_credentials(Some(id), listen, credentials).await?)
 }
 
+async fn session_list(json: bool) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    let lines = match ipc::send(&endpoint, &Request::List).await? {
+        Response::Ok(lines) => lines,
+        Response::Error(message) => return Err(message.into()),
+    };
+    for line in session_list_lines(&lines, json, gateinto::clock::unix_now())? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn session_list_lines(lines: &[String], json: bool, now: u64) -> Result<Vec<String>, String> {
+    let sessions = listed_sessions(lines)?;
+    Ok(if json {
+        lines
+            .iter()
+            .filter(|line| !line.is_empty())
+            .cloned()
+            .collect()
+    } else {
+        gateinto::session_table::session_table(&sessions, now)
+    })
+}
+
+fn print_session_table(sessions: &[SessionInfo]) {
+    for line in gateinto::session_table::session_table(sessions, gateinto::clock::unix_now()) {
+        println!("{line}");
+    }
+}
+
+fn listed_sessions(lines: &[String]) -> Result<Vec<SessionInfo>, String> {
+    SessionInfo::parse_list(lines).map_err(|error| error.to_string())
+}
+
 async fn agent_request(request: Request) -> Result {
     let endpoint = Endpoint::for_current_user()?;
     print_response(ipc::send(&endpoint, &request).await?)
@@ -1376,12 +1417,15 @@ async fn status(args: StatusArgs) -> Result {
         Err(error) => Err(RequestError::Io(error)),
     };
     match agent {
-        Ok(Response::Ok(sessions)) => {
-            println!("agent: running");
-            for session in sessions {
-                println!("{session}");
+        Ok(Response::Ok(lines)) => match listed_sessions(&lines) {
+            Ok(sessions) => {
+                println!("agent: running");
+                if !sessions.is_empty() {
+                    print_session_table(&sessions);
+                }
             }
-        }
+            Err(error) => println!("agent: running, list failed: {error}"),
+        },
         Ok(Response::Error(message)) => println!("agent: running, list failed: {message}"),
         Err(RequestError::NotRunning | RequestError::Closed) => println!("agent: not running"),
         Err(error) => println!("agent: unknown: {error}"),
@@ -1516,6 +1560,30 @@ async fn reset(args: ResetArgs) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;
+
+    #[test]
+    fn the_json_session_list_passes_the_agent_lines_through_verbatim() {
+        let lines = [NEWER_SESSION.to_owned(), String::new()];
+        assert_eq!(
+            session_list_lines(&lines, true, 0).unwrap(),
+            [NEWER_SESSION]
+        );
+    }
+
+    #[test]
+    fn the_json_session_list_still_rejects_an_older_agent() {
+        let lines = ["session: 1 device office 127.0.0.1:8080".to_owned()];
+        let error = session_list_lines(&lines, true, 0).unwrap_err();
+        assert!(error.contains("gateinto stop"), "{error}");
+    }
+
+    #[test]
+    fn the_session_table_shows_an_unknown_browser() {
+        let table = session_list_lines(&[NEWER_SESSION.to_owned()], false, 1_700_000_045).unwrap();
+        assert!(table[1].ends_with("45s     unknown"), "{table:?}");
+    }
 
     #[test]
     fn the_device_session_hint_names_the_accepted_methods() {

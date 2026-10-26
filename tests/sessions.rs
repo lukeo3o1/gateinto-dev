@@ -4,14 +4,16 @@ mod fixture;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fixture::*;
+use gateinto::clock::unix_now;
 use gateinto::config::GatewayName;
 use gateinto::identity::certificates::SelfSignedCertificates;
 use gateinto::identity::client_cert::ClientCertificate;
 use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::identity::x509::parse_certificate;
+use gateinto::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionRoute};
 use gateinto::proxy::Config;
 use gateinto::sessions::{SessionConfig, SessionError, SessionId, SessionKind, SessionManager};
 use rcgen::{KeyPair, PublicKeyData};
@@ -360,4 +362,49 @@ async fn a_session_refuses_a_non_loopback_listen_address() {
             .contains("--unsafe-allow-non-loopback-listen"),
         "{error}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
+    let ca = TestCa::new();
+    let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
+    let target = echo_server().await;
+    let before = unix_now();
+    let mut sessions = SessionManager::new();
+    let id = sessions
+        .start(device_session(
+            "office",
+            agent_config(upstream.addr, ca.roots(), PROXY_NAME),
+        ))
+        .await
+        .unwrap();
+    let session = sessions.session(id).unwrap();
+
+    let info = session.info(Some(BrowserKind::Edge));
+    assert!((before..=unix_now()).contains(&info.started), "{info:?}");
+    assert_eq!(
+        info,
+        SessionInfo {
+            id: id.into(),
+            kind: SessionKind::Device,
+            gateway: "office".to_owned(),
+            upstream: upstream.addr.to_string(),
+            listen: session.local_addr(),
+            route: SessionRoute::All,
+            auth: SessionAuth::None,
+            started: info.started,
+            tunnels: 0,
+            browser: Some(BrowserKind::Edge),
+        }
+    );
+    let mut stream = open_tunnel(session.local_addr(), target).await;
+    echo_open(&mut stream, b"open").await;
+    assert_eq!(session.info(None).tunnels, 1);
+    stream.shutdown().await.unwrap();
+    assert_eq!(read_to_end_within(&mut stream, CLOSE_WITHIN).await, b"");
+    let deadline = Instant::now() + CLOSE_WITHIN;
+    while session.info(None).tunnels != 0 {
+        assert!(Instant::now() < deadline, "the tunnel is still counted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use aws_lc_rs::rand::SystemRandom;
@@ -79,6 +80,38 @@ pub struct Upstream {
     pub port: u16,
     pub server_name: ServerName<'static>,
     pub roots: RootCertStore,
+}
+
+impl Upstream {
+    pub fn address(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OpenTunnels(Arc<AtomicUsize>);
+
+impl OpenTunnels {
+    pub fn count(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn open(&self) -> OpenTunnel {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        OpenTunnel(self.clone())
+    }
+}
+
+struct OpenTunnel(OpenTunnels);
+
+impl Drop for OpenTunnel {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +251,7 @@ struct Shared {
     limits: Limits,
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
+    open_tunnels: OpenTunnels,
 }
 
 impl Proxy {
@@ -284,6 +318,7 @@ impl Proxy {
             limits: config.limits,
             tunnels,
             rejects,
+            open_tunnels: OpenTunnels::default(),
         };
         Ok(Self {
             listener,
@@ -304,6 +339,10 @@ impl Proxy {
 
     pub fn credentials(&self) -> Option<&SessionCredentials> {
         self.credentials.as_ref()
+    }
+
+    pub fn open_tunnels(&self) -> OpenTunnels {
+        self.shared.open_tunnels.clone()
     }
 
     pub async fn run(self) {
@@ -412,6 +451,7 @@ impl Shared {
             Ok(Ok(opened)) => opened,
         };
         info!("tunnel established");
+        let _open = self.open_tunnels.open();
         let mut response = b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
         response.extend_from_slice(&upstream_early);
         let established = async {
@@ -683,6 +723,18 @@ mod tests {
         let auth = std::mem::replace(&mut shared.auth, Authenticator::new(None, None));
         shared.auth = auth.with_owners(owners as Arc<dyn Owners>);
         proxy
+    }
+
+    #[tokio::test]
+    async fn the_upstream_address_brackets_ipv6_hosts() {
+        let mut upstream = config(LocalAuth::NONE, Duration::from_secs(5))
+            .await
+            .upstream;
+        upstream.host = "proxy.example".to_owned();
+        upstream.port = 443;
+        assert_eq!(upstream.address(), "proxy.example:443");
+        upstream.host = "::1".to_owned();
+        assert_eq!(upstream.address(), "[::1]:443");
     }
 
     #[cfg(not(windows))]

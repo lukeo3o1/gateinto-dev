@@ -12,6 +12,7 @@ use tokio::process::{Child, Command};
 use tracing::warn;
 
 use crate::config::PortalUrl;
+use crate::ipc::BrowserKind;
 use crate::job::{Job, SpawnError};
 use crate::sessions::SessionId;
 
@@ -54,6 +55,16 @@ pub fn browser_args(
         OsString::from("--new-window"),
         OsString::from(start.map_or("about:blank", PortalUrl::as_str)),
     ]
+}
+
+pub fn browser_name(executable: &Path) -> Option<BrowserKind> {
+    let name = executable.file_name()?.to_str()?.to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
+        "chrome" | "google-chrome" | "google-chrome-stable" => Some(BrowserKind::Chrome),
+        "msedge" | "microsoft-edge" | "microsoft-edge-stable" => Some(BrowserKind::Edge),
+        "chromium" | "chromium-browser" => Some(BrowserKind::Chromium),
+        _ => None,
+    }
 }
 
 pub fn find_browser(configured: Option<&Path>) -> Result<PathBuf, BrowserError> {
@@ -363,6 +374,31 @@ mod tests {
             expected("https://portal.example.test/start")
         );
         assert_eq!(browser_args(&dir, proxy, None), expected("about:blank"));
+    }
+
+    #[test]
+    fn known_browser_executables_are_named_and_others_are_not() {
+        for (path, name) in [
+            (
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                Some(BrowserKind::Chrome),
+            ),
+            (
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                Some(BrowserKind::Edge),
+            ),
+            ("/usr/bin/google-chrome", Some(BrowserKind::Chrome)),
+            ("/usr/bin/google-chrome-stable", Some(BrowserKind::Chrome)),
+            ("/usr/bin/chromium", Some(BrowserKind::Chromium)),
+            ("/usr/bin/chromium-browser", Some(BrowserKind::Chromium)),
+            ("/usr/bin/microsoft-edge", Some(BrowserKind::Edge)),
+            ("/opt/CHROME.EXE", Some(BrowserKind::Chrome)),
+            ("/opt/brave", None),
+            ("", None),
+        ] {
+            let path = PathBuf::from(path.replace('\\', std::path::MAIN_SEPARATOR_STR));
+            assert_eq!(browser_name(&path), name, "{}", path.display());
+        }
     }
 
     #[test]
