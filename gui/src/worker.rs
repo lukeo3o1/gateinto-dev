@@ -30,6 +30,36 @@ pub struct Update {
     pub failure: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct Mailbox {
+    open: bool,
+    update: Option<Update>,
+}
+
+impl Default for Mailbox {
+    fn default() -> Self {
+        Self {
+            open: true,
+            update: None,
+        }
+    }
+}
+
+impl Mailbox {
+    pub fn put(&mut self, update: Update) -> bool {
+        self.open && self.update.replace(update).is_none()
+    }
+
+    pub fn take(&mut self) -> Option<Update> {
+        self.update.take()
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.update = None;
+    }
+}
+
 pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Option<String> {
     match reply {
         Ok(Response::Ok(_)) => None,
@@ -135,6 +165,26 @@ mod tests {
         let run = serve(rx, agent(&log), |u| updates.push(u));
         assert!(timeout(Duration::from_secs(10), run).await.is_ok());
         assert_eq!(updates, [polled(None)]);
+    }
+
+    #[test]
+    fn a_mailbox_asks_for_a_notice_only_when_it_was_empty() {
+        let mut mailbox = Mailbox::default();
+        assert!(mailbox.put(polled(None)));
+        assert!(!mailbox.put(polled(Some("busy"))));
+        assert_eq!(mailbox.take(), Some(polled(Some("busy"))));
+        assert_eq!(mailbox.take(), None);
+        assert!(mailbox.put(polled(None)));
+    }
+
+    #[test]
+    fn a_closed_mailbox_drops_what_it_holds_and_what_arrives() {
+        let mut mailbox = Mailbox::default();
+        mailbox.put(polled(None));
+        mailbox.close();
+        assert_eq!(mailbox.take(), None);
+        assert!(!mailbox.put(polled(None)));
+        assert_eq!(mailbox.take(), None);
     }
 
     #[test]
