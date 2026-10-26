@@ -153,7 +153,7 @@ What is verified:
 
 - CI (`windows-i686` job in [.github/workflows/ci.yml](../.github/workflows/ci.yml))
   builds it on `windows-latest` and runs
-  `cargo test --target i686-pc-windows-msvc --all-targets --all-features --locked`.
+  `cargo test --workspace --target i686-pc-windows-msvc --all-targets --all-features --locked`.
   The tests run as 32-bit processes under WOW64 on 64-bit Windows Server,
   including the CNG Software KSP tests, the named-pipe agent tests and the
   registry tests. The job then runs the static C runtime check on the 32-bit
@@ -205,9 +205,9 @@ A 32-bit process on 64-bit Windows sees a different registry and environment:
 ### On GitHub Actions
 
 The CI workflow ([.github/workflows/ci.yml](../.github/workflows/ci.yml))
-runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features
---locked -- -D warnings` and `cargo test --all-targets --all-features --locked`
-in two jobs, `ubuntu-latest` and `windows-latest`. Pull requests that change
+runs `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+--all-features --locked -- -D warnings` and `cargo test --workspace --all-targets
+--all-features --locked` in two jobs, `ubuntu-latest` and `windows-latest`. Pull requests that change
 only Markdown files or files under `docs/` skip the workflow, except changes to
 `README.md` and `docs/quickstart.md`; no test or job reads any other
 documentation file. `master` has no required status checks. If required checks are ever added,
