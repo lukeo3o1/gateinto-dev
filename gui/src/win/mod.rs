@@ -421,8 +421,12 @@ fn on_agent(hwnd: HWND) {
         if before != Some(gateways::names(&update.gateways)) {
             app.view.pointer.gateways_changed();
         }
+        let entries = app.entries();
         app.launches.settle(update.launched);
         app.update = Some(update);
+        if app.entries() != entries {
+            app.view.pointer.entries_changed();
+        }
         app.retarget();
         app.invalidate();
         true

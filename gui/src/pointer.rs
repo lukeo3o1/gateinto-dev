@@ -81,14 +81,15 @@ impl Pointer {
     }
 
     pub fn sessions_changed(&mut self) -> bool {
-        matches!(
-            self.pressed,
-            Some(Zone::Revoke(_) | Zone::More(_) | Zone::Entry(_))
-        ) && self.cancel()
+        matches!(self.pressed, Some(Zone::Revoke(_) | Zone::More(_))) && self.cancel()
     }
 
     pub fn gateways_changed(&mut self) -> bool {
-        matches!(self.pressed, Some(Zone::StartBrowser(_) | Zone::Entry(_))) && self.cancel()
+        matches!(self.pressed, Some(Zone::StartBrowser(_))) && self.cancel()
+    }
+
+    pub fn entries_changed(&mut self) -> bool {
+        matches!(self.pressed, Some(Zone::Entry(_))) && self.cancel()
     }
 
     pub fn left(&mut self) -> bool {
@@ -248,14 +249,16 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_list_drops_a_pressed_menu_entry() {
+    fn changed_menu_entries_drop_a_pressed_entry() {
         let mut p = Pointer::default();
         p.down(Zone::Entry(0));
-        assert!(p.gateways_changed());
+        assert!(!p.sessions_changed());
+        assert!(!p.gateways_changed());
+        assert!(p.entries_changed());
         assert_eq!(p.up(Zone::Entry(0)), None);
-        p.down(Zone::Entry(0));
-        assert!(p.sessions_changed());
-        assert_eq!(p.up(Zone::Entry(0)), None);
+        p.down(Zone::More(3));
+        assert!(!p.entries_changed());
+        assert_eq!(p.up(Zone::More(3)), Some(Action::More(3)));
     }
 
     #[test]
