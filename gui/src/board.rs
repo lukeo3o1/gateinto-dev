@@ -18,6 +18,17 @@ pub struct Board {
 }
 
 const STOP_LABEL: &str = "Stop agent";
+pub const REVOKE_TIP: &str = "Revoke session";
+
+pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(u64, Rect)> {
+    targets
+        .iter()
+        .filter_map(|&(r, zone)| match zone {
+            Zone::Revoke(id) => Some((id, r)),
+            _ => None,
+        })
+        .collect()
+}
 
 struct Columns {
     session: Rect,
@@ -325,6 +336,19 @@ mod tests {
 
     fn layout() -> Layout {
         Layout::new(1040, 680, S, true)
+    }
+
+    #[test]
+    fn only_revoke_targets_get_a_tip() {
+        let a = Rect::new(1, 2, 3, 4);
+        let b = Rect::new(5, 6, 7, 8);
+        let targets = [
+            (a, Zone::StopAgent),
+            (b, Zone::Revoke(9)),
+            (a, Zone::Revoke(3)),
+        ];
+        assert_eq!(tips(&targets), [(9, b), (3, a)]);
+        assert_eq!(REVOKE_TIP, "Revoke session");
     }
 
     fn running(rows: Vec<Row>) -> Page {
