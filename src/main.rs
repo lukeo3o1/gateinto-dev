@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
@@ -18,7 +18,7 @@ use gateinto::identity::client_cert::{
 use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
-use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server};
+use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
 use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
@@ -144,9 +144,14 @@ enum SessionCommand {
     /// Start a browser session with session credentials on an ephemeral loopback port, show the
     /// credentials, and run it until interrupted
     Browser(BrowserSessionArgs),
-    /// List the sessions of the running agent: id, kind, gateway name and listen address, then
-    /// the gateway address, local auth, start time, open tunnels and browser as key=value pairs
-    List,
+    /// List the sessions of the running agent as a table: id, kind, gateway, listen address,
+    /// route, local auth, open tunnels, uptime and browser; never credentials
+    List {
+        /// Print one JSON object per session and line instead, with the gateway's upstream
+        /// address and the start time in Unix seconds
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the proxy credentials of a session of the running agent again, in a dialog on an
     /// interactive Windows desktop or otherwise on the terminal; never on standard output
     Credentials {
@@ -492,7 +497,7 @@ async fn run() -> ExitCode {
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
-        Command::Session(SessionCommand::List) => agent_request(Request::List).await,
+        Command::Session(SessionCommand::List { json }) => session_list(json).await,
         Command::Session(SessionCommand::Credentials { id }) => session_credentials(id).await,
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
         Command::Agent(args) if args.detach => agent_detach(args.config.config.as_deref()).await,
@@ -1143,6 +1148,40 @@ async fn session_credentials(id: SessionId) -> Result {
     Ok(show_credentials(Some(id), listen, credentials).await?)
 }
 
+async fn session_list(json: bool) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    let lines = match ipc::send(&endpoint, &Request::List).await? {
+        Response::Ok(lines) => lines,
+        Response::Error(message) => return Err(message.into()),
+    };
+    let sessions = listed_sessions(&lines)?;
+    if json {
+        for session in sessions {
+            println!("{}", session.to_line());
+        }
+    } else {
+        print_session_table(&sessions);
+    }
+    Ok(())
+}
+
+fn print_session_table(sessions: &[SessionInfo]) {
+    for line in gateinto::session_table::session_table(sessions, unix_now()) {
+        println!("{line}");
+    }
+}
+
+fn listed_sessions(lines: &[String]) -> Result<Vec<SessionInfo>, String> {
+    SessionInfo::parse_list(lines)
+        .map_err(|error| format!("the agent listed a session this version cannot read: {error}"))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 async fn agent_request(request: Request) -> Result {
     let endpoint = Endpoint::for_current_user()?;
     print_response(ipc::send(&endpoint, &request).await?)
@@ -1377,12 +1416,15 @@ async fn status(args: StatusArgs) -> Result {
         Err(error) => Err(RequestError::Io(error)),
     };
     match agent {
-        Ok(Response::Ok(sessions)) => {
-            println!("agent: running");
-            for session in sessions {
-                println!("{session}");
+        Ok(Response::Ok(lines)) => match listed_sessions(&lines) {
+            Ok(sessions) => {
+                println!("agent: running");
+                if !sessions.is_empty() {
+                    print_session_table(&sessions);
+                }
             }
-        }
+            Err(error) => println!("agent: running, list failed: {error}"),
+        },
         Ok(Response::Error(message)) => println!("agent: running, list failed: {message}"),
         Err(RequestError::NotRunning | RequestError::Closed) => println!("agent: not running"),
         Err(error) => println!("agent: unknown: {error}"),

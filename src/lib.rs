@@ -15,6 +15,7 @@ pub mod proxy;
 pub mod registration;
 #[cfg(windows)]
 mod registry;
+pub mod session_table;
 pub mod sessions;
 #[cfg(test)]
 mod test_support;

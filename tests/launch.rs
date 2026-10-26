@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use fixture::*;
 use gateinto::browser::ProfileDir;
+use gateinto::ipc::{SessionInfo, SessionKind, SessionRoute};
 use launch_support::*;
 use tokio::io::AsyncWriteExt;
 
@@ -225,8 +226,15 @@ impl Launcher {
         (lines, browser)
     }
 
-    async fn list(&self) -> Vec<String> {
-        self.run(&["session", "list"]).await.success().lines()
+    async fn list(&self) -> Vec<SessionInfo> {
+        let lines = self
+            .run(&["session", "list", "--json"])
+            .await
+            .success()
+            .lines();
+        let sessions = SessionInfo::parse_list(&lines).unwrap();
+        assert_eq!(sessions.len(), lines.len(), "{lines:?}");
+        sessions
     }
 }
 
@@ -252,13 +260,11 @@ impl Launcher {
         let Response::Ok(list) = ipc::send(&endpoint, &Request::List).await.unwrap() else {
             panic!("listing the sessions failed");
         };
-        let id = list
+        let id = SessionInfo::parse_list(&list)
+            .unwrap()
             .iter()
-            .find_map(|line| {
-                let mut words = line.strip_prefix("session: ")?.split(' ');
-                let id = words.next()?;
-                (words.nth(2)? == listen.to_string()).then(|| id.parse().unwrap())
-            })
+            .find(|session| session.listen == listen)
+            .map(|session| session.id.to_string().parse().unwrap())
             .unwrap_or_else(|| panic!("no session listens on {listen}: {list:?}"));
         let Response::Ok(lines) = ipc::send(&endpoint, &Request::Credentials(id))
             .await
@@ -292,13 +298,29 @@ fn assert_no_credentials(output: &Output) {
     }
 }
 
-fn listed(list: &[String], lines: &[String]) -> bool {
-    let prefix = format!(
-        "session: {} browser main {} ",
+fn listed_session<'a>(list: &'a [SessionInfo], lines: &[String]) -> Option<&'a SessionInfo> {
+    list.iter().find(|session| {
+        session.id.to_string() == field(lines, "session")
+            && session.kind == SessionKind::Browser
+            && session.gateway == "main"
+            && session.listen.to_string() == field(lines, "listen")
+    })
+}
+
+fn listed(list: &[SessionInfo], lines: &[String]) -> bool {
+    listed_session(list, lines).is_some()
+}
+
+fn in_table(table: &[String], lines: &[String]) -> bool {
+    let row = [
         field(lines, "session"),
-        field(lines, "listen")
-    );
-    list.iter().any(|line| line.starts_with(&prefix))
+        "browser",
+        "main",
+        field(lines, "listen"),
+    ];
+    table
+        .iter()
+        .any(|line| line.split_whitespace().take(4).eq(row))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -505,16 +527,9 @@ async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_sessio
     }
     assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
     let list = launcher.list().await;
-    let prefix = format!(
-        "session: {} browser main {} route=mixed ",
-        field(&mixed, "session"),
-        field(&mixed, "listen")
-    );
-    assert!(
-        list.iter().any(|line| line.starts_with(&prefix)),
-        "{list:?}"
-    );
-    assert!(listed(&list, &gateway));
+    let route = |lines: &[String]| listed_session(&list, lines).map(|session| session.route);
+    assert_eq!(route(&mixed), Some(SessionRoute::Mixed), "{list:?}");
+    assert_eq!(route(&gateway), Some(SessionRoute::All), "{list:?}");
     mixed_browser.exit();
     gateway_browser.exit();
 }
@@ -750,7 +765,7 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
         "{after:?}"
     );
     assert!(after.contains(&"agent: running".to_owned()), "{after:?}");
-    assert!(listed(&after, &lines), "{after:?}");
+    assert!(in_table(&after, &lines), "{after:?}");
     let text = after.join("\n");
     let shown = launcher.shown_credentials(browser.proxy()).await;
     for secret in [
@@ -763,6 +778,40 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
     }
     assert!(browser.profile().exists());
     assert_eq!(launcher.list().await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_list_prints_an_aligned_table_or_json_objects_without_secrets() {
+    let launcher = Launcher::new("").await;
+    let (lines, browser) = launcher.opened("main").await;
+
+    let table = launcher.run(&["session", "list"]).await.success().lines();
+    let json = launcher
+        .run(&["session", "list", "--json"])
+        .await
+        .success()
+        .lines();
+
+    assert_eq!(table.len(), 2, "{table:?}");
+    assert_eq!(
+        table[0].split_whitespace().collect::<Vec<_>>(),
+        [
+            "ID", "KIND", "GATEWAY", "LISTEN", "ROUTE", "AUTH", "TUNNELS", "UPTIME", "BROWSER"
+        ]
+    );
+    assert!(in_table(&table, &lines), "{table:?}");
+    assert_eq!(
+        table[0].find("LISTEN"),
+        table[1].find(field(&lines, "listen")),
+        "{table:?}"
+    );
+    assert_eq!(json.len(), 1, "{json:?}");
+    assert!(listed(&SessionInfo::parse_list(&json).unwrap(), &lines));
+    let text = [table, json].concat().join("\n");
+    let shown = launcher.shown_credentials(browser.proxy()).await;
+    for secret in [field(&lines, "realm"), field(&shown, "password")] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -898,7 +947,7 @@ async fn concurrent_opens_without_an_agent_start_exactly_one() {
     assert!(listed(&list, &first) && listed(&list, &second), "{list:?}");
     assert_eq!(
         list.iter()
-            .filter(|line| line.contains(" browser "))
+            .filter(|session| session.kind == SessionKind::Browser)
             .count(),
         2,
         "{list:?}"
@@ -979,11 +1028,11 @@ async fn an_agent_device_session_with_auth_none_accepts_any_local_client() {
 async fn device_session_listen(launcher: &Launcher) -> SocketAddr {
     let list = launcher.list().await;
     list.iter()
-        .find_map(|line| line.strip_prefix("session: 1 device main "))
-        .and_then(|rest| rest.split(' ').next())
+        .find(|session| {
+            session.id == 1 && session.kind == SessionKind::Device && session.gateway == "main"
+        })
         .unwrap_or_else(|| panic!("{list:?}"))
-        .parse()
-        .unwrap()
+        .listen
 }
 
 #[cfg(unix)]

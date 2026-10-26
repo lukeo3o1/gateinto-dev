@@ -11,6 +11,8 @@ use crate::proxy::SessionCredentials;
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
+pub use gateinto_ipc_types::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
+
 pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const INSTANCE_VARIABLE: &str = "GATEINTO_INSTANCE";

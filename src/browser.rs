@@ -12,6 +12,7 @@ use tokio::process::{Child, Command};
 use tracing::warn;
 
 use crate::config::PortalUrl;
+use crate::ipc::BrowserKind;
 use crate::job::{Job, SpawnError};
 use crate::sessions::SessionId;
 
@@ -56,12 +57,12 @@ pub fn browser_args(
     ]
 }
 
-pub fn browser_name(executable: &Path) -> Option<&'static str> {
+pub fn browser_name(executable: &Path) -> Option<BrowserKind> {
     let name = executable.file_name()?.to_str()?.to_ascii_lowercase();
     match name.strip_suffix(".exe").unwrap_or(&name) {
-        "chrome" | "google-chrome" | "google-chrome-stable" => Some("chrome"),
-        "msedge" | "microsoft-edge" | "microsoft-edge-stable" => Some("edge"),
-        "chromium" | "chromium-browser" => Some("chromium"),
+        "chrome" | "google-chrome" | "google-chrome-stable" => Some(BrowserKind::Chrome),
+        "msedge" | "microsoft-edge" | "microsoft-edge-stable" => Some(BrowserKind::Edge),
+        "chromium" | "chromium-browser" => Some(BrowserKind::Chromium),
         _ => None,
     }
 }
@@ -380,18 +381,18 @@ mod tests {
         for (path, name) in [
             (
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                Some("chrome"),
+                Some(BrowserKind::Chrome),
             ),
             (
                 r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                Some("edge"),
+                Some(BrowserKind::Edge),
             ),
-            ("/usr/bin/google-chrome", Some("chrome")),
-            ("/usr/bin/google-chrome-stable", Some("chrome")),
-            ("/usr/bin/chromium", Some("chromium")),
-            ("/usr/bin/chromium-browser", Some("chromium")),
-            ("/usr/bin/microsoft-edge", Some("edge")),
-            ("/opt/CHROME.EXE", Some("chrome")),
+            ("/usr/bin/google-chrome", Some(BrowserKind::Chrome)),
+            ("/usr/bin/google-chrome-stable", Some(BrowserKind::Chrome)),
+            ("/usr/bin/chromium", Some(BrowserKind::Chromium)),
+            ("/usr/bin/chromium-browser", Some(BrowserKind::Chromium)),
+            ("/usr/bin/microsoft-edge", Some(BrowserKind::Edge)),
+            ("/opt/CHROME.EXE", Some(BrowserKind::Chrome)),
             ("/opt/brave", None),
             ("", None),
         ] {
