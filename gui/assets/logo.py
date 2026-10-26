@@ -13,9 +13,10 @@ from pathlib import Path
 
 import cairo
 
-TOP = (0x0A, 0x6B, 0xC7)
-BOTTOM = (0x00, 0x52, 0x9E)
-MARK = (0xFF, 0xFF, 0xFF)
+TILE = (0x26, 0x2B, 0x36)
+DOOR = (0x0C, 0x0E, 0x13)
+ARCH = (0xFF, 0xFF, 0xFF)
+EYES = (0xFF, 0xC9, 0x4A)
 
 
 @dataclass(frozen=True)
@@ -27,26 +28,95 @@ class Geometry:
     right: float
     crown: float
     foot: float
+    eye_dx: float
+    eye_y: float
+    eye_rx: float
+    eye_ry: float
+    bend: float | None = None
+    round_caps: bool = True
+    round_eyes: bool = True
 
 
 def master(size):
-    k = size / 16
+    k = size / 48
     return Geometry(
-        inset=1 * k,
-        radius=3.5 * k,
-        stroke=1.5 * k,
-        left=5 * k,
-        right=11 * k,
-        crown=7 * k,
-        foot=12 * k,
+        inset=2 * k,
+        radius=11 * k,
+        stroke=4.5 * k,
+        left=13 * k,
+        right=35 * k,
+        crown=23 * k,
+        foot=40 * k,
+        eye_dx=3.7 * k,
+        eye_y=27 * k,
+        eye_rx=2.2 * k,
+        eye_ry=3 * k,
     )
 
 
+SNAPPED = {"round_caps": False, "round_eyes": False}
+
 TUNED = {
-    16: Geometry(inset=1, radius=3, stroke=2, left=5, right=11, crown=7, foot=12),
-    20: Geometry(inset=1, radius=4, stroke=2, left=6, right=14, crown=9, foot=15),
-    24: Geometry(inset=1, radius=5, stroke=2, left=7, right=17, crown=11, foot=18),
-    32: Geometry(inset=2, radius=6.5, stroke=3, left=9.5, right=22.5, crown=15, foot=23.5),
+    16: Geometry(
+        inset=1,
+        radius=3.5,
+        stroke=2,
+        left=4,
+        right=12,
+        crown=8,
+        foot=14,
+        eye_dx=1.5,
+        eye_y=9,
+        eye_rx=0.5,
+        eye_ry=1,
+        bend=3,
+        **SNAPPED,
+    ),
+    20: Geometry(
+        inset=1,
+        radius=4.5,
+        stroke=2,
+        left=5,
+        right=15,
+        crown=10,
+        foot=17,
+        eye_dx=2,
+        eye_y=11.5,
+        eye_rx=1,
+        eye_ry=1.5,
+        bend=4,
+        **SNAPPED,
+    ),
+    24: Geometry(
+        inset=1,
+        radius=5.5,
+        stroke=2,
+        left=7,
+        right=17,
+        crown=11,
+        foot=21,
+        eye_dx=2,
+        eye_y=13.5,
+        eye_rx=1,
+        eye_ry=1.5,
+        bend=4,
+        **SNAPPED,
+    ),
+    32: Geometry(
+        inset=1,
+        radius=7.5,
+        stroke=3,
+        left=8.5,
+        right=23.5,
+        crown=15,
+        foot=28,
+        eye_dx=2.5,
+        eye_y=18,
+        eye_rx=1.5,
+        eye_ry=2,
+        bend=6,
+        **SNAPPED,
+    ),
 }
 
 SIZES = [16, 20, 24, 32, 40, 48, 64, 256]
@@ -60,9 +130,12 @@ def rgb(c):
     return tuple(v / 255 for v in c)
 
 
-def draw(ctx, size, g):
+def hexcolor(c):
+    return "#" + bytes(c).hex()
+
+
+def tile(ctx, size, g):
     lo, hi = g.inset, size - g.inset
-    w = hi - lo
     r = g.radius
     ctx.new_sub_path()
     ctx.arc(hi - r, lo + r, r, -math.pi / 2, 0)
@@ -70,23 +143,54 @@ def draw(ctx, size, g):
     ctx.arc(lo + r, hi - r, r, math.pi / 2, math.pi)
     ctx.arc(lo + r, lo + r, r, math.pi, 3 * math.pi / 2)
     ctx.close_path()
-    fill = cairo.LinearGradient(0, lo, 0, lo + w)
-    fill.add_color_stop_rgb(0, *rgb(TOP))
-    fill.add_color_stop_rgb(1, *rgb(BOTTOM))
-    ctx.set_source(fill)
+
+
+def arch(ctx, g, inset):
+    left, right = g.left + inset, g.right - inset
+    half = (g.right - g.left) / 2
+    bend = (half if g.bend is None else g.bend) - inset
+    top = g.crown - half + inset
+    ctx.move_to(left, g.foot)
+    ctx.arc(left + bend, top + bend, bend, math.pi, 3 * math.pi / 2)
+    ctx.arc(right - bend, top + bend, bend, 3 * math.pi / 2, 2 * math.pi)
+    ctx.line_to(right, g.foot)
+
+
+def eye(ctx, g, cx):
+    if not g.round_eyes:
+        ctx.rectangle(cx - g.eye_rx, g.eye_y - g.eye_ry, 2 * g.eye_rx, 2 * g.eye_ry)
+        return
+    ctx.save()
+    ctx.translate(cx, g.eye_y)
+    ctx.scale(g.eye_rx, g.eye_ry)
+    ctx.arc(0, 0, 1, 0, 2 * math.pi)
+    ctx.restore()
+
+
+def draw(ctx, size, g):
+    tile(ctx, size, g)
+    ctx.set_source_rgb(*rgb(TILE))
     ctx.fill()
 
-    cx = (g.left + g.right) / 2
-    radius = (g.right - g.left) / 2
-    ctx.move_to(g.left, g.foot)
-    ctx.line_to(g.left, g.crown)
-    ctx.arc(cx, g.crown, radius, math.pi, 2 * math.pi)
-    ctx.line_to(g.right, g.foot)
-    ctx.set_source_rgb(*rgb(MARK))
+    # The doorway reaches under the stroke so the anti-aliased inner edge blends into it, not the tile.
+    arch(ctx, g, g.stroke / 4)
+    ctx.close_path()
+    ctx.set_source_rgb(*rgb(DOOR))
+    ctx.fill()
+
+    arch(ctx, g, 0)
+    ctx.set_source_rgb(*rgb(ARCH))
     ctx.set_line_width(g.stroke)
-    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    cap = cairo.LINE_CAP_ROUND if g.round_caps else cairo.LINE_CAP_BUTT
+    ctx.set_line_cap(cap)
     ctx.set_line_join(cairo.LINE_JOIN_ROUND)
     ctx.stroke()
+
+    centre = (g.left + g.right) / 2
+    for cx in (centre - g.eye_dx, centre + g.eye_dx):
+        eye(ctx, g, cx)
+        ctx.set_source_rgb(*rgb(EYES))
+        ctx.fill()
 
 
 def render(size):
@@ -150,16 +254,21 @@ def ico(sizes):
 
 
 def svg():
-    g = master(16)
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="256" height="256">
-  <defs>
-    <linearGradient id="fill" x1="0" y1="{g.inset:g}" x2="0" y2="{16 - g.inset:g}" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#{bytes(TOP).hex()}"/>
-      <stop offset="1" stop-color="#{bytes(BOTTOM).hex()}"/>
-    </linearGradient>
-  </defs>
-  <rect x="{g.inset:g}" y="{g.inset:g}" width="{16 - 2 * g.inset:g}" height="{16 - 2 * g.inset:g}" rx="{g.radius:g}" fill="url(#fill)"/>
-  <path d="M{g.left:g} {g.foot:g}V{g.crown:g}a3 3 0 0 1 6 0V{g.foot:g}" fill="none" stroke="#{bytes(MARK).hex()}" stroke-width="{g.stroke:g}" stroke-linecap="round" stroke-linejoin="round"/>
+    g = master(48)
+    side = 48 - 2 * g.inset
+    radius = (g.right - g.left) / 2
+    inner = radius - g.stroke / 2
+    centre = (g.left + g.right) / 2
+    rise = g.foot - g.crown
+    eyes = "\n".join(
+        f'  <ellipse cx="{cx:g}" cy="{g.eye_y:g}" rx="{g.eye_rx:g}" ry="{g.eye_ry:g}" fill="{hexcolor(EYES)}"/>'
+        for cx in (round(centre - g.eye_dx, 6), round(centre + g.eye_dx, 6))
+    )
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="256" height="256">
+  <rect x="{g.inset:g}" y="{g.inset:g}" width="{side:g}" height="{side:g}" rx="{g.radius:g}" fill="{hexcolor(TILE)}"/>
+  <path d="M{g.left + g.stroke / 2:g} {g.foot:g}V{g.crown:g}a{inner:g} {inner:g} 0 0 1 {2 * inner:g} 0v{rise:g}z" fill="{hexcolor(DOOR)}"/>
+  <path d="M{g.left:g} {g.foot:g}V{g.crown:g}a{radius:g} {radius:g} 0 0 1 {2 * radius:g} 0v{rise:g}" fill="none" stroke="{hexcolor(ARCH)}" stroke-width="{g.stroke:g}" stroke-linecap="round" stroke-linejoin="round"/>
+{eyes}
 </svg>
 """
 
