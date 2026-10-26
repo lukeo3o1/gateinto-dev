@@ -3,7 +3,8 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_IGNORE, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D1_FIGURE_BEGIN, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
@@ -31,6 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::text::Fonts;
 use crate::icons::{self, Icon, Prim, Seg};
 use crate::layout::Rect;
+use crate::logo::{self, Arch};
 use crate::scene::Op;
 use crate::theme::Rgb;
 
@@ -237,15 +239,25 @@ impl Canvas<'_> {
                     };
                 }
             }
-            Op::Logo(_) => {}
+            Op::Logo(r, eyes) => self.logo(r, eyes),
         }
     }
 
     fn figure(&self, start: icons::Point, segs: &[Seg], closed: bool) -> Option<ID2D1PathGeometry> {
+        self.path(D2D1_FIGURE_BEGIN_HOLLOW, start, segs, closed)
+    }
+
+    fn path(
+        &self,
+        begin: D2D1_FIGURE_BEGIN,
+        start: icons::Point,
+        segs: &[Seg],
+        closed: bool,
+    ) -> Option<ID2D1PathGeometry> {
         unsafe {
             let path = self.d2d.CreatePathGeometry().ok()?;
             let sink = path.Open().ok()?;
-            sink.BeginFigure(point(start), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.BeginFigure(point(start), begin);
             for seg in segs {
                 match *seg {
                     Seg::Line(to) => sink.AddLine(point(to)),
@@ -281,6 +293,50 @@ impl Canvas<'_> {
             });
             sink.Close().ok()?;
             Some(path)
+        }
+    }
+
+    fn arch(&self, a: Arch, begin: D2D1_FIGURE_BEGIN) -> Option<ID2D1PathGeometry> {
+        let segs = [
+            Seg::Line((a.left, a.crown)),
+            Seg::Arc {
+                to: (a.right, a.crown),
+                r: (a.right - a.left) / 2.0,
+                sweep: 180.0,
+            },
+            Seg::Line((a.right, a.foot)),
+        ];
+        let closed = begin == D2D1_FIGURE_BEGIN_FILLED;
+        self.path(begin, (a.left, a.foot), &segs, closed)
+    }
+
+    fn logo(&self, r: Rect, eyes: Option<Rgb>) {
+        let m = logo::mark(r);
+        let (x, y, w, h) = m.tile;
+        unsafe {
+            self.rt.FillRoundedRectangle(
+                &rounded(rectf(x, y, w, h), m.radius),
+                self.paint(logo::TILE),
+            );
+            if let Some(door) = self.arch(m.door, D2D1_FIGURE_BEGIN_FILLED) {
+                self.rt.FillGeometry(&door, self.paint(logo::DOOR), None);
+            }
+            if let Some(arch) = self.arch(m.arch, D2D1_FIGURE_BEGIN_HOLLOW) {
+                self.rt
+                    .DrawGeometry(&arch, self.paint(logo::ARCH), m.stroke, self.round);
+            }
+            if let Some(c) = eyes {
+                for eye in m.eyes {
+                    self.rt.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: Vector2::new(eye.cx, eye.cy),
+                            radiusX: eye.rx,
+                            radiusY: eye.ry,
+                        },
+                        self.paint(c),
+                    );
+                }
+            }
         }
     }
 

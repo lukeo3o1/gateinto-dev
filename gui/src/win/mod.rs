@@ -15,19 +15,18 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyIcon, DispatchMessageW,
-    DrawIconEx, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION,
-    HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG,
-    ICON_SMALL, IDC_ARROW, IMAGE_ICON, IsZoomed, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK,
-    MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
-    SM_CXSMICON, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_METRICS_INDEX, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-    WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
+    GetClientRect, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT, HTCLOSE,
+    HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL, IDC_ARROW,
+    IMAGE_ICON, IsZoomed, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG,
+    MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SC_CLOSE,
+    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX,
+    SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
+    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::frame::Frame;
@@ -35,7 +34,7 @@ use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
 use crate::pointer::Action;
 use crate::scale::Scale;
-use crate::scene::{Op, View, scene};
+use crate::scene::{View, scene};
 use crate::theme::Theme;
 use d2d::Graphics;
 use sys::wide;
@@ -56,11 +55,10 @@ fn metric_icon(instance: HINSTANCE, metric: SYSTEM_METRICS_INDEX, dpi: u32) -> H
 
 struct Icons {
     window: [HICON; 2],
-    logo: HICON,
 }
 
 impl Icons {
-    fn apply(hwnd: HWND, s: Scale, logo: i32) -> Self {
+    fn apply(hwnd: HWND, s: Scale) -> Self {
         let instance = unsafe { GetModuleHandleW(null()) };
         let window = [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)].map(|(kind, metric)| {
             let icon = metric_icon(instance, metric, s.dpi);
@@ -69,16 +67,13 @@ impl Icons {
             }
             icon
         });
-        Self {
-            window,
-            logo: load_icon(instance, logo),
-        }
+        Self { window }
     }
 }
 
 impl Drop for Icons {
     fn drop(&mut self) {
-        for icon in self.window.into_iter().chain([self.logo]) {
+        for icon in self.window {
             if !icon.is_null() {
                 unsafe { DestroyIcon(icon) };
             }
@@ -113,7 +108,7 @@ impl App {
             frame,
             gfx,
             fonts,
-            icons: Icons::apply(hwnd, s, layout.logo.w),
+            icons: Icons::apply(hwnd, s),
             layout,
             view: View::default(),
         })
@@ -239,25 +234,6 @@ fn on_paint(hwnd: HWND) {
         let ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
-        }
-        for op in &ops {
-            if let Op::Logo(r) = *op
-                && !app.icons.logo.is_null()
-            {
-                unsafe {
-                    DrawIconEx(
-                        dc,
-                        r.x,
-                        r.y,
-                        app.icons.logo,
-                        r.w,
-                        r.h,
-                        0,
-                        null_mut(),
-                        DI_NORMAL,
-                    )
-                };
-            }
         }
     });
     unsafe { EndPaint(hwnd, &ps) };
@@ -390,13 +366,13 @@ fn on_dpi_changed(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
             SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
-    let Some((s, logo)) = with_app(hwnd, |app| {
+    let Some(s) = with_app(hwnd, |app| {
         app.relayout();
-        (app.s, app.layout.logo.w)
+        app.s
     }) else {
         return;
     };
-    let icons = Icons::apply(hwnd, s, logo);
+    let icons = Icons::apply(hwnd, s);
     with_app(hwnd, |app| std::mem::replace(&mut app.icons, icons));
 }
 

@@ -13,7 +13,7 @@ pub enum Op {
     Round(Rect, f32, Rgb),
     Icon(Icon, Rect, f32, Rgb),
     Text(Font, &'static str, Rect, Rgb),
-    Logo(Rect),
+    Logo(Rect, Option<Rgb>),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -35,7 +35,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         Op::Fill(Rect::new(0, 0, l.caption_row.right(), l.rail.h), t.bg),
         Op::Fill(l.rail, t.rail),
         Op::Fill(l.rail_edge, t.rail_edge),
-        Op::Logo(l.logo),
+        Op::Logo(l.logo, Some(t.accent)),
         Op::Text(Font::Brand, "Gateinto", l.brand_text, t.rail_on),
     ];
     for item in l.nav {
@@ -139,7 +139,7 @@ mod tests {
                 Op::Fill(o, _) | Op::Round(o, ..) | Op::Icon(_, o, ..) | Op::Text(_, _, o, _) => {
                     within(o)
                 }
-                Op::Logo(o) => within(o),
+                Op::Logo(o, _) => within(o),
             })
             .collect()
     }
@@ -154,7 +154,7 @@ mod tests {
                 Op::Fill(Rect::new(0, 0, 1040, 680), T.bg),
                 Op::Fill(l.rail, T.rail),
                 Op::Fill(l.rail_edge, T.rail_edge),
-                Op::Logo(l.logo),
+                Op::Logo(l.logo, Some(T.accent)),
                 Op::Text(Font::Brand, "Gateinto", l.brand_text, T.rail_on),
             ]
         );

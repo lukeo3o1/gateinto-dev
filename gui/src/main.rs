@@ -7,6 +7,7 @@ mod frame;
 mod hit;
 mod icons;
 mod layout;
+mod logo;
 mod nav;
 mod pointer;
 #[cfg(test)]
