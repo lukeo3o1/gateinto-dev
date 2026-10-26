@@ -103,19 +103,37 @@ pub fn snap(v: f32, width: f32) -> f32 {
     }
 }
 
+fn about(offset: f32, centre: f32) -> f32 {
+    centre + offset.round()
+}
+
 struct Grid {
     t: Transform,
-    width: f32,
+    mid: f32,
+    centre: Point,
 }
 
 impl Grid {
+    fn new(icon: &Icon, target: Rect, width: f32) -> Self {
+        let t = Transform::fit(icon.view, target);
+        let mid = icon.view / 2.0;
+        let (x, y) = t.point(mid, mid);
+        Self {
+            t,
+            mid,
+            centre: (snap(x, width), snap(y, width)),
+        }
+    }
+
     fn raw(&self, (x, y): Point) -> Point {
         self.t.point(x, y)
     }
 
-    fn snap(&self, p: Point) -> Point {
-        let (x, y) = self.raw(p);
-        (snap(x, self.width), snap(y, self.width))
+    fn snap(&self, (x, y): Point) -> Point {
+        (
+            about(self.t.len(x - self.mid), self.centre.0),
+            about(self.t.len(y - self.mid), self.centre.1),
+        )
     }
 
     fn shift(&self, p: Point, from: Point, to: Point) -> Point {
@@ -193,10 +211,7 @@ fn figures(cmds: &[Cmd], g: &Grid, out: &mut Vec<Prim>) {
 }
 
 pub fn trace(icon: &Icon, target: Rect, width: f32) -> Vec<Prim> {
-    let g = Grid {
-        t: Transform::fit(icon.view, target),
-        width,
-    };
+    let g = Grid::new(icon, target, width);
     let mut out = Vec::new();
     for shape in icon.shapes {
         match *shape {
@@ -227,7 +242,8 @@ pub fn trace(icon: &Icon, target: Rect, width: f32) -> Vec<Prim> {
 
 pub fn arc_end(cx: f32, cy: f32, r: f32, start: f32, sweep: f32) -> (f32, f32) {
     let a = (start + sweep).to_radians();
-    (cx + r * a.cos(), cy + r * a.sin())
+    let settle = |v: f32| (v * 1024.0).round() / 1024.0;
+    (settle(cx + r * a.cos()), settle(cy + r * a.sin()))
 }
 
 const fn line(x1: f32, y1: f32, x2: f32, y2: f32) -> [Cmd; 2] {
@@ -404,6 +420,15 @@ mod tests {
     }
 
     #[test]
+    fn offsets_from_the_centre_round_by_magnitude() {
+        assert_eq!(about(-5.25, 29.5), 24.5);
+        assert_eq!(about(5.25, 29.5), 34.5);
+        assert_eq!(about(-2.5, 29.5), 26.5);
+        assert_eq!(about(2.5, 29.5), 32.5);
+        assert_eq!(about(0.0, 29.5), 29.5);
+    }
+
+    #[test]
     fn even_strokes_snap_to_pixel_edges() {
         assert_eq!(snap(6.75, 2.0), 7.0);
         assert_eq!(snap(6.2, 2.0), 6.0);
@@ -417,16 +442,16 @@ mod tests {
             Prim::RoundRect {
                 x: 22.5,
                 y: 22.5,
-                w: 13.0,
-                h: 10.0,
+                w: 14.0,
+                h: 11.0,
                 r: 1.5
             }
         );
         assert_eq!(
             prims[1],
             Prim::Figure {
-                start: (22.5, 25.5),
-                segs: vec![Seg::Line((35.5, 25.5))],
+                start: (22.5, 26.5),
+                segs: vec![Seg::Line((36.5, 26.5))],
                 closed: false,
             }
         );
@@ -484,7 +509,7 @@ mod tests {
         assert_eq!(*start, (9.5, 2.5));
         assert_eq!(
             segs[0],
-            Seg::Cubic((11.75, 5.125), (11.75, 12.875), (9.5, 15.5))
+            Seg::Cubic((11.75, 5.125), (11.75, 13.875), (9.5, 16.5))
         );
     }
 
@@ -516,6 +541,79 @@ mod tests {
                         assert!(half(x) && half(y), "{x},{y} at {size}px");
                     }
                 }
+            }
+        }
+    }
+
+    fn anchors(prims: &[Prim]) -> Vec<Point> {
+        let mut points = Vec::new();
+        for prim in prims {
+            match prim {
+                Prim::RoundRect { x, y, w, h, .. } => {
+                    points.extend([(*x, *y), (x + w, *y), (*x, y + h), (x + w, y + h)])
+                }
+                Prim::Circle { cx, cy, .. } => points.push((*cx, *cy)),
+                Prim::Figure { start, segs, .. } => {
+                    points.push(*start);
+                    for seg in segs {
+                        match *seg {
+                            Seg::Line(p) | Seg::Arc { to: p, .. } => points.push(p),
+                            Seg::Cubic(c1, c2, p) => points.extend([c1, c2, p]),
+                        }
+                    }
+                }
+            }
+        }
+        points
+    }
+
+    fn sorted(mut points: Vec<Point>) -> Vec<(i64, i64)> {
+        let mut keys: Vec<_> = points
+            .drain(..)
+            .map(|(x, y)| ((x * 1000.0).round() as i64, (y * 1000.0).round() as i64))
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn mirror_symmetric_icons_trace_symmetrically_about_the_snapped_axis() {
+        for icon in [SESSIONS, GATEWAYS, IDENTITY, SETTINGS, DEVICE, PLUS] {
+            for size in [16, 18, 20, 24, 27, 30, 36] {
+                for width in [1.0, 2.0, 3.0] {
+                    let target = Rect::new(3, 7, size, size);
+                    let axis = snap(target.x as f32 + target.w as f32 / 2.0, width);
+                    let points = anchors(&trace(&icon, target, width));
+                    let mirrored = points.iter().map(|&(x, y)| (2.0 * axis - x, y)).collect();
+                    assert_eq!(
+                        sorted(points),
+                        sorted(mirrored),
+                        "{icon:?} at {size}px width {width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_lock_shackle_is_centred_on_its_body() {
+        for size in [16, 18, 20, 24, 27, 30, 36] {
+            for width in [1.0, 2.0, 3.0] {
+                let prims = trace(&IDENTITY, Rect::new(20, 19, size, size), width);
+                let Prim::RoundRect { x, w, .. } = prims[0] else {
+                    panic!("expected the body");
+                };
+                let Prim::Figure { start, segs, .. } = &prims[1] else {
+                    panic!("expected the shackle");
+                };
+                let Seg::Line(end) = segs[2] else {
+                    panic!("expected the right leg");
+                };
+                assert_eq!(
+                    x + w / 2.0,
+                    (start.0 + end.0) / 2.0,
+                    "{size}px width {width}"
+                );
             }
         }
     }
