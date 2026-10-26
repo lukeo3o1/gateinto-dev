@@ -84,8 +84,8 @@ expect_assets 'latest assets' latest
 expect_assets_fail 'unknown channel' stable "$sha" "$(dist latest)" 'unknown release channel'
 expect_assets_fail 'short commit' alpha "$short" "$(dist alpha)" 'full 40-character commit'
 expect_assets_fail 'uppercase commit' alpha "${sha^^}" "$(dist alpha)" 'full 40-character commit'
-expect_assets_fail 'latest with Windows 7 builds' latest "$sha" "$(dist alpha)" 'unexpected file'
-expect_assets_fail 'beta without Windows 7 builds' beta "$sha" "$(dist latest)" 'missing'
+expect_assets_fail 'latest with Windows 7 build' latest "$sha" "$(dist alpha)" 'unexpected file'
+expect_assets_fail 'beta without Windows 7 build' beta "$sha" "$(dist latest)" 'missing'
 
 dir=$(dist alpha)
 printf 'pdb\n' > "$dir/gateinto-$short-x86_64-pc-windows-msvc.wixpdb"

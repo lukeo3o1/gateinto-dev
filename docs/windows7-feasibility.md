@@ -244,7 +244,8 @@ so the update is not required.
 
 `partial`
 
-`gateinto.exe` builds and links for `x86_64-win7-windows-msvc` in CI. The builds
+`gateinto.exe` built and linked for `x86_64-win7-windows-msvc` in CI before that
+build was dropped; CI now builds only `i686-win7-windows-msvc`. The builds
 recorded so far imported `Tbsi_GetDeviceInfo` and `BCryptHash`, so they would not
 have loaded on Windows 7. Both imports are removed now, and the allow-list audit
 fails if another import that Windows 7 lacks appears. In run 39074036884 the
@@ -269,8 +270,8 @@ does not exist on Windows 7, so only software keys can work there.
 
 To reach `working`:
 
-1. A Windows 7 SP1 machine or VM with all updates, 32-bit (or x64, which runs
-   the 32-bit build under WOW64).
+1. A Windows 7 SP1 machine or VM with all updates, 32-bit preferred; an x64
+   machine would run the 32-bit build under WOW64, which is also unverified.
 2. Copy `gateinto.exe` from the `gateinto-i686-win7-windows-msvc` artifact of a passing
    [windows7.yml](../.github/workflows/windows7.yml) run made after the fixes
    above. Older artifacts import `Tbsi_GetDeviceInfo` and do not load. Check

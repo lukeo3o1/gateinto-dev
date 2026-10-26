@@ -270,7 +270,7 @@ without the Visual C++ Redistributable, because the UCRT ships with Windows
 10; the UCRT only matters on Windows 7 and 8.1. `.cargo/config.toml` now sets
 `-C target-feature=+crt-static` for `cfg(all(windows, target_env = "msvc"))`,
 which covers `x86_64-pc-windows-msvc`, `i686-pc-windows-msvc` and
-`x86_64-win7-windows-msvc`. No
+`i686-win7-windows-msvc`. No
 workflow sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, which would replace
 these flags.
 
