@@ -13,6 +13,7 @@ mod pointer;
 mod res;
 mod scale;
 mod scene;
+mod sessions;
 mod theme;
 #[cfg(windows)]
 mod win;
