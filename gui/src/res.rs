@@ -11,7 +11,8 @@ struct Image<'a> {
 
 fn read_ico(ico: &[u8]) -> Result<Vec<Image<'_>>, String> {
     let field = |at: usize, len: usize| {
-        ico.get(at..at + len)
+        at.checked_add(len)
+            .and_then(|end| ico.get(at..end))
             .ok_or_else(|| format!("icon file ends at byte {}", ico.len()))
     };
     let header = field(0, 6)?;
@@ -148,6 +149,14 @@ mod tests {
         short.truncate(short.len() - 1);
         assert!(build(&short, b"m").is_err());
         assert!(build(&ico(&[]), b"m").is_err());
+    }
+
+    #[test]
+    fn rejects_an_image_that_reaches_past_the_address_space() {
+        let mut huge = ico(&[(16, b"a")]);
+        huge[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(build(&huge, b"m").is_err());
     }
 
     #[test]
