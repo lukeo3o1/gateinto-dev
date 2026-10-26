@@ -12,9 +12,11 @@ use std::time::Duration;
 use fixture::*;
 use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
 use gateinto::browser::ProfileDir;
+use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::{
-    self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server,
+    self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server, SessionAuth,
+    SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
 use gateinto::proxy::Config;
@@ -385,14 +387,85 @@ async fn a_launch_opens_the_portal_in_a_browser_with_its_own_profile_and_session
     browser.exit();
 
     wait_until("the profile is removed", || !profile.exists()).await;
-    let id = field(&lines, "session").to_owned();
+    let id: u64 = field(&lines, "session").parse().unwrap();
     assert!(
         !agent
-            .list()
+            .sessions()
             .await
             .iter()
-            .any(|line| line.starts_with(&format!("session: {id} "))),
+            .any(|session| session.id == id)
     );
+    agent.stop().await;
+}
+
+impl TestAgent {
+    async fn sessions(&self) -> Vec<SessionInfo> {
+        SessionInfo::parse_list(&self.list().await).unwrap()
+    }
+
+    async fn listed(&self, lines: &[String]) -> SessionInfo {
+        let id: u64 = field(lines, "session").parse().unwrap();
+        let sessions = self.sessions().await;
+        sessions
+            .iter()
+            .find(|session| session.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{sessions:?}"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_list_is_one_json_object_per_session_without_secrets() {
+    let agent = TestAgent::start(limits()).await;
+    let before = unix_now();
+    let (lines, browser) = agent.launched("main").await;
+    let after = unix_now();
+
+    let listed = agent.listed(&lines).await;
+    assert!((before..=after).contains(&listed.started), "{listed:?}");
+    let auth = if cfg!(windows) {
+        SessionAuth::OsUser
+    } else {
+        SessionAuth::Password
+    };
+    let expected = SessionInfo {
+        id: field(&lines, "session").parse().unwrap(),
+        kind: SessionKind::Browser,
+        gateway: "main".to_owned(),
+        upstream: agent._upstream.addr.to_string(),
+        listen: field(&lines, "listen").parse().unwrap(),
+        route: SessionRoute::All,
+        auth,
+        started: listed.started,
+        tunnels: 0,
+        browser: None,
+    };
+    assert_eq!(listed, expected);
+    let list = agent.list().await;
+    assert_eq!(list, [expected.to_line()]);
+    for secret in ["username", "password", "realm"] {
+        let value = field(&lines, secret);
+        assert!(list.iter().all(|line| !line.contains(value)), "{list:?}");
+    }
+
+    let target = echo_server().await.to_string();
+    let (mut stream, response) = send(
+        browser.proxy(),
+        &connect_with(&target, Some(&session_auth(&lines))),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    assert_eq!(agent.listed(&lines).await.tunnels, 1);
+    stream.shutdown().await.unwrap();
+    assert!(read_to_end_within(&mut stream, WAIT).await.is_empty());
+    let deadline = std::time::Instant::now() + WAIT;
+    while agent.listed(&lines).await.tunnels != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tunnel is still listed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     agent.stop().await;
 }
 
@@ -418,14 +491,11 @@ async fn repeated_launches_open_separate_sessions_profiles_and_browsers() {
     assert_ne!(field(&first, "password"), field(&second, "password"));
     assert_ne!(first_browser.profile(), second_browser.profile());
     assert_ne!(first_browser.pid, second_browser.pid);
-    let list = agent.list().await;
     for lines in [&first, &second] {
-        let expected = format!(
-            "session: {} browser main {}",
-            field(lines, "session"),
-            field(lines, "listen")
-        );
-        assert!(list.contains(&expected), "{list:?}");
+        let listed = agent.listed(lines).await;
+        assert_eq!(listed.kind, SessionKind::Browser);
+        assert_eq!(listed.gateway, "main");
+        assert_eq!(listed.listen.to_string(), field(lines, "listen"));
     }
     tunnel_echoes(first_browser.proxy(), &first).await;
     tunnel_echoes(second_browser.proxy(), &second).await;
@@ -443,7 +513,7 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     let agent = TestAgent::start(limits()).await;
     let (lines, browser) = agent.launched("main").await;
     let (other_lines, other) = agent.launched("main").await;
-    let id = field(&lines, "session").parse().unwrap();
+    let id: SessionId = field(&lines, "session").parse().unwrap();
 
     assert_eq!(
         agent.send(Request::Close(id)).await,
@@ -451,12 +521,12 @@ async fn closing_a_session_stops_its_browser_and_removes_its_profile() {
     );
 
     assert!(!browser.profile().exists());
-    let list = agent.list().await;
+    let sessions = agent.sessions().await;
     assert!(
-        !list
+        !sessions
             .iter()
-            .any(|line| line.starts_with(&format!("session: {id} "))),
-        "{list:?}"
+            .any(|session| SessionId::from(session.id) == id),
+        "{sessions:?}"
     );
     assert!(other.profile().exists());
     tunnel_echoes(other.proxy(), &other_lines).await;

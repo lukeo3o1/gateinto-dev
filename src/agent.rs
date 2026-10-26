@@ -11,8 +11,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::browser::{self, BrowserProcess, ProfileDir};
+use crate::clock::unix_now;
 use crate::config::GatewayName;
-use crate::ipc::{self, ConfirmToken, Connection, Request, Response, Server};
+use crate::ipc::{self, BrowserKind, ConfirmToken, Connection, Request, Response, Server};
 use crate::job::{Job, SpawnError};
 use crate::link::{self, Decision, Known, Launch, LinkedGateway, Resolution};
 use crate::proxy::{self, LocalAuth};
@@ -135,6 +136,7 @@ impl LaunchLimiter {
 }
 
 struct Browser {
+    name: Option<BrowserKind>,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -509,7 +511,8 @@ impl Agent {
         let (close, closed) = oneshot::channel();
         let mut browsers = self.inner.browsers.lock().await;
         let task = tokio::spawn(watch(self.inner.clone(), id, child, dir, closed).instrument(span));
-        browsers.insert(id, Browser { close, task });
+        let name = browser::browser_name(&executable);
+        browsers.insert(id, Browser { name, close, task });
         Ok(lines)
     }
 
@@ -527,25 +530,20 @@ impl Agent {
     }
 
     async fn list(&self) -> Vec<String> {
+        let names: BTreeMap<SessionId, BrowserKind> = self
+            .inner
+            .browsers
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(&id, browser)| Some((id, browser.name?)))
+            .collect();
         self.inner
             .sessions
             .lock()
             .await
             .sessions()
-            .map(|session| {
-                format!(
-                    "session: {} {} {} {}{}",
-                    session.id(),
-                    session.kind(),
-                    session.gateway(),
-                    session.local_addr(),
-                    if session.route() == proxy::Route::Mixed {
-                        " route=mixed"
-                    } else {
-                        ""
-                    }
-                )
-            })
+            .map(|session| session.info(names.get(&session.id()).copied()).to_line())
             .collect()
     }
 
@@ -592,12 +590,6 @@ fn warned(mut lines: Vec<String>, known: &Known) -> Vec<String> {
         lines.push(line);
     }
     lines
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 async fn watch(
