@@ -66,6 +66,7 @@ pub struct Layout {
     pub caption_row: Rect,
     pub buttons: Option<CaptionButtons>,
     pub title: Rect,
+    pub content: Rect,
 }
 
 impl Layout {
@@ -120,6 +121,13 @@ impl Layout {
             Rect::new(width - w * i, 0, w, caption_row.h)
         };
         let pad = s.px(28.0);
+        let title = Rect::new(
+            rail.w + pad,
+            caption_row.h + title_gap,
+            content_w - 2 * pad,
+            s.px(32.0),
+        );
+        let top = title.bottom() + s.px(4.0);
         Self {
             rail,
             rail_edge: Rect::new(inner, 0, edge, height),
@@ -134,12 +142,8 @@ impl Layout {
                 close: button(1),
                 glyph: s.px(10.0),
             }),
-            title: Rect::new(
-                rail.w + pad,
-                caption_row.h + title_gap,
-                content_w - 2 * pad,
-                s.px(32.0),
-            ),
+            title,
+            content: Rect::new(title.x, top, title.w, height - top - s.px(24.0)),
         }
     }
 
@@ -232,6 +236,14 @@ mod tests {
     #[test]
     fn page_title_sits_under_the_caption_row() {
         assert_eq!(at(96).title, Rect::new(248, 44, 764, 32));
+    }
+
+    #[test]
+    fn content_fills_the_space_under_the_title() {
+        assert_eq!(at(96).content, Rect::new(248, 80, 764, 576));
+        let system = Layout::new(1040, 680, Scale::new(96), false);
+        assert_eq!(system.content, Rect::new(248, 56, 764, 600));
+        assert_eq!(at(192).content, Rect::new(496, 160, 488, 472));
     }
 
     #[test]
