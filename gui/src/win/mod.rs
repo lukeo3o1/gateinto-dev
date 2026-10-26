@@ -347,6 +347,14 @@ fn on_left(hwnd: HWND) {
     }
 }
 
+fn on_capture_lost(hwnd: HWND) {
+    if let Some(app) = app(hwnd)
+        && app.view.pointer.cancel()
+    {
+        app.invalidate();
+    }
+}
+
 fn on_size(hwnd: HWND, wp: WPARAM) {
     if let Some(app) = app(hwnd) {
         app.view.maximized = wp == SIZE_MAXIMIZED as WPARAM;
@@ -412,8 +420,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_NCMOUSEMOVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK | WM_NCLBUTTONUP => {
             on_nc_mouse(hwnd, msg, wp)
         }
-        WM_NCMOUSELEAVE | WM_MOUSELEAVE | WM_CAPTURECHANGED => {
+        WM_NCMOUSELEAVE | WM_MOUSELEAVE => {
             on_left(hwnd);
+            Some(0)
+        }
+        WM_CAPTURECHANGED => {
+            on_capture_lost(hwnd);
             Some(0)
         }
         WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {

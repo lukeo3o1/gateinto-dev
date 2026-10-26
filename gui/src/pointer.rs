@@ -64,6 +64,10 @@ impl Pointer {
         action(zone)
     }
 
+    pub fn cancel(&mut self) -> bool {
+        self.pressed.take().is_some()
+    }
+
     pub fn left(&mut self) -> bool {
         let changed = self.hover.is_some() || self.pressed.is_some();
         *self = Self::default();
@@ -141,5 +145,17 @@ mod tests {
         assert_eq!(p.look(Zone::Close), Look::Rest);
         assert_eq!(p.up(Zone::Close), None);
         assert!(!p.left());
+    }
+
+    #[test]
+    fn losing_capture_cancels_the_press_but_keeps_the_hover() {
+        let mut p = Pointer::default();
+        p.moved(SETTINGS);
+        p.down(SETTINGS);
+        assert!(p.cancel());
+        assert_eq!(p.look(SETTINGS), Look::Hover);
+        assert_eq!(p.up(SETTINGS), None);
+        assert!(!p.cancel());
+        assert_eq!(p.look(SETTINGS), Look::Hover);
     }
 }
