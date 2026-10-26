@@ -105,10 +105,6 @@ impl Session {
         &self.gateway
     }
 
-    pub fn route(&self) -> proxy::Route {
-        self.route
-    }
-
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
