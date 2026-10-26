@@ -1,5 +1,5 @@
 use crate::layout::Rect;
-use crate::nav::{KeyKind, Page};
+use crate::nav::Page;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cmd {
@@ -288,46 +288,6 @@ pub const DEVICE: Icon = Icon {
     ],
 };
 
-pub const CHIP: Icon = Icon {
-    view: RAIL,
-    stroke: RAIL_STROKE,
-    shapes: &[
-        rect(6.5, 6.5, 11.0, 11.0, 2.0),
-        rect(9.5, 9.5, 5.0, 5.0, 1.0),
-        Shape::Path(&line(9.5, 3.5, 9.5, 6.5)),
-        Shape::Path(&line(14.5, 3.5, 14.5, 6.5)),
-        Shape::Path(&line(9.5, 17.5, 9.5, 20.5)),
-        Shape::Path(&line(14.5, 17.5, 14.5, 20.5)),
-        Shape::Path(&line(3.5, 9.5, 6.5, 9.5)),
-        Shape::Path(&line(3.5, 14.5, 6.5, 14.5)),
-        Shape::Path(&line(17.5, 9.5, 20.5, 9.5)),
-        Shape::Path(&line(17.5, 14.5, 20.5, 14.5)),
-    ],
-};
-
-pub const KEYFILE: Icon = Icon {
-    view: RAIL,
-    stroke: RAIL_STROKE,
-    shapes: &[
-        Shape::Path(&[
-            Cmd::Move(6.0, 3.5),
-            Cmd::Line(14.0, 3.5),
-            Cmd::Line(18.0, 7.5),
-            Cmd::Line(18.0, 20.5),
-            Cmd::Line(6.0, 20.5),
-            Cmd::Close,
-        ]),
-        Shape::Path(&[
-            Cmd::Move(14.0, 3.5),
-            Cmd::Line(14.0, 7.5),
-            Cmd::Line(18.0, 7.5),
-        ]),
-        circle(10.0, 14.5, 2.0),
-        Shape::Path(&line(12.0, 14.5, 16.0, 14.5)),
-        Shape::Path(&line(14.5, 14.5, 14.5, 16.5)),
-    ],
-};
-
 pub const LOG: Icon = Icon {
     view: RAIL,
     stroke: RAIL_STROKE,
@@ -400,15 +360,13 @@ pub const CLOSE: Icon = Icon {
     ],
 };
 
-pub fn rail_icon(page: Page, key: Option<KeyKind>) -> Icon {
-    match (page, key) {
-        (Page::Sessions, _) => SESSIONS,
-        (Page::Gateways, _) => GATEWAYS,
-        (Page::Device, None) => DEVICE,
-        (Page::Device, Some(KeyKind::Hardware)) => CHIP,
-        (Page::Device, Some(KeyKind::Software)) => KEYFILE,
-        (Page::Log, _) => LOG,
-        (Page::Settings, _) => SETTINGS,
+pub fn rail_icon(page: Page) -> Icon {
+    match page {
+        Page::Sessions => SESSIONS,
+        Page::Gateways => GATEWAYS,
+        Page::Device => DEVICE,
+        Page::Log => LOG,
+        Page::Settings => SETTINGS,
     }
 }
 
@@ -416,9 +374,8 @@ pub fn rail_icon(page: Page, key: Option<KeyKind>) -> Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 11] = [
-        SESSIONS, GATEWAYS, DEVICE, CHIP, KEYFILE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE,
-        CLOSE,
+    const ALL: [Icon; 9] = [
+        SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE,
     ];
 
     #[test]
@@ -565,7 +522,7 @@ mod tests {
 
     #[test]
     fn mirror_symmetric_icons_trace_symmetrically_about_the_snapped_axis() {
-        for icon in [GATEWAYS, DEVICE, CHIP, MINIMIZE, MAXIMIZE, CLOSE] {
+        for icon in [GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE] {
             for size in [10, 15, 20, 25, 30, 40] {
                 for width in [1.0, 2.0, 3.0] {
                     let target = Rect::new(3, 7, size, size);
@@ -583,13 +540,11 @@ mod tests {
     }
 
     #[test]
-    fn rail_icons_follow_the_page_and_the_device_key() {
-        assert_eq!(rail_icon(Page::Sessions, None), SESSIONS);
-        assert_eq!(rail_icon(Page::Gateways, Some(KeyKind::Hardware)), GATEWAYS);
-        assert_eq!(rail_icon(Page::Log, None), LOG);
-        assert_eq!(rail_icon(Page::Settings, None), SETTINGS);
-        assert_eq!(rail_icon(Page::Device, None), DEVICE);
-        assert_eq!(rail_icon(Page::Device, Some(KeyKind::Hardware)), CHIP);
-        assert_eq!(rail_icon(Page::Device, Some(KeyKind::Software)), KEYFILE);
+    fn rail_icons_follow_the_page() {
+        assert_eq!(rail_icon(Page::Sessions), SESSIONS);
+        assert_eq!(rail_icon(Page::Gateways), GATEWAYS);
+        assert_eq!(rail_icon(Page::Device), DEVICE);
+        assert_eq!(rail_icon(Page::Log), LOG);
+        assert_eq!(rail_icon(Page::Settings), SETTINGS);
     }
 }

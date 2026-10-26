@@ -2,7 +2,7 @@ use crate::fonts::Font;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
-use crate::nav::{KeyKind, Nav, Page};
+use crate::nav::Nav;
 use crate::pointer::{Look, Pointer};
 use crate::scale::Scale;
 use crate::theme::{Rgb, Theme};
@@ -19,7 +19,6 @@ pub enum Op {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct View {
     pub nav: Nav,
-    pub key: Option<KeyKind>,
     pub pointer: Pointer,
     pub maximized: bool,
 }
@@ -47,12 +46,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         } else if v.pointer.look(Zone::Nav(item.page)) != Look::Rest {
             ops.push(Op::Round(item.frame, s.pxf(6.0), t.rail_hover));
         }
-        let key = if item.page == Page::Device {
-            v.key
-        } else {
-            None
-        };
-        let icon = icons::rail_icon(item.page, key);
+        let icon = icons::rail_icon(item.page);
         let (font, ink, glyph) = if selected {
             (Font::ItemSelected, t.rail_on, t.rail_icon)
         } else {
@@ -113,6 +107,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nav::Page;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
@@ -196,26 +191,6 @@ mod tests {
         let hovered = inside(&draw(&v), item.frame);
         assert_eq!(hovered[0], Op::Round(item.frame, 6.0, T.rail_hover));
         assert_eq!(hovered[1..], rest[..]);
-    }
-
-    #[test]
-    fn device_icon_shows_the_key_kind_when_known() {
-        let item = layout(true).item(Page::Device);
-        let icon = |key| {
-            let v = View {
-                key,
-                ..View::default()
-            };
-            inside(&draw(&v), item.frame)
-                .into_iter()
-                .find_map(|op| match op {
-                    Op::Icon(icon, ..) => Some(icon),
-                    _ => None,
-                })
-        };
-        assert_eq!(icon(None), Some(icons::DEVICE));
-        assert_eq!(icon(Some(KeyKind::Hardware)), Some(icons::CHIP));
-        assert_eq!(icon(Some(KeyKind::Software)), Some(icons::KEYFILE));
     }
 
     #[test]

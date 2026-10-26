@@ -39,16 +39,6 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the device key is unknown until the Device page reads key data"
-)]
-pub enum KeyKind {
-    Hardware,
-    Software,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Nav {
     selected: Page,
