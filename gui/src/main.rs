@@ -7,6 +7,8 @@ mod icons;
 mod layout;
 mod nav;
 mod pointer;
+#[cfg(test)]
+mod res;
 mod scale;
 mod theme;
 
