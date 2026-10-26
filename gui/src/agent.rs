@@ -19,6 +19,13 @@ impl AgentState {
             Err(error) => Self::Unreachable(error.to_string()),
         }
     }
+
+    pub fn ids(&self) -> Vec<u64> {
+        match self {
+            Self::Running(sessions) => sessions.iter().map(|s| s.id).collect(),
+            Self::Stopped | Self::Unreachable(_) => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -52,6 +59,16 @@ mod tests {
             AgentState::from_list(Ok(Response::Ok(Vec::new()))),
             AgentState::Running(Vec::new())
         );
+    }
+
+    #[test]
+    fn only_a_running_agent_has_session_ids() {
+        assert_eq!(
+            AgentState::Running(vec![session(1), session(4)]).ids(),
+            [1, 4]
+        );
+        assert!(AgentState::Stopped.ids().is_empty());
+        assert!(AgentState::Unreachable("busy".to_owned()).ids().is_empty());
     }
 
     #[test]
