@@ -1,12 +1,13 @@
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory,
-    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    IDWriteTextLayout,
 };
 use windows::core::{BOOL, PCWSTR, Result};
 
 use super::sys::wide;
-use crate::fonts::{self, Font, UI_FAMILIES};
+use crate::fonts::{self, Font, MONO_FAMILIES, UI_FAMILIES};
 use crate::scale::Scale;
 
 pub struct Fonts {
@@ -17,6 +18,7 @@ pub struct Fonts {
 fn installed(collection: &IDWriteFontCollection) -> Vec<&'static str> {
     UI_FAMILIES
         .iter()
+        .chain(MONO_FAMILIES)
         .copied()
         .filter(|name| {
             let name = wide(name);
@@ -34,12 +36,17 @@ impl Fonts {
         let mut collection = None;
         unsafe { dw.GetSystemFontCollection(&mut collection, false)? };
         let collection = collection.ok_or_else(windows::core::Error::empty)?;
-        let family = wide(fonts::choose_family(&installed(&collection), UI_FAMILIES));
+        let installed = installed(&collection);
         let locale = wide("en-us");
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+            ..Default::default()
+        };
         let formats = Font::ALL
             .iter()
             .map(|font| {
                 let spec = font.spec();
+                let family = wide(fonts::choose_family(&installed, font.families()));
                 unsafe {
                     let format = dw.CreateTextFormat(
                         PCWSTR(family.as_ptr()),
@@ -52,6 +59,8 @@ impl Fonts {
                     )?;
                     format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                     format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                    let ellipsis = dw.CreateEllipsisTrimmingSign(&format)?;
+                    format.SetTrimming(&trimming, &ellipsis)?;
                     Ok(format)
                 }
             })
