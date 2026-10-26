@@ -2,6 +2,7 @@ mod d2d;
 mod link;
 mod sys;
 mod text;
+mod tips;
 
 use std::ptr::{null, null_mut};
 
@@ -33,7 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use gateinto::clock::unix_now;
 
-use crate::board::{Board, board};
+use crate::board::{Board, board, tips};
 use crate::frame::Frame;
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
@@ -47,6 +48,7 @@ use d2d::Graphics;
 use link::{Link, WM_AGENT};
 use sys::wide;
 use text::Fonts;
+use tips::Tips;
 
 const STYLE: u32 = WS_OVERLAPPEDWINDOW;
 const EX_STYLE: u32 = 0;
@@ -101,6 +103,7 @@ struct App {
     icons: Icons,
     update: Option<Update>,
     link: Link,
+    tips: Tips,
 }
 
 fn choose_frame() -> Frame {
@@ -125,6 +128,7 @@ impl App {
             targets: Vec::new(),
             update: None,
             link: Link::start(hwnd),
+            tips: Tips::new(hwnd),
         })
     }
 
@@ -272,7 +276,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
 fn on_paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
-    with_app(hwnd, |app| {
+    let change = with_app(hwnd, |app| {
         let (w, h) = client_size(hwnd);
         let mut ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
         let board = app.board();
@@ -281,8 +285,12 @@ fn on_paint(hwnd: HWND) {
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
         }
+        app.tips.replace(tips(&app.targets))
     });
     unsafe { EndPaint(hwnd, &ps) };
+    if let Some(change) = change.flatten() {
+        change.apply();
+    }
 }
 
 fn on_agent(hwnd: HWND) {
