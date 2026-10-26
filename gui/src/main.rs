@@ -10,6 +10,7 @@ mod hit;
 mod icons;
 mod layout;
 mod logo;
+mod menu;
 mod nav;
 mod pointer;
 #[cfg(test)]

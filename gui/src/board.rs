@@ -1,30 +1,37 @@
 use std::borrow::Cow;
 
 use crate::fonts::{Font, Measure};
+use crate::gateways::START;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
+use crate::menu::Popup;
 use crate::nav::Page as NavPage;
 use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View, stroke};
 use crate::scroll::{self, Pane};
-use crate::sessions::{EMPTY, Eyes, Kind, Page, Row};
+use crate::sessions::{EMPTY, Eyes, Kind, Launch, Page, Row};
 use crate::theme::{Rgb, Theme};
 
 pub mod gateways;
+pub mod menu;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Board {
     pub ops: Vec<Op>,
     pub targets: Vec<(Rect, Zone)>,
     pub pane: Option<Pane>,
+    pub anchor: Option<Rect>,
 }
 
 const STOP_LABEL: &str = "Stop agent";
 pub const REVOKE_TIP: &str = "Revoke session";
 
 pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(u64, Rect)> {
+    if targets.iter().any(|&(_, zone)| zone == Zone::Menu) {
+        return Vec::new();
+    }
     targets
         .iter()
         .filter_map(|&(r, zone)| match zone {
@@ -165,8 +172,15 @@ impl<'a, M: Measure> Painter<'a, M> {
         let logo = Rect::new(card.x + s.px(20.0), card.y + s.px(18.0), logo, logo);
         self.push(Op::Logo(logo, eyes));
         let x = logo.right() + s.px(16.0);
-        let button = status.stop.then(|| self.stop_button(card));
-        let right = button.map_or(card.right() - s.px(20.0), |b| b.x - s.px(16.0));
+        let mut right = card.right() - s.px(20.0);
+        let button = status.stop.then(|| self.button(card, right, STOP_LABEL));
+        if let Some(button) = button {
+            right = button.x - s.px(16.0);
+        }
+        let pick = (status.launch != Launch::Hidden).then(|| self.button(card, right, START));
+        if let Some(pick) = pick {
+            right = pick.x - s.px(16.0);
+        }
         let (title, sub) = (s.px(28.0), s.px(18.0));
         let top = card.y + (card.h - title - s.px(2.0) - sub) / 2;
         let w = right - x;
@@ -178,19 +192,44 @@ impl<'a, M: Measure> Painter<'a, M> {
         );
         let subtitle = Rect::new(x, top + title + s.px(2.0), w, sub);
         self.text(Font::Body, status.subtitle.clone(), subtitle, t.muted);
+        if let Some(pick) = pick {
+            let ready = status.launch == Launch::Ready;
+            self.start(pick, START, Zone::Picker, ready);
+            if ready && self.v.popup == Some(Popup::Picker) {
+                self.board.anchor = Some(pick);
+            }
+        }
         if let Some(button) = button {
             self.stop(button);
         }
         card
     }
 
-    fn stop_button(&self, card: Rect) -> Rect {
+    fn button(&self, card: Rect, right: i32, label: &str) -> Rect {
         let s = self.s;
-        let text = self.m.width(Font::BodyStrong, STOP_LABEL);
+        let text = self.m.width(Font::BodyStrong, label);
         let w = s.px(14.0) + s.px(16.0) + s.px(8.0) + text + s.px(14.0);
         let h = s.px(32.0);
-        let right = card.right() - s.px(20.0);
         Rect::new(right - w, card.y + (card.h - h) / 2, w, h)
+    }
+
+    fn start(&mut self, button: Rect, label: &'static str, zone: Zone, enabled: bool) {
+        let (s, t) = (self.s, self.t);
+        let (fill, glyph, ink) = match (enabled, self.v.pointer.look(zone)) {
+            (false, _) => (t.tile, t.eyes_idle, t.eyes_idle),
+            (true, Look::Rest) => (t.button, t.accent, t.button_text),
+            (true, Look::Hover) => (t.button_hover, t.accent, t.button_text),
+            (true, Look::Pressed) => (t.button_pressed, t.accent, t.button_text),
+        };
+        self.push(Op::Round(button, s.pxf(6.0), fill));
+        let icon = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
+        self.icon(icons::PLUS, icon, 16.0, glyph);
+        let x = icon.right() + s.px(8.0);
+        let text = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
+        self.text(Font::BodyStrong, label, text, ink);
+        if enabled {
+            self.target(button, zone);
+        }
     }
 
     fn stop(&mut self, button: Rect) {
@@ -362,13 +401,15 @@ mod tests {
     use super::*;
     use crate::fonts::Font;
     use crate::icons;
+    use crate::menu::Popup;
     use crate::nav::{Nav, Page as NavPage};
     use crate::scroll::Pane;
-    use crate::sessions::{EMPTY, Eyes, Kind, Row, Status};
+    use crate::sessions::{EMPTY, Eyes, Kind, Launch, Row, Status};
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
     const STOP: Rect = Rect::new(870, 110, 122, 32);
+    pub(super) const PICK: Rect = Rect::new(711, 110, 143, 32);
     const FIRST_ROW: i32 = 264;
 
     pub(super) struct Chars;
@@ -396,6 +437,13 @@ mod tests {
         assert_eq!(REVOKE_TIP, "Revoke session");
     }
 
+    #[test]
+    fn an_open_menu_hides_the_tips() {
+        let r = Rect::new(1, 2, 3, 4);
+        let targets = [(r, Zone::Entry(0)), (r, Zone::Menu), (r, Zone::Revoke(9))];
+        assert_eq!(tips(&targets), []);
+    }
+
     fn running(rows: Vec<Row>) -> Page {
         let active = rows.iter().any(|r| r.active);
         Page {
@@ -404,6 +452,7 @@ mod tests {
                 subtitle: "Agent running on loopback only · 1 session · 1 active".to_owned(),
                 eyes: if active { Eyes::Lit } else { Eyes::Dim },
                 stop: true,
+                launch: Launch::Ready,
             },
             rows: Some(rows),
         }
@@ -416,6 +465,7 @@ mod tests {
                 subtitle: "The agent is not running".to_owned(),
                 eyes: Eyes::Closed,
                 stop: false,
+                launch: Launch::Hidden,
             },
             rows: None,
         }
@@ -491,13 +541,13 @@ mod tests {
                 text(
                     Font::Status,
                     "Relaying",
-                    Rect::new(340, 102, 514, 28),
+                    Rect::new(340, 102, 355, 28),
                     T.text
                 ),
                 text(
                     Font::Body,
                     "Agent running on loopback only · 1 session · 1 active",
-                    Rect::new(340, 132, 514, 18),
+                    Rect::new(340, 132, 355, 18),
                     T.muted
                 ),
             ]
@@ -550,7 +600,7 @@ mod tests {
     #[test]
     fn the_stop_button_has_a_border_icon_and_label() {
         let b = draw(&running(vec![]));
-        assert_eq!(b.targets, [(STOP, Zone::StopAgent)]);
+        assert_eq!(b.targets, [(PICK, Zone::Picker), (STOP, Zone::StopAgent)]);
         assert_eq!(
             inside(&b.ops, STOP),
             [
@@ -565,6 +615,71 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    fn busy() -> Page {
+        let mut page = running(vec![]);
+        page.status.launch = Launch::Busy;
+        page
+    }
+
+    #[test]
+    fn the_start_browser_button_sits_left_of_stop_agent() {
+        let b = draw(&running(vec![]));
+        assert_eq!(
+            inside(&b.ops, PICK),
+            [
+                Op::Round(PICK, 6.0, T.button),
+                Op::Icon(icons::PLUS, Rect::new(725, 118, 16, 16), 1.0, T.accent),
+                text(
+                    Font::BodyStrong,
+                    "Start browser",
+                    Rect::new(749, 110, 91, 32),
+                    T.button_text
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_start_browser_button_is_disabled_while_a_launch_is_in_flight() {
+        let b = draw(&busy());
+        assert_eq!(b.targets, [(STOP, Zone::StopAgent)]);
+        assert_eq!(
+            inside(&b.ops, PICK),
+            [
+                Op::Round(PICK, 6.0, T.tile),
+                Op::Icon(icons::PLUS, Rect::new(725, 118, 16, 16), 1.0, T.eyes_idle),
+                text(
+                    Font::BodyStrong,
+                    "Start browser",
+                    Rect::new(749, 110, 91, 32),
+                    T.eyes_idle
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_start_browser_button_tints_on_hover_and_press() {
+        let fill = |v: &View| inside(&draw_with(&running(vec![]), v).ops, PICK)[0].clone();
+        let mut v = View::default();
+        v.pointer.moved(Zone::Picker);
+        assert_eq!(fill(&v), Op::Round(PICK, 6.0, T.button_hover));
+        v.pointer.down(Zone::Picker);
+        assert_eq!(fill(&v), Op::Round(PICK, 6.0, T.button_pressed));
+    }
+
+    #[test]
+    fn an_open_picker_hangs_from_an_enabled_start_browser_button() {
+        let open = View {
+            popup: Some(Popup::Picker),
+            ..View::default()
+        };
+        assert_eq!(draw_with(&running(vec![]), &open).anchor, Some(PICK));
+        assert_eq!(draw(&running(vec![])).anchor, None);
+        assert_eq!(draw_with(&busy(), &open).anchor, None);
+        assert_eq!(draw_with(&stopped(), &open).anchor, None);
     }
 
     #[test]
@@ -716,6 +831,7 @@ mod tests {
         assert_eq!(
             b.targets,
             [
+                (PICK, Zone::Picker),
                 (STOP, Zone::StopAgent),
                 (button(0), Zone::Revoke(1)),
                 (button(1), Zone::Revoke(2)),
@@ -782,8 +898,8 @@ mod tests {
         let rows = (1..=9).map(row).collect();
         let b = draw(&running(rows));
         let ids: Vec<_> = b.targets.iter().map(|(_, z)| *z).collect();
-        assert_eq!(ids[1..], (1..=7).map(Zone::Revoke).collect::<Vec<_>>()[..]);
-        assert_eq!(b.targets[7].0, Rect::new(964, 638, 32, 18));
+        assert_eq!(ids[2..], (1..=7).map(Zone::Revoke).collect::<Vec<_>>()[..]);
+        assert_eq!(b.targets[8].0, Rect::new(964, 638, 32, 18));
         assert!(
             !b.ops
                 .iter()
@@ -817,7 +933,7 @@ mod tests {
                 .any(|op| matches!(op, Op::Text(_, s, ..) if s == " #1"))
         );
         assert_eq!(
-            b.targets[1..3],
+            b.targets[2..4],
             [
                 (Rect::new(964, 228, 32, 22), Zone::Revoke(2)),
                 (Rect::new(964, 278, 32, 32), Zone::Revoke(3)),
@@ -866,6 +982,6 @@ mod tests {
             b.ops[3],
             Op::Logo(Rect::new(536, 196, 112, 112), Some(T.accent))
         );
-        assert_eq!(b.targets[1].0.w, 64);
+        assert_eq!(b.targets[2].0.w, 64);
     }
 }

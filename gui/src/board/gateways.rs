@@ -5,7 +5,6 @@ use crate::hit::Zone;
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
-use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::theme::Theme;
@@ -72,7 +71,7 @@ impl<M: Measure> Painter<'_, M> {
 
         let gap = s.px(16.0);
         let right = card.right() - pad;
-        let button = self.start_button(card, right);
+        let button = self.button(card, right, START);
         let sessions = Rect::new(button.x - gap - s.px(120.0), card.y, s.px(120.0), card.h);
         let x = tile.right() + gap;
         let w = (sessions.x - gap - x).max(0);
@@ -97,35 +96,7 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Mono, row.address.clone(), address, t.muted);
 
         self.eyes(sessions, row);
-        self.start(button, index, launch);
-    }
-
-    fn start_button(&self, card: Rect, right: i32) -> Rect {
-        let s = self.s;
-        let text = self.m.width(Font::BodyStrong, START);
-        let w = s.px(14.0) + s.px(16.0) + s.px(8.0) + text + s.px(14.0);
-        let h = s.px(32.0);
-        Rect::new(right - w, card.y + (card.h - h) / 2, w, h)
-    }
-
-    fn start(&mut self, button: Rect, index: usize, launch: bool) {
-        let (s, t) = (self.s, self.t);
-        let zone = Zone::StartBrowser(index);
-        let (fill, glyph, label) = match (launch, self.v.pointer.look(zone)) {
-            (false, _) => (t.tile, t.eyes_idle, t.eyes_idle),
-            (true, Look::Rest) => (t.button, t.accent, t.button_text),
-            (true, Look::Hover) => (t.button_hover, t.accent, t.button_text),
-            (true, Look::Pressed) => (t.button_pressed, t.accent, t.button_text),
-        };
-        self.push(Op::Round(button, s.pxf(6.0), fill));
-        let icon = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
-        self.icon(icons::PLUS, icon, 16.0, glyph);
-        let x = icon.right() + s.px(8.0);
-        let text = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
-        self.text(Font::BodyStrong, START, text, label);
-        if launch {
-            self.target(button, zone);
-        }
+        self.start(button, START, Zone::StartBrowser(index), launch);
     }
 
     fn eyes(&mut self, col: Rect, row: &Row) {

@@ -15,6 +15,14 @@ pub struct Status {
     pub subtitle: String,
     pub eyes: Eyes,
     pub stop: bool,
+    pub launch: Launch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launch {
+    Hidden,
+    Ready,
+    Busy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +53,7 @@ pub struct Page {
 
 pub const EMPTY: &str = "No sessions. Start one from a gateinto:// link.";
 
-pub fn page(state: &AgentState, failure: Option<&str>, now: u64) -> Page {
+pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> Page {
     let (status, rows) = match state {
         AgentState::Running(sessions) => {
             let active = sessions.iter().filter(|s| s.tunnels > 0).count();
@@ -58,6 +66,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64) -> Page {
                 ),
                 eyes: if active > 0 { Eyes::Lit } else { Eyes::Dim },
                 stop: true,
+                launch: if busy { Launch::Busy } else { Launch::Ready },
             };
             (status, Some(sessions.iter().map(|s| row(s, now)).collect()))
         }
@@ -67,6 +76,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64) -> Page {
                 subtitle: "The agent is not running".to_owned(),
                 eyes: Eyes::Closed,
                 stop: false,
+                launch: Launch::Hidden,
             },
             None,
         ),
@@ -76,6 +86,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64) -> Page {
                 subtitle: error.clone(),
                 eyes: Eyes::Dim,
                 stop: false,
+                launch: Launch::Hidden,
             },
             None,
         ),
@@ -197,7 +208,7 @@ mod tests {
     #[test]
     fn a_running_agent_relays_while_any_session_has_tunnels() {
         let state = AgentState::Running(vec![session(1, 0), session(2, 3), session(3, 1)]);
-        let page = page(&state, None, 1_000);
+        let page = page(&state, None, 1_000, false);
         assert_eq!(
             page.status,
             Status {
@@ -205,6 +216,7 @@ mod tests {
                 subtitle: "Agent running on loopback only · 3 sessions · 2 active".to_owned(),
                 eyes: Eyes::Lit,
                 stop: true,
+                launch: Launch::Ready,
             }
         );
         let ids: Vec<u64> = page.rows.unwrap().iter().map(|r| r.id).collect();
@@ -212,8 +224,22 @@ mod tests {
     }
 
     #[test]
+    fn the_start_browser_button_waits_for_a_launch_in_flight() {
+        let running = AgentState::Running(Vec::new());
+        assert_eq!(page(&running, None, 0, false).status.launch, Launch::Ready);
+        assert_eq!(page(&running, None, 0, true).status.launch, Launch::Busy);
+        let stopped = page(&AgentState::Stopped, None, 0, true).status.launch;
+        assert_eq!(stopped, Launch::Hidden);
+    }
+
+    #[test]
     fn a_running_agent_without_tunnels_is_idle() {
-        let page = page(&AgentState::Running(vec![session(4, 0)]), None, 1_000);
+        let page = page(
+            &AgentState::Running(vec![session(4, 0)]),
+            None,
+            1_000,
+            false,
+        );
         assert_eq!(page.status.title, "Idle");
         assert_eq!(
             page.status.subtitle,
@@ -225,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_running_agent_without_sessions_shows_an_empty_table() {
-        let page = page(&AgentState::Running(Vec::new()), None, 1_000);
+        let page = page(&AgentState::Running(Vec::new()), None, 1_000, false);
         assert_eq!(page.status.title, "Idle");
         assert_eq!(
             page.status.subtitle,
@@ -237,13 +263,14 @@ mod tests {
     #[test]
     fn a_stopped_agent_has_no_table_eyes_or_stop_button() {
         assert_eq!(
-            page(&AgentState::Stopped, None, 0),
+            page(&AgentState::Stopped, None, 0, false),
             Page {
                 status: Status {
                     title: "Stopped",
                     subtitle: "The agent is not running".to_owned(),
                     eyes: Eyes::Closed,
                     stop: false,
+                    launch: Launch::Hidden,
                 },
                 rows: None,
             }
@@ -254,13 +281,14 @@ mod tests {
     fn an_unreachable_agent_shows_the_error() {
         let state = AgentState::Unreachable("the agent did not answer".to_owned());
         assert_eq!(
-            page(&state, None, 0),
+            page(&state, None, 0, false),
             Page {
                 status: Status {
                     title: "Agent unreachable",
                     subtitle: "the agent did not answer".to_owned(),
                     eyes: Eyes::Dim,
                     stop: false,
+                    launch: Launch::Hidden,
                 },
                 rows: None,
             }
@@ -270,7 +298,7 @@ mod tests {
     #[test]
     fn a_failed_command_replaces_the_subtitle() {
         let state = AgentState::Running(vec![session(1, 1)]);
-        let page = page(&state, Some("no session 9"), 1_000);
+        let page = page(&state, Some("no session 9"), 1_000, false);
         assert_eq!(page.status.title, "Relaying");
         assert_eq!(page.status.subtitle, "no session 9");
         assert_eq!(page.rows.unwrap().len(), 1);

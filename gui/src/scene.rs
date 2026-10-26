@@ -4,6 +4,7 @@ use crate::fonts::Font;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
+use crate::menu::Popup;
 use crate::nav::Nav;
 use crate::pointer::{Look, Pointer};
 use crate::scale::Scale;
@@ -27,6 +28,7 @@ pub struct View {
     pub pointer: Pointer,
     pub maximized: bool,
     pub scroll: Offsets,
+    pub popup: Option<Popup>,
 }
 
 const RAIL_ICON: f32 = 20.0;

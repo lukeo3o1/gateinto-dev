@@ -15,6 +15,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_ESCAPE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
@@ -26,10 +27,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX,
     SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -39,10 +40,11 @@ use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
+use crate::menu::{self, Choice, Entry, Popup};
 use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
-use crate::scene::{View, scene};
+use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
 use crate::theme::Theme;
@@ -151,7 +153,7 @@ impl App {
         };
         let (l, s, t, v, m) = (&self.layout, self.s, &Theme::LIGHT, &self.view, &self.fonts);
         let failure = update.failure.as_deref();
-        match v.nav.selected() {
+        let mut board = match v.nav.selected() {
             NavPage::Gateways => {
                 let busy = self.launches.busy();
                 let page = gateways::page(&update.gateways, &update.state, failure, busy);
@@ -162,23 +164,56 @@ impl App {
                 s,
                 t,
                 v,
-                &sessions::page(&update.state, failure, unix_now()),
+                &sessions::page(&update.state, failure, unix_now(), self.launches.busy()),
                 m,
             ),
+        };
+        if v.popup.is_some() {
+            board::menu::overlay(&mut board, l, s, t, v, &self.entries(), m);
+        }
+        board
+    }
+
+    fn entries(&self) -> Vec<Entry> {
+        match (self.view.popup, &self.update) {
+            (Some(Popup::Picker), Some(update)) => menu::picker(&update.gateways),
+            _ => Vec::new(),
         }
     }
 
     fn retarget(&mut self) {
         let board = self.board();
-        self.adopt(board.targets, board.pane);
+        self.adopt(board);
     }
 
-    fn adopt(&mut self, targets: Vec<(Rect, Zone)>, pane: Option<Pane>) {
-        self.targets = targets;
-        self.pane = pane;
-        if let Some(pane) = pane {
+    fn adopt(&mut self, board: Board) -> Vec<Op> {
+        self.targets = board.targets;
+        self.pane = board.pane;
+        if let Some(pane) = board.pane {
             let page = self.view.nav.selected();
             self.view.scroll.set(page, pane.offset);
+        }
+        if board.anchor.is_none() {
+            self.view.popup = None;
+        }
+        board.ops
+    }
+
+    fn dismiss(&mut self) -> bool {
+        if self.view.popup.take().is_none() {
+            return false;
+        }
+        self.retarget();
+        self.invalidate();
+        true
+    }
+
+    fn launch(&mut self, row: usize) {
+        let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
+        if let Some(name) = self.launches.start(&names.unwrap_or_default(), row) {
+            self.link.send(Command::Launch(name));
+            self.retarget();
+            self.invalidate();
         }
     }
 
@@ -257,9 +292,14 @@ fn hit_code(zone: Zone) -> u32 {
         Zone::Minimize => HTMINBUTTON,
         Zone::Maximize => HTMAXBUTTON,
         Zone::Close => HTCLOSE,
-        Zone::Nav(_) | Zone::StopAgent | Zone::Revoke(_) | Zone::StartBrowser(_) | Zone::Client => {
-            HTCLIENT
-        }
+        Zone::Nav(_)
+        | Zone::StopAgent
+        | Zone::Revoke(_)
+        | Zone::StartBrowser(_)
+        | Zone::Picker
+        | Zone::Entry(_)
+        | Zone::Menu
+        | Zone::Client => HTCLIENT,
     }
 }
 
@@ -293,14 +333,27 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::StartBrowser(row)) => {
+            with_app(hwnd, |app| app.launch(row));
+            return;
+        }
+        Some(Action::OpenPicker) => {
             with_app(hwnd, |app| {
-                let names = app.update.as_ref().map(|u| gateways::names(&u.gateways));
-                if let Some(name) = app.launches.start(&names.unwrap_or_default(), row) {
-                    app.link.send(Command::Launch(name));
-                    app.retarget();
-                    app.invalidate();
+                app.view.popup = Some(Popup::Picker);
+                app.retarget();
+                app.invalidate();
+            });
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::Choose(index)) => {
+            with_app(hwnd, |app| {
+                let choice = app.entries().get(index).and_then(|entry| entry.choice);
+                app.dismiss();
+                if let Some(Choice::Launch(row)) = choice {
+                    app.launch(row);
                 }
             });
+            rehover(hwnd);
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,
@@ -318,8 +371,7 @@ fn on_paint(hwnd: HWND) {
         let (w, h) = client_size(hwnd);
         let mut ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
         let board = app.board();
-        ops.extend(board.ops);
-        app.adopt(board.targets, board.pane);
+        ops.extend(app.adopt(board));
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
         }
@@ -407,6 +459,9 @@ fn on_nc_hit_test(hwnd: HWND, lp: LPARAM) -> Option<LRESULT> {
 }
 
 fn on_nc_mouse(hwnd: HWND, msg: u32, wp: WPARAM) -> Option<LRESULT> {
+    if msg != WM_NCMOUSEMOVE && msg != WM_NCLBUTTONUP {
+        with_app(hwnd, App::dismiss);
+    }
     let button = caption_button(wp);
     let zone = button.unwrap_or(Zone::Caption);
     let action = with_custom(hwnd, |app| {
@@ -432,6 +487,7 @@ enum Follow {
     Track,
     Capture,
     Release(Option<Action>),
+    Dismissed,
     Nothing,
 }
 
@@ -439,6 +495,10 @@ fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
     let (x, y) = coords(lp);
     let follow = with_app(hwnd, |app| {
         let zone = app.zone(x, y);
+        if msg == WM_LBUTTONDOWN && app.view.popup.is_some() && menu::dismisses(zone) {
+            app.dismiss();
+            return Follow::Dismissed;
+        }
         let pointer = &mut app.view.pointer;
         let (changed, follow) = match msg {
             WM_MOUSEMOVE => (pointer.moved(zone), Follow::Track),
@@ -460,6 +520,7 @@ fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
             unsafe { ReleaseCapture() };
             perform(hwnd, action);
         }
+        Some(Follow::Dismissed) => rehover(hwnd),
         Some(Follow::Nothing) | None => {}
     }
 }
@@ -489,6 +550,17 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     if moved == Some(true) {
         rehover(hwnd);
     }
+}
+
+fn on_key(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
+    if wp != WPARAM::from(VK_ESCAPE) {
+        return None;
+    }
+    if !with_app(hwnd, App::dismiss)? {
+        return None;
+    }
+    rehover(hwnd);
+    Some(0)
 }
 
 fn on_left(hwnd: HWND) {
@@ -582,6 +654,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             on_mouse(hwnd, msg, lp);
             Some(0)
         }
+        WM_KEYDOWN => on_key(hwnd, wp),
         WM_MOUSEWHEEL => {
             on_wheel(hwnd, wp, lp);
             Some(0)

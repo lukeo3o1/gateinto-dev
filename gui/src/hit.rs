@@ -14,6 +14,9 @@ pub enum Zone {
     StopAgent,
     Revoke(u64),
     StartBrowser(usize),
+    Picker,
+    Entry(usize),
+    Menu,
     Client,
 }
 

@@ -107,14 +107,18 @@ pub fn names(listing: &Result<Known, String>) -> Vec<GatewayName> {
     })
 }
 
+pub fn label(gateway: &KnownGateway) -> String {
+    let address = address(gateway.host.as_deref(), gateway.port);
+    gateway_label(gateway.name.as_str(), &address)
+}
+
 fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
     let open: Vec<_> = sessions
         .iter()
         .filter(|session| session.gateway == gateway.name.as_str())
         .collect();
-    let address = address(gateway.host.as_deref(), gateway.port);
     Row {
-        label: gateway_label(gateway.name.as_str(), &address),
+        label: label(gateway),
         sessions: match open.len() {
             0 => "No sessions".to_owned(),
             1 => "1 session".to_owned(),
@@ -122,7 +126,7 @@ fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
         },
         lit: open.iter().any(|session| session.tunnels > 0),
         config: gateway.source == Source::Config,
-        address,
+        address: address(gateway.host.as_deref(), gateway.port),
     }
 }
 

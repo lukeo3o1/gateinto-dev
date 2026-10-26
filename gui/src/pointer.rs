@@ -10,6 +10,8 @@ pub enum Action {
     StopAgent,
     Revoke(u64),
     StartBrowser(usize),
+    OpenPicker,
+    Choose(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +36,8 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::StopAgent => Some(Action::StopAgent),
         Zone::Revoke(id) => Some(Action::Revoke(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
+        Zone::Picker => Some(Action::OpenPicker),
+        Zone::Entry(i) => Some(Action::Choose(i)),
         _ => None,
     }
 }
@@ -75,11 +79,11 @@ impl Pointer {
     }
 
     pub fn sessions_changed(&mut self) -> bool {
-        matches!(self.pressed, Some(Zone::Revoke(_))) && self.cancel()
+        matches!(self.pressed, Some(Zone::Revoke(_) | Zone::Entry(_))) && self.cancel()
     }
 
     pub fn gateways_changed(&mut self) -> bool {
-        matches!(self.pressed, Some(Zone::StartBrowser(_))) && self.cancel()
+        matches!(self.pressed, Some(Zone::StartBrowser(_) | Zone::Entry(_))) && self.cancel()
     }
 
     pub fn left(&mut self) -> bool {
@@ -201,6 +205,32 @@ mod tests {
         p.down(Zone::Revoke(4));
         assert!(!p.gateways_changed());
         assert_eq!(p.up(Zone::Revoke(4)), Some(Action::Revoke(4)));
+    }
+
+    #[test]
+    fn the_picker_button_opens_and_menu_entries_choose() {
+        let mut p = Pointer::default();
+        p.down(Zone::Picker);
+        assert_eq!(p.up(Zone::Picker), Some(Action::OpenPicker));
+        assert!(p.moved(Zone::Entry(1)));
+        assert_eq!(p.look(Zone::Entry(1)), Look::Hover);
+        p.down(Zone::Entry(1));
+        assert_eq!(p.up(Zone::Entry(1)), Some(Action::Choose(1)));
+        assert!(p.moved(Zone::Menu));
+        assert_eq!(p.look(Zone::Entry(1)), Look::Rest);
+        assert!(!p.moved(Zone::Menu));
+        assert!(!p.down(Zone::Menu));
+    }
+
+    #[test]
+    fn a_changed_list_drops_a_pressed_menu_entry() {
+        let mut p = Pointer::default();
+        p.down(Zone::Entry(0));
+        assert!(p.gateways_changed());
+        assert_eq!(p.up(Zone::Entry(0)), None);
+        p.down(Zone::Entry(0));
+        assert!(p.sessions_changed());
+        assert_eq!(p.up(Zone::Entry(0)), None);
     }
 
     #[test]
