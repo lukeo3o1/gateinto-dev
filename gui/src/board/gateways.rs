@@ -33,16 +33,22 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
             t.muted,
         );
     }
-    let (h, gap) = (s.px(72.0), s.px(10.0));
-    for (i, row) in page.rows.iter().enumerate() {
-        let card = Rect::new(content.x, top + i as i32 * (h + gap), content.w, h);
-        if card.bottom() > bottom {
-            break;
+    if !page.rows.is_empty() {
+        let (h, gap) = (s.px(72.0), s.px(10.0));
+        let view = Rect::new(content.x, top, content.w, (bottom - top).max(0));
+        let offset = p.scroll(view, page.rows.len() as i32 * (h + gap) - gap);
+        for (i, row) in page.rows.iter().enumerate() {
+            let card = Rect::new(content.x, top - offset + i as i32 * (h + gap), content.w, h);
+            if card.bottom() <= view.y {
+                continue;
+            }
+            if card.y >= view.bottom() {
+                break;
+            }
+            p.gateway(card, row, (i, page.launch));
         }
-        p.gateway(card, row, (i, page.launch));
     }
-    p.push(Op::Unclip);
-    p.board
+    p.finish()
 }
 
 impl<M: Measure> Painter<'_, M> {
@@ -148,6 +154,7 @@ mod tests {
     use crate::icons;
     use crate::nav::{Nav, Page as NavPage};
     use crate::scene::Op;
+    use crate::scroll::Pane;
     use crate::theme::Theme;
 
     const T: Theme = Theme::LIGHT;
@@ -390,10 +397,18 @@ mod tests {
         );
     }
 
-    fn cards(height: i32, config: bool) -> Vec<i32> {
-        let l = Layout::new(1040, height, S, true);
-        let rows = (0..9).map(|i| row(&format!("g{i}"), config)).collect();
-        board(&l, S, &T, &view(), &listed(rows), &Chars)
+    fn nine(config: bool) -> Page {
+        listed((0..9).map(|i| row(&format!("g{i}"), config)).collect())
+    }
+
+    fn scrolled(offset: i32) -> View {
+        let mut v = view();
+        v.scroll.set(NavPage::Gateways, offset);
+        v
+    }
+
+    fn cards(v: &View) -> Vec<i32> {
+        board(&layout(), S, &T, v, &nine(false), &Chars)
             .ops
             .iter()
             .filter_map(|op| match op {
@@ -404,13 +419,42 @@ mod tests {
     }
 
     #[test]
-    fn rows_stack_with_a_gap_and_only_whole_cards_are_drawn() {
-        assert_eq!(cards(680, false), [116, 198, 280, 362, 444, 526]);
+    fn cards_scroll_between_the_subtitle_and_the_footnote() {
+        let pane = |page: &Page| board(&layout(), S, &T, &view(), page, &Chars).pane;
+        let open = Rect::new(248, FIRST, 764, 540);
+        assert_eq!(pane(&nine(false)), Some(Pane::new(open, 728, 0)));
+        let above = Rect::new(248, FIRST, 764, 504);
+        assert_eq!(pane(&nine(true)), Some(Pane::new(above, 728, 0)));
+        assert_eq!(pane(&listed(vec![])), None);
+        let ops = draw(&nine(true)).ops;
+        assert!(ops.contains(&Op::Clip(above)));
     }
 
     #[test]
-    fn rows_stop_above_the_footnote() {
-        assert_eq!(cards(710, false).len(), 7);
-        assert_eq!(cards(710, true).len(), 6);
+    fn only_cards_in_the_viewport_are_drawn() {
+        assert_eq!(cards(&view()), [116, 198, 280, 362, 444, 526, 608]);
+        assert_eq!(cards(&scrolled(100)), [98, 180, 262, 344, 426, 508, 590]);
+    }
+
+    #[test]
+    fn scrolled_targets_are_clipped_to_the_viewport() {
+        let b = board(&layout(), S, &T, &scrolled(110), &nine(false), &Chars);
+        assert_eq!(
+            b.targets[..2],
+            [
+                (Rect::new(849, FIRST, 143, 24), Zone::StartBrowser(1)),
+                (Rect::new(849, 190, 143, 32), Zone::StartBrowser(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_offset_is_clamped_and_shown_by_a_thumb() {
+        let b = board(&layout(), S, &T, &scrolled(10_000), &nine(false), &Chars);
+        assert_eq!(b.pane.map(|p| p.offset), Some(188));
+        assert_eq!(
+            b.ops.last(),
+            Some(&Op::Round(Rect::new(1024, 256, 4, 400), 2.0, T.eyes_idle))
+        );
     }
 }

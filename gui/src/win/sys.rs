@@ -8,8 +8,8 @@ use windows_sys::Win32::System::LibraryLoader::{
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, GetSystemMetrics, SM_CXPADDEDBORDER, SM_CYFRAME, SYSTEM_METRICS_INDEX,
-    SetProcessDPIAware,
+    AdjustWindowRectEx, GetSystemMetrics, SM_CXPADDEDBORDER, SM_CYFRAME, SPI_GETWHEELSCROLLLINES,
+    SYSTEM_METRICS_INDEX, SetProcessDPIAware, SystemParametersInfoW,
 };
 
 pub fn wide(s: &str) -> Vec<u16> {
@@ -114,6 +114,13 @@ pub fn adjusted_rect(w: i32, h: i32, style: u32, ex_style: u32, dpi: u32) -> [i3
         unsafe { AdjustWindowRectEx(&mut r, style, 0, ex_style) };
     }
     [r.left, r.top, r.right, r.bottom]
+}
+
+pub fn wheel_lines() -> u32 {
+    let mut lines = 3u32;
+    let ok =
+        unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut lines).cast(), 0) };
+    if ok != 0 { lines } else { 3 }
 }
 
 pub fn os_major() -> u32 {

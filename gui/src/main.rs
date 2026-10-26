@@ -16,6 +16,7 @@ mod pointer;
 mod res;
 mod scale;
 mod scene;
+mod scroll;
 mod sessions;
 mod theme;
 #[cfg(windows)]

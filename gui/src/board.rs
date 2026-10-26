@@ -8,6 +8,7 @@ use crate::nav::Page as NavPage;
 use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View, stroke};
+use crate::scroll::{self, Pane};
 use crate::sessions::{EMPTY, Eyes, Kind, Page, Row};
 use crate::theme::{Rgb, Theme};
 
@@ -17,6 +18,7 @@ pub mod gateways;
 pub struct Board {
     pub ops: Vec<Op>,
     pub targets: Vec<(Rect, Zone)>,
+    pub pane: Option<Pane>,
 }
 
 const STOP_LABEL: &str = "Stop agent";
@@ -63,8 +65,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
             rows,
         );
     }
-    p.push(Op::Unclip);
-    p.board
+    p.finish()
 }
 
 fn inset(r: Rect, d: i32) -> Rect {
@@ -83,6 +84,35 @@ impl<'a, M: Measure> Painter<'a, M> {
         };
         p.push(Op::Clip(l.content));
         p
+    }
+
+    fn finish(mut self) -> Board {
+        if self.board.pane.is_some() {
+            self.push(Op::Unclip);
+        }
+        self.push(Op::Unclip);
+        if let Some(pane) = self.board.pane {
+            self.thumb(pane);
+        }
+        self.board
+    }
+
+    fn scroll(&mut self, view: Rect, content: i32) -> i32 {
+        let page = self.v.nav.selected();
+        let pane = Pane::new(view, content, self.v.scroll.get(page));
+        self.board.pane = Some(pane);
+        self.push(Op::Clip(view));
+        self.clip = view;
+        pane.offset
+    }
+
+    fn thumb(&mut self, pane: Pane) {
+        let s = self.s;
+        let view = pane.view;
+        let track = Rect::new(view.right() + s.px(12.0), view.y, s.px(4.0), view.h);
+        if let Some(r) = scroll::thumb(track, pane.content, pane.offset, s.px(24.0)) {
+            self.push(Op::Round(r, s.pxf(2.0), self.t.eyes_idle));
+        }
     }
 
     fn push(&mut self, op: Op) {
@@ -112,11 +142,12 @@ impl<'a, M: Measure> Painter<'a, M> {
     }
 
     fn target(&mut self, r: Rect, zone: Zone) {
+        let top = r.y.max(self.clip.y);
         let bottom = r.bottom().min(self.clip.bottom());
-        if bottom > r.y {
+        if bottom > top {
             self.board
                 .targets
-                .push((Rect::new(r.x, r.y, r.w, bottom - r.y), zone));
+                .push((Rect::new(r.x, top, r.w, bottom - top), zone));
         }
     }
 
@@ -207,7 +238,10 @@ impl<'a, M: Measure> Painter<'a, M> {
         let (s, t) = (self.s, self.t);
         let (header_h, row_h) = (s.px(36.0), s.px(60.0));
         let lines = rows.len().max(1) as i32;
-        let table = Rect::new(top.x, top.y, top.w, header_h + lines * row_h);
+        let height = header_h + lines * row_h;
+        let view = Rect::new(top.x, top.y, top.w, (self.clip.bottom() - top.y).max(0));
+        let offset = self.scroll(view, height);
+        let table = Rect::new(top.x, top.y - offset, top.w, height);
         self.framed(table, 10.0, t.card);
         let header = Rect::new(table.x, table.y, table.w, header_h);
         let c = self.columns(header);
@@ -228,7 +262,10 @@ impl<'a, M: Measure> Painter<'a, M> {
         }
         for (i, row) in rows.iter().enumerate() {
             let r = Rect::new(table.x, header.bottom() + i as i32 * row_h, table.w, row_h);
-            if r.y >= self.clip.bottom() {
+            if r.bottom() <= view.y {
+                continue;
+            }
+            if r.y >= view.bottom() {
                 break;
             }
             self.row(r, row);
@@ -326,6 +363,7 @@ mod tests {
     use crate::fonts::Font;
     use crate::icons;
     use crate::nav::{Nav, Page as NavPage};
+    use crate::scroll::Pane;
     use crate::sessions::{EMPTY, Eyes, Kind, Row, Status};
 
     const T: Theme = Theme::LIGHT;
@@ -751,7 +789,64 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, Op::Text(_, s, ..) if s == " #8"))
         );
-        assert_eq!(b.ops.last(), Some(&Op::Unclip));
+    }
+
+    fn scrolled(offset: i32) -> View {
+        let mut v = View::default();
+        v.scroll.set(NavPage::Sessions, offset);
+        v
+    }
+
+    const TABLE_VIEW: Rect = Rect::new(248, 228, 764, 428);
+
+    #[test]
+    fn the_table_scrolls_in_a_viewport_under_the_heading() {
+        let page = running((1..=9).map(row).collect());
+        let b = draw(&page);
+        assert_eq!(b.pane, Some(Pane::new(TABLE_VIEW, 576, 0)));
+        assert!(b.ops.contains(&Op::Clip(TABLE_VIEW)));
+        let b = draw_with(&page, &scrolled(120));
+        assert_eq!(b.pane, Some(Pane::new(TABLE_VIEW, 576, 120)));
+        assert!(
+            b.ops
+                .contains(&Op::Round(Rect::new(248, 108, 764, 576), 10.0, T.border))
+        );
+        assert!(
+            !b.ops
+                .iter()
+                .any(|op| matches!(op, Op::Text(_, s, ..) if s == " #1"))
+        );
+        assert_eq!(
+            b.targets[1..3],
+            [
+                (Rect::new(964, 228, 32, 22), Zone::Revoke(2)),
+                (Rect::new(964, 278, 32, 32), Zone::Revoke(3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_offset_is_clamped_to_the_table() {
+        let b = draw_with(&running((1..=9).map(row).collect()), &scrolled(10_000));
+        assert_eq!(b.pane.map(|p| p.offset), Some(148));
+        let b = draw_with(&running(vec![row(1)]), &scrolled(50));
+        assert_eq!(b.pane.map(|p| p.offset), Some(0));
+        assert_eq!(draw_with(&stopped(), &scrolled(50)).pane, None);
+    }
+
+    #[test]
+    fn an_overflowing_table_gets_a_thin_scrollbar_in_the_gutter() {
+        let page = running((1..=9).map(row).collect());
+        let thumb = |v: &View| draw_with(&page, v).ops.last().cloned();
+        assert_eq!(
+            thumb(&View::default()),
+            Some(Op::Round(Rect::new(1024, 228, 4, 318), 2.0, T.eyes_idle))
+        );
+        assert_eq!(
+            thumb(&scrolled(148)),
+            Some(Op::Round(Rect::new(1024, 338, 4, 318), 2.0, T.eyes_idle))
+        );
+        assert_eq!(draw(&running(vec![row(1)])).ops.last(), Some(&Op::Unclip));
     }
 
     #[test]

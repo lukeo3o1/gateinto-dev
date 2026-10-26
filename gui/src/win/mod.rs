@@ -26,10 +26,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX,
     SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
     WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY,
-    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
-    WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
-    WindowFromPoint,
+    WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -43,6 +43,7 @@ use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
 use crate::scene::{View, scene};
+use crate::scroll::Pane;
 use crate::sessions;
 use crate::theme::Theme;
 use crate::worker::{Command, Update};
@@ -102,6 +103,7 @@ struct App {
     layout: Layout,
     view: View,
     targets: Vec<(Rect, Zone)>,
+    pane: Option<Pane>,
     icons: Icons,
     update: Option<Update>,
     launches: Launches,
@@ -129,6 +131,7 @@ impl App {
             layout,
             view: View::default(),
             targets: Vec::new(),
+            pane: None,
             update: None,
             launches: Launches::default(),
             link: Link::start(hwnd),
@@ -166,7 +169,17 @@ impl App {
     }
 
     fn retarget(&mut self) {
-        self.targets = self.board().targets;
+        let board = self.board();
+        self.adopt(board.targets, board.pane);
+    }
+
+    fn adopt(&mut self, targets: Vec<(Rect, Zone)>, pane: Option<Pane>) {
+        self.targets = targets;
+        self.pane = pane;
+        if let Some(pane) = pane {
+            let page = self.view.nav.selected();
+            self.view.scroll.set(page, pane.offset);
+        }
     }
 
     fn invalidate(&self) {
@@ -306,7 +319,7 @@ fn on_paint(hwnd: HWND) {
         let mut ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
         let board = app.board();
         ops.extend(board.ops);
-        app.targets = board.targets;
+        app.adopt(board.targets, board.pane);
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
         }
@@ -451,6 +464,33 @@ fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
     }
 }
 
+fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
+    let (x, y) = coords(lp);
+    let mut p = POINT { x, y };
+    unsafe { ScreenToClient(hwnd, &mut p) };
+    let delta = i32::from((wp >> 16) as u16 as i16);
+    let lines = sys::wheel_lines();
+    let moved = with_app(hwnd, |app| {
+        let Some(pane) = app.pane else {
+            return false;
+        };
+        if !app.layout.content.contains(p.x, p.y) {
+            return false;
+        }
+        let offset = pane.scrolled(delta, lines, app.s.px(20.0));
+        let page = app.view.nav.selected();
+        if !app.view.scroll.set(page, offset) {
+            return false;
+        }
+        app.retarget();
+        app.invalidate();
+        true
+    });
+    if moved == Some(true) {
+        rehover(hwnd);
+    }
+}
+
 fn on_left(hwnd: HWND) {
     with_app(hwnd, |app| {
         if app.view.pointer.left() {
@@ -540,6 +580,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
             on_mouse(hwnd, msg, lp);
+            Some(0)
+        }
+        WM_MOUSEWHEEL => {
+            on_wheel(hwnd, wp, lp);
             Some(0)
         }
         WM_CREATE => {

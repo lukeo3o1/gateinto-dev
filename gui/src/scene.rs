@@ -7,6 +7,7 @@ use crate::layout::{Layout, Rect};
 use crate::nav::Nav;
 use crate::pointer::{Look, Pointer};
 use crate::scale::Scale;
+use crate::scroll::Offsets;
 use crate::theme::{Rgb, Theme};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +26,7 @@ pub struct View {
     pub nav: Nav,
     pub pointer: Pointer,
     pub maximized: bool,
+    pub scroll: Offsets,
 }
 
 const RAIL_ICON: f32 = 20.0;
