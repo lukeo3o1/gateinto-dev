@@ -7,6 +7,8 @@ pub enum Action {
     Minimize,
     ToggleMaximize,
     Close,
+    StopAgent,
+    Revoke(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +30,8 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::Minimize => Some(Action::Minimize),
         Zone::Maximize => Some(Action::ToggleMaximize),
         Zone::Close => Some(Action::Close),
+        Zone::StopAgent => Some(Action::StopAgent),
+        Zone::Revoke(id) => Some(Action::Revoke(id)),
         _ => None,
     }
 }
@@ -66,6 +70,10 @@ impl Pointer {
 
     pub fn cancel(&mut self) -> bool {
         self.pressed.take().is_some()
+    }
+
+    pub fn sessions_changed(&mut self) -> bool {
+        matches!(self.pressed, Some(Zone::Revoke(_))) && self.cancel()
     }
 
     pub fn left(&mut self) -> bool {
@@ -134,6 +142,37 @@ mod tests {
         let mut p = Pointer::default();
         assert!(!p.down(Zone::Caption));
         assert_eq!(p.up(Zone::Caption), None);
+    }
+
+    #[test]
+    fn page_buttons_stop_the_agent_and_revoke_a_session() {
+        let mut p = Pointer::default();
+        p.down(Zone::StopAgent);
+        assert_eq!(p.up(Zone::StopAgent), Some(Action::StopAgent));
+        p.down(Zone::Revoke(4));
+        assert_eq!(p.up(Zone::Revoke(4)), Some(Action::Revoke(4)));
+        assert!(p.moved(Zone::Revoke(9)));
+        assert_eq!(p.look(Zone::Revoke(9)), Look::Hover);
+    }
+
+    #[test]
+    fn a_revoke_moved_under_by_a_new_list_does_not_act() {
+        let mut p = Pointer::default();
+        p.down(Zone::Revoke(4));
+        p.moved(Zone::Revoke(5));
+        assert_eq!(p.up(Zone::Revoke(5)), None);
+    }
+
+    #[test]
+    fn a_changed_session_list_drops_a_pressed_revoke() {
+        let mut p = Pointer::default();
+        p.down(Zone::Revoke(4));
+        assert!(p.sessions_changed());
+        assert_eq!(p.look(Zone::Revoke(4)), Look::Hover);
+        assert_eq!(p.up(Zone::Revoke(4)), None);
+        p.down(Zone::StopAgent);
+        assert!(!p.sessions_changed());
+        assert_eq!(p.up(Zone::StopAgent), Some(Action::StopAgent));
     }
 
     #[test]

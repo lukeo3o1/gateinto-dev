@@ -89,6 +89,7 @@ struct App {
     fonts: Fonts,
     layout: Layout,
     view: View,
+    targets: Vec<(Rect, Zone)>,
     icons: Icons,
 }
 
@@ -111,6 +112,7 @@ impl App {
             icons: Icons::apply(hwnd, s),
             layout,
             view: View::default(),
+            targets: Vec::new(),
         })
     }
 
@@ -131,7 +133,7 @@ impl App {
         let band = self
             .frame
             .top_resize_band(self.view.maximized, self.frame_y());
-        hit(&self.layout, x, y, band)
+        hit(&self.layout, x, y, band, &self.targets)
     }
 
     fn screen_zone(&self, lp: LPARAM) -> Zone {
@@ -194,7 +196,7 @@ fn hit_code(zone: Zone) -> u32 {
         Zone::Minimize => HTMINBUTTON,
         Zone::Maximize => HTMAXBUTTON,
         Zone::Close => HTCLOSE,
-        Zone::Nav(_) | Zone::Client => HTCLIENT,
+        Zone::Nav(_) | Zone::StopAgent | Zone::Revoke(_) | Zone::Client => HTCLIENT,
     }
 }
 
@@ -222,6 +224,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
         Some(Action::Close) => SC_CLOSE,
+        Some(Action::StopAgent | Action::Revoke(_)) => return,
     };
     unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0) };
 }
