@@ -46,6 +46,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: .github/scripts/assert-static-crt.ps1 -Path target\debug\gateinto.exe
+      - name: Build gateinto-gui.exe
+        if: runner.os == 'Windows'
+        run: cargo build -p gateinto-gui --locked
       - name: Check that gateinto-gui.exe links the C runtime statically
         if: runner.os == 'Windows'
         shell: pwsh
@@ -85,6 +88,8 @@ jobs:
       - run: cargo test --workspace --target $env:TARGET --all-targets --all-features --locked
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto.exe"
+      - name: Build gateinto-gui.exe
+        run: cargo build -p gateinto-gui --target $env:TARGET --locked
       - name: Check that gateinto-gui.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:TARGET\debug\gateinto-gui.exe"
       - uses: actions/upload-artifact@v7
