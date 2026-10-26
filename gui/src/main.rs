@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod hit;
+mod layout;
 mod nav;
 mod scale;
 mod theme;
