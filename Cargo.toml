@@ -9,7 +9,7 @@ readme = "README.md"
 publish = false
 
 [workspace]
-members = ["ipc-types"]
+members = ["ipc-types", "gui"]
 default-members = [".", "ipc-types"]
 
 [lints.rust]

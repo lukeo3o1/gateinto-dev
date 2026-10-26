@@ -885,8 +885,8 @@ Windows 7 has no TPM key storage provider. They have never been run on Windows
 ```sh
 cargo build
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
 ```
 
 The minimum supported Rust version is 1.88 (required by `rcgen` and `time`).
