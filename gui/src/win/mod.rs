@@ -385,8 +385,16 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 None
             });
             rehover(hwnd);
-            if let Some(url) = portal.flatten() {
-                sys::open_https(hwnd, &url);
+            if let Some(url) = portal.flatten()
+                && !sys::open_https(hwnd, &url)
+            {
+                with_app(hwnd, |app| {
+                    if let Some(update) = &mut app.update {
+                        update.failure = Some(menu::PORTAL_FAILED.to_owned());
+                        app.retarget();
+                        app.invalidate();
+                    }
+                });
             }
             return;
         }

@@ -20,12 +20,12 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn open_https(hwnd: HWND, url: &str) {
+pub fn open_https(hwnd: HWND, url: &str) -> bool {
     if !menu::https(url) {
-        return;
+        return false;
     }
     let (verb, url) = (wide("open"), wide(url));
-    unsafe {
+    let code = unsafe {
         ShellExecuteW(
             hwnd,
             verb.as_ptr(),
@@ -35,6 +35,7 @@ pub fn open_https(hwnd: HWND, url: &str) {
             SW_SHOWNORMAL,
         )
     };
+    menu::opened(code as isize)
 }
 
 fn lookup(module: &str, name: &CStr, load: bool) -> Option<unsafe extern "system" fn() -> isize> {

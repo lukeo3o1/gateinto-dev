@@ -10,6 +10,7 @@ use crate::icons::{self, Icon};
 use crate::layout::Rect;
 
 pub const NO_GATEWAYS: &str = "No gateways";
+pub const PORTAL_FAILED: &str = "Could not open the portal page";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Popup {
@@ -87,6 +88,10 @@ pub fn portal<'a>(
         .as_ref()
         .map(|url| url.as_str())
         .filter(|url| https(url))
+}
+
+pub fn opened(code: isize) -> bool {
+    code > 32
 }
 
 pub fn https(url: &str) -> bool {
@@ -281,6 +286,16 @@ mod tests {
         ] {
             assert!(dismisses(zone), "{zone:?}");
         }
+    }
+
+    #[test]
+    fn the_shell_reports_failure_at_or_below_32() {
+        assert!(!opened(0));
+        assert!(!opened(2));
+        assert!(!opened(32));
+        assert!(opened(33));
+        assert!(opened(isize::MAX));
+        assert!(!PORTAL_FAILED.contains("://"));
     }
 
     const BOUNDS: Rect = Rect::new(0, 0, 1040, 680);
