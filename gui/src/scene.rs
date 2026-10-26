@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::fonts::Font;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
@@ -7,13 +9,15 @@ use crate::pointer::{Look, Pointer};
 use crate::scale::Scale;
 use crate::theme::{Rgb, Theme};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Fill(Rect, Rgb),
     Round(Rect, f32, Rgb),
     Icon(Icon, Rect, f32, Rgb),
-    Text(Font, &'static str, Rect, Rgb),
+    Text(Font, Cow<'static, str>, Rect, Rgb),
     Logo(Rect, Option<Rgb>),
+    Clip(Rect),
+    Unclip,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -36,7 +40,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         Op::Fill(l.rail, t.rail),
         Op::Fill(l.rail_edge, t.rail_edge),
         Op::Logo(l.logo, Some(t.accent)),
-        Op::Text(Font::Brand, "Gateinto", l.brand_text, t.rail_on),
+        Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, t.rail_on),
     ];
     for item in l.nav {
         let selected = v.nav.selected() == item.page;
@@ -58,7 +62,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
             stroke(s, &icon, RAIL_ICON),
             glyph,
         ));
-        ops.push(Op::Text(font, item.page.label(), item.label, ink));
+        ops.push(Op::Text(font, item.page.label().into(), item.label, ink));
     }
     if let Some(b) = l.buttons {
         let maximize = if v.maximized {
@@ -97,7 +101,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
     }
     ops.push(Op::Text(
         Font::Title,
-        v.nav.selected().title(),
+        v.nav.selected().title().into(),
         l.title,
         t.text,
     ));
@@ -134,13 +138,15 @@ mod tests {
             o.x >= r.x && o.y >= r.y && o.right() <= r.right() && o.bottom() <= r.bottom()
         };
         ops.iter()
-            .copied()
-            .filter(|op| match *op {
-                Op::Fill(o, _) | Op::Round(o, ..) | Op::Icon(_, o, ..) | Op::Text(_, _, o, _) => {
-                    within(o)
-                }
-                Op::Logo(o, _) => within(o),
+            .filter(|op| match op {
+                Op::Fill(o, _)
+                | Op::Round(o, ..)
+                | Op::Icon(_, o, ..)
+                | Op::Text(_, _, o, _)
+                | Op::Logo(o, _) => within(*o),
+                Op::Clip(_) | Op::Unclip => false,
             })
+            .cloned()
             .collect()
     }
 
@@ -155,7 +161,7 @@ mod tests {
                 Op::Fill(l.rail, T.rail),
                 Op::Fill(l.rail_edge, T.rail_edge),
                 Op::Logo(l.logo, Some(T.accent)),
-                Op::Text(Font::Brand, "Gateinto", l.brand_text, T.rail_on),
+                Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, T.rail_on),
             ]
         );
     }
@@ -170,7 +176,7 @@ mod tests {
                 Op::Round(item.frame, 6.0, T.rail_selected),
                 Op::Round(item.bar, 1.5, T.accent),
                 Op::Icon(icons::GATEWAYS, item.icon, 1.0, T.rail_icon),
-                Op::Text(Font::ItemSelected, "Gateways", item.label, T.rail_on),
+                Op::Text(Font::ItemSelected, "Gateways".into(), item.label, T.rail_on),
             ]
         );
     }
@@ -183,7 +189,7 @@ mod tests {
             rest,
             [
                 Op::Icon(icons::LOG, item.icon, 1.0, T.rail_text),
-                Op::Text(Font::Item, "Log", item.label, T.rail_text),
+                Op::Text(Font::Item, "Log".into(), item.label, T.rail_text),
             ]
         );
         let mut v = View::default();
@@ -230,7 +236,7 @@ mod tests {
         let glyph = Op::Icon(icons::CLOSE, b.glyph(b.close), 1.0, T.close_glyph_hover);
         assert_eq!(
             inside(&draw(&v), b.close),
-            [Op::Fill(b.close, T.close_hover), glyph]
+            [Op::Fill(b.close, T.close_hover), glyph.clone()]
         );
         v.pointer.down(Zone::Close);
         assert_eq!(
@@ -272,7 +278,12 @@ mod tests {
         let ops = draw(&at(Page::Device));
         assert_eq!(
             ops.last(),
-            Some(&Op::Text(Font::Title, "This device", l.title, T.text))
+            Some(&Op::Text(
+                Font::Title,
+                "This device".into(),
+                l.title,
+                T.text
+            ))
         );
     }
 
