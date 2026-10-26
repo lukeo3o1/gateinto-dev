@@ -3,7 +3,7 @@ description: Builds gateinto.exe for a -win7-windows-msvc target with a pinned n
 
 inputs:
   target:
-    description: x86_64-win7-windows-msvc or i686-win7-windows-msvc
+    description: A -win7-windows-msvc target, such as i686-win7-windows-msvc
     required: true
   nasm-version:
     description: NASM version for i686 targets
