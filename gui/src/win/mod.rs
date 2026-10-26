@@ -166,12 +166,14 @@ fn coords(lp: LPARAM) -> (i32, i32) {
     )
 }
 
-fn app<'a>(hwnd: HWND) -> Option<&'a mut App> {
-    unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App).as_mut() }
+// The closure must not call anything that sends a message back to this window.
+fn with_app<R>(hwnd: HWND, f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut App;
+    unsafe { state.as_mut() }.map(f)
 }
 
-fn custom<'a>(hwnd: HWND) -> Option<&'a mut App> {
-    app(hwnd).filter(|app| app.frame.draws_caption())
+fn with_custom<R>(hwnd: HWND, f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    with_app(hwnd, |app| app.frame.draws_caption().then(|| f(app))).flatten()
 }
 
 fn outer_size(frame: Frame, (w, h): (i32, i32), dpi: u32) -> (i32, i32) {
@@ -214,11 +216,11 @@ fn perform(hwnd: HWND, action: Option<Action>) {
     let command = match action {
         None => return,
         Some(Action::Select(page)) => {
-            if let Some(app) = app(hwnd)
-                && app.view.nav.select(page)
-            {
-                app.invalidate();
-            }
+            with_app(hwnd, |app| {
+                if app.view.nav.select(page) {
+                    app.invalidate();
+                }
+            });
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,
@@ -232,7 +234,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
 fn on_paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
-    if let Some(app) = app(hwnd) {
+    with_app(hwnd, |app| {
         let (w, h) = client_size(hwnd);
         let ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
@@ -257,13 +259,15 @@ fn on_paint(hwnd: HWND) {
                 };
             }
         }
-    }
+    });
     unsafe { EndPaint(hwnd, &ps) };
 }
 
 fn on_nc_calc_size(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
-    let app = custom(hwnd).filter(|_| wp != 0)?;
-    let frame_y = app.frame_y();
+    if wp == 0 {
+        return None;
+    }
+    let frame_y = with_custom(hwnd, |app| app.frame_y())?;
     let params = lp as *mut NCCALCSIZE_PARAMS;
     let top = unsafe { (*params).rgrc[0].top };
     let result = unsafe { DefWindowProcW(hwnd, WM_NCCALCSIZE, wp, lp) };
@@ -277,100 +281,103 @@ fn on_nc_calc_size(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
 }
 
 fn on_nc_hit_test(hwnd: HWND, lp: LPARAM) -> Option<LRESULT> {
-    let app = custom(hwnd)?;
+    with_custom(hwnd, |_| ())?;
     let system = unsafe { DefWindowProcW(hwnd, WM_NCHITTEST, 0, lp) };
     if system != HTCLIENT as LRESULT {
         return Some(system);
     }
-    Some(hit_code(app.screen_zone(lp)) as LRESULT)
+    with_app(hwnd, |app| hit_code(app.screen_zone(lp)) as LRESULT)
 }
 
 fn on_nc_mouse(hwnd: HWND, msg: u32, wp: WPARAM) -> Option<LRESULT> {
-    let app = custom(hwnd)?;
     let button = caption_button(wp);
     let zone = button.unwrap_or(Zone::Caption);
-    let action = match msg {
-        WM_NCMOUSEMOVE => {
-            track(hwnd, TME_LEAVE | TME_NONCLIENT);
-            if app.view.pointer.moved(zone) {
-                app.invalidate();
-            }
-            None
-        }
-        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
-            if app.view.pointer.down(zone) {
-                app.invalidate();
-            }
-            None
-        }
-        _ => {
-            let action = app.view.pointer.up(zone);
+    let action = with_custom(hwnd, |app| {
+        let (changed, action) = match msg {
+            WM_NCMOUSEMOVE => (app.view.pointer.moved(zone), None),
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => (app.view.pointer.down(zone), None),
+            _ => (true, app.view.pointer.up(zone)),
+        };
+        if changed {
             app.invalidate();
-            action
         }
-    };
+        action
+    })?;
+    if msg == WM_NCMOUSEMOVE {
+        track(hwnd, TME_LEAVE | TME_NONCLIENT);
+    }
     button?;
     perform(hwnd, action);
     Some(0)
 }
 
+enum Follow {
+    Track,
+    Capture,
+    Release(Option<Action>),
+    Nothing,
+}
+
 fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
-    let Some(app) = app(hwnd) else { return };
     let (x, y) = coords(lp);
-    let zone = app.zone(x, y);
-    match msg {
-        WM_MOUSEMOVE => {
-            track(hwnd, TME_LEAVE);
-            if app.view.pointer.moved(zone) {
-                app.invalidate();
-            }
-        }
-        WM_LBUTTONDOWN => {
-            if app.view.pointer.down(zone) {
-                app.invalidate();
-                unsafe { SetCapture(hwnd) };
-            }
-        }
-        _ => {
-            let action = app.view.pointer.up(zone);
+    let follow = with_app(hwnd, |app| {
+        let zone = app.zone(x, y);
+        let pointer = &mut app.view.pointer;
+        let (changed, follow) = match msg {
+            WM_MOUSEMOVE => (pointer.moved(zone), Follow::Track),
+            WM_LBUTTONDOWN if pointer.down(zone) => (true, Follow::Capture),
+            WM_LBUTTONDOWN => (false, Follow::Nothing),
+            _ => (true, Follow::Release(pointer.up(zone))),
+        };
+        if changed {
             app.invalidate();
+        }
+        follow
+    });
+    match follow {
+        Some(Follow::Track) => track(hwnd, TME_LEAVE),
+        Some(Follow::Capture) => {
+            unsafe { SetCapture(hwnd) };
+        }
+        Some(Follow::Release(action)) => {
             unsafe { ReleaseCapture() };
             perform(hwnd, action);
         }
+        Some(Follow::Nothing) | None => {}
     }
 }
 
 fn on_left(hwnd: HWND) {
-    if let Some(app) = app(hwnd)
-        && app.view.pointer.left()
-    {
-        app.invalidate();
-    }
+    with_app(hwnd, |app| {
+        if app.view.pointer.left() {
+            app.invalidate();
+        }
+    });
 }
 
 fn on_capture_lost(hwnd: HWND) {
-    if let Some(app) = app(hwnd)
-        && app.view.pointer.cancel()
-    {
-        app.invalidate();
-    }
+    with_app(hwnd, |app| {
+        if app.view.pointer.cancel() {
+            app.invalidate();
+        }
+    });
 }
 
 fn on_size(hwnd: HWND, wp: WPARAM) {
-    if let Some(app) = app(hwnd) {
+    with_app(hwnd, |app| {
         app.view.maximized = wp == SIZE_MAXIMIZED as WPARAM;
         app.relayout();
-    }
+    });
 }
 
 fn on_dpi_changed(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
-    if let Some(app) = app(hwnd) {
+    with_app(hwnd, |app| {
         let s = Scale::new((wp & 0xffff) as u32);
         if let Ok(fonts) = Fonts::new(app.gfx.dwrite(), s) {
             app.s = s;
             app.fonts = fonts;
         }
-    }
+    });
     let r = unsafe { &*(lp as *const RECT) };
     unsafe {
         SetWindowPos(
@@ -383,20 +390,20 @@ fn on_dpi_changed(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
             SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
-    if let Some(app) = app(hwnd) {
+    let Some((s, logo)) = with_app(hwnd, |app| {
         app.relayout();
-        app.icons = Icons::apply(hwnd, app.s, app.layout.logo.w);
-    }
+        (app.s, app.layout.logo.w)
+    }) else {
+        return;
+    };
+    let icons = Icons::apply(hwnd, s, logo);
+    with_app(hwnd, |app| std::mem::replace(&mut app.icons, icons));
 }
 
 fn on_composition_changed(hwnd: HWND) {
-    if let Some(app) = app(hwnd) {
-        app.frame = choose_frame();
-    }
+    with_app(hwnd, |app| app.frame = choose_frame());
     refresh_frame(hwnd);
-    if let Some(app) = app(hwnd) {
-        app.relayout();
-    }
+    with_app(hwnd, |app| app.relayout());
 }
 
 fn refresh_frame(hwnd: HWND) {
@@ -405,10 +412,8 @@ fn refresh_frame(hwnd: HWND) {
 }
 
 fn on_min_max(hwnd: HWND, info: &mut MINMAXINFO) {
-    let (s, frame) = app(hwnd).map_or_else(
-        || (Scale::new(sys::window_dpi(hwnd)), Frame::System),
-        |app| (app.s, app.frame),
-    );
+    let (s, frame) = with_app(hwnd, |app| (app.s, app.frame))
+        .unwrap_or_else(|| (Scale::new(sys::window_dpi(hwnd)), Frame::System));
     let (w, h) = outer_size(frame, Layout::min_size(s), s.dpi);
     info.ptMinTrackSize.x = w;
     info.ptMinTrackSize.y = h;
@@ -482,7 +487,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 
 fn center_on_monitor(hwnd: HWND) {
     let s = Scale::new(sys::window_dpi(hwnd));
-    let frame = app(hwnd).map_or(Frame::System, |app| app.frame);
+    let frame = with_app(hwnd, |app| app.frame).unwrap_or(Frame::System);
     let (w, h) = outer_size(frame, Layout::default_size(s), s.dpi);
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
