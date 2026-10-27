@@ -24,6 +24,7 @@ const TAKEN: &str =
     "Another gateway with this name or address was just added. Nothing was changed.";
 const FULL: &str = "This device holds as many added gateways as it can. Remove one first.";
 const NOT_SAVED: &str = "The gateway could not be saved on this device.";
+const UNLISTED: &str = "The gateway list cannot be read.";
 const UNUSABLE: &str = "These values cannot be used for a gateway.";
 // The longest DNS name, a colon and a five digit port.
 const MAX_ADDRESS: usize = 253 + 1 + 5;
@@ -223,9 +224,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
     }
     let known = match listing {
         Ok(known) => known,
-        Err(error) => {
-            return Verdict::Invalid(None, format!("The gateway list cannot be read: {error}"));
-        }
+        Err(_) => return Verdict::Invalid(None, UNLISTED.to_owned()),
     };
     let request = match LaunchRequest::from_fields(
         optional(&form.name),
@@ -599,13 +598,10 @@ mod tests {
 
     #[test]
     fn an_unreadable_listing_blocks_adding() {
-        let failed: Result<Known, String> = Err("config.toml: bad".to_owned());
+        let failed: Result<Known, String> = Err("config.toml: password = hunter2".to_owned());
         assert_eq!(
             error(&form("proxy.example.net", "", ""), &failed),
-            (
-                None,
-                "The gateway list cannot be read: config.toml: bad".to_owned()
-            )
+            (None, "The gateway list cannot be read.".to_owned())
         );
     }
 
@@ -740,10 +736,7 @@ mod tests {
         assert!(!sheet_failed.ready);
         assert_eq!(
             sheet_failed.notice,
-            Some((
-                "The gateway list cannot be read: bad".to_owned(),
-                Tone::Error
-            ))
+            Some(("The gateway list cannot be read.".to_owned(), Tone::Error))
         );
         form.failure = Some("The gateway was not added: full".to_owned());
         let sheet = sheet(&form, &known(vec![]));
