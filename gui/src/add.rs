@@ -74,14 +74,6 @@ impl Form {
         }
     }
 
-    pub fn focus(&self) -> Input {
-        self.focus
-    }
-
-    pub fn route(&self) -> Route {
-        self.route
-    }
-
     pub fn select(&mut self, input: Input) {
         self.focus = input;
     }
@@ -112,10 +104,6 @@ impl Form {
             (Input::Name, false) | (Input::Address, true) => Input::Portal,
             (Input::Portal, false) | (Input::Name, true) => Input::Address,
         };
-    }
-
-    pub fn failure(&self) -> Option<&str> {
-        self.failure.as_deref()
     }
 }
 
@@ -451,7 +439,7 @@ mod tests {
     #[test]
     fn typing_fills_the_focused_field_and_drops_spaces_and_control_characters() {
         let mut form = Form::default();
-        assert_eq!(form.focus(), Input::Address);
+        assert_eq!(form.focus, Input::Address);
         form.type_text(" proxy.example.com\r\n");
         form.select(Input::Portal);
         form.type_text("https://portal\t.example/");
@@ -474,13 +462,13 @@ mod tests {
     fn tab_cycles_the_fields_both_ways() {
         let mut form = Form::default();
         form.next(false);
-        assert_eq!(form.focus(), Input::Name);
+        assert_eq!(form.focus, Input::Name);
         form.next(false);
-        assert_eq!(form.focus(), Input::Portal);
+        assert_eq!(form.focus, Input::Portal);
         form.next(false);
-        assert_eq!(form.focus(), Input::Address);
+        assert_eq!(form.focus, Input::Address);
         form.next(true);
-        assert_eq!(form.focus(), Input::Portal);
+        assert_eq!(form.focus, Input::Portal);
     }
 
     #[test]
@@ -733,10 +721,10 @@ mod tests {
         let mut form = form("proxy.example.net", "lab", "");
         form.failure = Some("x".to_owned());
         form.erase();
-        assert_eq!(form.failure(), None);
+        assert_eq!(form.failure.as_deref(), None);
         form.failure = Some("x".to_owned());
         form.choose(Route::Mixed);
-        assert_eq!(form.failure(), None);
+        assert_eq!(form.failure.as_deref(), None);
     }
 
     #[test]
@@ -769,7 +757,7 @@ mod tests {
         let mut twin = form("proxy.example.org", "lab", "");
         assert_eq!(commit(&mut twin, &again, Some(dir.clone()), 43), None);
         assert_eq!(
-            twin.failure(),
+            twin.failure.as_deref(),
             Some("\"lab\" is already used by another gateway.")
         );
         assert_eq!(
@@ -783,7 +771,7 @@ mod tests {
     fn committing_without_a_store_folder_writes_nothing() {
         let mut form = form("proxy.example.net", "lab", "");
         assert_eq!(commit(&mut form, &known(vec![]), None, 1), None);
-        assert_eq!(form.failure(), Some(NO_FOLDER));
+        assert_eq!(form.failure.as_deref(), Some(NO_FOLDER));
     }
 
     #[test]

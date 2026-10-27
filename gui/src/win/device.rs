@@ -3,9 +3,12 @@ use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND};
 use windows_sys::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
-use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_SUBKEY_WOW6464KEY};
 use windows_sys::Win32::System::SystemInformation::{
@@ -98,6 +101,36 @@ pub fn copy_secret(hwnd: HWND, text: &str) -> bool {
     });
     units.zeroize();
     placed
+}
+
+pub fn paste(hwnd: HWND, limit: usize) -> Option<String> {
+    unsafe {
+        if OpenClipboard(hwnd) == 0 {
+            return None;
+        }
+        let text = read_text(limit);
+        CloseClipboard();
+        text
+    }
+}
+
+unsafe fn read_text(limit: usize) -> Option<String> {
+    unsafe {
+        let memory = GetClipboardData(u32::from(CF_UNICODETEXT));
+        if memory.is_null() {
+            return None;
+        }
+        let units = (GlobalSize(memory) / size_of::<u16>()).min(limit);
+        let source = GlobalLock(memory).cast::<u16>();
+        if source.is_null() {
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(source, units);
+        let end = slice.iter().position(|&c| c == 0).unwrap_or(units);
+        let text = String::from_utf16_lossy(&slice[..end]);
+        GlobalUnlock(memory);
+        Some(text)
+    }
 }
 
 fn open(hwnd: HWND, fill: impl FnOnce() -> bool) -> bool {

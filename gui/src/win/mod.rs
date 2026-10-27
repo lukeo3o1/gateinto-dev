@@ -17,8 +17,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_ESCAPE,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
+    TrackMouseEvent, VK_ESCAPE, VK_SHIFT, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
@@ -29,7 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
     SM_CXSMICON, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SYSTEM_METRICS_INDEX, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY,
+    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CREATE, WM_DESTROY,
     WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
     WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
     WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
@@ -39,8 +39,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
+use gateinto::link::store;
 use gateinto::proxy::Route;
 
+use crate::add::{self, Form, Keyed, Units};
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
 use crate::frame::Frame;
@@ -70,6 +72,7 @@ const APP_ICON: usize = 1;
 const TITLE: &str = "Gateinto";
 const COPIED_TIMER: usize = 1;
 const COPIED_MS: u32 = 1500;
+const PASTE_UNITS: usize = 4096;
 
 fn load_icon(instance: HINSTANCE, size: i32) -> HICON {
     unsafe { LoadImageW(instance, APP_ICON as *const u16, IMAGE_ICON, size, size, 0) }
@@ -130,6 +133,8 @@ struct App {
     log: log::Body,
     dialog: Option<Dialog>,
     details: Option<GatewayName>,
+    adding: Option<Form>,
+    units: Units,
 }
 
 fn choose_frame() -> Frame {
@@ -165,6 +170,8 @@ impl App {
             log: log::Body::Rows(Vec::new()),
             dialog: None,
             details: None,
+            adding: None,
+            units: Units::default(),
         })
     }
 
@@ -220,6 +227,10 @@ impl App {
         if let Some(details) = self.gateway_details() {
             board::dialog::gateway(&mut board, l, s, t, v, &details, m);
         }
+        if let Some(form) = &self.adding {
+            let sheet = add::sheet(form, &update.gateways);
+            board::dialog::add(&mut board, l, s, t, v, &sheet, m);
+        }
         board
     }
 
@@ -262,7 +273,7 @@ impl App {
     }
 
     fn modal(&self) -> bool {
-        self.dialog.is_some() || self.details.is_some()
+        self.dialog.is_some() || self.details.is_some() || self.adding.is_some()
     }
 
     fn portal(&self, id: u64) -> Option<String> {
@@ -282,6 +293,7 @@ impl App {
         if self.view.nav.select(page) {
             self.dialog = None;
             self.details = None;
+            self.adding = None;
             self.relog();
             if self.copied {
                 self.uncopy();
@@ -325,6 +337,7 @@ impl App {
         };
         self.uncopy();
         self.details = None;
+        self.adding = None;
         self.dialog = Some(dialog);
         self.link.send(Command::Credentials(id));
         self.retarget();
@@ -360,7 +373,7 @@ impl App {
     }
 
     fn close_dialog(&mut self) -> bool {
-        if self.details.take().is_some() {
+        if self.details.take().is_some() || self.adding.take().is_some() {
             self.retarget();
             self.invalidate();
             return true;
@@ -369,6 +382,68 @@ impl App {
             return false;
         }
         self.uncopy();
+        true
+    }
+
+    fn open_add(&mut self) {
+        self.close_dialog();
+        self.units = Units::default();
+        self.adding = Some(Form::default());
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn edit(&mut self, change: impl FnOnce(&mut Form)) {
+        if let Some(form) = &mut self.adding {
+            change(form);
+            self.retarget();
+            self.invalidate();
+        }
+    }
+
+    fn typed(&mut self, unit: u16) -> bool {
+        if self.adding.is_none() {
+            return false;
+        }
+        let Some(c) = self.units.push(unit) else {
+            return true;
+        };
+        let Some(form) = &mut self.adding else {
+            return false;
+        };
+        match add::keyed(form, c) {
+            Keyed::Changed => {}
+            Keyed::Submit => return self.confirm_add(),
+            Keyed::Paste => {
+                let text = device::paste(self.hwnd, PASTE_UNITS);
+                if let (Some(text), Some(form)) = (text, &mut self.adding) {
+                    form.type_text(&text);
+                }
+            }
+            Keyed::Ignored => return true,
+        }
+        self.retarget();
+        self.invalidate();
+        true
+    }
+
+    fn confirm_add(&mut self) -> bool {
+        let Some(form) = &mut self.adding else {
+            return false;
+        };
+        let listing = gateways::read(config::default_path())
+            .map(|file| gateways::catalog(&file, store::default_dir()));
+        let added = add::commit(form, &listing, store::default_dir(), unix_now());
+        if let Some(added) = added {
+            self.adding = None;
+            let state = self.update.as_ref().map(|u| &u.state);
+            let follow = state.and_then(|state| self.launches.follow(state, added.name));
+            if let Some(name) = follow {
+                self.link.send(Command::Launch(name, added.route));
+            }
+        }
+        self.retarget();
+        self.invalidate();
         true
     }
 
@@ -720,6 +795,25 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             rehover(hwnd);
             return;
         }
+        Some(Action::AddGateway) => {
+            with_app(hwnd, App::open_add);
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::Focus(input)) => {
+            with_app(hwnd, |app| app.edit(|form| form.select(input)));
+            return;
+        }
+        Some(Action::Route(route)) => {
+            with_app(hwnd, |app| app.edit(|form| form.choose(route)));
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::ConfirmAdd) => {
+            with_app(hwnd, App::confirm_add);
+            rehover(hwnd);
+            return;
+        }
         Some(Action::Minimize) => SC_MINIMIZE,
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
@@ -967,7 +1061,25 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     }
 }
 
+fn on_char(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
+    let handled = with_app(hwnd, |app| app.typed(wp as u16))?;
+    if !handled {
+        return None;
+    }
+    rehover(hwnd);
+    Some(0)
+}
+
 fn on_key(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
+    if wp == WPARAM::from(VK_TAB) {
+        let back = unsafe { GetKeyState(i32::from(VK_SHIFT)) } < 0;
+        let moved = with_app(hwnd, |app| {
+            let open = app.adding.is_some();
+            app.edit(|form| form.next(back));
+            open
+        })?;
+        return moved.then_some(0);
+    }
     if wp != WPARAM::from(VK_ESCAPE) {
         return None;
     }
@@ -1070,6 +1182,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             Some(0)
         }
         WM_KEYDOWN => on_key(hwnd, wp),
+        WM_CHAR => on_char(hwnd, wp),
         WM_ACTIVATE | WM_KILLFOCUS => {
             if msg == WM_KILLFOCUS || (wp & 0xFFFF) as u32 == WA_INACTIVE {
                 with_app(hwnd, App::dismiss);
