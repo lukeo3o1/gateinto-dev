@@ -331,12 +331,11 @@ impl App {
         let Some(update) = &self.update else {
             return;
         };
-        let offset = sys::utc_offset();
-        let log::Body::Rows(rows) = log::body(&update.state, &update.log, self.filter, offset)
-        else {
+        let text = log::text(&update.log, self.filter, sys::utc_offset());
+        if text.is_empty() {
             return;
-        };
-        if device::copy(self.hwnd, &log::text(&rows)) {
+        }
+        if device::copy(self.hwnd, &text) {
             self.copied = unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) } != 0;
         } else {
             self.fail(log::COPY_FAILED);

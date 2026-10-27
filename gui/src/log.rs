@@ -32,6 +32,12 @@ impl Journal {
         &self.events
     }
 
+    fn shown(&self, filter: Filter) -> impl Iterator<Item = &LogEvent> {
+        self.events
+            .iter()
+            .filter(move |event| filter.shows(event.level))
+    }
+
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
     }
@@ -142,8 +148,12 @@ pub struct Row {
 
 impl Row {
     pub fn label(&self) -> String {
-        self.level.as_str().to_ascii_uppercase()
+        label(self.level)
     }
+}
+
+fn label(level: LogLevel) -> String {
+    level.as_str().to_ascii_uppercase()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,14 +169,16 @@ pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) 
         AgentState::Running(_) => {}
     }
     let rows: Vec<Row> = journal
-        .events
-        .iter()
-        .filter(|event| filter.shows(event.level))
+        .shown(filter)
         .map(|event| Row {
             time: clock(event.time, offset),
             level: event.level,
             scope: event.scope.clone(),
-            message: event.message.clone(),
+            message: event
+                .message
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect(),
         })
         .collect();
     if !rows.is_empty() {
@@ -208,15 +220,16 @@ pub fn page(
     }
 }
 
-pub fn text(rows: &[Row]) -> String {
-    rows.iter()
-        .map(|row| {
+pub fn text(journal: &Journal, filter: Filter, offset: u64) -> String {
+    journal
+        .shown(filter)
+        .map(|event| {
             format!(
                 "{} {} {} {}\r\n",
-                row.time,
-                row.label(),
-                row.scope,
-                row.message
+                clock(event.time, offset),
+                label(event.level),
+                event.scope,
+                event.message
             )
         })
         .collect()
@@ -419,6 +432,29 @@ mod tests {
     }
 
     #[test]
+    fn control_characters_are_shown_as_spaces_and_copied_as_they_were() {
+        let raw = "first\nsecond\r\tthird\u{1b}[0m\u{85}end";
+        let mut journal = Journal::default();
+        let page = LogPage {
+            last: 1,
+            events: vec![LogEvent {
+                message: raw.to_owned(),
+                ..event(1, LogLevel::Info)
+            }],
+        };
+        journal.absorb(Ok(Response::Ok(page.to_lines())));
+        let Body::Rows(rows) = body(&running(), &journal, Filter::All, 0) else {
+            panic!("rows expected");
+        };
+        assert_eq!(rows[0].message, "first second  third [0m end");
+        let time = clock(1_700_000_001_000, 0);
+        assert_eq!(
+            text(&journal, Filter::All, 0),
+            format!("{time} INFO agent {raw}\r\n")
+        );
+    }
+
+    #[test]
     fn the_warnings_filter_keeps_warnings_and_errors() {
         let Body::Rows(rows) = body(&running(), &mixed(), Filter::Warnings, 0) else {
             panic!("rows expected");
@@ -429,13 +465,10 @@ mod tests {
 
     #[test]
     fn copied_text_is_one_line_per_shown_row() {
-        let Body::Rows(rows) = body(&running(), &mixed(), Filter::Warnings, 0) else {
-            panic!("rows expected");
-        };
         let time = clock(1_700_000_002_000, 0);
         let later = clock(1_700_000_003_000, 0);
         assert_eq!(
-            text(&rows),
+            text(&mixed(), Filter::Warnings, 0),
             format!("{time} WARN agent event 2\r\n{later} ERROR session 4 event 3\r\n")
         );
     }
