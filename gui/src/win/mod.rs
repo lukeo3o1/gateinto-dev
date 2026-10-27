@@ -411,6 +411,8 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::OpenConfig
         | Zone::SignIn
         | Zone::CopyId
+        | Zone::CopyLog
+        | Zone::LogFilter(_)
         | Zone::Menu
         | Zone::Client => HTCLIENT,
     }

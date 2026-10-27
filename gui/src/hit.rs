@@ -1,4 +1,5 @@
 use crate::layout::{Layout, Rect};
+use crate::log::Filter;
 use crate::nav::Page;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum Zone {
     OpenConfig,
     SignIn,
     CopyId,
+    CopyLog,
+    LogFilter(Filter),
     Menu,
     Client,
 }

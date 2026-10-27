@@ -9,6 +9,11 @@ pub const STOPPED: &str = "The agent is not running";
 pub const OLDER: &str = "The running agent is older than this version of Gateinto and cannot show its log. Restart it to see its messages here.";
 pub const NOTHING: &str = "No messages yet";
 pub const NO_WARNINGS: &str = "No warnings";
+pub const SUBTITLE: &str =
+    "Messages from the running agent. Passwords and page contents are never logged.";
+pub const COPY: &str = "Copy";
+pub const COPIED: &str = "Copied";
+pub const COPY_FAILED: &str = "Could not copy the log";
 
 const DAY: u64 = 86_400;
 
@@ -171,6 +176,35 @@ pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) 
         (None, Filter::All) => NOTHING.to_owned(),
         (None, Filter::Warnings) => NO_WARNINGS.to_owned(),
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Page {
+    pub subtitle: String,
+    pub alert: bool,
+    pub filter: Filter,
+    pub copy: Option<&'static str>,
+    pub body: Body,
+}
+
+pub fn page(
+    state: &AgentState,
+    journal: &Journal,
+    filter: Filter,
+    offset: u64,
+    failure: Option<&str>,
+    copied: bool,
+) -> Page {
+    let body = body(state, journal, filter, offset);
+    let rows = matches!(body, Body::Rows(_));
+    let alert = failure.or(journal.problem().filter(|_| rows));
+    Page {
+        subtitle: alert.unwrap_or(SUBTITLE).to_owned(),
+        alert: alert.is_some(),
+        filter,
+        copy: rows.then_some(if copied { COPIED } else { COPY }),
+        body,
+    }
 }
 
 pub fn text(rows: &[Row]) -> String {
@@ -438,5 +472,53 @@ mod tests {
             matches!(body(&running(), &journal, Filter::All, 0), Body::Rows(rows) if rows.len() == 3)
         );
         assert!(journal.problem().is_some());
+    }
+
+    #[test]
+    fn the_page_explains_what_is_logged_and_offers_to_copy_rows() {
+        let shown = page(&running(), &mixed(), Filter::All, 0, None, false);
+        assert_eq!(shown.subtitle, SUBTITLE);
+        assert!(!shown.alert);
+        assert_eq!(shown.filter, Filter::All);
+        assert_eq!(shown.copy, Some(COPY));
+        assert!(matches!(shown.body, Body::Rows(ref rows) if rows.len() == 3));
+        let copied = page(&running(), &mixed(), Filter::Warnings, 0, None, true);
+        assert_eq!(copied.copy, Some(COPIED));
+        assert_eq!(copied.filter, Filter::Warnings);
+    }
+
+    #[test]
+    fn nothing_to_copy_without_rows() {
+        let shown = page(&AgentState::Stopped, &mixed(), Filter::All, 0, None, true);
+        assert_eq!(shown.copy, None);
+        assert_eq!(shown.body, Body::Empty(STOPPED.to_owned()));
+        assert_eq!(shown.subtitle, SUBTITLE);
+    }
+
+    #[test]
+    fn problems_with_kept_rows_and_failures_replace_the_subtitle() {
+        let mut journal = mixed();
+        journal.absorb(Err(RequestError::TimedOut));
+        let shown = page(&running(), &journal, Filter::All, 0, None, false);
+        assert_eq!(shown.subtitle, RequestError::TimedOut.to_string());
+        assert!(shown.alert);
+        let failed = page(
+            &running(),
+            &journal,
+            Filter::All,
+            0,
+            Some("Could not copy"),
+            false,
+        );
+        assert_eq!(failed.subtitle, "Could not copy");
+        assert!(failed.alert);
+        let older = {
+            let mut older = mixed();
+            older.absorb(Ok(Response::Error("invalid request".to_owned())));
+            older
+        };
+        let shown = page(&running(), &older, Filter::All, 0, None, false);
+        assert_eq!(shown.subtitle, SUBTITLE);
+        assert_eq!(shown.body, Body::Empty(OLDER.to_owned()));
     }
 }

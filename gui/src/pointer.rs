@@ -1,4 +1,5 @@
 use crate::hit::Zone;
+use crate::log::Filter;
 use crate::nav::Page;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +17,8 @@ pub enum Action {
     OpenConfig,
     ToggleSignIn,
     CopyId,
+    CopyLog,
+    Filter(Filter),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +49,8 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::OpenConfig => Some(Action::OpenConfig),
         Zone::SignIn => Some(Action::ToggleSignIn),
         Zone::CopyId => Some(Action::CopyId),
+        Zone::CopyLog => Some(Action::CopyLog),
+        Zone::LogFilter(filter) => Some(Action::Filter(filter)),
         _ => None,
     }
 }
@@ -282,6 +287,18 @@ mod tests {
         let mut p = Pointer::default();
         assert!(p.down(Zone::CopyId));
         assert_eq!(p.up(Zone::CopyId), Some(Action::CopyId));
+    }
+
+    #[test]
+    fn the_log_page_copies_its_lines_and_switches_its_filter() {
+        let mut p = Pointer::default();
+        assert!(p.down(Zone::CopyLog));
+        assert_eq!(p.up(Zone::CopyLog), Some(Action::CopyLog));
+        let warnings = Zone::LogFilter(Filter::Warnings);
+        assert!(p.moved(warnings));
+        assert_eq!(p.look(warnings), Look::Hover);
+        assert!(p.down(warnings));
+        assert_eq!(p.up(warnings), Some(Action::Filter(Filter::Warnings)));
     }
 
     #[test]

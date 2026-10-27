@@ -50,6 +50,10 @@ impl Pane {
         }
     }
 
+    pub fn at_bottom(&self) -> bool {
+        self.offset == clamp(i32::MAX, self.content, self.view.h)
+    }
+
     pub fn scrolled(&self, delta: i32, lines: u32, line: i32) -> i32 {
         let moved = self
             .offset
@@ -63,27 +67,27 @@ pub struct Offsets {
     sessions: i32,
     gateways: i32,
     device: i32,
+    log: i32,
     settings: i32,
 }
 
 impl Offsets {
-    fn slot(&mut self, page: Page) -> Option<&mut i32> {
+    fn slot(&mut self, page: Page) -> &mut i32 {
         match page {
-            Page::Sessions => Some(&mut self.sessions),
-            Page::Gateways => Some(&mut self.gateways),
-            Page::Device => Some(&mut self.device),
-            Page::Settings => Some(&mut self.settings),
-            _ => None,
+            Page::Sessions => &mut self.sessions,
+            Page::Gateways => &mut self.gateways,
+            Page::Device => &mut self.device,
+            Page::Log => &mut self.log,
+            Page::Settings => &mut self.settings,
         }
     }
 
     pub fn get(mut self, page: Page) -> i32 {
-        self.slot(page).map_or(0, |offset| *offset)
+        *self.slot(page)
     }
 
     pub fn set(&mut self, page: Page, offset: i32) -> bool {
-        self.slot(page)
-            .is_some_and(|slot| std::mem::replace(slot, offset) != offset)
+        std::mem::replace(self.slot(page), offset) != offset
     }
 }
 
@@ -150,6 +154,14 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_is_at_the_bottom_when_its_last_screen_shows() {
+        let view = Rect::new(0, 100, 50, 200);
+        assert!(Pane::new(view, 500, 300).at_bottom());
+        assert!(!Pane::new(view, 500, 299).at_bottom());
+        assert!(Pane::new(view, 150, 0).at_bottom());
+    }
+
+    #[test]
     fn each_scrolling_page_keeps_its_own_offset() {
         let mut o = Offsets::default();
         assert!(o.set(Page::Gateways, 40));
@@ -164,8 +176,9 @@ mod tests {
         assert!(o.set(Page::Device, 5));
         assert_eq!(o.get(Page::Device), 5);
         assert_eq!(o.get(Page::Settings), 9);
-        assert!(!o.set(Page::Log, 3));
-        assert_eq!(o.get(Page::Log), 0);
+        assert!(o.set(Page::Log, 3));
+        assert_eq!(o.get(Page::Log), 3);
+        assert_eq!(o.get(Page::Device), 5);
     }
 
     #[test]
