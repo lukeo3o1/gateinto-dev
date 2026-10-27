@@ -2,13 +2,30 @@ use std::path::PathBuf;
 
 use gateinto::config::GatewayName;
 use gateinto::link::store::LinkedStore;
-use gateinto::link::{self, Decision, Known, LinkError, LinkedGateway, MIXED_TRAFFIC, Resolution};
+use gateinto::link::{
+    self, Decision, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, MIXED_TRAFFIC, Resolution,
+};
 use gateinto::proxy::Route;
 use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
 
 use crate::gateways;
 
 pub const TITLE: &str = "Add gateway";
+pub const ADDRESS_HINT: &str = "Host name or IP address. Port 443 is the default.";
+pub const NAME_HINT: &str = "Shown in lists. Leave empty to use the host name.";
+pub const PORTAL_HINT: &str = "Optional. An https:// page the browser opens first.";
+pub const ROUTES: [(Route, &str, &str); 2] = [
+    (
+        Route::Gateway,
+        "Gateway",
+        "Every site goes through the gateway",
+    ),
+    (
+        Route::Mixed,
+        "Mixed",
+        "Sites the gateway serves go through it; others connect directly",
+    ),
+];
 pub const NO_FOLDER: &str = "This device has no folder for added gateways.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -215,6 +232,75 @@ pub fn disclosure(route: Route) -> Option<String> {
         Route::Mixed => Some(format!(
             "The gateway will see this device's identity and {MIXED_TRAFFIC}."
         )),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Hint,
+    Error,
+    Warning,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry<'a> {
+    pub input: Input,
+    pub label: &'static str,
+    pub value: &'a str,
+    pub note: String,
+    pub tone: Tone,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sheet<'a> {
+    pub entries: [Entry<'a>; 3],
+    pub focus: Input,
+    pub route: Route,
+    pub notice: Option<(String, Tone)>,
+    pub ready: bool,
+}
+
+pub fn sheet<'a>(form: &'a Form, listing: &Result<Known, String>) -> Sheet<'a> {
+    let verdict = check(form, listing);
+    let entry = |input, label, hint: &str| {
+        let (note, tone) = match &verdict {
+            Verdict::Invalid(Some(wrong), message) if *wrong == input => {
+                (message.clone(), Tone::Error)
+            }
+            Verdict::Ready(ready) if ready.local && input == Input::Address => {
+                (LOCAL_ADDRESS.to_owned(), Tone::Warning)
+            }
+            _ => (hint.to_owned(), Tone::Hint),
+        };
+        Entry {
+            input,
+            label,
+            value: form.value(input),
+            note,
+            tone,
+        }
+    };
+    let entries = [
+        entry(Input::Address, "Gateway address", ADDRESS_HINT),
+        entry(Input::Name, "Name", NAME_HINT),
+        entry(Input::Portal, "Portal page", PORTAL_HINT),
+    ];
+    let general = match &verdict {
+        Verdict::Invalid(None, message) => Some(message.clone()),
+        _ => None,
+    };
+    let notice = form
+        .failure
+        .clone()
+        .or(general)
+        .map(|message| (message, Tone::Error))
+        .or_else(|| disclosure(form.route).map(|text| (text, Tone::Warning)));
+    Sheet {
+        entries,
+        focus: form.focus,
+        route: form.route,
+        notice,
+        ready: form.failure.is_none() && matches!(verdict, Verdict::Ready(_)),
     }
 }
 
@@ -492,6 +578,100 @@ mod tests {
         assert_eq!(
             error(&form("proxy.example.net", "lab", ""), &unavailable).0,
             None
+        );
+    }
+
+    fn notes(sheet: &Sheet) -> Vec<(String, Tone)> {
+        sheet
+            .entries
+            .iter()
+            .map(|entry| (entry.note.clone(), entry.tone))
+            .collect()
+    }
+
+    fn hint(text: &str) -> (String, Tone) {
+        (text.to_owned(), Tone::Hint)
+    }
+
+    #[test]
+    fn an_empty_sheet_labels_every_field_with_its_hint_and_cannot_add() {
+        let form = Form::default();
+        let sheet = sheet(&form, &known(vec![]));
+        let labels: Vec<_> = sheet
+            .entries
+            .iter()
+            .map(|e| (e.input, e.label, e.value))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (Input::Address, "Gateway address", ""),
+                (Input::Name, "Name", ""),
+                (Input::Portal, "Portal page", ""),
+            ]
+        );
+        assert_eq!(
+            notes(&sheet),
+            [hint(ADDRESS_HINT), hint(NAME_HINT), hint(PORTAL_HINT)]
+        );
+        assert_eq!(sheet.notice, None);
+        assert_eq!(sheet.route, Route::Gateway);
+        assert!(!sheet.ready);
+    }
+
+    #[test]
+    fn a_field_error_replaces_only_that_hint() {
+        let form = form("proxy.example.net", "a.b", "");
+        let sheet = sheet(&form, &known(vec![]));
+        assert_eq!(sheet.entries[1].value, "a.b");
+        assert_eq!(sheet.entries[1].tone, Tone::Error);
+        assert_eq!(sheet.entries[0].note, ADDRESS_HINT);
+        assert_eq!(sheet.entries[2].note, PORTAL_HINT);
+        assert!(!sheet.ready);
+    }
+
+    #[test]
+    fn a_ready_local_gateway_warns_under_its_address() {
+        let form = form("127.0.0.1:3128", "", "");
+        let sheet = sheet(&form, &known(vec![]));
+        assert!(sheet.ready);
+        assert_eq!(sheet.entries[0].clone().note, gateinto::link::LOCAL_ADDRESS);
+        assert_eq!(sheet.entries[0].tone, Tone::Warning);
+    }
+
+    #[test]
+    fn mixed_shows_its_disclosure_while_add_is_possible() {
+        let mut form = form("proxy.example.net", "", "");
+        form.choose(Route::Mixed);
+        let sheet = sheet(&form, &known(vec![]));
+        assert!(sheet.ready);
+        assert_eq!(sheet.route, Route::Mixed);
+        assert_eq!(
+            sheet.notice,
+            Some((disclosure(Route::Mixed).unwrap(), Tone::Warning))
+        );
+    }
+
+    #[test]
+    fn a_general_error_or_failure_takes_the_notice_and_blocks_adding() {
+        let mut form = form("proxy.example.net", "", "");
+        form.choose(Route::Mixed);
+        let failed: Result<Known, String> = Err("bad".to_owned());
+        let sheet_failed = sheet(&form, &failed);
+        assert!(!sheet_failed.ready);
+        assert_eq!(
+            sheet_failed.notice,
+            Some((
+                "The gateway list cannot be read: bad".to_owned(),
+                Tone::Error
+            ))
+        );
+        form.failure = Some("The gateway was not added: full".to_owned());
+        let sheet = sheet(&form, &known(vec![]));
+        assert!(!sheet.ready);
+        assert_eq!(
+            sheet.notice,
+            Some(("The gateway was not added: full".to_owned(), Tone::Error))
         );
     }
 
