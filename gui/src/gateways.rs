@@ -31,13 +31,16 @@ pub struct Page {
     pub launch: bool,
 }
 
-pub fn load(config: Option<PathBuf>, store: Option<PathBuf>) -> Result<Known, String> {
-    let file = match config.filter(|path| path.is_file()) {
-        Some(path) => ConfigFile::load(&path).map_err(|error| error.to_string())?,
-        None => ConfigFile::default(),
-    };
+pub fn read(config: Option<PathBuf>) -> Result<ConfigFile, String> {
+    match config.filter(|path| path.is_file()) {
+        Some(path) => ConfigFile::load(&path).map_err(|error| error.to_string()),
+        None => Ok(ConfigFile::default()),
+    }
+}
+
+pub fn catalog(file: &ConfigFile, store: Option<PathBuf>) -> Known {
     let linked = store.map_or(Ok(Loaded::default()), |dir| LinkedStore::new(dir).load());
-    Ok(Known::new(&file, linked))
+    Known::new(file, linked)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -402,6 +405,10 @@ mod tests {
             false,
         );
         assert_eq!(page.subtitle, "too many launches");
+    }
+
+    fn load(config: Option<PathBuf>, store: Option<PathBuf>) -> Result<Known, String> {
+        Ok(catalog(&read(config)?, store))
     }
 
     fn scratch(test: &str) -> PathBuf {

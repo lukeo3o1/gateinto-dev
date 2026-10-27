@@ -9,6 +9,7 @@ use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::AgentState;
+use crate::settings::Agent;
 
 pub const POLL: Duration = Duration::from_secs(2);
 pub const CONFIRMATION: &str =
@@ -38,6 +39,7 @@ impl Command {
 pub struct Update {
     pub state: AgentState,
     pub gateways: Result<Known, String>,
+    pub agent: Result<Agent, String>,
     pub failure: Option<String>,
     pub launched: u64,
 }
@@ -103,7 +105,7 @@ where
 pub async fn serve<F, R>(
     mut commands: UnboundedReceiver<Command>,
     send: F,
-    mut load: impl FnMut() -> Result<Known, String>,
+    mut load: impl FnMut() -> (Result<Known, String>, Result<Agent, String>),
     mut deliver: impl FnMut(Update),
 ) where
     F: Fn(Request) -> R,
@@ -113,9 +115,11 @@ pub async fn serve<F, R>(
     let mut launched = 0;
     loop {
         let state = AgentState::from_list(send(Request::List).await);
+        let (gateways, agent) = load();
         deliver(Update {
             state,
-            gateways: load(),
+            gateways,
+            agent,
             failure: failure.take(),
             launched,
         });
@@ -158,6 +162,7 @@ mod tests {
         Update {
             state: AgentState::Running(Vec::new()),
             gateways: Ok(Known::default()),
+            agent: Ok(Agent::default()),
             failure: failure.map(str::to_owned),
             launched: 0,
         }
@@ -178,7 +183,7 @@ mod tests {
         let run = serve(
             rx,
             agent(&log),
-            || Ok(Known::default()),
+            || (Ok(Known::default()), Ok(Agent::default())),
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
@@ -195,7 +200,7 @@ mod tests {
         let run = serve(
             rx,
             agent(&log),
-            || Ok(Known::default()),
+            || (Ok(Known::default()), Ok(Agent::default())),
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
@@ -223,7 +228,7 @@ mod tests {
         let run = serve(
             rx,
             agent(&log),
-            || Ok(Known::default()),
+            || (Ok(Known::default()), Ok(Agent::default())),
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_secs(10), run).await.is_ok());
@@ -231,21 +236,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn every_poll_rereads_the_gateways() {
+    async fn every_poll_rereads_the_gateways_and_agent_settings() {
         let log = RefCell::new(Vec::new());
         let (_tx, rx) = unbounded_channel();
         let reads = RefCell::new(0);
         let load = || {
             *reads.borrow_mut() += 1;
-            Err(format!("read {}", reads.borrow()))
+            let read = format!("read {}", reads.borrow());
+            (Err(read.clone()), Err(read))
         };
         let mut updates = Vec::new();
-        let run = serve(rx, agent(&log), load, |u| updates.push(u.gateways));
+        let run = serve(rx, agent(&log), load, |u| {
+            updates.push((u.gateways, u.agent))
+        });
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
-        assert_eq!(
-            updates,
-            [Err("read 1".to_owned()), Err("read 2".to_owned())]
-        );
+        let read = |n: u32| (Err(format!("read {n}")), Err(format!("read {n}")));
+        assert_eq!(updates, [read(1), read(2)]);
     }
 
     fn launcher(
@@ -275,7 +281,7 @@ mod tests {
         let run = serve(
             rx,
             launcher(&log, lines),
-            || Ok(Known::default()),
+            || (Ok(Known::default()), Ok(Agent::default())),
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
@@ -297,7 +303,7 @@ mod tests {
         let run = serve(
             rx,
             launcher(&log, lines),
-            || Ok(Known::default()),
+            || (Ok(Known::default()), Ok(Agent::default())),
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());

@@ -1,6 +1,7 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use gateinto::browser::find_browser;
 use gateinto::config;
 use gateinto::ipc::{self, Endpoint, Request, RequestError};
 use gateinto::link::{Known, store};
@@ -11,6 +12,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::agent::AgentState;
 use crate::gateways;
+use crate::settings::{self, Agent};
 use crate::worker::{Command, Mailbox, Update, serve};
 
 pub const WM_AGENT: u32 = WM_APP;
@@ -24,8 +26,14 @@ fn open(mailbox: &Mutex<Mailbox>) -> MutexGuard<'_, Mailbox> {
     mailbox.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn known() -> Result<Known, String> {
-    gateways::load(config::default_path(), store::default_dir())
+fn load() -> (Result<Known, String>, Result<Agent, String>) {
+    let file = gateways::read(config::default_path());
+    let known = file
+        .as_ref()
+        .map(|file| gateways::catalog(file, store::default_dir()))
+        .map_err(Clone::clone);
+    let agent = file.map(|file| settings::agent(&file, || find_browser(None).ok()));
+    (known, agent)
 }
 
 impl Link {
@@ -46,9 +54,11 @@ impl Link {
                 let runtime = match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
+                        let (gateways, agent) = load();
                         deliver(Update {
                             state: AgentState::Unreachable(error.to_string()),
-                            gateways: known(),
+                            gateways,
+                            agent,
                             failure: None,
                             launched: 0,
                         });
@@ -68,7 +78,7 @@ impl Link {
                         }
                     }
                 };
-                runtime.block_on(serve(inbox, send, known, deliver));
+                runtime.block_on(serve(inbox, send, load, deliver));
             });
         Self { commands, mailbox }
     }
