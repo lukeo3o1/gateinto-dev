@@ -24,16 +24,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT,
     HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, IMAGE_ICON, IsZoomed, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG,
-    MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SC_CLOSE,
-    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_SHOW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE,
-    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON,
-    WM_SIZE, WM_SYSCOMMAND, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    IDC_ARROW, IMAGE_ICON, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK,
+    MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
+    SM_CXSMICON, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SYSTEM_METRICS_INDEX, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CREATE, WM_DESTROY,
+    WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -64,6 +65,8 @@ const STYLE: u32 = WS_OVERLAPPEDWINDOW;
 const EX_STYLE: u32 = 0;
 const APP_ICON: usize = 1;
 const TITLE: &str = "Gateinto";
+const COPIED_TIMER: usize = 1;
+const COPIED_MS: u32 = 1500;
 
 fn load_icon(instance: HINSTANCE, size: i32) -> HICON {
     unsafe { LoadImageW(instance, APP_ICON as *const u16, IMAGE_ICON, size, size, 0) }
@@ -119,6 +122,7 @@ struct App {
     tips: Tips,
     config: String,
     sign_in: bool,
+    copied: bool,
 }
 
 fn choose_frame() -> Frame {
@@ -149,6 +153,7 @@ impl App {
             tips: Tips::new(hwnd),
             config: config_line(),
             sign_in: false,
+            copied: false,
         })
     }
 
@@ -168,6 +173,13 @@ impl App {
             NavPage::Settings => {
                 let page = settings::page(&self.config, &update.agent, failure, self.sign_in);
                 board::settings::board(l, s, t, v, &page, m)
+            }
+            NavPage::Device => {
+                let device = update.device.as_ref();
+                let gateways = &update.gateways;
+                let page =
+                    crate::device::page(device, &update.state, gateways, failure, self.copied);
+                board::device::board(l, s, t, v, &page, m)
             }
             NavPage::Gateways => {
                 let busy = self.launches.busy();
@@ -242,6 +254,9 @@ impl App {
                     Err(()) => self.fail(settings::SIGN_IN_UNREAD),
                 }
             }
+            if page == NavPage::Device {
+                self.link.send(Command::Probe);
+            }
             self.retarget();
             self.invalidate();
         }
@@ -272,6 +287,31 @@ impl App {
             Ok(()) => self.sign_in = on,
             Err(()) => self.fail(settings::SIGN_IN_FAILED),
         }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn copy_id(&mut self) {
+        let id = self
+            .update
+            .as_ref()
+            .and_then(|u| crate::device::device_id(u.device.as_ref()));
+        let Some(id) = id else {
+            return;
+        };
+        if device::copy(self.hwnd, id) {
+            self.copied = true;
+            unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) };
+        } else {
+            self.fail(crate::device::COPY_FAILED);
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn uncopy(&mut self) {
+        unsafe { KillTimer(self.hwnd, COPIED_TIMER) };
+        self.copied = false;
         self.retarget();
         self.invalidate();
     }
@@ -454,6 +494,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::ToggleSignIn) => {
             with_app(hwnd, App::toggle_sign_in);
+            return;
+        }
+        Some(Action::CopyId) => {
+            with_app(hwnd, App::copy_id);
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,
@@ -798,6 +842,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_AGENT => {
             on_agent(hwnd);
+            Some(0)
+        }
+        WM_TIMER if wp == COPIED_TIMER => {
+            with_app(hwnd, App::uncopy);
             Some(0)
         }
         WM_ERASEBKGND => Some(1),

@@ -12,6 +12,7 @@ pub const SUBTITLE: &str = "What gateways see when this PC signs in";
 pub const STORAGE: &str = "Storage";
 pub const DEVICE_ID: &str = "Device ID";
 pub const USED_WITH: &str = "Used with";
+pub const COPY_FAILED: &str = "Could not copy the device ID";
 pub const VERSION: &str = match option_env!("GATEINTO_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
