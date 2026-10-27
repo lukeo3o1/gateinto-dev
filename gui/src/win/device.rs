@@ -3,7 +3,7 @@ use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND};
 use windows_sys::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
@@ -12,7 +12,9 @@ use windows_sys::Win32::System::SystemInformation::{
     ComputerNameNetBIOS, GetComputerNameExW, GetNativeSystemInfo, SYSTEM_INFO,
 };
 
-use super::sys::reg_string;
+use zeroize::Zeroize;
+
+use super::sys::{reg_string, wide};
 use crate::device::System;
 
 const CURRENT_VERSION: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
@@ -74,23 +76,46 @@ pub fn system() -> System {
     }
 }
 
+const PRIVATE_FORMATS: [&str; 3] = [
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "CanUploadToCloudClipboard",
+];
+
 pub fn copy(hwnd: HWND, text: &str) -> bool {
     let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    open(hwnd, || unsafe { place(u32::from(CF_UNICODETEXT), &units) })
+}
+
+pub fn copy_secret(hwnd: HWND, text: &str) -> bool {
+    let mut units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let placed = open(hwnd, || unsafe {
+        place(u32::from(CF_UNICODETEXT), &units)
+            && PRIVATE_FORMATS.iter().all(|name| {
+                let format = RegisterClipboardFormatW(wide(name).as_ptr());
+                format != 0 && place(format, &[0, 0])
+            })
+    });
+    units.zeroize();
+    placed
+}
+
+fn open(hwnd: HWND, fill: impl FnOnce() -> bool) -> bool {
     unsafe {
         if OpenClipboard(hwnd) == 0 {
             return false;
         }
-        let placed = place(&units);
+        let placed = EmptyClipboard() != 0 && fill();
+        if !placed {
+            EmptyClipboard();
+        }
         CloseClipboard();
         placed
     }
 }
 
-unsafe fn place(units: &[u16]) -> bool {
+unsafe fn place(format: u32, units: &[u16]) -> bool {
     unsafe {
-        if EmptyClipboard() == 0 {
-            return false;
-        }
         let memory = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(units));
         if memory.is_null() {
             return false;
@@ -102,7 +127,7 @@ unsafe fn place(units: &[u16]) -> bool {
         }
         target.copy_from_nonoverlapping(units.as_ptr(), units.len());
         GlobalUnlock(memory);
-        if SetClipboardData(u32::from(CF_UNICODETEXT), memory).is_null() {
+        if SetClipboardData(format, memory).is_null() {
             GlobalFree(memory);
             return false;
         }

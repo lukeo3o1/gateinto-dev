@@ -41,6 +41,7 @@ use gateinto::clock::unix_now;
 use gateinto::config;
 
 use crate::board::{self, Board, board, tips};
+use crate::credentials::{self, Dialog, Field};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
@@ -126,6 +127,7 @@ struct App {
     copied: bool,
     filter: Filter,
     log: log::Body,
+    dialog: Option<Dialog>,
 }
 
 fn choose_frame() -> Frame {
@@ -159,6 +161,7 @@ impl App {
             copied: false,
             filter: Filter::default(),
             log: log::Body::Rows(Vec::new()),
+            dialog: None,
         })
     }
 
@@ -206,6 +209,10 @@ impl App {
         };
         if v.popup.is_some() {
             board::menu::overlay(&mut board, l, s, t, v, &self.entries(), m);
+        }
+        if let Some(dialog) = &self.dialog {
+            let page = dialog.page(&update.state);
+            board::dialog::credentials(&mut board, l, s, t, v, &page, m);
         }
         board
     }
@@ -258,6 +265,7 @@ impl App {
     fn select(&mut self, page: NavPage) {
         let before = self.view.nav.selected();
         if self.view.nav.select(page) {
+            self.dialog = None;
             self.relog();
             if self.copied {
                 self.uncopy();
@@ -290,6 +298,59 @@ impl App {
         self.retarget();
         self.invalidate();
         true
+    }
+
+    fn reveal(&mut self, id: u64) {
+        let Some(update) = &self.update else {
+            return;
+        };
+        let Some(dialog) = Dialog::open(&update.state, id) else {
+            return;
+        };
+        self.uncopy();
+        self.dialog = Some(dialog);
+        self.link.send(Command::Credentials(id));
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn close_dialog(&mut self) -> bool {
+        if self.dialog.take().is_none() {
+            return false;
+        }
+        self.uncopy();
+        true
+    }
+
+    fn revoke_credentials(&mut self) {
+        if let Some(dialog) = &self.dialog {
+            self.link.send(Command::Close(dialog.id()));
+        }
+        self.close_dialog();
+    }
+
+    fn toggle_password(&mut self) {
+        if let Some(dialog) = &mut self.dialog {
+            dialog.toggle();
+            self.retarget();
+            self.invalidate();
+        }
+    }
+
+    fn copy_credential(&mut self, field: Field) {
+        let Some(secret) = self.dialog.as_ref().and_then(|d| d.secret(field)) else {
+            return;
+        };
+        if device::copy_secret(self.hwnd, secret) {
+            if let Some(dialog) = &mut self.dialog {
+                dialog.copied(field);
+            }
+            unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) };
+        } else {
+            self.fail(credentials::COPY_FAILED);
+        }
+        self.retarget();
+        self.invalidate();
     }
 
     fn launch(&mut self, row: usize) {
@@ -370,6 +431,9 @@ impl App {
     fn uncopy(&mut self) {
         unsafe { KillTimer(self.hwnd, COPIED_TIMER) };
         self.copied = false;
+        if let Some(dialog) = &mut self.dialog {
+            dialog.uncopy();
+        }
         self.retarget();
         self.invalidate();
     }
@@ -392,7 +456,10 @@ impl App {
         let band = self
             .frame
             .top_resize_band(self.view.maximized, self.frame_y());
-        hit(&self.layout, x, y, band, &self.targets)
+        match hit(&self.layout, x, y, band, &self.targets) {
+            Zone::Nav(_) if self.dialog.is_some() => Zone::Client,
+            zone => zone,
+        }
     }
 
     fn screen_zone(&self, lp: LPARAM) -> Zone {
@@ -473,6 +540,11 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::CopyLog
         | Zone::LogFilter(_)
         | Zone::Menu
+        | Zone::Dialog
+        | Zone::CopyCredential(_)
+        | Zone::TogglePassword(_)
+        | Zone::RevokeCredentials
+        | Zone::CloseDialog
         | Zone::Client => HTCLIENT,
     }
 }
@@ -523,6 +595,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                     Some(Choice::Launch(row)) => app.launch(row),
                     Some(Choice::Details) => app.select(NavPage::Gateways),
                     Some(Choice::Portal(id)) => return app.portal(id),
+                    Some(Choice::Credentials(id)) => app.reveal(id),
                     None => {}
                 }
                 None
@@ -569,6 +642,24 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             rehover(hwnd);
             return;
         }
+        Some(Action::CopyCredential(field)) => {
+            with_app(hwnd, |app| app.copy_credential(field));
+            return;
+        }
+        Some(Action::TogglePassword) => {
+            with_app(hwnd, App::toggle_password);
+            return;
+        }
+        Some(Action::RevokeCredentials) => {
+            with_app(hwnd, App::revoke_credentials);
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::CloseDialog) => {
+            with_app(hwnd, App::close_dialog);
+            rehover(hwnd);
+            return;
+        }
         Some(Action::Minimize) => SC_MINIMIZE,
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
@@ -598,7 +689,16 @@ fn on_paint(hwnd: HWND) {
 
 fn on_agent(hwnd: HWND) {
     let delivered = with_app(hwnd, |app| {
+        let reveal = app.link.take_reveal();
+        let revealed = reveal.is_some();
+        if let (Some(reveal), Some(dialog)) = (reveal, &mut app.dialog) {
+            dialog.receive(reveal);
+        }
         let Some(update) = app.link.take() else {
+            if revealed {
+                app.retarget();
+                app.invalidate();
+            }
             return false;
         };
         let before = app.update.as_ref().map(|u| u.state.ids());
@@ -615,6 +715,9 @@ fn on_agent(hwnd: HWND) {
             log::evicted(&before.log, &update.log, app.filter)
         });
         app.launches.settle(update.launched);
+        if app.dialog.as_ref().is_some_and(|d| !d.lasts(&update.state)) {
+            app.close_dialog();
+        }
         app.update = Some(update);
         app.relog();
         if pinned {
@@ -729,6 +832,9 @@ fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
             app.dismiss();
             return Follow::Dismissed;
         }
+        if msg == WM_LBUTTONDOWN && zone == Zone::Client && app.close_dialog() {
+            return Follow::Dismissed;
+        }
         let pointer = &mut app.view.pointer;
         let (changed, follow) = match msg {
             WM_MOUSEMOVE => (pointer.moved(zone), Follow::Track),
@@ -762,6 +868,9 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     let delta = i32::from((wp >> 16) as u16 as i16);
     let lines = sys::wheel_lines();
     let moved = with_app(hwnd, |app| {
+        if app.dialog.is_some() {
+            return false;
+        }
         let open = app.view.popup.is_some();
         let inside = app.layout.content.contains(p.x, p.y);
         let line = app.s.px(20.0);
@@ -799,7 +908,7 @@ fn on_key(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
     if wp != WPARAM::from(VK_ESCAPE) {
         return None;
     }
-    if !with_app(hwnd, App::dismiss)? {
+    if !with_app(hwnd, |app| app.dismiss() || app.close_dialog())? {
         return None;
     }
     rehover(hwnd);

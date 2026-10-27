@@ -13,6 +13,7 @@ pub const UNAVAILABLE: &str =
     "The agent did not hand out this session's credentials. Close this and try again.";
 pub const SUBTITLE: &str =
     "Shown when this PC cannot check the OS user, so the browser asks for a proxy sign-in.";
+pub const COPY_FAILED: &str = "Could not copy to the clipboard";
 pub const HINT: &str = "Type it exactly, including the hyphens.";
 
 #[derive(Debug)]

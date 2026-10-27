@@ -1,3 +1,4 @@
+use crate::credentials::Field;
 use crate::layout::{Layout, Rect};
 use crate::log::Filter;
 use crate::nav::Page;
@@ -24,6 +25,11 @@ pub enum Zone {
     CopyLog,
     LogFilter(Filter),
     Menu,
+    Dialog,
+    CopyCredential(Field),
+    TogglePassword(bool),
+    RevokeCredentials,
+    CloseDialog,
     Client,
 }
 

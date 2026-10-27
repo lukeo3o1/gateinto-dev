@@ -460,6 +460,31 @@ pub const MORE: Icon = Icon {
     ],
 };
 
+const EYE_OUTLINE: Shape = Shape::Path(&[
+    Cmd::Move(2.5, 12.0),
+    Cmd::Cubic((5.0, 8.0), (8.0, 6.0), (12.0, 6.0)),
+    Cmd::Cubic((16.0, 6.0), (19.0, 8.0), (21.5, 12.0)),
+    Cmd::Cubic((19.0, 16.0), (16.0, 18.0), (12.0, 18.0)),
+    Cmd::Cubic((8.0, 18.0), (5.0, 16.0), (2.5, 12.0)),
+    Cmd::Close,
+]);
+
+pub const EYE: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[EYE_OUTLINE, circle(12.0, 12.0, 2.6)],
+};
+
+pub const EYE_OFF: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        EYE_OUTLINE,
+        circle(12.0, 12.0, 2.6),
+        Shape::Path(&line(4.0, 4.0, 20.0, 20.0)),
+    ],
+};
+
 pub const COPY: Icon = Icon {
     view: RAIL,
     stroke: RAIL_STROKE,

@@ -15,6 +15,7 @@ use crate::sessions::{EMPTY, Eyes, Kind, Launch, Page, Row};
 use crate::theme::{Rgb, Theme};
 
 pub mod device;
+pub mod dialog;
 pub mod gateways;
 pub mod log;
 pub mod menu;
@@ -42,6 +43,8 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
         .filter_map(|&(r, zone)| match zone {
             Zone::Revoke(_) => Some((r, REVOKE_TIP)),
             Zone::More(_) => Some((r, MORE_TIP)),
+            Zone::TogglePassword(false) => Some((r, "Show password")),
+            Zone::TogglePassword(true) => Some((r, "Hide password")),
             _ => None,
         })
         .collect()
@@ -475,6 +478,16 @@ mod tests {
     }
 
     #[test]
+    fn the_password_toggle_says_what_it_does() {
+        let r = Rect::new(1, 2, 3, 4);
+        let targets = [
+            (r, Zone::TogglePassword(false)),
+            (r, Zone::TogglePassword(true)),
+        ];
+        assert_eq!(tips(&targets), [(r, "Show password"), (r, "Hide password")]);
+    }
+
+    #[test]
     fn an_open_menu_hides_the_tips() {
         let r = Rect::new(1, 2, 3, 4);
         let targets = [(r, Zone::Entry(0)), (r, Zone::Menu), (r, Zone::Revoke(9))];
@@ -538,6 +551,7 @@ mod tests {
         ops.iter()
             .filter(|op| match op {
                 Op::Fill(o, _)
+                | Op::Shade(o, ..)
                 | Op::Round(o, ..)
                 | Op::Icon(_, o, ..)
                 | Op::Text(_, _, o, _)

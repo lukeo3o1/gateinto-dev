@@ -1,3 +1,4 @@
+use crate::credentials::Field;
 use crate::hit::Zone;
 use crate::log::Filter;
 use crate::nav::Page;
@@ -19,6 +20,10 @@ pub enum Action {
     CopyId,
     CopyLog,
     Filter(Filter),
+    CopyCredential(Field),
+    TogglePassword,
+    RevokeCredentials,
+    CloseDialog,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +56,10 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::CopyId => Some(Action::CopyId),
         Zone::CopyLog => Some(Action::CopyLog),
         Zone::LogFilter(filter) => Some(Action::Filter(filter)),
+        Zone::CopyCredential(field) => Some(Action::CopyCredential(field)),
+        Zone::TogglePassword(_) => Some(Action::TogglePassword),
+        Zone::RevokeCredentials => Some(Action::RevokeCredentials),
+        Zone::CloseDialog => Some(Action::CloseDialog),
         _ => None,
     }
 }
@@ -299,6 +308,24 @@ mod tests {
         assert_eq!(p.look(warnings), Look::Hover);
         assert!(p.down(warnings));
         assert_eq!(p.up(warnings), Some(Action::Filter(Filter::Warnings)));
+    }
+
+    #[test]
+    fn the_credentials_dialog_copies_toggles_revokes_and_closes() {
+        let mut p = Pointer::default();
+        for (zone, action) in [
+            (
+                Zone::CopyCredential(Field::Password),
+                Action::CopyCredential(Field::Password),
+            ),
+            (Zone::TogglePassword(true), Action::TogglePassword),
+            (Zone::RevokeCredentials, Action::RevokeCredentials),
+            (Zone::CloseDialog, Action::CloseDialog),
+        ] {
+            assert!(p.down(zone));
+            assert_eq!(p.up(zone), Some(action));
+        }
+        assert!(!p.down(Zone::Dialog));
     }
 
     #[test]

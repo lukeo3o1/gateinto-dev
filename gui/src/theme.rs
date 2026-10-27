@@ -40,6 +40,9 @@ pub struct Theme {
     pub button_hover: Rgb,
     pub button_pressed: Rgb,
     pub button_text: Rgb,
+    pub field: Rgb,
+    pub notice: Rgb,
+    pub notice_text: Rgb,
 }
 
 impl Theme {
@@ -74,6 +77,9 @@ impl Theme {
         button_hover: Rgb(0x353b48),
         button_pressed: Rgb(0x1b1f27),
         button_text: Rgb(0xffffff),
+        field: Rgb(0xfbfbfa),
+        notice: Rgb(0xfff4d6),
+        notice_text: Rgb(0x7a5000),
     };
 }
 

@@ -14,6 +14,7 @@ use crate::theme::{Rgb, Theme};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Fill(Rect, Rgb),
+    Shade(Rect, Rgb, f32),
     Round(Rect, f32, Rgb),
     Icon(Icon, Rect, f32, Rgb),
     Text(Font, Cow<'static, str>, Rect, Rgb),
@@ -145,6 +146,7 @@ mod tests {
         ops.iter()
             .filter(|op| match op {
                 Op::Fill(o, _)
+                | Op::Shade(o, ..)
                 | Op::Round(o, ..)
                 | Op::Icon(_, o, ..)
                 | Op::Text(_, _, o, _)

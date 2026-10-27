@@ -221,6 +221,14 @@ impl Canvas<'_> {
     fn op(&self, op: &Op, fonts: &Fonts) {
         match *op {
             Op::Fill(r, c) => unsafe { self.rt.FillRectangle(&rect(r), self.paint(c)) },
+            Op::Shade(r, c, alpha) => unsafe {
+                let tint = D2D1_COLOR_F {
+                    a: alpha,
+                    ..color(c)
+                };
+                self.brush.SetColor(&tint);
+                self.rt.FillRectangle(&rect(r), self.brush)
+            },
             Op::Round(r, radius, c) => unsafe {
                 self.rt
                     .FillRoundedRectangle(&rounded(rect(r), radius), self.paint(c))
