@@ -19,6 +19,7 @@ mod scale;
 mod scene;
 mod scroll;
 mod sessions;
+mod settings;
 mod theme;
 #[cfg(windows)]
 mod win;

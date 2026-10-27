@@ -101,17 +101,18 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
     Page { status, rows }
 }
 
+pub fn browser_title(kind: Option<BrowserKind>) -> &'static str {
+    match kind {
+        Some(BrowserKind::Chrome) => "Chrome",
+        Some(BrowserKind::Edge) => "Edge",
+        Some(BrowserKind::Chromium) => "Chromium",
+        Some(BrowserKind::Unknown) | None => "Browser",
+    }
+}
+
 pub fn row(session: &SessionInfo, now: u64) -> Row {
     let (kind, title) = match session.kind {
-        SessionKind::Browser => (
-            Kind::Browser,
-            match session.browser {
-                Some(BrowserKind::Chrome) => "Chrome",
-                Some(BrowserKind::Edge) => "Edge",
-                Some(BrowserKind::Chromium) => "Chromium",
-                Some(BrowserKind::Unknown) | None => "Browser",
-            },
-        ),
+        SessionKind::Browser => (Kind::Browser, browser_title(session.browser)),
         SessionKind::Device => (Kind::Device, "Device proxy"),
         SessionKind::Unknown => (Kind::Device, "Session"),
     };
