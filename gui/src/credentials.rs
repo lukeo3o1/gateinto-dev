@@ -91,6 +91,10 @@ pub fn offers(state: &AgentState, id: u64) -> bool {
     find(state, id).is_some_and(|session| session.auth == SessionAuth::Password)
 }
 
+pub fn clears_clipboard(copied: Option<u32>, sequence: u32) -> bool {
+    copied == Some(sequence)
+}
+
 pub fn deliver(dialog: Option<&mut Dialog>, reveal: Reveal) -> bool {
     let Some(dialog) = dialog else {
         return false;
@@ -394,5 +398,12 @@ mod tests {
             dialog.page(&state).detail,
             "proxy.example.com · sign-in dialog names 127.0.0.1:49210"
         );
+    }
+
+    #[test]
+    fn the_clipboard_is_cleared_only_while_it_still_holds_the_copied_secret() {
+        assert!(clears_clipboard(Some(5), 5));
+        assert!(!clears_clipboard(Some(5), 6));
+        assert!(!clears_clipboard(None, 5));
     }
 }

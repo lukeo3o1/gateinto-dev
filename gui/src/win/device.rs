@@ -3,8 +3,8 @@ use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND};
 use windows_sys::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
-    SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
@@ -90,17 +90,35 @@ pub fn copy(hwnd: HWND, text: &str) -> bool {
     open(hwnd, || unsafe { place(u32::from(CF_UNICODETEXT), &units) })
 }
 
-pub fn copy_secret(hwnd: HWND, text: &str) -> bool {
+pub fn copy_secret(hwnd: HWND, text: &str) -> Option<u32> {
     let mut units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let placed = open(hwnd, || unsafe {
-        place(u32::from(CF_UNICODETEXT), &units)
+    let mut sequence = None;
+    open(hwnd, || unsafe {
+        let placed = place(u32::from(CF_UNICODETEXT), &units)
             && PRIVATE_FORMATS.iter().all(|name| {
                 let format = RegisterClipboardFormatW(wide(name).as_ptr());
                 format != 0 && place(format, &[0, 0])
-            })
+            });
+        sequence = placed.then(|| GetClipboardSequenceNumber());
+        placed
     });
     units.zeroize();
-    placed
+    sequence
+}
+
+pub fn clear_secret(hwnd: HWND, copied: Option<u32>) {
+    if copied.is_none() {
+        return;
+    }
+    unsafe {
+        if OpenClipboard(hwnd) == 0 {
+            return;
+        }
+        if crate::credentials::clears_clipboard(copied, GetClipboardSequenceNumber()) {
+            EmptyClipboard();
+        }
+        CloseClipboard();
+    }
 }
 
 pub fn paste(hwnd: HWND, limit: usize) -> Option<String> {

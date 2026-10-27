@@ -135,6 +135,7 @@ struct App {
     adding: Option<Form>,
     units: Units,
     tickets: u64,
+    secret: Option<u32>,
 }
 
 fn choose_frame() -> Frame {
@@ -173,6 +174,7 @@ impl App {
             adding: None,
             units: Units::default(),
             tickets: 0,
+            secret: None,
         })
     }
 
@@ -292,7 +294,9 @@ impl App {
     fn select(&mut self, page: NavPage) {
         let before = self.view.nav.selected();
         if self.view.nav.select(page) {
-            self.dialog = None;
+            if self.dialog.take().is_some() {
+                self.forget_secret();
+            }
             self.details = None;
             self.adding = None;
             self.relog();
@@ -338,6 +342,7 @@ impl App {
             return;
         };
         self.tickets = ticket;
+        self.forget_secret();
         self.uncopy();
         self.details = None;
         self.adding = None;
@@ -384,8 +389,13 @@ impl App {
         if self.dialog.take().is_none() {
             return false;
         }
+        self.forget_secret();
         self.uncopy();
         true
+    }
+
+    fn forget_secret(&mut self) {
+        device::clear_secret(self.hwnd, self.secret.take());
     }
 
     fn open_add(&mut self) {
@@ -463,7 +473,8 @@ impl App {
         let Some(secret) = self.dialog.as_ref().and_then(|d| d.secret(field)) else {
             return;
         };
-        if device::copy_secret(self.hwnd, secret) {
+        if let Some(sequence) = device::copy_secret(self.hwnd, secret) {
+            self.secret = Some(sequence);
             if let Some(dialog) = &mut self.dialog {
                 dialog.copied(field);
             }
@@ -1228,6 +1239,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             Some(0)
         }
         WM_DESTROY => {
+            with_app(hwnd, App::forget_secret);
             unsafe { PostQuitMessage(0) };
             Some(0)
         }
