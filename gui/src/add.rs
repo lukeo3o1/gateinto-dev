@@ -14,6 +14,13 @@ pub const ADDRESS_HINT: &str = "Host name or IP address. Port 443 is the default
 pub const NAME_HINT: &str = "Shown in lists. Leave empty to use the host name.";
 pub const PORTAL_HINT: &str = "Optional. An https:// page the browser opens first.";
 pub const NO_FOLDER: &str = "This device has no folder for added gateways.";
+const AMBIGUOUS: &str = "Several gateways use this address. Enter the name of the one you mean.";
+const DAMAGED: &str = "A damaged gateway entry on this device uses this name or address. \
+     Fix or remove it, then try again.";
+const UNSTORABLE: &str = "This address is too long to store on this device.";
+const UNAVAILABLE: &str =
+    "The gateways added on this device cannot be read, so no gateway can be added now.";
+const UNUSABLE: &str = "These values cannot be used for a gateway.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Input {
@@ -165,7 +172,7 @@ fn field_error(error: UriError) -> Verdict {
             "Use letters, digits, _ or -, not starting with -.",
         ),
         UriError::InvalidValue("portal") => (Input::Portal, "Enter an https:// address."),
-        other => return Verdict::Invalid(None, other.to_string()),
+        _ => return Verdict::Invalid(None, UNUSABLE.to_owned()),
     };
     Verdict::Invalid(Some(input), message.to_owned())
 }
@@ -192,7 +199,11 @@ fn link_error(known: &Known, error: LinkError) -> Verdict {
             Some(Input::Name),
             format!("Too close to \"{existing}\": names may not differ only in letter case."),
         ),
-        other => (None, other.to_string()),
+        LinkError::AmbiguousGateway(_) => (Some(Input::Name), AMBIGUOUS.to_owned()),
+        LinkError::Damaged { .. } => (None, DAMAGED.to_owned()),
+        LinkError::Unstorable { .. } => (Some(Input::Address), UNSTORABLE.to_owned()),
+        LinkError::StoreUnavailable(_) => (None, UNAVAILABLE.to_owned()),
+        _ => (None, UNUSABLE.to_owned()),
     };
     Verdict::Invalid(input, message)
 }
@@ -342,6 +353,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use gateinto::config::ConfigFile;
+    use gateinto::link::store::InvalidEntry;
     use gateinto::link::{KnownGateway, Source};
 
     use super::*;
@@ -561,14 +573,64 @@ mod tests {
                 "The gateway list cannot be read: config.toml: bad".to_owned()
             )
         );
+    }
+
+    #[test]
+    fn an_address_shared_by_several_gateways_asks_for_a_name() {
+        let mut home = office();
+        home.name = "home".parse().unwrap();
+        let listing = known(vec![office(), home]);
+        assert_eq!(
+            error(&form("proxy.example.com", "", ""), &listing),
+            (Some(Input::Name), AMBIGUOUS.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_damaged_entry_is_reported_without_link_wording() {
+        let listing = Ok(Known {
+            invalid: vec![InvalidEntry {
+                file: PathBuf::from("/secret/lab.gateway"),
+                name: Some("lab".parse().unwrap()),
+                addresses: Vec::new(),
+                reason: "bad".to_owned(),
+            }],
+            ..Known::default()
+        });
+        assert_eq!(
+            error(&form("proxy.example.net", "lab", ""), &listing),
+            (None, DAMAGED.to_owned())
+        );
+    }
+
+    #[test]
+    fn an_address_too_long_to_store_is_refused_on_the_address() {
+        let host = format!("{}example", "a.".repeat(123));
+        assert_eq!(
+            error(&form(&host, "lab", ""), &known(vec![])),
+            (Some(Input::Address), UNSTORABLE.to_owned())
+        );
+    }
+
+    #[test]
+    fn unexpected_errors_get_fixed_wording() {
         let unavailable = Ok(Known {
             unavailable: Some("denied".to_owned()),
             ..Known::default()
         });
         assert_eq!(
-            error(&form("proxy.example.net", "lab", ""), &unavailable).0,
-            None
+            error(&form("proxy.example.net", "lab", ""), &unavailable),
+            (None, UNAVAILABLE.to_owned())
         );
+        assert_eq!(
+            field_error(UriError::TooLong),
+            Verdict::Invalid(None, UNUSABLE.to_owned())
+        );
+        for text in [AMBIGUOUS, DAMAGED, UNSTORABLE, UNAVAILABLE, UNUSABLE] {
+            for word in ["link", "launch", "URI", "profile"] {
+                assert!(!text.contains(word), "{text}");
+            }
+        }
     }
 
     fn notes(sheet: &Sheet) -> Vec<(String, Tone)> {
