@@ -107,6 +107,82 @@ impl fmt::Display for ListError {
 
 impl std::error::Error for ListError {}
 
+named!(LogLevel {
+    Error => "error",
+    Warn => "warn",
+    Info => "info",
+});
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogEvent {
+    pub seq: u64,
+    pub time: u64,
+    pub level: LogLevel,
+    pub scope: String,
+    pub message: String,
+}
+
+impl LogEvent {
+    pub fn to_line(&self) -> String {
+        serde_json::to_string(self)
+            .expect("a log event has only string keys and serializable values")
+    }
+}
+
+const LAST: &str = "last: ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogPage {
+    pub last: u64,
+    pub events: Vec<LogEvent>,
+}
+
+impl LogPage {
+    pub fn last_line(last: u64) -> String {
+        format!("{LAST}{last}")
+    }
+
+    pub fn to_lines(&self) -> Vec<String> {
+        std::iter::once(Self::last_line(self.last))
+            .chain(self.events.iter().map(LogEvent::to_line))
+            .collect()
+    }
+
+    pub fn parse(lines: &[String]) -> Result<Self, LogError> {
+        let mut last = None;
+        let mut events = Vec::new();
+        for line in lines {
+            if line.starts_with('{') {
+                events.push(serde_json::from_str(line).map_err(LogError::Malformed)?);
+            } else if let Some(value) = line.strip_prefix(LAST) {
+                last = value.parse().ok();
+            }
+        }
+        Ok(Self {
+            last: last.ok_or(LogError::Missing)?,
+            events,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum LogError {
+    Missing,
+    Malformed(serde_json::Error),
+}
+
+impl fmt::Display for LogError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the agent sent a log page this version cannot read: ")?;
+        match self {
+            Self::Missing => f.write_str("it has no last sequence number"),
+            Self::Malformed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for LogError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +286,75 @@ mod tests {
         assert_eq!(SessionRoute::All.to_string(), "all");
         assert_eq!(SessionAuth::OsUser.to_string(), "os_user");
         assert_eq!(BrowserKind::Edge.to_string(), "edge");
+    }
+
+    fn event(seq: u64, level: LogLevel) -> LogEvent {
+        LogEvent {
+            seq,
+            time: 1_700_000_000_123,
+            level,
+            scope: "session 2".to_owned(),
+            message: "tunnel opened".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_log_event_is_one_json_object() {
+        assert_eq!(
+            event(4, LogLevel::Warn).to_line(),
+            r#"{"seq":4,"time":1700000000123,"level":"warn","scope":"session 2","message":"tunnel opened"}"#
+        );
+    }
+
+    #[test]
+    fn a_log_page_round_trips_through_its_lines() {
+        let page = LogPage {
+            last: 9,
+            events: vec![event(8, LogLevel::Info), event(9, LogLevel::Error)],
+        };
+        let lines = page.to_lines();
+        assert_eq!(lines[0], "last: 9");
+        assert_eq!(LogPage::parse(&lines).unwrap(), page);
+    }
+
+    #[test]
+    fn a_log_page_ignores_header_lines_and_fields_added_later() {
+        let mut line = event(3, LogLevel::Info).to_line();
+        line.insert_str(1, r#""added_later":1,"#);
+        let line = line.replace(r#""level":"info""#, r#""level":"notice""#);
+        let lines = [
+            "agent-pid: 42".to_owned(),
+            String::new(),
+            "last: 3".to_owned(),
+            line,
+        ];
+        assert_eq!(
+            LogPage::parse(&lines).unwrap(),
+            LogPage {
+                last: 3,
+                events: vec![event(3, LogLevel::Unknown)],
+            }
+        );
+    }
+
+    #[test]
+    fn a_log_page_needs_its_last_sequence_number() {
+        let missing = LogPage::parse(&[event(1, LogLevel::Info).to_line()]).unwrap_err();
+        assert!(matches!(missing, LogError::Missing), "{missing:?}");
+        let bad = LogPage::parse(&["last: soon".to_owned()]).unwrap_err();
+        assert!(matches!(bad, LogError::Missing), "{bad:?}");
+        let malformed = LogPage::parse(&["last: 1".to_owned(), "{".to_owned()]).unwrap_err();
+        assert!(matches!(malformed, LogError::Malformed(_)), "{malformed:?}");
+        assert_eq!(
+            missing.to_string(),
+            "the agent sent a log page this version cannot read: it has no last sequence number"
+        );
+    }
+
+    #[test]
+    fn log_levels_are_named_like_their_json_values() {
+        assert_eq!(LogLevel::Info.to_string(), "info");
+        assert_eq!(LogLevel::Warn.to_string(), "warn");
+        assert_eq!(LogLevel::Error.to_string(), "error");
     }
 }
