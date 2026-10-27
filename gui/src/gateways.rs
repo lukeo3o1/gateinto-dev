@@ -133,7 +133,7 @@ fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
     }
 }
 
-fn address(host: Option<&str>, port: Option<u16>) -> String {
+pub fn address(host: Option<&str>, port: Option<u16>) -> String {
     let Some(host) = host else {
         return String::new();
     };
