@@ -316,6 +316,9 @@ impl Known {
     }
 }
 
+pub const MIXED_TRAFFIC: &str = "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups";
+pub const LOCAL_ADDRESS: &str = "This address is on your computer or local network.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
     pub route: Route,
@@ -358,15 +361,13 @@ impl Confirmation {
 
     pub fn message(&self) -> String {
         let local = if self.gateway.is_local() {
-            "\nThis address is on your computer or local network."
+            format!("\n{LOCAL_ADDRESS}")
         } else {
-            ""
+            String::new()
         };
         let traffic = match self.route {
             Route::Gateway => "all traffic of the isolated browser",
-            Route::Mixed => {
-                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups"
-            }
+            Route::Mixed => MIXED_TRAFFIC,
         };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
