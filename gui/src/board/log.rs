@@ -42,7 +42,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
 
     let top = tools.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
-    let (pad, row_h) = (s.px(8.0), s.px(24.0));
+    let (pad, row_h) = (s.px(8.0), row_height(s));
     let total = match &page.body {
         Body::Rows(rows) => 2 * pad + rows.len() as i32 * row_h,
         Body::Empty(_) => s.px(56.0),
@@ -72,6 +72,10 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
         }
     }
     p.finish()
+}
+
+pub fn row_height(s: Scale) -> i32 {
+    s.px(24.0)
 }
 
 struct Columns {

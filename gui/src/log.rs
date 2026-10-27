@@ -107,6 +107,24 @@ impl Journal {
     }
 }
 
+pub fn evicted(before: &Journal, after: &Journal, filter: Filter) -> usize {
+    let Some(first) = after.events.front() else {
+        return 0;
+    };
+    if before.pid != after.pid {
+        return 0;
+    }
+    before
+        .shown(filter)
+        .take_while(|event| event.seq < first.seq)
+        .count()
+}
+
+pub fn kept_offset(offset: i32, evicted: usize, row_h: i32) -> i32 {
+    let rows = i32::try_from(evicted).unwrap_or(i32::MAX);
+    offset.saturating_sub(rows.saturating_mul(row_h)).max(0)
+}
+
 pub fn clock(time_ms: u64, offset: u64) -> String {
     let seconds = (time_ms / 1000 + offset) % DAY;
     format!(
@@ -307,6 +325,44 @@ mod tests {
         journal.absorb(answer(7, last, 1..=last));
         assert_eq!(journal.events().len(), KEPT);
         assert_eq!(journal.events()[0].seq, 21);
+    }
+
+    #[test]
+    fn rows_dropped_from_the_front_are_counted_for_the_shown_filter() {
+        let full = |pid: u32, seqs: std::ops::RangeInclusive<u64>| {
+            let last = *seqs.end();
+            let events = seqs
+                .map(|seq| match seq % 4 {
+                    0 => event(seq, LogLevel::Warn),
+                    _ => event(seq, LogLevel::Info),
+                })
+                .collect();
+            let mut lines = vec![format!("agent-pid: {pid}")];
+            lines.extend(LogPage { last, events }.to_lines());
+            Ok(Response::Ok(lines))
+        };
+        let kept = KEPT as u64;
+        let mut before = Journal::default();
+        before.absorb(full(7, 1..=kept));
+        let mut after = before.clone();
+        after.absorb(full(7, kept + 1..=kept + 9));
+        assert_eq!(evicted(&before, &after, Filter::All), 9);
+        assert_eq!(evicted(&before, &after, Filter::Warnings), 2);
+        assert_eq!(evicted(&before, &before, Filter::All), 0);
+        assert_eq!(evicted(&before, &Journal::default(), Filter::All), 0);
+        let mut restarted = before.clone();
+        restarted.absorb(full(8, 1..=3));
+        restarted.absorb(full(8, 1..=3));
+        assert_eq!(seqs(&restarted), [1, 2, 3]);
+        assert_eq!(evicted(&before, &restarted, Filter::All), 0);
+    }
+
+    #[test]
+    fn a_view_above_the_bottom_moves_up_by_the_dropped_rows() {
+        assert_eq!(kept_offset(400, 3, 24), 328);
+        assert_eq!(kept_offset(400, 0, 24), 400);
+        assert_eq!(kept_offset(40, 3, 24), 0);
+        assert_eq!(kept_offset(i32::MAX, usize::MAX, 24), 0);
     }
 
     #[test]

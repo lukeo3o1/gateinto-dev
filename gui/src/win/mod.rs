@@ -601,10 +601,18 @@ fn on_agent(hwnd: HWND) {
         }
         let entries = app.entries();
         let pinned = app.pinned();
+        let evicted = app.update.as_ref().map_or(0, |before| {
+            log::evicted(&before.log, &update.log, app.filter)
+        });
         app.launches.settle(update.launched);
         app.update = Some(update);
         if pinned {
             app.view.scroll.set(NavPage::Log, i32::MAX);
+        } else if evicted > 0 {
+            let offset = app.view.scroll.get(NavPage::Log);
+            let row_h = board::log::row_height(app.s);
+            let kept = log::kept_offset(offset, evicted, row_h);
+            app.view.scroll.set(NavPage::Log, kept);
         }
         if app.entries() != entries {
             app.view.pointer.entries_changed();
