@@ -39,6 +39,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
+use gateinto::proxy::Route;
 
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
@@ -405,7 +406,7 @@ impl App {
     fn launch(&mut self, row: usize) {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
         if let Some(name) = self.launches.start(&names.unwrap_or_default(), row) {
-            self.link.send(Command::Launch(name));
+            self.link.send(Command::Launch(name, Route::Gateway));
             self.retarget();
             self.invalidate();
         }
