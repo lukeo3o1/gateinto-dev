@@ -10,6 +10,7 @@ mod gateways;
 mod hit;
 mod icons;
 mod layout;
+mod log;
 mod logo;
 mod menu;
 mod nav;
