@@ -1,5 +1,3 @@
-use gateinto::proxy::Route;
-
 use crate::add::Input;
 use crate::credentials::Field;
 use crate::hit::Zone;
@@ -30,7 +28,6 @@ pub enum Action {
     CloseDialog,
     AddGateway,
     Focus(Input),
-    Route(Route),
     ConfirmAdd,
 }
 
@@ -71,7 +68,6 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::CloseDialog => Some(Action::CloseDialog),
         Zone::AddGateway => Some(Action::AddGateway),
         Zone::AddField(input) => Some(Action::Focus(input)),
-        Zone::RouteOption(route) => Some(Action::Route(route)),
         Zone::ConfirmAdd => Some(Action::ConfirmAdd),
         _ => None,
     }
@@ -383,7 +379,6 @@ mod tests {
         for (zone, action) in [
             (Zone::AddGateway, Action::AddGateway),
             (Zone::AddField(Input::Name), Action::Focus(Input::Name)),
-            (Zone::RouteOption(Route::Mixed), Action::Route(Route::Mixed)),
             (Zone::ConfirmAdd, Action::ConfirmAdd),
         ] {
             let mut p = Pointer::default();

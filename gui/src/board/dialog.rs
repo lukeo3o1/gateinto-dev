@@ -300,7 +300,7 @@ pub fn add(
         s.px(10.0) + 2 * pad + lines.len() as i32 * note
     });
     let entry = row + s.px(2.0) + note;
-    let body = s.px(42.0) + 3 * entry + 2 * gap + s.px(GAP) + entry + notice_h;
+    let body = s.px(42.0) + 3 * entry + 2 * gap + notice_h;
     let mut modal = Modal::open(l, s, t, v, m, body);
     let inner = modal.inner;
     let p = &mut modal.p;
@@ -329,24 +329,6 @@ pub fn add(
         p.text(Font::Small, entry.note.clone(), r, tone(t, entry.tone));
         y = r.bottom() + gap;
     }
-    y += s.px(GAP) - gap;
-    p.text(
-        Font::BodyStrong,
-        "Route",
-        Rect::new(x, y, label_w, row),
-        t.text,
-    );
-    let half = (fw - gap) / 2;
-    for (i, (route, label, description)) in add::ROUTES.into_iter().enumerate() {
-        let option = Rect::new(fx + i as i32 * (half + gap), y, half, row);
-        let chosen = sheet.route == route;
-        p.segment(option, label, Zone::RouteOption(route), chosen);
-        if chosen {
-            let r = Rect::new(fx, y + row + s.px(2.0), fw, note);
-            p.text(Font::Small, description, r, t.muted);
-        }
-    }
-    y += entry;
     if let Some((lines, kind)) = notice {
         y += s.px(10.0);
         let r = Rect::new(x, y, w, notice_h - s.px(10.0));
@@ -486,25 +468,6 @@ impl<M: Measure> Painter<'_, M> {
         self.target(button, zone);
     }
 
-    fn segment(&mut self, r: Rect, label: &'static str, zone: Zone, chosen: bool) {
-        let (s, t) = (self.s, self.t);
-        if chosen {
-            self.push(Op::Round(r, s.pxf(6.0), t.button));
-        } else {
-            let fill = match self.v.pointer.look(zone) {
-                Look::Rest => t.card,
-                Look::Hover => t.caption_hover,
-                Look::Pressed => t.caption_pressed,
-            };
-            self.framed(r, 6.0, fill);
-        }
-        let ink = if chosen { t.button_text } else { t.text };
-        let w = self.m.width(Font::BodyStrong, label).min(r.w);
-        let text = Rect::new(r.x + (r.w - w) / 2, r.y, w, r.h);
-        self.text(Font::BodyStrong, label, text, ink);
-        self.target(r, zone);
-    }
-
     fn input(&mut self, r: Rect, value: &str, focused: bool) {
         let (s, t) = (self.s, self.t);
         let edge = s.hairline();
@@ -549,7 +512,6 @@ impl<M: Measure> Painter<'_, M> {
 mod tests {
     use super::*;
     use crate::board::tests::{Chars, layout};
-    use gateinto::proxy::Route;
 
     use crate::add::{ADDRESS_HINT, Entry, Input, NAME_HINT, PORTAL_HINT, Tone, disclosure};
     use crate::credentials::{Field, MASK, Page, UNAVAILABLE, WAITING};
@@ -798,7 +760,7 @@ mod tests {
         assert!(last.bottom() <= board.targets[0].0.y, "{last:?}");
     }
 
-    fn add_sheet(route: Route, ready: bool) -> Sheet<'static> {
+    fn add_sheet(ready: bool) -> Sheet<'static> {
         let entry = |input, label, value, note: &str| Entry {
             input,
             label,
@@ -813,8 +775,7 @@ mod tests {
                 entry(Input::Portal, "Portal page", "", PORTAL_HINT),
             ],
             focus: Input::Address,
-            route,
-            notice: disclosure(route).map(|text| (text, Tone::Warning)),
+            notice: Some((disclosure(), Tone::Warning)),
             ready,
         }
     }
@@ -829,16 +790,14 @@ mod tests {
     }
 
     #[test]
-    fn the_add_dialog_offers_its_fields_routes_cancel_and_add() {
-        let board = draw_add(&layout(), &add_sheet(Route::Gateway, true));
+    fn the_add_dialog_offers_its_fields_cancel_and_add() {
+        let board = draw_add(&layout(), &add_sheet(true));
         assert_eq!(
             zones(&board),
             [
                 Zone::AddField(Input::Address),
                 Zone::AddField(Input::Name),
                 Zone::AddField(Input::Portal),
-                Zone::RouteOption(Route::Gateway),
-                Zone::RouteOption(Route::Mixed),
                 Zone::CloseDialog,
                 Zone::ConfirmAdd,
                 Zone::Dialog,
@@ -850,48 +809,31 @@ mod tests {
             "Gateway address",
             "Name",
             "Portal page",
-            "Route",
             "proxy",
             ADDRESS_HINT,
             NAME_HINT,
             PORTAL_HINT,
-            "Gateway",
-            "Mixed",
-            "Every site goes through the gateway",
             "Cancel",
             "Add",
         ] {
             assert!(texts.iter().any(|t| t == part), "{part}");
         }
-        assert!(!texts.iter().any(|t| t.contains("mixed mode")));
+        for absent in ["Route", "Mixed", "mixed mode"] {
+            assert!(!texts.iter().any(|t| t.contains(absent)), "{absent}");
+        }
     }
 
     #[test]
     fn add_is_drawn_but_not_offered_until_the_form_is_ready() {
-        let board = draw_add(&layout(), &add_sheet(Route::Gateway, false));
+        let board = draw_add(&layout(), &add_sheet(false));
         assert!(!zones(&board).contains(&Zone::ConfirmAdd));
         assert!(zones(&board).contains(&Zone::CloseDialog));
         assert!(texts(&board).iter().any(|t| t == "Add"));
     }
 
     #[test]
-    fn the_chosen_route_is_filled() {
-        let board = draw_add(&layout(), &add_sheet(Route::Mixed, true));
-        let mixed = board
-            .targets
-            .iter()
-            .find(|(_, zone)| *zone == Zone::RouteOption(Route::Mixed))
-            .unwrap()
-            .0;
-        assert!(board.ops.contains(&Op::Round(mixed, 6.0, T.button)));
-        assert!(board.ops.iter().any(
-            |op| matches!(op, Op::Text(_, text, _, c) if text == "Mixed" && *c == T.button_text)
-        ));
-    }
-
-    #[test]
     fn the_focused_field_shows_a_caret_after_its_value() {
-        let board = draw_add(&layout(), &add_sheet(Route::Gateway, true));
+        let board = draw_add(&layout(), &add_sheet(true));
         let value = board
             .ops
             .iter()
@@ -909,7 +851,7 @@ mod tests {
 
     #[test]
     fn a_long_value_keeps_its_end_in_view() {
-        let mut sheet = add_sheet(Route::Gateway, true);
+        let mut sheet = add_sheet(true);
         let long = "a".repeat(200);
         sheet.entries[0].value = Box::leak(long.into_boxed_str());
         let board = draw_add(&layout(), &sheet);
@@ -929,17 +871,18 @@ mod tests {
     }
 
     #[test]
-    fn mixed_discloses_direct_connections_and_fits_the_minimum_window() {
+    fn the_trust_disclosure_fits_the_minimum_window() {
         let (w, h) = crate::layout::Layout::min_size(S);
         let l = crate::layout::Layout::new(w, h, S, true);
-        let board = draw_add(&l, &add_sheet(Route::Mixed, true));
+        let board = draw_add(&l, &add_sheet(true));
         let panel = board.targets.last().unwrap().0;
         assert!(
             panel.y >= l.caption_row.bottom() && panel.bottom() <= h,
             "{panel:?}"
         );
         let texts = texts(&board).join(" ");
-        assert!(texts.contains("exposing your IP address and local DNS lookups"));
+        assert!(texts.contains("client certificate"), "{texts}");
+        assert!(texts.contains("trust the organisation"), "{texts}");
         let footer = board
             .targets
             .iter()

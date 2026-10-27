@@ -666,7 +666,6 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::CloseDialog
         | Zone::AddGateway
         | Zone::AddField(_)
-        | Zone::RouteOption(_)
         | Zone::ConfirmAdd
         | Zone::Client => HTCLIENT,
     }
@@ -795,11 +794,6 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Focus(input)) => {
             with_app(hwnd, |app| app.edit(|form| form.select(input)));
-            return;
-        }
-        Some(Action::Route(route)) => {
-            with_app(hwnd, |app| app.edit(|form| form.choose(route)));
-            rehover(hwnd);
             return;
         }
         Some(Action::ConfirmAdd) => {

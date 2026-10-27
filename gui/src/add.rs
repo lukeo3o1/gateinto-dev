@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use gateinto::config::GatewayName;
 use gateinto::link::store::LinkedStore;
 use gateinto::link::{
-    self, Decision, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, MIXED_TRAFFIC, Resolution,
+    self, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, Resolution, TRUST,
 };
-use gateinto::proxy::Route;
 use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
 
 use crate::gateways;
@@ -14,18 +13,6 @@ pub const TITLE: &str = "Add gateway";
 pub const ADDRESS_HINT: &str = "Host name or IP address. Port 443 is the default.";
 pub const NAME_HINT: &str = "Shown in lists. Leave empty to use the host name.";
 pub const PORTAL_HINT: &str = "Optional. An https:// page the browser opens first.";
-pub const ROUTES: [(Route, &str, &str); 2] = [
-    (
-        Route::Gateway,
-        "Gateway",
-        "Every site goes through the gateway",
-    ),
-    (
-        Route::Mixed,
-        "Mixed",
-        "Sites the gateway serves go through it; others connect directly",
-    ),
-];
 pub const NO_FOLDER: &str = "This device has no folder for added gateways.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,7 +38,6 @@ pub struct Form {
     address: String,
     name: String,
     portal: String,
-    route: Route,
     focus: Input,
     failure: Option<String>,
 }
@@ -76,11 +62,6 @@ impl Form {
 
     pub fn select(&mut self, input: Input) {
         self.focus = input;
-    }
-
-    pub fn choose(&mut self, route: Route) {
-        self.failure = None;
-        self.route = route;
     }
 
     pub fn type_text(&mut self, text: &str) {
@@ -155,7 +136,6 @@ impl Units {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready {
     pub gateway: LinkedGateway,
-    pub route: Route,
     pub local: bool,
 }
 
@@ -234,16 +214,12 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
         Some(&form.address),
         optional(&form.portal),
     ) {
-        Ok(request) => LaunchRequest {
-            route: form.route,
-            ..request
-        },
+        Ok(request) => request,
         Err(error) => return field_error(error),
     };
     match link::resolve(&request, known, &mut Decision::Defer, 0) {
         Ok(Resolution::Confirm(confirmation)) => Verdict::Ready(Ready {
             local: confirmation.gateway.is_local(),
-            route: confirmation.route,
             gateway: LinkedGateway {
                 name: confirmation.profile,
                 address: confirmation.gateway,
@@ -259,13 +235,8 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
     }
 }
 
-pub fn disclosure(route: Route) -> Option<String> {
-    match route {
-        Route::Gateway => None,
-        Route::Mixed => Some(format!(
-            "The gateway will see this device's identity and {MIXED_TRAFFIC}."
-        )),
-    }
+pub fn disclosure() -> String {
+    format!("{IDENTITY} and the browser traffic routed to it. Add it {TRUST}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,7 +259,6 @@ pub struct Entry<'a> {
 pub struct Sheet<'a> {
     pub entries: [Entry<'a>; 3],
     pub focus: Input,
-    pub route: Route,
     pub notice: Option<(String, Tone)>,
     pub ready: bool,
 }
@@ -327,11 +297,10 @@ pub fn sheet<'a>(form: &'a Form, listing: &Result<Known, String>) -> Sheet<'a> {
         .clone()
         .or(general)
         .map(|message| (message, Tone::Error))
-        .or_else(|| disclosure(form.route).map(|text| (text, Tone::Warning)));
+        .or_else(|| Some((disclosure(), Tone::Warning)));
     Sheet {
         entries,
         focus: form.focus,
-        route: form.route,
         notice,
         ready: form.failure.is_none() && matches!(verdict, Verdict::Ready(_)),
     }
@@ -477,18 +446,16 @@ mod tests {
         assert_eq!(ready.gateway.address.to_string(), "proxy.example.net:443");
         assert_eq!(ready.gateway.portal_url, None);
         assert_eq!(ready.gateway.approved_at, None);
-        assert_eq!(ready.route, Route::Gateway);
         assert!(!ready.local);
     }
 
     #[test]
-    fn a_named_gateway_keeps_its_port_portal_and_route() {
-        let mut form = form(
+    fn a_named_gateway_keeps_its_port_and_portal() {
+        let form = form(
             "proxy.example.net:8443",
             "lab",
             "https://portal.example.net/",
         );
-        form.choose(Route::Mixed);
         let ready = ready(&form, &known(vec![office()]));
         assert_eq!(ready.gateway.name.as_str(), "lab");
         assert_eq!(ready.gateway.address.to_string(), "proxy.example.net:8443");
@@ -496,7 +463,6 @@ mod tests {
             ready.gateway.portal_url.map(|url| url.to_string()),
             Some("https://portal.example.net/".to_owned())
         );
-        assert_eq!(ready.route, Route::Mixed);
     }
 
     #[test]
@@ -638,8 +604,7 @@ mod tests {
             notes(&sheet),
             [hint(ADDRESS_HINT), hint(NAME_HINT), hint(PORTAL_HINT)]
         );
-        assert_eq!(sheet.notice, None);
-        assert_eq!(sheet.route, Route::Gateway);
+        assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
         assert!(!sheet.ready);
     }
 
@@ -664,22 +629,16 @@ mod tests {
     }
 
     #[test]
-    fn mixed_shows_its_disclosure_while_add_is_possible() {
-        let mut form = form("proxy.example.net", "", "");
-        form.choose(Route::Mixed);
+    fn every_add_shows_the_identity_and_trust_disclosure() {
+        let form = form("proxy.example.net", "", "");
         let sheet = sheet(&form, &known(vec![]));
         assert!(sheet.ready);
-        assert_eq!(sheet.route, Route::Mixed);
-        assert_eq!(
-            sheet.notice,
-            Some((disclosure(Route::Mixed).unwrap(), Tone::Warning))
-        );
+        assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
     }
 
     #[test]
     fn a_general_error_or_failure_takes_the_notice_and_blocks_adding() {
         let mut form = form("proxy.example.net", "", "");
-        form.choose(Route::Mixed);
         let failed: Result<Known, String> = Err("bad".to_owned());
         let sheet_failed = sheet(&form, &failed);
         assert!(!sheet_failed.ready);
@@ -700,11 +659,15 @@ mod tests {
     }
 
     #[test]
-    fn only_mixed_discloses_direct_connections() {
-        assert_eq!(disclosure(Route::Gateway), None);
-        let text = disclosure(Route::Mixed).unwrap();
-        assert!(text.contains(MIXED_TRAFFIC));
-        assert!(text.contains("exposing your IP address and local DNS lookups"));
+    fn the_disclosure_reuses_the_link_identity_and_trust_wording() {
+        assert_eq!(
+            disclosure(),
+            "The gateway will see this device's identity (its client certificate, if one is \
+             installed) and the browser traffic routed to it. Add it only if you trust the \
+             organisation that runs this gateway."
+        );
+        assert!(disclosure().starts_with(gateinto::link::IDENTITY));
+        assert!(disclosure().ends_with(gateinto::link::TRUST));
     }
 
     #[test]
@@ -714,7 +677,7 @@ mod tests {
         form.erase();
         assert_eq!(form.failure.as_deref(), None);
         form.failure = Some("x".to_owned());
-        form.choose(Route::Mixed);
+        form.type_text("x");
         assert_eq!(form.failure.as_deref(), None);
     }
 
@@ -726,7 +689,6 @@ mod tests {
             "lab",
             "https://portal.example.net/",
         );
-        first.choose(Route::Mixed);
         let listing = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
         assert!(commit(&mut first, &listing, Some(dir.clone()), 42));
         let stored = LinkedStore::new(dir.clone()).load().unwrap();
