@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use gateinto::config::GatewayName;
-use gateinto::link::store::LinkedStore;
+use gateinto::link::store::{LinkedStore, StoreError};
 use gateinto::link::{
     self, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, Resolution, TRUST,
 };
@@ -20,6 +20,10 @@ const DAMAGED: &str = "A damaged gateway entry on this device uses this name or 
 const UNSTORABLE: &str = "This address is too long to store on this device.";
 const UNAVAILABLE: &str =
     "The gateways added on this device cannot be read, so no gateway can be added now.";
+const TAKEN: &str =
+    "Another gateway with this name or address was just added. Nothing was changed.";
+const FULL: &str = "This device holds as many added gateways as it can. Remove one first.";
+const NOT_SAVED: &str = "The gateway could not be saved on this device.";
 const UNUSABLE: &str = "These values cannot be used for a gateway.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -342,7 +346,12 @@ pub fn commit(
     match LinkedStore::new(dir).add(&gateway) {
         Ok(_) => true,
         Err(error) => {
-            form.failure = Some(format!("The gateway was not added: {error}"));
+            let message = match error {
+                StoreError::Exists(_) | StoreError::AddressTaken(_) => TAKEN,
+                StoreError::Full => FULL,
+                _ => NOT_SAVED,
+            };
+            form.failure = Some(message.to_owned());
             false
         }
     }
@@ -350,6 +359,7 @@ pub fn commit(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use gateinto::config::ConfigFile;
@@ -773,6 +783,76 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn lab() -> Form {
+        form("proxy.example.net", "lab", "")
+    }
+
+    fn other(name: &str, host: &str) -> LinkedGateway {
+        LinkedGateway {
+            name: name.parse().unwrap(),
+            address: host.parse().unwrap(),
+            portal_url: None,
+            approved_at: None,
+        }
+    }
+
+    fn stored(dir: &Path) -> Vec<String> {
+        let loaded = LinkedStore::new(dir.to_owned()).load().unwrap();
+        assert!(loaded.invalid.is_empty());
+        loaded
+            .gateways
+            .iter()
+            .map(|gateway| format!("{} {}", gateway.name, gateway.address))
+            .collect()
+    }
+
+    #[test]
+    fn committing_after_the_store_became_unusable_writes_nothing() {
+        let dir = scratch();
+        let listing = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
+        std::fs::write(&dir, b"").unwrap();
+        let mut form = lab();
+        assert!(!commit(&mut form, &listing, Some(dir.clone()), 1));
+        assert_eq!(form.failure.as_deref(), Some(NOT_SAVED));
+        assert!(std::fs::read(&dir).unwrap().is_empty());
+        std::fs::remove_file(dir).unwrap();
+    }
+
+    #[test]
+    fn committing_a_name_another_writer_just_added_writes_nothing() {
+        let dir = scratch();
+        let listing = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
+        let store = LinkedStore::new(dir.clone());
+        store.add(&other("lab", "proxy.example.org")).unwrap();
+        let mut form = lab();
+        assert!(!commit(&mut form, &listing, Some(dir.clone()), 1));
+        assert_eq!(form.failure.as_deref(), Some(TAKEN));
+        assert_eq!(stored(&dir), ["lab proxy.example.org:443"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn committing_an_address_another_writer_just_added_writes_nothing() {
+        let dir = scratch();
+        let listing = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
+        let store = LinkedStore::new(dir.clone());
+        store.add(&other("edge", "proxy.example.net")).unwrap();
+        let mut form = lab();
+        assert!(!commit(&mut form, &listing, Some(dir.clone()), 1));
+        assert_eq!(form.failure.as_deref(), Some(TAKEN));
+        assert_eq!(stored(&dir), ["edge proxy.example.net:443"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn store_failures_get_fixed_wording() {
+        for text in [TAKEN, FULL, NOT_SAVED] {
+            for word in ["link", "gateinto"] {
+                assert!(!text.contains(word), "{text}");
+            }
+        }
     }
 
     #[test]
