@@ -1,4 +1,6 @@
 use std::ffi::CStr;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::ptr::null;
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
@@ -21,15 +23,21 @@ pub fn wide(s: &str) -> Vec<u16> {
 }
 
 pub fn open_https(hwnd: HWND, url: &str) -> bool {
-    if !menu::https(url) {
-        return false;
-    }
-    let (verb, url) = (wide("open"), wide(url));
+    menu::https(url) && open(hwnd, wide(url))
+}
+
+pub fn open_file(hwnd: HWND, path: &Path) -> bool {
+    let path = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    open(hwnd, path)
+}
+
+fn open(hwnd: HWND, target: Vec<u16>) -> bool {
+    let verb = wide("open");
     let code = unsafe {
         ShellExecuteW(
             hwnd,
             verb.as_ptr(),
-            url.as_ptr(),
+            target.as_ptr(),
             null(),
             null(),
             SW_SHOWNORMAL,

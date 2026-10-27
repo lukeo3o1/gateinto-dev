@@ -13,6 +13,8 @@ pub enum Action {
     StartBrowser(usize),
     OpenPicker,
     Choose(usize),
+    OpenConfig,
+    ToggleSignIn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +42,8 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
         Zone::Picker => Some(Action::OpenPicker),
         Zone::Entry(i) => Some(Action::Choose(i)),
+        Zone::OpenConfig => Some(Action::OpenConfig),
+        Zone::SignIn => Some(Action::ToggleSignIn),
         _ => None,
     }
 }
@@ -259,6 +263,16 @@ mod tests {
         p.down(Zone::More(3));
         assert!(!p.entries_changed());
         assert_eq!(p.up(Zone::More(3)), Some(Action::More(3)));
+    }
+
+    #[test]
+    fn settings_buttons_open_the_config_and_toggle_sign_in() {
+        let mut p = Pointer::default();
+        assert!(p.moved(Zone::OpenConfig));
+        assert!(p.down(Zone::OpenConfig));
+        assert_eq!(p.up(Zone::OpenConfig), Some(Action::OpenConfig));
+        assert!(p.down(Zone::SignIn));
+        assert_eq!(p.up(Zone::SignIn), Some(Action::ToggleSignIn));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::theme::{Rgb, Theme};
 
 pub mod gateways;
 pub mod menu;
+pub mod settings;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Board {
@@ -84,15 +85,19 @@ fn inset(r: Rect, d: i32) -> Rect {
 
 impl<'a, M: Measure> Painter<'a, M> {
     fn new(l: &Layout, s: Scale, t: &'a Theme, v: &'a View, m: &'a M) -> Self {
+        Self::within(l.content, s, t, v, m)
+    }
+
+    fn within(clip: Rect, s: Scale, t: &'a Theme, v: &'a View, m: &'a M) -> Self {
         let mut p = Self {
             s,
             t,
             v,
             m,
-            clip: l.content,
+            clip,
             board: Board::default(),
         };
-        p.push(Op::Clip(l.content));
+        p.push(Op::Clip(clip));
         p
     }
 
@@ -236,19 +241,23 @@ impl<'a, M: Measure> Painter<'a, M> {
     }
 
     fn stop(&mut self, button: Rect) {
+        self.outlined(button, icons::STOP, STOP_LABEL, Zone::StopAgent);
+    }
+
+    fn outlined(&mut self, button: Rect, icon: Icon, label: &'static str, zone: Zone) {
         let (s, t) = (self.s, self.t);
-        let fill = match self.v.pointer.look(Zone::StopAgent) {
+        let fill = match self.v.pointer.look(zone) {
             Look::Rest => t.card,
             Look::Hover => t.caption_hover,
             Look::Pressed => t.caption_pressed,
         };
         self.framed(button, 6.0, fill);
         let glyph = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
-        self.icon(icons::STOP, glyph, 16.0, t.text);
+        self.icon(icon, glyph, 16.0, t.text);
         let x = glyph.right() + s.px(8.0);
-        let label = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
-        self.text(Font::BodyStrong, STOP_LABEL, label, t.text);
-        self.target(button, Zone::StopAgent);
+        let text = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
+        self.text(Font::BodyStrong, label, text, t.text);
+        self.target(button, zone);
     }
 
     fn columns(&self, row: Rect) -> Columns {

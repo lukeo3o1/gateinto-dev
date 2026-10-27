@@ -17,6 +17,8 @@ pub enum Zone {
     StartBrowser(usize),
     Picker,
     Entry(usize),
+    OpenConfig,
+    SignIn,
     Menu,
     Client,
 }

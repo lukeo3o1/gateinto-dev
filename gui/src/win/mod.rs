@@ -1,9 +1,11 @@
 mod d2d;
 mod link;
+mod run;
 mod sys;
 mod text;
 mod tips;
 
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -34,6 +36,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use gateinto::clock::unix_now;
+use gateinto::config;
 
 use crate::board::{self, Board, board, tips};
 use crate::frame::Frame;
@@ -47,6 +50,7 @@ use crate::scale::Scale;
 use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
+use crate::settings;
 use crate::theme::Theme;
 use crate::worker::{Command, Update};
 use d2d::Graphics;
@@ -112,6 +116,8 @@ struct App {
     launches: Launches,
     link: Link,
     tips: Tips,
+    config: String,
+    sign_in: bool,
 }
 
 fn choose_frame() -> Frame {
@@ -140,6 +146,8 @@ impl App {
             launches: Launches::default(),
             link: Link::start(hwnd),
             tips: Tips::new(hwnd),
+            config: config_line(),
+            sign_in: false,
         })
     }
 
@@ -156,6 +164,10 @@ impl App {
         let (l, s, t, v, m) = (&self.layout, self.s, &Theme::LIGHT, &self.view, &self.fonts);
         let failure = update.failure.as_deref();
         let mut board = match v.nav.selected() {
+            NavPage::Settings => {
+                let page = settings::page(&self.config, &update.agent, failure, self.sign_in);
+                board::settings::board(l, s, t, v, &page, m)
+            }
             NavPage::Gateways => {
                 let busy = self.launches.busy();
                 let page = gateways::page(&update.gateways, &update.state, failure, busy);
@@ -223,6 +235,12 @@ impl App {
 
     fn select(&mut self, page: NavPage) {
         if self.view.nav.select(page) {
+            if page == NavPage::Settings {
+                match run::enabled() {
+                    Ok(on) => self.sign_in = on,
+                    Err(()) => self.fail(settings::SIGN_IN_UNREAD),
+                }
+            }
             self.retarget();
             self.invalidate();
         }
@@ -247,6 +265,22 @@ impl App {
         }
     }
 
+    fn toggle_sign_in(&mut self) {
+        let on = !self.sign_in;
+        match run::set(on) {
+            Ok(()) => self.sign_in = on,
+            Err(()) => self.fail(settings::SIGN_IN_FAILED),
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn fail(&mut self, failure: &str) {
+        if let Some(update) = &mut self.update {
+            update.failure = Some(failure.to_owned());
+        }
+    }
+
     fn invalidate(&self) {
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
@@ -268,6 +302,11 @@ impl App {
         unsafe { ScreenToClient(self.hwnd, &mut p) };
         self.zone(p.x, p.y)
     }
+}
+
+fn config_line() -> String {
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+    settings::shown(config::default_path().as_deref(), appdata.as_deref())
 }
 
 fn measure(hwnd: HWND, s: Scale, frame: Frame) -> Layout {
@@ -329,6 +368,8 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::StartBrowser(_)
         | Zone::Picker
         | Zone::Entry(_)
+        | Zone::OpenConfig
+        | Zone::SignIn
         | Zone::Menu
         | Zone::Client => HTCLIENT,
     }
@@ -389,13 +430,28 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 && !sys::open_https(hwnd, &url)
             {
                 with_app(hwnd, |app| {
-                    if let Some(update) = &mut app.update {
-                        update.failure = Some(menu::PORTAL_FAILED.to_owned());
-                        app.retarget();
-                        app.invalidate();
-                    }
+                    app.fail(menu::PORTAL_FAILED);
+                    app.retarget();
+                    app.invalidate();
                 });
             }
+            return;
+        }
+        Some(Action::OpenConfig) => {
+            let opened = config::default_path()
+                .filter(|path| path.is_file())
+                .is_some_and(|path| sys::open_file(hwnd, &path));
+            if !opened {
+                with_app(hwnd, |app| {
+                    app.fail(settings::OPEN_FAILED);
+                    app.retarget();
+                    app.invalidate();
+                });
+            }
+            return;
+        }
+        Some(Action::ToggleSignIn) => {
+            with_app(hwnd, App::toggle_sign_in);
             return;
         }
         Some(Action::Minimize) => SC_MINIMIZE,
