@@ -67,13 +67,6 @@ impl Launches {
         Some(name)
     }
 
-    pub fn follow(&mut self, state: &AgentState, name: GatewayName) -> Option<GatewayName> {
-        if !matches!(state, AgentState::Running(_)) {
-            return None;
-        }
-        self.start(&[name], 0)
-    }
-
     pub fn settle(&mut self, launched: u64) {
         self.done = launched;
     }
@@ -617,19 +610,6 @@ mod tests {
         assert!(!launches.busy());
         assert_eq!(launches.start(&names, 0), Some(name("office")));
         assert!(launches.busy());
-    }
-
-    #[test]
-    fn an_added_gateway_starts_only_on_a_running_idle_agent() {
-        let running = AgentState::Running(Vec::new());
-        let mut launches = Launches::default();
-        assert_eq!(launches.follow(&AgentState::Stopped, name("edge")), None);
-        let down = AgentState::Unreachable("down".to_owned());
-        assert_eq!(launches.follow(&down, name("edge")), None);
-        assert!(!launches.busy());
-        assert_eq!(launches.follow(&running, name("edge")), Some(name("edge")));
-        assert!(launches.busy());
-        assert_eq!(launches.follow(&running, name("home")), None);
     }
 
     #[test]

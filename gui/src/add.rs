@@ -337,42 +337,33 @@ pub fn sheet<'a>(form: &'a Form, listing: &Result<Known, String>) -> Sheet<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Added {
-    pub name: GatewayName,
-    pub route: Route,
-}
-
 pub fn commit(
     form: &mut Form,
     listing: &Result<Known, String>,
     dir: Option<PathBuf>,
     now: u64,
-) -> Option<Added> {
+) -> bool {
     let ready = match check(form, listing) {
         Verdict::Ready(ready) => ready,
         Verdict::Invalid(_, message) => {
             form.failure = Some(message);
-            return None;
+            return false;
         }
-        Verdict::Incomplete => return None,
+        Verdict::Incomplete => return false,
     };
     let Some(dir) = dir else {
         form.failure = Some(NO_FOLDER.to_owned());
-        return None;
+        return false;
     };
     let gateway = LinkedGateway {
         approved_at: Some(now),
         ..ready.gateway
     };
     match LinkedStore::new(dir).add(&gateway) {
-        Ok(_) => Some(Added {
-            name: gateway.name,
-            route: ready.route,
-        }),
+        Ok(_) => true,
         Err(error) => {
             form.failure = Some(format!("The gateway was not added: {error}"));
-            None
+            false
         }
     }
 }
@@ -737,14 +728,7 @@ mod tests {
         );
         first.choose(Route::Mixed);
         let listing = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
-        let added = commit(&mut first, &listing, Some(dir.clone()), 42);
-        assert_eq!(
-            added,
-            Some(Added {
-                name: "lab".parse().unwrap(),
-                route: Route::Mixed,
-            })
-        );
+        assert!(commit(&mut first, &listing, Some(dir.clone()), 42));
         let stored = LinkedStore::new(dir.clone()).load().unwrap();
         assert_eq!(stored.gateways.len(), 1);
         assert_eq!(stored.gateways[0].name.as_str(), "lab");
@@ -755,7 +739,7 @@ mod tests {
         assert_eq!(stored.gateways[0].approved_at, Some(42));
         let again = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
         let mut twin = form("proxy.example.org", "lab", "");
-        assert_eq!(commit(&mut twin, &again, Some(dir.clone()), 43), None);
+        assert!(!commit(&mut twin, &again, Some(dir.clone()), 43));
         assert_eq!(
             twin.failure.as_deref(),
             Some("\"lab\" is already used by another gateway.")
@@ -770,7 +754,7 @@ mod tests {
     #[test]
     fn committing_without_a_store_folder_writes_nothing() {
         let mut form = form("proxy.example.net", "lab", "");
-        assert_eq!(commit(&mut form, &known(vec![]), None, 1), None);
+        assert!(!commit(&mut form, &known(vec![]), None, 1));
         assert_eq!(form.failure.as_deref(), Some(NO_FOLDER));
     }
 
@@ -778,10 +762,7 @@ mod tests {
     fn committing_an_incomplete_form_writes_nothing() {
         let dir = scratch();
         let mut form = Form::default();
-        assert_eq!(
-            commit(&mut form, &known(vec![]), Some(dir.clone()), 1),
-            None
-        );
+        assert!(!commit(&mut form, &known(vec![]), Some(dir.clone()), 1));
         assert!(!dir.exists());
     }
 

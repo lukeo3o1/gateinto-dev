@@ -5,7 +5,6 @@ use std::time::Duration;
 use gateinto::config::{GatewayName, Gateways};
 use gateinto::ipc::{self, Request, RequestError, Response};
 use gateinto::link::Known;
-use gateinto::proxy::Route;
 use gateinto::sessions::SessionId;
 use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -25,7 +24,7 @@ pub const CONFIRMATION: &str =
 pub enum Command {
     Close(u64),
     Stop,
-    Launch(GatewayName, Route),
+    Launch(GatewayName),
     Probe,
     Watch(bool),
     Credentials(u64),
@@ -36,13 +35,10 @@ impl Command {
         Ok(match self {
             Command::Close(id) => Request::Close(SessionId::from(*id)),
             Command::Stop => Request::Stop,
-            Command::Launch(name, route) => {
-                let mut request =
-                    LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
-                        .map_err(|error| error.to_string())?;
-                request.route = *route;
-                Request::Launch(request)
-            }
+            Command::Launch(name) => Request::Launch(
+                LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
+                    .map_err(|error| error.to_string())?,
+            ),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
             Command::Watch(_) => {
                 return Err("watching the log is not an agent request".to_owned());
@@ -230,9 +226,9 @@ pub async fn serve<F, R>(
                         reveal(credentials::reveal(id, reply));
                         continue;
                     }
-                    Command::Close(_) | Command::Stop | Command::Launch(..) => {}
+                    Command::Close(_) | Command::Stop | Command::Launch(_) => {}
                 }
-                let launch = matches!(command, Command::Launch(..));
+                let launch = matches!(command, Command::Launch(_));
                 failure = run(command, &send).await;
                 launched += u64::from(launch);
             }
@@ -249,7 +245,6 @@ mod tests {
     use tokio::time::timeout;
 
     use gateinto::config::ConfigFile;
-    use gateinto::proxy::Route;
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
     use gateinto::ipc::{LogEvent, LogLevel, LogPage};
@@ -522,8 +517,7 @@ mod tests {
     async fn launching_a_known_gateway_asks_for_a_browser_session() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Launch("office".parse().unwrap(), Route::Gateway))
-            .unwrap();
+        tx.send(Command::Launch("office".parse().unwrap())).unwrap();
         let lines = vec!["session 3".to_owned(), "password: secret".to_owned()];
         let mut updates = Vec::new();
         let run = serve(
@@ -543,36 +537,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_launch_carries_the_chosen_route() {
-        let log = RefCell::new(Vec::new());
-        let (tx, rx) = unbounded_channel();
-        tx.send(Command::Launch("office".parse().unwrap(), Route::Mixed))
-            .unwrap();
-        let mut updates = Vec::new();
-        let run = serve(
-            rx,
-            launcher(&log, Vec::new()),
-            loaded,
-            unprobed,
-            |u| updates.push(u),
-            unrevealed,
-        );
-        assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        let mut mixed =
-            LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
-        mixed.route = Route::Mixed;
-        assert_eq!(
-            *log.borrow(),
-            [Request::List, Request::Launch(mixed), Request::List]
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_launch_that_asks_for_confirmation_is_denied_and_fails() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Launch("office".parse().unwrap(), Route::Gateway))
-            .unwrap();
+        tx.send(Command::Launch("office".parse().unwrap())).unwrap();
         let token = "0123456789abcdef0123456789abcdef";
         let lines = vec![format!("confirm: {token}")];
         let mut updates = Vec::new();
@@ -863,7 +831,7 @@ mod tests {
     #[test]
     fn stopping_an_agent_that_is_not_running_is_not_a_failure() {
         assert_eq!(failure(Command::Stop, Err(RequestError::NotRunning)), None);
-        let office = || Command::Launch("office".parse().unwrap(), Route::Gateway);
+        let office = || Command::Launch("office".parse().unwrap());
         assert_eq!(
             failure(office(), Err(RequestError::NotRunning)),
             Some("no agent is running".to_owned())

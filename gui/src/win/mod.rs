@@ -40,7 +40,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
 use gateinto::link::store;
-use gateinto::proxy::Route;
 
 use crate::add::{self, Form, Keyed, Units};
 use crate::board::{self, Board, board, tips};
@@ -433,14 +432,8 @@ impl App {
         };
         let listing = gateways::read(config::default_path())
             .map(|file| gateways::catalog(&file, store::default_dir()));
-        let added = add::commit(form, &listing, store::default_dir(), unix_now());
-        if let Some(added) = added {
+        if add::commit(form, &listing, store::default_dir(), unix_now()) {
             self.adding = None;
-            let state = self.update.as_ref().map(|u| &u.state);
-            let follow = state.and_then(|state| self.launches.follow(state, added.name));
-            if let Some(name) = follow {
-                self.link.send(Command::Launch(name, added.route));
-            }
         }
         self.retarget();
         self.invalidate();
@@ -481,7 +474,7 @@ impl App {
     fn launch(&mut self, row: usize) {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
         if let Some(name) = self.launches.start(&names.unwrap_or_default(), row) {
-            self.link.send(Command::Launch(name, Route::Gateway));
+            self.link.send(Command::Launch(name));
             self.retarget();
             self.invalidate();
         }
