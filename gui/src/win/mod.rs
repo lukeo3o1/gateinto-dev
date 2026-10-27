@@ -300,8 +300,7 @@ impl App {
             return;
         };
         if device::copy(self.hwnd, id) {
-            self.copied = true;
-            unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) };
+            self.copied = unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) } != 0;
         } else {
             self.fail(crate::device::COPY_FAILED);
         }
