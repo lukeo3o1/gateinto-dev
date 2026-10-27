@@ -162,7 +162,7 @@ pub fn exposure(listen: &Result<SocketAddr, String>, state: &AgentState) -> Stri
     };
     std::iter::once(listen)
         .chain(sessions.iter().map(|session| session.listen))
-        .find(|addr| !addr.ip().is_loopback())
+        .find(|addr| !addr.ip().to_canonical().is_loopback())
         .map_or_else(
             || LOOPBACK.to_owned(),
             |addr| format!("Open to the network on {addr}"),
@@ -459,6 +459,18 @@ mod tests {
     }
 
     #[test]
+    fn only_windows_10_names_are_corrected_on_a_windows_11_build() {
+        let server = System {
+            product: Some("Windows Server 2025 Datacenter".to_owned()),
+            ..system()
+        };
+        assert_eq!(
+            os(&server).as_deref(),
+            Some("Windows Server 2025 Datacenter \u{b7} x64")
+        );
+    }
+
+    #[test]
     fn unknown_parts_of_the_system_line_are_left_out() {
         let odd = System {
             arch: Some(77),
@@ -515,6 +527,26 @@ mod tests {
         assert_eq!(
             exposure(&listen("127.0.0.1:18736"), &running),
             "Open to the network on 192.168.1.5:8080"
+        );
+    }
+
+    #[test]
+    fn an_ipv6_wildcard_listen_is_open_to_the_network() {
+        assert_eq!(
+            exposure(&listen("[::]:18736"), &AgentState::Stopped),
+            "Open to the network on [::]:18736"
+        );
+    }
+
+    #[test]
+    fn an_ipv4_mapped_loopback_listen_is_loopback_only() {
+        assert_eq!(
+            exposure(&listen("[::ffff:127.0.0.1]:18736"), &AgentState::Stopped),
+            "Loopback only"
+        );
+        assert_eq!(
+            exposure(&listen("[::ffff:10.0.0.2]:18736"), &AgentState::Stopped),
+            "Open to the network on [::ffff:10.0.0.2]:18736"
         );
     }
 
