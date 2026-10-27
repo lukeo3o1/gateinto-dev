@@ -16,6 +16,7 @@ use crate::theme::{Rgb, Theme};
 
 pub mod device;
 pub mod gateways;
+pub mod log;
 pub mod menu;
 pub mod settings;
 
