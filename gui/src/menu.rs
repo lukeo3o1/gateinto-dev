@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use gateinto::link::Known;
 
 use crate::agent::AgentState;
+use crate::credentials;
 
 use crate::gateways;
 use crate::hit::Zone;
@@ -23,6 +24,7 @@ pub enum Choice {
     Launch(usize),
     Portal(u64),
     Details,
+    Credentials(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +58,11 @@ pub fn picker(listing: &Result<Known, String>) -> Vec<Entry> {
 }
 
 pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> Vec<Entry> {
+    let credentials = credentials::offers(state, id).then(|| Entry {
+        icon: icons::LOCK,
+        label: "Show credentials".into(),
+        choice: Some(Choice::Credentials(id)),
+    });
     let portal = portal(listing, state, id).map(|_| Entry {
         icon: icons::EXTERNAL,
         label: "Open portal page".into(),
@@ -66,7 +73,11 @@ pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> 
         label: "Gateway details".into(),
         choice: Some(Choice::Details),
     };
-    portal.into_iter().chain([details]).collect()
+    credentials
+        .into_iter()
+        .chain(portal)
+        .chain([details])
+        .collect()
 }
 
 pub fn portal<'a>(
@@ -254,6 +265,21 @@ mod tests {
             session(&Err("broken".to_owned()), &running(), 4),
             [details()]
         );
+    }
+
+    #[test]
+    fn only_sessions_signed_in_with_session_credentials_offer_to_show_them() {
+        let mut signed = session_info(5, "lab");
+        signed.auth = SessionAuth::Password;
+        let state = AgentState::Running(vec![session_info(4, "lab"), signed]);
+        let listing = known(vec![gateway("lab", "lab.example.com")]);
+        let show = Entry {
+            icon: icons::LOCK,
+            label: "Show credentials".into(),
+            choice: Some(Choice::Credentials(5)),
+        };
+        assert_eq!(session(&listing, &state, 5), [show, details()]);
+        assert_eq!(session(&listing, &state, 4), [details()]);
     }
 
     #[test]

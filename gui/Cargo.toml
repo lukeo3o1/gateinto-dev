@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 gateinto = { path = ".." }
 tokio = { version = "1.54.1", features = ["rt", "net", "sync", "time", "macros"] }
+zeroize = "1.9.1"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["test-util"] }

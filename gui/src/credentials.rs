@@ -1,0 +1,365 @@
+use std::net::SocketAddr;
+
+use gateinto::ipc::{self, RequestError, Response, SessionAuth, SessionInfo};
+use gateinto::proxy::SessionCredentials;
+use zeroize::Zeroize;
+
+use crate::agent::AgentState;
+use crate::sessions;
+
+pub const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}";
+pub const WAITING: &str = "Asking the agent for this session's credentials\u{2026}";
+pub const UNAVAILABLE: &str =
+    "The agent did not hand out this session's credentials. Close this and try again.";
+pub const SUBTITLE: &str =
+    "Shown when this PC cannot check the OS user, so the browser asks for a proxy sign-in.";
+pub const HINT: &str = "Type it exactly, including the hyphens.";
+
+#[derive(Debug)]
+pub struct Reveal {
+    pub id: u64,
+    pub credentials: Option<SessionCredentials>,
+}
+
+pub fn reveal(id: u64, reply: Result<Response, RequestError>) -> Reveal {
+    let credentials = match reply {
+        Ok(Response::Ok(mut lines)) => {
+            let credentials = ipc::issued_credentials(&lines);
+            lines.zeroize();
+            credentials
+        }
+        Ok(Response::Error(mut message)) => {
+            message.zeroize();
+            None
+        }
+        Err(_) => None,
+    };
+    Reveal { id, credentials }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Username,
+    Password,
+}
+
+#[derive(Debug)]
+enum Secret {
+    Waiting,
+    Shown(SessionCredentials),
+    Failed,
+}
+
+#[derive(Debug)]
+pub struct Dialog {
+    id: u64,
+    started: u64,
+    listen: SocketAddr,
+    secret: Secret,
+    revealed: bool,
+    copied: Option<Field>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Page<'a> {
+    pub session: String,
+    pub detail: String,
+    pub username: &'a str,
+    pub password: &'a str,
+    pub revealed: bool,
+    pub ready: bool,
+    pub copied: Option<Field>,
+    pub note: Option<&'static str>,
+    pub warning: String,
+}
+
+fn find(state: &AgentState, id: u64) -> Option<&SessionInfo> {
+    match state {
+        AgentState::Running(sessions) => sessions.iter().find(|session| session.id == id),
+        AgentState::Stopped | AgentState::Unreachable(_) => None,
+    }
+}
+
+pub fn offers(state: &AgentState, id: u64) -> bool {
+    find(state, id).is_some_and(|session| session.auth == SessionAuth::Password)
+}
+
+impl Dialog {
+    pub fn open(state: &AgentState, id: u64) -> Option<Self> {
+        let session = find(state, id).filter(|session| session.auth == SessionAuth::Password)?;
+        Some(Self {
+            id,
+            started: session.started,
+            listen: session.listen,
+            secret: Secret::Waiting,
+            revealed: false,
+            copied: None,
+        })
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn receive(&mut self, reveal: Reveal) {
+        if reveal.id == self.id && matches!(self.secret, Secret::Waiting) {
+            self.secret = reveal.credentials.map_or(Secret::Failed, Secret::Shown);
+        }
+    }
+
+    pub fn lasts(&self, state: &AgentState) -> bool {
+        find(state, self.id).is_some_and(|session| {
+            session.started == self.started
+                && session.listen == self.listen
+                && session.auth == SessionAuth::Password
+        })
+    }
+
+    pub fn toggle(&mut self) {
+        if matches!(self.secret, Secret::Shown(_)) {
+            self.revealed = !self.revealed;
+        }
+    }
+
+    pub fn secret(&self, field: Field) -> Option<&str> {
+        match (&self.secret, field) {
+            (Secret::Shown(credentials), Field::Username) => Some(credentials.username()),
+            (Secret::Shown(credentials), Field::Password) => Some(credentials.password()),
+            (Secret::Waiting | Secret::Failed, _) => None,
+        }
+    }
+
+    pub fn copied(&mut self, field: Field) {
+        self.copied = Some(field);
+    }
+
+    pub fn uncopy(&mut self) {
+        self.copied = None;
+    }
+
+    pub fn page(&self, state: &AgentState) -> Page<'_> {
+        let listen = self.listen.to_string();
+        let mut detail = Vec::new();
+        let mut session = String::new();
+        if let Some(info) = find(state, self.id) {
+            let row = sessions::row(info, info.started);
+            session = format!("{}{}", row.title, row.number);
+            if row.gateway != row.address {
+                detail.push(row.gateway);
+            }
+            detail.push(row.address);
+        }
+        detail.push(format!("sign-in dialog names {listen}"));
+        let (username, password, note) = match &self.secret {
+            Secret::Shown(credentials) => (
+                credentials.username(),
+                if self.revealed {
+                    credentials.password()
+                } else {
+                    MASK
+                },
+                None,
+            ),
+            Secret::Waiting => ("", "", Some(WAITING)),
+            Secret::Failed => ("", "", Some(UNAVAILABLE)),
+        };
+        Page {
+            session,
+            detail: detail.join(" \u{b7} "),
+            username,
+            password,
+            revealed: self.revealed,
+            ready: note.is_none(),
+            copied: self.copied,
+            note,
+            warning: format!(
+                "Enter these only in the browser's proxy sign-in dialog that names {listen}. \
+                 Never enter them in a website's sign-in page or dialog."
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use gateinto::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
+
+    use super::*;
+    use crate::agent::AgentState;
+
+    const PASSWORD: &str = "abcd-efgh-jkmn";
+
+    fn issued() -> Response {
+        Response::Ok(vec![
+            "listen: 127.0.0.1:49210".to_owned(),
+            "username: gateinto".to_owned(),
+            format!("password: {PASSWORD}"),
+        ])
+    }
+
+    fn session(id: u64, auth: SessionAuth) -> SessionInfo {
+        SessionInfo {
+            id,
+            kind: SessionKind::Browser,
+            gateway: "office".to_owned(),
+            upstream: "proxy.example.com:443".to_owned(),
+            listen: "127.0.0.1:49210".parse().unwrap(),
+            route: SessionRoute::All,
+            auth,
+            started: 1_000,
+            tunnels: 0,
+            browser: Some(BrowserKind::Chrome),
+        }
+    }
+
+    fn running() -> AgentState {
+        AgentState::Running(vec![
+            session(2, SessionAuth::OsUser),
+            session(3, SessionAuth::Password),
+        ])
+    }
+
+    fn shown() -> Dialog {
+        let mut dialog = Dialog::open(&running(), 3).unwrap();
+        dialog.receive(reveal(3, Ok(issued())));
+        dialog
+    }
+
+    #[test]
+    fn a_reveal_keeps_only_well_formed_credentials() {
+        let revealed = reveal(3, Ok(issued()));
+        assert_eq!(revealed.id, 3);
+        let credentials = revealed.credentials.unwrap();
+        assert_eq!(credentials.username(), "gateinto");
+        assert_eq!(credentials.password(), PASSWORD);
+        let malformed = Response::Ok(vec![
+            "username: gateinto".to_owned(),
+            "password: abcd".to_owned(),
+        ]);
+        for reply in [
+            Ok(malformed),
+            Ok(Response::Ok(Vec::new())),
+            Ok(Response::Error(format!("password: {PASSWORD}"))),
+            Err(RequestError::NotRunning),
+            Err(RequestError::Io(io::Error::other(PASSWORD))),
+        ] {
+            assert!(reveal(3, reply).credentials.is_none());
+        }
+    }
+
+    #[test]
+    fn only_sessions_signed_in_with_session_credentials_offer_them() {
+        assert!(offers(&running(), 3));
+        assert!(!offers(&running(), 2));
+        assert!(!offers(&running(), 9));
+        assert!(!offers(&AgentState::Stopped, 3));
+        assert!(Dialog::open(&running(), 2).is_none());
+        assert!(Dialog::open(&AgentState::Stopped, 3).is_none());
+        assert_eq!(Dialog::open(&running(), 3).unwrap().id(), 3);
+    }
+
+    #[test]
+    fn a_waiting_dialog_shows_nothing_secret_and_cannot_copy() {
+        let mut dialog = Dialog::open(&running(), 3).unwrap();
+        let page = dialog.page(&running());
+        assert_eq!(page.session, "Chrome #3");
+        assert_eq!(
+            page.detail,
+            "office · proxy.example.com · sign-in dialog names 127.0.0.1:49210"
+        );
+        assert_eq!(page.note, Some(WAITING));
+        assert!(!page.ready);
+        assert_eq!(page.username, "");
+        assert_eq!(page.password, "");
+        assert_eq!(
+            page.warning,
+            "Enter these only in the browser's proxy sign-in dialog that names \
+             127.0.0.1:49210. Never enter them in a website's sign-in page or dialog."
+        );
+        assert_eq!(dialog.secret(Field::Password), None);
+        dialog.toggle();
+        assert!(!dialog.page(&running()).revealed);
+    }
+
+    #[test]
+    fn the_password_stays_masked_until_shown() {
+        let mut dialog = shown();
+        let page = dialog.page(&running());
+        assert!(page.ready);
+        assert_eq!(page.note, None);
+        assert_eq!(page.username, "gateinto");
+        assert_eq!(page.password, MASK);
+        assert!(!page.revealed);
+        dialog.toggle();
+        let page = dialog.page(&running());
+        assert_eq!(page.password, PASSWORD);
+        assert!(page.revealed);
+        dialog.toggle();
+        assert_eq!(dialog.page(&running()).password, MASK);
+    }
+
+    #[test]
+    fn copies_hand_out_the_value_and_mark_their_field() {
+        let mut dialog = shown();
+        assert_eq!(dialog.secret(Field::Username), Some("gateinto"));
+        assert_eq!(dialog.secret(Field::Password), Some(PASSWORD));
+        dialog.copied(Field::Password);
+        assert_eq!(dialog.page(&running()).copied, Some(Field::Password));
+        dialog.uncopy();
+        assert_eq!(dialog.page(&running()).copied, None);
+    }
+
+    #[test]
+    fn a_reveal_for_another_session_or_a_second_reveal_is_dropped() {
+        let mut dialog = Dialog::open(&running(), 3).unwrap();
+        dialog.receive(reveal(2, Ok(issued())));
+        assert_eq!(dialog.secret(Field::Password), None);
+        assert_eq!(dialog.page(&running()).note, Some(WAITING));
+        dialog.receive(reveal(3, Err(RequestError::NotRunning)));
+        dialog.receive(reveal(3, Ok(issued())));
+        assert_eq!(dialog.secret(Field::Password), None);
+        assert_eq!(dialog.page(&running()).note, Some(UNAVAILABLE));
+    }
+
+    #[test]
+    fn the_failure_note_is_fixed_whatever_the_agent_said() {
+        let mut dialog = Dialog::open(&running(), 3).unwrap();
+        dialog.receive(reveal(
+            3,
+            Ok(Response::Error(format!("bad password: {PASSWORD}"))),
+        ));
+        let page = dialog.page(&running());
+        assert_eq!(page.note, Some(UNAVAILABLE));
+        assert!(!page.ready);
+        assert!(!UNAVAILABLE.contains(PASSWORD));
+    }
+
+    #[test]
+    fn a_dialog_lasts_only_while_its_session_does() {
+        let dialog = shown();
+        assert!(dialog.lasts(&running()));
+        assert!(!dialog.lasts(&AgentState::Stopped));
+        assert!(!dialog.lasts(&AgentState::Unreachable("gone".to_owned())));
+        assert!(!dialog.lasts(&AgentState::Running(vec![session(2, SessionAuth::OsUser)])));
+        let mut restarted = session(3, SessionAuth::Password);
+        restarted.started = 2_000;
+        assert!(!dialog.lasts(&AgentState::Running(vec![restarted])));
+        let mut moved = session(3, SessionAuth::Password);
+        moved.listen = "127.0.0.1:49211".parse().unwrap();
+        assert!(!dialog.lasts(&AgentState::Running(vec![moved])));
+    }
+
+    #[test]
+    fn a_profile_gateway_is_named_once_by_its_host() {
+        let mut profile = session(3, SessionAuth::Password);
+        profile.gateway = format!("g-{}", "a".repeat(62));
+        let state = AgentState::Running(vec![profile]);
+        let dialog = Dialog::open(&state, 3).unwrap();
+        assert_eq!(
+            dialog.page(&state).detail,
+            "proxy.example.com · sign-in dialog names 127.0.0.1:49210"
+        );
+    }
+}

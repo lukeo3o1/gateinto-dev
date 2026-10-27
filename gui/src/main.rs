@@ -3,6 +3,7 @@
 
 mod agent;
 mod board;
+mod credentials;
 mod device;
 mod fonts;
 mod frame;

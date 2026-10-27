@@ -33,6 +33,7 @@ toml = { version = "1.1.8", default-features = false, features = ["std", "serde"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "env-filter"] }
 webpki-roots = "1.0.10"
+zeroize = "1.9.1"
 
 [target.'cfg(windows)'.dependencies]
 rustls-cng = { version = "0.7.1", default-features = false }

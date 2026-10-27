@@ -346,6 +346,7 @@ dependencies = [
  "tracing-subscriber",
  "webpki-roots",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -357,6 +358,7 @@ dependencies = [
  "windows",
  "windows-numerics",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

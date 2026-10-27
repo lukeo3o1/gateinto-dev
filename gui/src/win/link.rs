@@ -11,6 +11,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use super::device::system;
+use crate::credentials::Reveal;
 use crate::device::{self, Probe};
 use crate::gateways;
 use crate::settings;
@@ -52,10 +53,15 @@ impl Link {
         let (commands, inbox) = unbounded_channel();
         let mailbox = Arc::new(Mutex::new(Mailbox::default()));
         let shared = Arc::clone(&mailbox);
+        let secrets = Arc::clone(&mailbox);
         let window = hwnd as isize;
         let deliver = move |update| {
-            let mut mailbox = open(&shared);
-            if mailbox.put(update) {
+            if open(&shared).put(update) {
+                unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
+            }
+        };
+        let reveal = move |reveal| {
+            if open(&secrets).put_reveal(reveal) {
                 unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
             }
         };
@@ -82,7 +88,7 @@ impl Link {
                         }
                     }
                 };
-                runtime.block_on(serve(inbox, send, load, probe, deliver));
+                runtime.block_on(serve(inbox, send, load, probe, deliver, reveal));
             });
         Self { commands, mailbox }
     }
@@ -93,6 +99,10 @@ impl Link {
 
     pub fn take(&self) -> Option<Update> {
         open(&self.mailbox).take()
+    }
+
+    pub fn take_reveal(&self) -> Option<Reveal> {
+        open(&self.mailbox).take_reveal()
     }
 }
 
