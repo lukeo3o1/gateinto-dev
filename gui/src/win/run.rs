@@ -13,14 +13,13 @@ use super::sys::wide;
 use crate::settings;
 
 const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const NAME: &str = "Gateinto";
 
 fn exe() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
 fn value() -> Result<Option<String>, ()> {
-    let (key, name) = (wide(KEY), wide(NAME));
+    let (key, name) = (wide(KEY), wide(settings::RUN_VALUE));
     let mut buf: Vec<u16> = Vec::new();
     for _ in 0..4 {
         let mut size = (buf.len() * 2) as u32;
@@ -60,7 +59,7 @@ pub fn enabled() -> Result<bool, ()> {
 }
 
 pub fn set(on: bool) -> Result<(), ()> {
-    let (key, name) = (wide(KEY), wide(NAME));
+    let (key, name) = (wide(KEY), wide(settings::RUN_VALUE));
     let code = if on {
         let command = exe().as_deref().and_then(settings::command).ok_or(())?;
         let data = wide(&command);

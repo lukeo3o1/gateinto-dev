@@ -15,6 +15,7 @@ pub const SIGN_IN: &str = "Start at sign-in";
 pub const SIGN_IN_NOTE: &str = "Opens Gateinto when you sign in";
 pub const SIGN_IN_UNREAD: &str = "Could not read the sign-in setting";
 pub const SIGN_IN_FAILED: &str = "Could not change the sign-in setting";
+pub const RUN_VALUE: &str = "Gateinto App";
 pub const AGENT: &str = "Agent";
 pub const FROM_CONFIG: &str = "From the config file";
 
@@ -167,6 +168,15 @@ mod tests {
     use std::path::MAIN_SEPARATOR_STR;
 
     use super::*;
+
+    #[test]
+    fn the_sign_in_value_is_not_the_installer_agent_value() {
+        let wxs = include_str!("../../packaging/wix/gateinto.wxs");
+        let run = r#"Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Gateinto""#;
+        assert!(wxs.contains(run));
+        assert_eq!(RUN_VALUE, "Gateinto App");
+        assert!(!wxs.contains(&format!(r#"Name="{RUN_VALUE}""#)));
+    }
 
     fn parsed(text: &str) -> ConfigFile {
         ConfigFile::parse(text).unwrap()
