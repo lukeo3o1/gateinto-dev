@@ -102,9 +102,8 @@ pub struct Page {
 const PROVIDER_NOTE_TPM: &str = "Kept in this PC's TPM; the private key is hardware-protected";
 const PROVIDER_NOTE_SOFTWARE: &str =
     "Kept in software; not protected against copying by an administrator or malware";
-const DUPLICATE: &str =
-    "A software key has the same name; gateways may see either. Showing the TPM key";
-const MISSING: &str = "No device key yet. Run `gateinto key init` to create one.";
+const DUPLICATE: &str = "A software key has the same name; gateways see the TPM key shown here";
+const MISSING: &str = "No device key yet. Run `gateinto setup` to create one.";
 const READING: &str = "Reading the device key\u{2026}";
 const HARDWARE_KEY: &str = "Hardware key";
 const DEVICE_KEY: &str = "Device key";
@@ -597,12 +596,12 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_key_warns_which_one_is_shown() {
+    fn a_duplicate_key_says_gateways_see_the_tpm_key() {
         let probe = probed(present(Backend::Tpm, id(1), true));
         let card = draw(Some(&probe)).key;
         assert_eq!(
             card.note,
-            "A software key has the same name; gateways may see either. Showing the TPM key"
+            "A software key has the same name; gateways see the TPM key shown here"
         );
         assert!(card.alert);
     }
@@ -628,7 +627,7 @@ mod tests {
             card,
             KeyCard {
                 title: "Device key",
-                note: "No device key yet. Run `gateinto key init` to create one.".to_owned(),
+                note: "No device key yet. Run `gateinto setup` to create one.".to_owned(),
                 alert: true,
                 rows: vec![("Key name", "work".to_owned())],
                 copy: None,
