@@ -27,7 +27,7 @@ pub enum Command {
     Launch(GatewayName),
     Probe,
     Watch(bool),
-    Credentials(u64),
+    Credentials(u64, u64),
 }
 
 impl Command {
@@ -43,7 +43,7 @@ impl Command {
             Command::Watch(_) => {
                 return Err("watching the log is not an agent request".to_owned());
             }
-            Command::Credentials(_) => {
+            Command::Credentials(..) => {
                 return Err("credentials are revealed apart from commands".to_owned());
             }
         })
@@ -221,9 +221,9 @@ pub async fn serve<F, R>(
                         watching = on;
                         continue;
                     }
-                    Command::Credentials(id) => {
+                    Command::Credentials(id, ticket) => {
                         let reply = send(Request::Credentials(SessionId::from(id))).await;
-                        reveal(credentials::reveal(id, reply));
+                        reveal(credentials::reveal(id, ticket, reply));
                         continue;
                     }
                     Command::Close(_) | Command::Stop | Command::Launch(_) => {}
@@ -317,7 +317,7 @@ mod tests {
     async fn credentials_are_asked_once_for_the_chosen_session_and_never_by_polls() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Credentials(7)).unwrap();
+        tx.send(Command::Credentials(7, 4)).unwrap();
         let reveals = RefCell::new(Vec::new());
         let updates = RefCell::new(Vec::new());
         let run = serve(
@@ -341,7 +341,7 @@ mod tests {
         );
         let reveals = reveals.borrow();
         assert_eq!(reveals.len(), 1);
-        assert_eq!(reveals[0].id, 7);
+        assert_eq!((reveals[0].id, reveals[0].ticket), (7, 4));
         let credentials = reveals[0].credentials.as_ref().unwrap();
         assert_eq!(
             (credentials.username(), credentials.password()),
@@ -778,6 +778,7 @@ mod tests {
     fn revealed(id: u64) -> Reveal {
         Reveal {
             id,
+            ticket: 1,
             credentials: SessionCredentials::parse("gateinto", PASSWORD),
         }
     }

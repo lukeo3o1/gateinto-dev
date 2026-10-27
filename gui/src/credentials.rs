@@ -19,10 +19,11 @@ pub const HINT: &str = "Type it exactly, including the hyphens.";
 #[derive(Debug)]
 pub struct Reveal {
     pub id: u64,
+    pub ticket: u64,
     pub credentials: Option<SessionCredentials>,
 }
 
-pub fn reveal(id: u64, reply: Result<Response, RequestError>) -> Reveal {
+pub fn reveal(id: u64, ticket: u64, reply: Result<Response, RequestError>) -> Reveal {
     let credentials = match reply {
         Ok(Response::Ok(mut lines)) => {
             let credentials = ipc::issued_credentials(&lines);
@@ -35,7 +36,11 @@ pub fn reveal(id: u64, reply: Result<Response, RequestError>) -> Reveal {
         }
         Err(_) => None,
     };
-    Reveal { id, credentials }
+    Reveal {
+        id,
+        ticket,
+        credentials,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +59,7 @@ enum Secret {
 #[derive(Debug)]
 pub struct Dialog {
     id: u64,
+    ticket: u64,
     started: u64,
     listen: SocketAddr,
     secret: Secret,
@@ -85,11 +91,20 @@ pub fn offers(state: &AgentState, id: u64) -> bool {
     find(state, id).is_some_and(|session| session.auth == SessionAuth::Password)
 }
 
+pub fn deliver(dialog: Option<&mut Dialog>, reveal: Reveal) -> bool {
+    let Some(dialog) = dialog else {
+        return false;
+    };
+    dialog.receive(reveal);
+    matches!(dialog.secret, Secret::Shown(_))
+}
+
 impl Dialog {
-    pub fn open(state: &AgentState, id: u64) -> Option<Self> {
+    pub fn open(state: &AgentState, id: u64, ticket: u64) -> Option<Self> {
         let session = find(state, id).filter(|session| session.auth == SessionAuth::Password)?;
         Some(Self {
             id,
+            ticket,
             started: session.started,
             listen: session.listen,
             secret: Secret::Waiting,
@@ -103,7 +118,8 @@ impl Dialog {
     }
 
     pub fn receive(&mut self, reveal: Reveal) {
-        if reveal.id == self.id && matches!(self.secret, Secret::Waiting) {
+        let asked = reveal.id == self.id && reveal.ticket == self.ticket;
+        if asked && matches!(self.secret, Secret::Waiting) {
             self.secret = reveal.credentials.map_or(Secret::Failed, Secret::Shown);
         }
     }
@@ -223,15 +239,15 @@ mod tests {
     }
 
     fn shown() -> Dialog {
-        let mut dialog = Dialog::open(&running(), 3).unwrap();
-        dialog.receive(reveal(3, Ok(issued())));
+        let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
+        dialog.receive(reveal(3, 1, Ok(issued())));
         dialog
     }
 
     #[test]
     fn a_reveal_keeps_only_well_formed_credentials() {
-        let revealed = reveal(3, Ok(issued()));
-        assert_eq!(revealed.id, 3);
+        let revealed = reveal(3, 1, Ok(issued()));
+        assert_eq!((revealed.id, revealed.ticket), (3, 1));
         let credentials = revealed.credentials.unwrap();
         assert_eq!(credentials.username(), "gateinto");
         assert_eq!(credentials.password(), PASSWORD);
@@ -246,7 +262,7 @@ mod tests {
             Err(RequestError::NotRunning),
             Err(RequestError::Io(io::Error::other(PASSWORD))),
         ] {
-            assert!(reveal(3, reply).credentials.is_none());
+            assert!(reveal(3, 1, reply).credentials.is_none());
         }
     }
 
@@ -256,14 +272,14 @@ mod tests {
         assert!(!offers(&running(), 2));
         assert!(!offers(&running(), 9));
         assert!(!offers(&AgentState::Stopped, 3));
-        assert!(Dialog::open(&running(), 2).is_none());
-        assert!(Dialog::open(&AgentState::Stopped, 3).is_none());
-        assert_eq!(Dialog::open(&running(), 3).unwrap().id(), 3);
+        assert!(Dialog::open(&running(), 2, 1).is_none());
+        assert!(Dialog::open(&AgentState::Stopped, 3, 1).is_none());
+        assert_eq!(Dialog::open(&running(), 3, 1).unwrap().id(), 3);
     }
 
     #[test]
     fn a_waiting_dialog_shows_nothing_secret_and_cannot_copy() {
-        let mut dialog = Dialog::open(&running(), 3).unwrap();
+        let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
         let page = dialog.page(&running());
         assert_eq!(page.session, "Chrome #3");
         assert_eq!(
@@ -314,21 +330,37 @@ mod tests {
 
     #[test]
     fn a_reveal_for_another_session_or_a_second_reveal_is_dropped() {
-        let mut dialog = Dialog::open(&running(), 3).unwrap();
-        dialog.receive(reveal(2, Ok(issued())));
+        let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
+        dialog.receive(reveal(2, 1, Ok(issued())));
         assert_eq!(dialog.secret(Field::Password), None);
         assert_eq!(dialog.page(&running()).note, Some(WAITING));
-        dialog.receive(reveal(3, Err(RequestError::NotRunning)));
-        dialog.receive(reveal(3, Ok(issued())));
+        dialog.receive(reveal(3, 1, Err(RequestError::NotRunning)));
+        dialog.receive(reveal(3, 1, Ok(issued())));
         assert_eq!(dialog.secret(Field::Password), None);
         assert_eq!(dialog.page(&running()).note, Some(UNAVAILABLE));
     }
 
     #[test]
+    fn a_reveal_asked_by_an_earlier_dialog_is_dropped() {
+        let mut dialog = Dialog::open(&running(), 3, 2).unwrap();
+        assert!(!deliver(Some(&mut dialog), reveal(3, 1, Ok(issued()))));
+        assert_eq!(dialog.secret(Field::Password), None);
+        assert_eq!(dialog.page(&running()).note, Some(WAITING));
+        assert!(deliver(Some(&mut dialog), reveal(3, 2, Ok(issued()))));
+        assert_eq!(dialog.secret(Field::Password), Some(PASSWORD));
+    }
+
+    #[test]
+    fn a_reveal_arriving_after_the_dialog_closed_is_dropped() {
+        assert!(!deliver(None, reveal(3, 1, Ok(issued()))));
+    }
+
+    #[test]
     fn the_failure_note_is_fixed_whatever_the_agent_said() {
-        let mut dialog = Dialog::open(&running(), 3).unwrap();
+        let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
         dialog.receive(reveal(
             3,
+            1,
             Ok(Response::Error(format!("bad password: {PASSWORD}"))),
         ));
         let page = dialog.page(&running());
@@ -357,7 +389,7 @@ mod tests {
         let mut profile = session(3, SessionAuth::Password);
         profile.gateway = format!("g-{}", "a".repeat(62));
         let state = AgentState::Running(vec![profile]);
-        let dialog = Dialog::open(&state, 3).unwrap();
+        let dialog = Dialog::open(&state, 3, 1).unwrap();
         assert_eq!(
             dialog.page(&state).detail,
             "proxy.example.com · sign-in dialog names 127.0.0.1:49210"

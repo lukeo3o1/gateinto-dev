@@ -134,6 +134,7 @@ struct App {
     details: Option<GatewayName>,
     adding: Option<Form>,
     units: Units,
+    tickets: u64,
 }
 
 fn choose_frame() -> Frame {
@@ -171,6 +172,7 @@ impl App {
             details: None,
             adding: None,
             units: Units::default(),
+            tickets: 0,
         })
     }
 
@@ -331,14 +333,16 @@ impl App {
         let Some(update) = &self.update else {
             return;
         };
-        let Some(dialog) = Dialog::open(&update.state, id) else {
+        let ticket = self.tickets.wrapping_add(1);
+        let Some(dialog) = Dialog::open(&update.state, id, ticket) else {
             return;
         };
+        self.tickets = ticket;
         self.uncopy();
         self.details = None;
         self.adding = None;
         self.dialog = Some(dialog);
-        self.link.send(Command::Credentials(id));
+        self.link.send(Command::Credentials(id, ticket));
         self.retarget();
         self.invalidate();
     }
@@ -832,8 +836,8 @@ fn on_agent(hwnd: HWND) {
     let delivered = with_app(hwnd, |app| {
         let reveal = app.link.take_reveal();
         let revealed = reveal.is_some();
-        if let (Some(reveal), Some(dialog)) = (reveal, &mut app.dialog) {
-            dialog.receive(reveal);
+        if let Some(reveal) = reveal {
+            credentials::deliver(app.dialog.as_mut(), reveal);
         }
         let Some(update) = app.link.take() else {
             if revealed {
