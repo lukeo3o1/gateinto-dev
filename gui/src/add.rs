@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gateinto::config::GatewayName;
+use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::link::store::{LinkedStore, StoreError};
 use gateinto::link::{
     self, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, Resolution, TRUST,
@@ -25,6 +25,8 @@ const TAKEN: &str =
 const FULL: &str = "This device holds as many added gateways as it can. Remove one first.";
 const NOT_SAVED: &str = "The gateway could not be saved on this device.";
 const UNUSABLE: &str = "These values cannot be used for a gateway.";
+// The longest DNS name, a colon and a five digit port.
+const MAX_ADDRESS: usize = 253 + 1 + 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Input {
@@ -37,9 +39,9 @@ pub enum Input {
 impl Input {
     fn limit(self) -> usize {
         match self {
-            Self::Address => 261,
-            Self::Name => 64,
-            Self::Portal => 2048,
+            Self::Address => MAX_ADDRESS,
+            Self::Name => GatewayName::MAX_LEN,
+            Self::Portal => PortalUrl::MAX_LEN,
         }
     }
 }
@@ -78,12 +80,15 @@ impl Form {
     pub fn type_text(&mut self, text: &str) {
         let limit = self.focus.limit();
         let field = self.field();
-        let room = limit.saturating_sub(field.chars().count());
-        field.extend(
-            text.chars()
-                .filter(|c| !c.is_control() && !c.is_whitespace())
-                .take(room),
-        );
+        for c in text
+            .chars()
+            .filter(|c| !c.is_control() && !c.is_whitespace())
+        {
+            if field.len() + c.len_utf8() > limit {
+                break;
+            }
+            field.push(c);
+        }
     }
 
     pub fn erase(&mut self) {
@@ -433,11 +438,30 @@ mod tests {
     }
 
     #[test]
-    fn a_name_stops_at_sixty_four_characters() {
+    fn each_field_stops_at_its_byte_limit() {
+        for (input, limit) in [
+            (Input::Address, 259),
+            (Input::Name, GatewayName::MAX_LEN),
+            (Input::Portal, PortalUrl::MAX_LEN),
+        ] {
+            let mut form = Form::default();
+            form.select(input);
+            form.type_text(&"a".repeat(limit + 10));
+            assert_eq!(form.value(input).len(), limit);
+        }
+    }
+
+    #[test]
+    fn a_limit_never_splits_a_character() {
         let mut form = Form::default();
         form.select(Input::Name);
-        form.type_text(&"a".repeat(80));
-        assert_eq!(form.value(Input::Name).len(), 64);
+        form.type_text("a");
+        form.type_text(&"\u{e9}".repeat(40));
+        assert_eq!(form.value(Input::Name).len(), GatewayName::MAX_LEN - 1);
+        form.type_text("b");
+        assert_eq!(form.value(Input::Name).len(), GatewayName::MAX_LEN);
+        form.type_text("c");
+        assert_eq!(form.value(Input::Name).len(), GatewayName::MAX_LEN);
     }
 
     #[test]
