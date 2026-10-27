@@ -22,6 +22,7 @@ use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, Ses
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
 use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
+use gateinto::logbook::Logbook;
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
 use gateinto::registration;
@@ -30,6 +31,9 @@ use gateinto::tls::{self, TlsMode};
 use gateinto::uri::LaunchRequest;
 use rustls::pki_types::{ServerName, UnixTime};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -587,13 +591,19 @@ fn key_info<S: ClientIdentityStore>(store: &S, name: &KeyName, args: KeyInfoArgs
 }
 
 fn init_logging(default_filter: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
+    init_logging_into(default_filter, None);
+}
+
+fn init_logging_into(default_filter: &str, logbook: Option<&Logbook>) {
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                // Otherwise a closed stderr makes tracing-subscriber panic inside connection tasks.
+                .log_internal_errors(false),
         )
-        .with_writer(std::io::stderr)
-        // Otherwise a closed stderr makes tracing-subscriber panic inside connection tasks.
-        .log_internal_errors(false)
+        .with(logbook.map(|logbook| logbook.layer().with_filter(LevelFilter::INFO)))
         .init();
 }
 
@@ -868,7 +878,8 @@ impl Profiles for ConfigProfiles {
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
     let file = args.load()?;
-    init_logging("info");
+    let logbook = Logbook::default();
+    init_logging_into("info", Some(&logbook));
     args.log_default();
     let endpoint = Endpoint::for_current_user()?;
     let server = Server::bind(&endpoint)?;
@@ -878,6 +889,7 @@ async fn agent(args: ConfigArg) -> Result {
         browser: file.browser.executable.clone(),
         profiles_root,
         limits: AgentLimits::default(),
+        logbook,
     };
     let device_session = file.device_session.gateway.is_some();
     let profiles = ConfigProfiles {
