@@ -177,8 +177,8 @@ impl App {
             NavPage::Device => {
                 let device = update.device.as_ref();
                 let gateways = &update.gateways;
-                let page =
-                    crate::device::page(device, &update.state, gateways, failure, self.copied);
+                let (listen, state, copied) = (&update.listen, &update.state, self.copied);
+                let page = crate::device::page(device, listen, state, gateways, failure, copied);
                 board::device::board(l, s, t, v, &page, m)
             }
             NavPage::Gateways => {

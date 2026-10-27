@@ -63,7 +63,6 @@ pub struct System {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Probe {
     pub key: KeyState,
-    pub listen: Result<SocketAddr, String>,
     pub system: System,
 }
 
@@ -223,14 +222,14 @@ fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
     }
 }
 
-fn computer(probe: &Probe, state: &AgentState) -> Computer {
+fn computer(probe: &Probe, listen: &Result<SocketAddr, String>, state: &AgentState) -> Computer {
     let system = &probe.system;
     let rows = os(system)
         .map(|os| ("System", os))
         .into_iter()
         .chain([
             ("Gateinto", VERSION.to_owned()),
-            ("Agent", exposure(&probe.listen, state)),
+            ("Agent", exposure(listen, state)),
         ])
         .collect();
     Computer {
@@ -267,22 +266,22 @@ pub fn probe<S: KeyStore>(
     store: impl FnOnce() -> Result<S, UnsupportedPlatform>,
     system: System,
 ) -> Probe {
-    let (key, listen) = match file {
-        Ok(file) => (
-            key(store(), &file.device_key.settings().name),
-            Ok(file.device_session.listen.unwrap_or(DEFAULT_LISTEN)),
-        ),
-        Err(error) => (KeyState::Failed(error.clone()), Err(error.clone())),
+    let key = match file {
+        Ok(file) => key(store(), &file.device_key.settings().name),
+        Err(error) => KeyState::Failed(error.clone()),
     };
-    Probe {
-        key,
-        listen,
-        system,
-    }
+    Probe { key, system }
+}
+
+pub fn configured_listen(file: &Result<ConfigFile, String>) -> Result<SocketAddr, String> {
+    file.as_ref()
+        .map(|file| file.device_session.listen.unwrap_or(DEFAULT_LISTEN))
+        .map_err(Clone::clone)
 }
 
 pub fn page(
     probe: Option<&Probe>,
+    listen: &Result<SocketAddr, String>,
     state: &AgentState,
     listing: &Result<Known, String>,
     failure: Option<&str>,
@@ -292,7 +291,7 @@ pub fn page(
         subtitle: failure.unwrap_or(SUBTITLE).to_owned(),
         failed: failure.is_some(),
         key: key_card(probe.map(|probe| &probe.key), copied),
-        computer: probe.map(|probe| computer(probe, state)),
+        computer: probe.map(|probe| computer(probe, listen, state)),
         gateways: gateways(listing),
     }
 }
@@ -562,7 +561,6 @@ mod tests {
     fn probed(key: KeyState) -> Probe {
         Probe {
             key,
-            listen: listen("127.0.0.1:18736"),
             system: system(),
         }
     }
@@ -579,7 +577,18 @@ mod tests {
     }
 
     fn draw(probe: Option<&Probe>) -> Page {
-        page(probe, &AgentState::Stopped, &known(Vec::new()), None, false)
+        page(
+            probe,
+            &loopback(),
+            &AgentState::Stopped,
+            &known(Vec::new()),
+            None,
+            false,
+        )
+    }
+
+    fn loopback() -> Result<SocketAddr, String> {
+        listen("127.0.0.1:18736")
     }
 
     #[test]
@@ -643,6 +652,7 @@ mod tests {
         let probe = probed(tpm());
         let page = page(
             Some(&probe),
+            &loopback(),
             &AgentState::Stopped,
             &known(Vec::new()),
             None,
@@ -733,10 +743,35 @@ mod tests {
     fn the_agent_row_follows_the_running_sessions() {
         let probe = probed(tpm());
         let running = AgentState::Running(vec![session("0.0.0.0:8080")]);
-        let page = page(Some(&probe), &running, &known(Vec::new()), None, false);
+        let page = page(
+            Some(&probe),
+            &loopback(),
+            &running,
+            &known(Vec::new()),
+            None,
+            false,
+        );
         assert_eq!(
             page.computer.unwrap().rows[2],
             ("Agent", "Open to the network on 0.0.0.0:8080".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_agent_row_follows_the_listen_setting_read_with_each_poll() {
+        let probe = probed(tpm());
+        let open = listen("0.0.0.0:9000");
+        let page = page(
+            Some(&probe),
+            &open,
+            &AgentState::Stopped,
+            &known(Vec::new()),
+            None,
+            false,
+        );
+        assert_eq!(
+            page.computer.unwrap().rows[2],
+            ("Agent", "Open to the network on 0.0.0.0:9000".to_owned())
         );
     }
 
@@ -756,7 +791,14 @@ mod tests {
             gateway("office", "proxy.example.com", 443, Source::Config),
             gateway("lab", "lab.example", 8443, Source::Linked),
         ]);
-        let page = page(None, &AgentState::Stopped, &listing, None, false);
+        let page = page(
+            None,
+            &loopback(),
+            &AgentState::Stopped,
+            &listing,
+            None,
+            false,
+        );
         assert_eq!(
             page.gateways,
             Ok(vec![
@@ -777,7 +819,14 @@ mod tests {
     #[test]
     fn a_broken_gateway_listing_shows_its_first_line() {
         let listing = Err("config file c.toml: bad\n  |".to_owned());
-        let page = page(None, &AgentState::Stopped, &listing, None, false);
+        let page = page(
+            None,
+            &loopback(),
+            &AgentState::Stopped,
+            &listing,
+            None,
+            false,
+        );
         assert_eq!(page.gateways, Err("config file c.toml: bad".to_owned()));
     }
 
@@ -785,6 +834,7 @@ mod tests {
     fn a_failure_replaces_the_subtitle() {
         let page = page(
             None,
+            &loopback(),
             &AgentState::Stopped,
             &known(Vec::new()),
             Some("Could not copy the device ID"),
@@ -798,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_reads_the_configured_key_name_and_listen_address() {
+    fn a_probe_reads_the_configured_key_name() {
         let file = ConfigFile::parse(
             "[device_key]\nname = \"work\"\n[device_session]\nlisten = \"0.0.0.0:9000\"\n",
         )
@@ -812,10 +862,10 @@ mod tests {
             found,
             Probe {
                 key: KeyState::Missing("work".parse().unwrap()),
-                listen: listen("0.0.0.0:9000"),
                 system: system(),
             }
         );
+        assert_eq!(configured_listen(&file), listen("0.0.0.0:9000"));
     }
 
     #[test]
@@ -826,7 +876,10 @@ mod tests {
             System::default(),
         );
         assert_eq!(found.key, tpm());
-        assert_eq!(found.listen, Ok(gateinto::proxy::DEFAULT_LISTEN));
+        assert_eq!(
+            configured_listen(&Ok(ConfigFile::default())),
+            Ok(DEFAULT_LISTEN)
+        );
     }
 
     #[test]
@@ -837,6 +890,9 @@ mod tests {
             found.key,
             KeyState::Failed("config file c.toml: bad".to_owned())
         );
-        assert_eq!(found.listen, broken.map(|_| unreachable!()));
+        assert_eq!(
+            configured_listen(&broken),
+            Err("config file c.toml: bad".to_owned())
+        );
     }
 }

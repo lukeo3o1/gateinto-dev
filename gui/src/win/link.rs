@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use gateinto::browser::find_browser;
 use gateinto::config;
 use gateinto::ipc::{self, Endpoint, Request, RequestError};
-use gateinto::link::{Known, store};
+use gateinto::link::store;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use windows_sys::Win32::Foundation::HWND;
@@ -14,8 +14,8 @@ use super::device::system;
 use crate::agent::AgentState;
 use crate::device::{self, Probe};
 use crate::gateways;
-use crate::settings::{self, Agent};
-use crate::worker::{Command, Mailbox, Update, serve};
+use crate::settings;
+use crate::worker::{Command, Loaded, Mailbox, Update, serve};
 
 pub const WM_AGENT: u32 = WM_APP;
 
@@ -28,14 +28,19 @@ fn open(mailbox: &Mutex<Mailbox>) -> MutexGuard<'_, Mailbox> {
     mailbox.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn load() -> (Result<Known, String>, Result<Agent, String>) {
+fn load() -> Loaded {
     let file = gateways::read(config::default_path());
     let known = file
         .as_ref()
         .map(|file| gateways::catalog(file, store::default_dir()))
         .map_err(Clone::clone);
+    let listen = device::configured_listen(&file);
     let agent = file.map(|file| settings::agent(&file, || find_browser(None).ok()));
-    (known, agent)
+    Loaded {
+        gateways: known,
+        agent,
+        listen,
+    }
 }
 
 fn probe() -> Probe {
@@ -61,11 +66,16 @@ impl Link {
                 let runtime = match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        let (gateways, agent) = load();
+                        let Loaded {
+                            gateways,
+                            agent,
+                            listen,
+                        } = load();
                         deliver(Update {
                             state: AgentState::Unreachable(error.to_string()),
                             gateways,
                             agent,
+                            listen,
                             failure: None,
                             launched: 0,
                             device: None,
