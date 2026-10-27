@@ -34,10 +34,15 @@ fn load() -> Loaded {
         .as_ref()
         .map(|file| gateways::catalog(file, store::default_dir()))
         .map_err(Clone::clone);
+    let sections = file
+        .as_ref()
+        .map(|file| file.gateways.clone())
+        .unwrap_or_default();
     let listen = device::configured_listen(&file);
     let agent = file.map(|file| settings::agent(&file, || find_browser(None).ok()));
     Loaded {
         gateways: known,
+        sections,
         agent,
         listen,
     }

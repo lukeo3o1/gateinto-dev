@@ -97,6 +97,7 @@ impl<M: Measure> Painter<'_, M> {
 
         self.eyes(sessions, row);
         self.start(button, START, Zone::StartBrowser(index), launch);
+        self.target(card, Zone::GatewayCard(index));
     }
 
     fn eyes(&mut self, col: Rect, row: &Row) {
@@ -270,7 +271,9 @@ mod tests {
             b.targets,
             [
                 (Rect::new(849, FIRST + 20, 143, 32), Zone::StartBrowser(0)),
+                (Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0)),
                 (Rect::new(849, FIRST + 102, 143, 32), Zone::StartBrowser(1)),
+                (Rect::new(248, FIRST + 82, 764, 72), Zone::GatewayCard(1)),
             ]
         );
     }
@@ -300,7 +303,10 @@ mod tests {
         let mut v = view();
         v.pointer.moved(Zone::StartBrowser(0));
         let b = board(&layout(), S, &T, &v, &page, &Chars);
-        assert!(b.targets.is_empty());
+        assert_eq!(
+            b.targets,
+            [(Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0))]
+        );
         assert_eq!(
             button(&b.ops),
             [
@@ -411,9 +417,10 @@ mod tests {
     fn scrolled_targets_are_clipped_to_the_viewport() {
         let b = board(&layout(), S, &T, &scrolled(110), &nine(false), &Chars);
         assert_eq!(
-            b.targets[..2],
+            b.targets[..3],
             [
                 (Rect::new(849, FIRST, 143, 24), Zone::StartBrowser(1)),
+                (Rect::new(248, FIRST, 764, 44), Zone::GatewayCard(1)),
                 (Rect::new(849, 190, 143, 32), Zone::StartBrowser(2)),
             ]
         );

@@ -13,6 +13,7 @@ pub enum Action {
     Revoke(u64),
     More(u64),
     StartBrowser(usize),
+    GatewayDetails(usize),
     OpenPicker,
     Choose(usize),
     OpenConfig,
@@ -49,6 +50,7 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::Revoke(id) => Some(Action::Revoke(id)),
         Zone::More(id) => Some(Action::More(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
+        Zone::GatewayCard(row) => Some(Action::GatewayDetails(row)),
         Zone::Picker => Some(Action::OpenPicker),
         Zone::Entry(i) => Some(Action::Choose(i)),
         Zone::OpenConfig => Some(Action::OpenConfig),
@@ -105,7 +107,10 @@ impl Pointer {
     }
 
     pub fn gateways_changed(&mut self) -> bool {
-        matches!(self.pressed, Some(Zone::StartBrowser(_))) && self.cancel()
+        matches!(
+            self.pressed,
+            Some(Zone::StartBrowser(_) | Zone::GatewayCard(_))
+        ) && self.cancel()
     }
 
     pub fn entries_changed(&mut self) -> bool {
@@ -231,6 +236,17 @@ mod tests {
         p.down(Zone::Revoke(4));
         assert!(!p.gateways_changed());
         assert_eq!(p.up(Zone::Revoke(4)), Some(Action::Revoke(4)));
+    }
+
+    #[test]
+    fn a_gateway_card_opens_its_details_until_the_list_changes() {
+        let mut p = Pointer::default();
+        assert!(p.moved(Zone::GatewayCard(1)));
+        p.down(Zone::GatewayCard(1));
+        assert_eq!(p.up(Zone::GatewayCard(1)), Some(Action::GatewayDetails(1)));
+        p.down(Zone::GatewayCard(1));
+        assert!(p.gateways_changed());
+        assert_eq!(p.up(Zone::GatewayCard(1)), None);
     }
 
     #[test]

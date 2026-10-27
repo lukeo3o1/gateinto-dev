@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use super::{Board, Painter};
 use crate::credentials::{Field, HINT, Page, SUBTITLE};
 use crate::fonts::{Font, Measure};
+use crate::gateways::Details;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
@@ -221,6 +222,52 @@ pub fn credentials(
     });
 }
 
+const FACT: f32 = 26.0;
+const KEY_W: f32 = 150.0;
+
+pub fn gateway(
+    board: &mut Board,
+    l: &Layout,
+    s: Scale,
+    t: &Theme,
+    v: &View,
+    details: &Details,
+    m: &impl Measure,
+) {
+    let w = width(l, s);
+    let (line, gap, fact) = (s.px(18.0), s.px(GAP), s.px(FACT));
+    let body = s.px(30.0) + line + gap + details.facts.len() as i32 * fact;
+    let mut modal = Modal::open(l, s, t, v, m, body);
+    let inner = modal.inner;
+    let p = &mut modal.p;
+    let x = inner.x;
+    p.text(
+        Font::Title,
+        details.title.clone(),
+        Rect::new(x, inner.y, w, s.px(28.0)),
+        t.text,
+    );
+    let mut y = inner.y + s.px(30.0);
+    p.text(
+        Font::Body,
+        details.address.clone(),
+        Rect::new(x, y, w, line),
+        t.muted,
+    );
+    y += line + gap;
+    let key_w = s.px(KEY_W);
+    for (key, value) in &details.facts {
+        p.text(Font::Body, *key, Rect::new(x, y, key_w, fact), t.muted);
+        let r = Rect::new(x + key_w, y, w - key_w, fact);
+        p.text(Font::BodyStrong, value.clone(), r, t.text);
+        y += fact;
+    }
+    modal.close(board, |p, footer| {
+        let close = p.close_rect(footer);
+        p.primary(close, CLOSE, Zone::CloseDialog);
+    });
+}
+
 impl<M: Measure> Painter<'_, M> {
     fn session(&mut self, r: Rect, page: &Page) {
         let (s, t) = (self.s, self.t);
@@ -299,16 +346,20 @@ impl<M: Measure> Painter<'_, M> {
         );
     }
 
-    fn footer_buttons(&mut self, footer: Rect, revoke: Zone, close: Zone) {
+    fn close_rect(&self, footer: Rect) -> Rect {
         let s = self.s;
         let h = s.px(32.0);
         let y = footer.y + (footer.h - h) / 2;
-        let pad = s.px(14.0);
-        let close_w = 2 * pad + self.m.width(Font::BodyStrong, CLOSE);
-        let close_r = Rect::new(footer.right() - s.px(24.0) - close_w, y, close_w, h);
-        let revoke_w = 2 * pad + s.px(24.0) + self.m.width(Font::BodyStrong, REVOKE);
-        let revoke_r = Rect::new(close_r.x - s.px(8.0) - revoke_w, y, revoke_w, h);
-        self.outlined(revoke_r, icons::POWER, REVOKE, revoke);
+        let w = 2 * s.px(14.0) + self.m.width(Font::BodyStrong, CLOSE);
+        Rect::new(footer.right() - s.px(24.0) - w, y, w, h)
+    }
+
+    fn footer_buttons(&mut self, footer: Rect, revoke: Zone, close: Zone) {
+        let s = self.s;
+        let close_r = self.close_rect(footer);
+        let w = 2 * s.px(14.0) + s.px(24.0) + self.m.width(Font::BodyStrong, REVOKE);
+        let r = Rect::new(close_r.x - s.px(8.0) - w, close_r.y, w, close_r.h);
+        self.outlined(r, icons::POWER, REVOKE, revoke);
         self.primary(close_r, CLOSE, close);
     }
 }
@@ -318,6 +369,7 @@ mod tests {
     use super::*;
     use crate::board::tests::{Chars, layout};
     use crate::credentials::{Field, MASK, Page, UNAVAILABLE, WAITING};
+    use crate::gateways::Details;
     use crate::hit::Zone;
     use crate::layout::Rect;
     use crate::scale::Scale;
@@ -478,5 +530,87 @@ mod tests {
         let footer = board.targets[3].0;
         assert_eq!(board.targets[2].1, Zone::CopyCredential(Field::Password));
         assert!(field.bottom() + 100 < footer.y, "{field:?} {footer:?}");
+    }
+
+    fn gateway_details() -> Details {
+        Details {
+            title: "office".to_owned(),
+            address: "proxy.example.com:8443".to_owned(),
+            facts: vec![
+                ("Name", "office".to_owned()),
+                ("Host", "proxy.example.com".to_owned()),
+                ("Port", "8443".to_owned()),
+                ("Server name", "edge.example.com".to_owned()),
+                ("Source", "Config file".to_owned()),
+                ("Route", "Gateway and Mixed".to_owned()),
+                ("Portal page", "https://portal.example.com/".to_owned()),
+                ("TLS mode", "Hybrid required".to_owned()),
+                ("Client certificate", "Required, self-signed".to_owned()),
+                ("Active sessions", "2 sessions".to_owned()),
+            ],
+        }
+    }
+
+    #[test]
+    fn gateway_details_list_every_fact_and_offer_only_close() {
+        let details = gateway_details();
+        let mut board = Board {
+            targets: vec![(Rect::new(900, 300, 32, 32), Zone::Revoke(3))],
+            ..Board::default()
+        };
+        gateway(
+            &mut board,
+            &layout(),
+            S,
+            &T,
+            &View::default(),
+            &details,
+            &Chars,
+        );
+        assert_eq!(zones(&board), [Zone::CloseDialog, Zone::Dialog]);
+        let texts = texts(&board);
+        for part in ["office", "proxy.example.com:8443", "Close"] {
+            assert!(texts.iter().any(|t| t == part), "{part}");
+        }
+        for (key, value) in &details.facts {
+            let at = texts.iter().position(|t| t == key).unwrap();
+            assert_eq!(&texts[at + 1], value);
+        }
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("Remove") || t.contains("Forget"))
+        );
+    }
+
+    #[test]
+    fn gateway_details_fit_a_window_of_the_minimum_size() {
+        let (w, h) = crate::layout::Layout::min_size(S);
+        let l = crate::layout::Layout::new(w, h, S, true);
+        let mut board = Board::default();
+        gateway(
+            &mut board,
+            &l,
+            S,
+            &T,
+            &View::default(),
+            &gateway_details(),
+            &Chars,
+        );
+        let panel = board.targets.last().unwrap().0;
+        assert!(
+            panel.y >= l.caption_row.bottom() && panel.bottom() <= h,
+            "{panel:?}"
+        );
+        let last = board
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, text, r, _) if text == "2 sessions" => Some(*r),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert!(last.bottom() <= board.targets[0].0.y, "{last:?}");
     }
 }

@@ -2,7 +2,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use gateinto::config::GatewayName;
+use gateinto::config::{GatewayName, Gateways};
 use gateinto::ipc::{self, Request, RequestError, Response};
 use gateinto::link::Known;
 use gateinto::sessions::SessionId;
@@ -53,6 +53,7 @@ impl Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Loaded {
     pub gateways: Result<Known, String>,
+    pub sections: Gateways,
     pub agent: Result<Agent, String>,
     pub listen: Result<SocketAddr, String>,
 }
@@ -61,6 +62,7 @@ pub struct Loaded {
 pub struct Update {
     pub state: AgentState,
     pub gateways: Result<Known, String>,
+    pub sections: Gateways,
     pub agent: Result<Agent, String>,
     pub listen: Result<SocketAddr, String>,
     pub failure: Option<String>,
@@ -114,6 +116,7 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
     Update {
         state: AgentState::Unreachable(error.clone()),
         gateways: loaded.gateways,
+        sections: loaded.sections,
         agent: loaded.agent,
         listen: loaded.listen,
         failure: None,
@@ -188,12 +191,14 @@ pub async fn serve<F, R>(
         }
         let Loaded {
             gateways,
+            sections,
             agent,
             listen,
         } = load();
         deliver(Update {
             state,
             gateways,
+            sections,
             agent,
             listen,
             failure: failure.take(),
@@ -239,6 +244,7 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
     use tokio::time::timeout;
 
+    use gateinto::config::ConfigFile;
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
     use gateinto::ipc::{LogEvent, LogLevel, LogPage};
@@ -262,6 +268,7 @@ mod tests {
         Update {
             state: AgentState::Running(Vec::new()),
             gateways: Ok(Known::default()),
+            sections: Gateways::default(),
             agent: Ok(Agent::default()),
             listen: Ok(DEFAULT_LISTEN),
             failure: failure.map(str::to_owned),
@@ -274,6 +281,7 @@ mod tests {
     fn loaded() -> Loaded {
         Loaded {
             gateways: Ok(Known::default()),
+            sections: Gateways::default(),
             agent: Ok(Agent::default()),
             listen: Ok(DEFAULT_LISTEN),
         }
@@ -458,6 +466,9 @@ mod tests {
         let reads = RefCell::new(0);
         let read = |n: u32| Loaded {
             gateways: Err(format!("gateways {n}")),
+            sections: ConfigFile::parse(&format!("[gateways.g{n}]\nhost = \"h{n}\"\n"))
+                .unwrap()
+                .gateways,
             agent: Err(format!("agent {n}")),
             listen: Err(format!("listen {n}")),
         };
@@ -474,6 +485,7 @@ mod tests {
             |u| {
                 updates.push(Loaded {
                     gateways: u.gateways,
+                    sections: u.sections,
                     agent: u.agent,
                     listen: u.listen,
                 })

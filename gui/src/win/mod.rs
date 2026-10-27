@@ -38,7 +38,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use gateinto::clock::unix_now;
-use gateinto::config;
+use gateinto::config::{self, GatewayName};
 
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
@@ -128,6 +128,7 @@ struct App {
     filter: Filter,
     log: log::Body,
     dialog: Option<Dialog>,
+    details: Option<GatewayName>,
 }
 
 fn choose_frame() -> Frame {
@@ -162,6 +163,7 @@ impl App {
             filter: Filter::default(),
             log: log::Body::Rows(Vec::new()),
             dialog: None,
+            details: None,
         })
     }
 
@@ -214,6 +216,9 @@ impl App {
             let page = dialog.page(&update.state);
             board::dialog::credentials(&mut board, l, s, t, v, &page, m);
         }
+        if let Some(details) = self.gateway_details() {
+            board::dialog::gateway(&mut board, l, s, t, v, &details, m);
+        }
         board
     }
 
@@ -250,6 +255,15 @@ impl App {
         board.ops
     }
 
+    fn gateway_details(&self) -> Option<gateways::Details> {
+        let (update, name) = (self.update.as_ref()?, self.details.as_ref()?);
+        gateways::details(&update.gateways, &update.sections, &update.state, name)
+    }
+
+    fn modal(&self) -> bool {
+        self.dialog.is_some() || self.details.is_some()
+    }
+
     fn portal(&self, id: u64) -> Option<String> {
         let update = self.update.as_ref()?;
         menu::portal(&update.gateways, &update.state, id).map(str::to_owned)
@@ -266,6 +280,7 @@ impl App {
         let before = self.view.nav.selected();
         if self.view.nav.select(page) {
             self.dialog = None;
+            self.details = None;
             self.relog();
             if self.copied {
                 self.uncopy();
@@ -308,13 +323,47 @@ impl App {
             return;
         };
         self.uncopy();
+        self.details = None;
         self.dialog = Some(dialog);
         self.link.send(Command::Credentials(id));
         self.retarget();
         self.invalidate();
     }
 
+    fn show_gateway(&mut self, name: GatewayName) {
+        self.close_dialog();
+        self.details = Some(name);
+        if self.gateway_details().is_none() {
+            self.details = None;
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn gateway_row(&mut self, row: usize) {
+        let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
+        if let Some(name) = names.unwrap_or_default().get(row) {
+            self.show_gateway(name.clone());
+        }
+    }
+
+    fn session_gateway(&mut self, id: u64) {
+        let name = self
+            .update
+            .as_ref()
+            .and_then(|u| menu::gateway(&u.gateways, &u.state, id));
+        match name {
+            Some(name) => self.show_gateway(name),
+            None => self.select(NavPage::Gateways),
+        }
+    }
+
     fn close_dialog(&mut self) -> bool {
+        if self.details.take().is_some() {
+            self.retarget();
+            self.invalidate();
+            return true;
+        }
         if self.dialog.take().is_none() {
             return false;
         }
@@ -457,7 +506,7 @@ impl App {
             .frame
             .top_resize_band(self.view.maximized, self.frame_y());
         match hit(&self.layout, x, y, band, &self.targets) {
-            Zone::Nav(_) if self.dialog.is_some() => Zone::Client,
+            Zone::Nav(_) if self.modal() => Zone::Client,
             zone => zone,
         }
     }
@@ -532,6 +581,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::Revoke(_)
         | Zone::More(_)
         | Zone::StartBrowser(_)
+        | Zone::GatewayCard(_)
         | Zone::Picker
         | Zone::Entry(_)
         | Zone::OpenConfig
@@ -577,6 +627,11 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             with_app(hwnd, |app| app.launch(row));
             return;
         }
+        Some(Action::GatewayDetails(row)) => {
+            with_app(hwnd, |app| app.gateway_row(row));
+            rehover(hwnd);
+            return;
+        }
         Some(Action::OpenPicker) => {
             with_app(hwnd, |app| app.open(Popup::Picker));
             rehover(hwnd);
@@ -593,7 +648,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 app.dismiss();
                 match choice {
                     Some(Choice::Launch(row)) => app.launch(row),
-                    Some(Choice::Details) => app.select(NavPage::Gateways),
+                    Some(Choice::Details(id)) => app.session_gateway(id),
                     Some(Choice::Portal(id)) => return app.portal(id),
                     Some(Choice::Credentials(id)) => app.reveal(id),
                     None => {}
@@ -719,6 +774,9 @@ fn on_agent(hwnd: HWND) {
             app.close_dialog();
         }
         app.update = Some(update);
+        if app.details.is_some() && app.gateway_details().is_none() {
+            app.details = None;
+        }
         app.relog();
         if pinned {
             app.view.scroll.set(NavPage::Log, i32::MAX);
@@ -868,7 +926,7 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     let delta = i32::from((wp >> 16) as u16 as i16);
     let lines = sys::wheel_lines();
     let moved = with_app(hwnd, |app| {
-        if app.dialog.is_some() {
+        if app.modal() {
             return false;
         }
         let open = app.view.popup.is_some();

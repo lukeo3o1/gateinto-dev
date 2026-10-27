@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use gateinto::link::Known;
+use gateinto::config::GatewayName;
+use gateinto::link::{Known, KnownGateway};
 
 use crate::agent::AgentState;
 use crate::credentials;
@@ -23,7 +24,7 @@ pub enum Popup {
 pub enum Choice {
     Launch(usize),
     Portal(u64),
-    Details,
+    Details(u64),
     Credentials(u64),
 }
 
@@ -71,7 +72,7 @@ pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> 
     let details = Entry {
         icon: icons::GATEWAYS,
         label: "Gateway details".into(),
-        choice: Some(Choice::Details),
+        choice: Some(Choice::Details(id)),
     };
     credentials
         .into_iter()
@@ -85,6 +86,26 @@ pub fn portal<'a>(
     state: &AgentState,
     id: u64,
 ) -> Option<&'a str> {
+    listed(listing, state, id)?
+        .portal_url
+        .as_ref()
+        .map(|url| url.as_str())
+        .filter(|url| https(url))
+}
+
+pub fn gateway(
+    listing: &Result<Known, String>,
+    state: &AgentState,
+    id: u64,
+) -> Option<GatewayName> {
+    listed(listing, state, id).map(|gateway| gateway.name.clone())
+}
+
+fn listed<'a>(
+    listing: &'a Result<Known, String>,
+    state: &AgentState,
+    id: u64,
+) -> Option<&'a KnownGateway> {
     let AgentState::Running(sessions) = state else {
         return None;
     };
@@ -94,11 +115,7 @@ pub fn portal<'a>(
         .ok()?
         .gateways
         .iter()
-        .find(|gateway| gateway.name.as_str() == session.gateway)?
-        .portal_url
-        .as_ref()
-        .map(|url| url.as_str())
-        .filter(|url| https(url))
+        .find(|gateway| gateway.name.as_str() == session.gateway)
 }
 
 pub fn opened(code: isize) -> bool {
@@ -222,11 +239,11 @@ mod tests {
         }
     }
 
-    fn details() -> Entry {
+    fn details(id: u64) -> Entry {
         Entry {
             icon: icons::GATEWAYS,
             label: "Gateway details".into(),
-            choice: Some(Choice::Details),
+            choice: Some(Choice::Details(id)),
         }
     }
 
@@ -245,7 +262,7 @@ mod tests {
             label: "Open portal page".into(),
             choice: Some(Choice::Portal(3)),
         };
-        assert_eq!(session(&listing, &running(), 3), [portal, details()]);
+        assert_eq!(session(&listing, &running(), 3), [portal, details(3)]);
         assert_eq!(
             super::portal(&listing, &running(), 3),
             Some("https://portal.example.com/start")
@@ -255,7 +272,7 @@ mod tests {
     #[test]
     fn without_a_known_portal_the_session_menu_only_has_details() {
         let listing = known(vec![gateway("lab", "lab.example.com")]);
-        assert_eq!(session(&listing, &running(), 4), [details()]);
+        assert_eq!(session(&listing, &running(), 4), [details(4)]);
         assert_eq!(super::portal(&listing, &running(), 4), None);
         let elsewhere = known(vec![with_portal("lab", "https://lab.example.com/")]);
         assert_eq!(super::portal(&elsewhere, &running(), 3), None);
@@ -263,8 +280,21 @@ mod tests {
         assert_eq!(super::portal(&elsewhere, &AgentState::Stopped, 4), None);
         assert_eq!(
             session(&Err("broken".to_owned()), &running(), 4),
-            [details()]
+            [details(4)]
         );
+    }
+
+    #[test]
+    fn gateway_details_resolve_a_running_session_to_its_listed_gateway() {
+        let listing = known(vec![gateway("lab", "lab.example.com")]);
+        assert_eq!(
+            super::gateway(&listing, &running(), 4),
+            Some("lab".parse().unwrap())
+        );
+        assert_eq!(super::gateway(&listing, &running(), 3), None);
+        assert_eq!(super::gateway(&listing, &running(), 9), None);
+        assert_eq!(super::gateway(&listing, &AgentState::Stopped, 4), None);
+        assert_eq!(super::gateway(&Err("x".to_owned()), &running(), 4), None);
     }
 
     #[test]
@@ -278,8 +308,8 @@ mod tests {
             label: "Show credentials".into(),
             choice: Some(Choice::Credentials(5)),
         };
-        assert_eq!(session(&listing, &state, 5), [show, details()]);
-        assert_eq!(session(&listing, &state, 4), [details()]);
+        assert_eq!(session(&listing, &state, 5), [show, details(5)]);
+        assert_eq!(session(&listing, &state, 4), [details(4)]);
     }
 
     #[test]
