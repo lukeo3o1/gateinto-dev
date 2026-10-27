@@ -258,8 +258,7 @@ impl App {
         let before = self.view.nav.selected();
         if self.view.nav.select(page) {
             if self.copied {
-                unsafe { KillTimer(self.hwnd, COPIED_TIMER) };
-                self.copied = false;
+                self.uncopy();
             }
             if (before == NavPage::Log) != (page == NavPage::Log) {
                 self.link.send(Command::Watch(page == NavPage::Log));
@@ -349,8 +348,7 @@ impl App {
             return;
         }
         self.view.scroll.set(NavPage::Log, i32::MAX);
-        self.retarget();
-        self.invalidate();
+        self.uncopy();
     }
 
     fn pinned(&self) -> bool {
