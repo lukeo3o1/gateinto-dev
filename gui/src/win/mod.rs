@@ -51,7 +51,7 @@ use crate::layout::{Layout, Rect};
 use crate::log::{self, Filter};
 use crate::menu::{self, Choice, Entry, Popup, Wheel};
 use crate::nav::Page as NavPage;
-use crate::pointer::Action;
+use crate::pointer::{self, Action};
 use crate::scale::Scale;
 use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
@@ -980,7 +980,11 @@ fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
             app.dismiss();
             return Follow::Dismissed;
         }
-        if msg == WM_LBUTTONDOWN && zone == Zone::Client && app.close_dialog() {
+        if msg == WM_LBUTTONDOWN
+            && zone == Zone::Client
+            && pointer::outside_click_closes(app.adding.is_some())
+            && app.close_dialog()
+        {
             return Follow::Dismissed;
         }
         let pointer = &mut app.view.pointer;

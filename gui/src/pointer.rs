@@ -44,6 +44,11 @@ pub struct Pointer {
     pressed: Option<Zone>,
 }
 
+// A stray click must not discard values typed into the add gateway form.
+pub fn outside_click_closes(adding: bool) -> bool {
+    !adding
+}
+
 fn action(zone: Zone) -> Option<Action> {
     match zone {
         Zone::Nav(page) => Some(Action::Select(page)),
@@ -385,5 +390,11 @@ mod tests {
             assert!(p.down(zone));
             assert_eq!(p.up(zone), Some(action));
         }
+    }
+
+    #[test]
+    fn an_outside_click_closes_every_dialog_but_add_gateway() {
+        assert!(outside_click_closes(false));
+        assert!(!outside_click_closes(true));
     }
 }
