@@ -19,6 +19,7 @@ pub enum Zone {
     Entry(usize),
     OpenConfig,
     SignIn,
+    CopyId,
     Menu,
     Client,
 }

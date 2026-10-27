@@ -15,6 +15,7 @@ pub enum Action {
     Choose(usize),
     OpenConfig,
     ToggleSignIn,
+    CopyId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,7 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::Entry(i) => Some(Action::Choose(i)),
         Zone::OpenConfig => Some(Action::OpenConfig),
         Zone::SignIn => Some(Action::ToggleSignIn),
+        Zone::CopyId => Some(Action::CopyId),
         _ => None,
     }
 }
@@ -273,6 +275,13 @@ mod tests {
         assert_eq!(p.up(Zone::OpenConfig), Some(Action::OpenConfig));
         assert!(p.down(Zone::SignIn));
         assert_eq!(p.up(Zone::SignIn), Some(Action::ToggleSignIn));
+    }
+
+    #[test]
+    fn the_device_page_copies_its_id() {
+        let mut p = Pointer::default();
+        assert!(p.down(Zone::CopyId));
+        assert_eq!(p.up(Zone::CopyId), Some(Action::CopyId));
     }
 
     #[test]
