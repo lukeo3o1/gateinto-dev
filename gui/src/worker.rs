@@ -11,9 +11,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::AgentState;
 use crate::device::{KeyState, Probe, System};
+use crate::log::Journal;
 use crate::settings::Agent;
 
 pub const POLL: Duration = Duration::from_secs(2);
+const LOG_PAGES: usize = 16;
 pub const CONFIRMATION: &str =
     "the agent asked to confirm this gateway; open its gateinto:// link to confirm it";
 
@@ -23,6 +25,7 @@ pub enum Command {
     Stop,
     Launch(GatewayName),
     Probe,
+    Watch(bool),
 }
 
 impl Command {
@@ -35,6 +38,9 @@ impl Command {
                     .map_err(|error| error.to_string())?,
             ),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
+            Command::Watch(_) => {
+                return Err("watching the log is not an agent request".to_owned());
+            }
         })
     }
 }
@@ -55,6 +61,7 @@ pub struct Update {
     pub failure: Option<String>,
     pub launched: u64,
     pub device: Option<Probe>,
+    pub log: Journal,
 }
 
 #[derive(Debug)]
@@ -99,6 +106,7 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
             key: KeyState::Failed(error),
             system: System::default(),
         }),
+        log: Journal::default(),
     }
 }
 
@@ -143,8 +151,24 @@ pub async fn serve<F, R>(
     let mut failure = None;
     let mut launched = 0;
     let mut device = None;
+    let mut watching = false;
+    let mut journal = Journal::default();
     loop {
         let state = AgentState::from_list(send(Request::List).await);
+        match state {
+            AgentState::Stopped => journal.stopped(),
+            AgentState::Running(_) if watching => {
+                for _ in 0..LOG_PAGES {
+                    let Some(request) = journal.request() else {
+                        break;
+                    };
+                    if !journal.absorb(send(request).await) {
+                        break;
+                    }
+                }
+            }
+            AgentState::Running(_) | AgentState::Unreachable(_) => {}
+        }
         let Loaded {
             gateways,
             agent,
@@ -158,13 +182,24 @@ pub async fn serve<F, R>(
             failure: failure.take(),
             launched,
             device: device.clone(),
+            log: journal.clone(),
         });
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { return };
-                if command == Command::Probe {
-                    device = Some(probe());
-                    continue;
+                match command {
+                    Command::Probe => {
+                        device = Some(probe());
+                        continue;
+                    }
+                    Command::Watch(on) => {
+                        if on && !watching {
+                            journal.reopen();
+                        }
+                        watching = on;
+                        continue;
+                    }
+                    Command::Close(_) | Command::Stop | Command::Launch(_) => {}
                 }
                 let launch = matches!(command, Command::Launch(_));
                 failure = run(command, &send).await;
@@ -184,6 +219,7 @@ mod tests {
 
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
+    use gateinto::ipc::{LogEvent, LogLevel, LogPage};
     use gateinto::proxy::DEFAULT_LISTEN;
 
     use super::*;
@@ -209,6 +245,7 @@ mod tests {
             failure: failure.map(str::to_owned),
             launched: 0,
             device: None,
+            log: Journal::default(),
         }
     }
 
@@ -390,6 +427,157 @@ mod tests {
                 Request::Deny(token.parse().unwrap()),
                 Request::List
             ]
+        );
+    }
+
+    fn logger(
+        log: &RefCell<Vec<Request>>,
+        answer: impl Fn(u64) -> Response,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Log { after } => answer(after),
+                _ => Response::Ok(Vec::new()),
+            }))
+        }
+    }
+
+    fn log_page(last: u64, seqs: std::ops::RangeInclusive<u64>) -> Response {
+        let page = LogPage {
+            last,
+            events: seqs
+                .map(|seq| LogEvent {
+                    seq,
+                    time: 0,
+                    level: LogLevel::Info,
+                    scope: "agent".to_owned(),
+                    message: format!("event {seq}"),
+                })
+                .collect(),
+        };
+        let mut lines = vec!["agent-pid: 9".to_owned()];
+        lines.extend(page.to_lines());
+        Response::Ok(lines)
+    }
+
+    fn logged(update: &Update) -> Vec<u64> {
+        update.log.events().iter().map(|event| event.seq).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_log_is_read_only_while_its_page_is_watched() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Watch(true)).unwrap();
+        let answer = |after: u64| log_page(2, after + 1..=2);
+        let mut updates = Vec::new();
+        let run = serve(rx, logger(&log, answer), loaded, unprobed, |u| {
+            updates.push(u)
+        });
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        assert_eq!(
+            *log.borrow(),
+            [
+                Request::List,
+                Request::List,
+                Request::Log { after: 0 },
+                Request::List,
+                Request::Log { after: 2 },
+            ]
+        );
+        let seen: Vec<Vec<u64>> = updates.iter().map(logged).collect();
+        assert_eq!(seen, [vec![], vec![1, 2], vec![1, 2]]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_page_left_stops_the_log_requests_and_keeps_what_was_read() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Watch(true)).unwrap();
+        tx.send(Command::Watch(false)).unwrap();
+        let answer = |after: u64| log_page(1, after + 1..=1);
+        let mut updates = Vec::new();
+        let run = serve(rx, logger(&log, answer), loaded, unprobed, |u| {
+            updates.push(u)
+        });
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        assert_eq!(
+            *log.borrow(),
+            [
+                Request::List,
+                Request::List,
+                Request::Log { after: 0 },
+                Request::List,
+                Request::List,
+            ]
+        );
+        assert_eq!(logged(updates.last().unwrap()), [1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_log_is_read_page_by_page_within_one_poll() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Watch(true)).unwrap();
+        let answer = |after: u64| log_page(5, after + 1..=(after + 2).min(5));
+        let mut updates = Vec::new();
+        let run = serve(rx, logger(&log, answer), loaded, unprobed, |u| {
+            updates.push(u)
+        });
+        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        let asked: Vec<Request> = log.borrow()[2..].to_vec();
+        assert_eq!(
+            asked,
+            [
+                Request::Log { after: 0 },
+                Request::Log { after: 2 },
+                Request::Log { after: 4 },
+            ]
+        );
+        assert_eq!(logged(&updates[1]), [1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_older_agent_is_asked_for_its_log_once_per_visit() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Watch(true)).unwrap();
+        let answer = |_| Response::Error(ipc::INVALID_REQUEST.to_owned());
+        let mut updates = Vec::new();
+        let run = serve(rx, logger(&log, answer), loaded, unprobed, |u| {
+            updates.push(u)
+        });
+        assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
+        let asked = log
+            .borrow()
+            .iter()
+            .filter(|request| matches!(request, Request::Log { .. }))
+            .count();
+        assert_eq!(asked, 1);
+        assert_eq!(
+            updates.last().unwrap().log.problem(),
+            Some(crate::log::OLDER)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_agent_is_not_asked_for_its_log() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Watch(true)).unwrap();
+        let send = |request: Request| {
+            log.borrow_mut().push(request);
+            std::future::ready(Err(RequestError::NotRunning))
+        };
+        let mut updates = Vec::new();
+        let run = serve(rx, send, loaded, unprobed, |u| updates.push(u));
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        assert!(log.borrow().iter().all(|request| *request == Request::List));
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.log == Journal::default())
         );
     }
 
