@@ -119,6 +119,51 @@ impl Form {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keyed {
+    Changed,
+    Submit,
+    Paste,
+    Ignored,
+}
+
+pub fn keyed(form: &mut Form, c: char) -> Keyed {
+    match c {
+        '\u{8}' => {
+            form.erase();
+            Keyed::Changed
+        }
+        '\r' => Keyed::Submit,
+        '\u{16}' => Keyed::Paste,
+        c if c.is_control() => Keyed::Ignored,
+        c => {
+            form.type_text(c.encode_utf8(&mut [0; 4]));
+            Keyed::Changed
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Units {
+    high: Option<u16>,
+}
+
+impl Units {
+    pub fn push(&mut self, unit: u16) -> Option<char> {
+        let high = self.high.take();
+        if (0xD800..0xDC00).contains(&unit) {
+            self.high = Some(unit);
+            return None;
+        }
+        match high {
+            Some(high) if (0xDC00..0xE000).contains(&unit) => {
+                char::decode_utf16([high, unit]).next()?.ok()
+            }
+            _ => char::from_u32(u32::from(unit)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready {
     pub gateway: LinkedGateway,
@@ -750,5 +795,31 @@ mod tests {
             None
         );
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn keys_edit_the_form_and_ask_for_submit_or_paste() {
+        let mut typed = Form::default();
+        assert_eq!(keyed(&mut typed, 'a'), Keyed::Changed);
+        assert_eq!(keyed(&mut typed, 'b'), Keyed::Changed);
+        assert_eq!(keyed(&mut typed, '\u{8}'), Keyed::Changed);
+        assert_eq!(typed.value(Input::Address), "a");
+        assert_eq!(keyed(&mut typed, '\r'), Keyed::Submit);
+        assert_eq!(keyed(&mut typed, '\u{16}'), Keyed::Paste);
+        for ignored in ['\t', '\u{1b}', '\u{7f}', '\n'] {
+            assert_eq!(keyed(&mut typed, ignored), Keyed::Ignored);
+        }
+        assert_eq!(typed.value(Input::Address), "a");
+    }
+
+    #[test]
+    fn utf16_units_join_into_characters() {
+        let mut units = Units::default();
+        assert_eq!(units.push(0x61), Some('a'));
+        assert_eq!(units.push(0xD83D), None);
+        assert_eq!(units.push(0xDE00), Some('\u{1F600}'));
+        assert_eq!(units.push(0xDE00), None);
+        assert_eq!(units.push(0xD83D), None);
+        assert_eq!(units.push(0x62), Some('b'));
     }
 }
