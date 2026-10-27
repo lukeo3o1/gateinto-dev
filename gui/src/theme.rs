@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn device_warnings_are_amber_and_readable_on_cards() {
+    fn device_warnings_use_the_amber_ink() {
         let t = Theme::LIGHT;
         assert_eq!(t.warning, Rgb(0x9a5b00));
     }
