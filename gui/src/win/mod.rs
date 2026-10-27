@@ -45,6 +45,7 @@ use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
+use crate::log::{self, Filter};
 use crate::menu::{self, Choice, Entry, Popup, Wheel};
 use crate::nav::Page as NavPage;
 use crate::pointer::Action;
@@ -123,6 +124,7 @@ struct App {
     config: String,
     sign_in: bool,
     copied: bool,
+    filter: Filter,
 }
 
 fn choose_frame() -> Frame {
@@ -154,6 +156,7 @@ impl App {
             config: config_line(),
             sign_in: false,
             copied: false,
+            filter: Filter::default(),
         })
     }
 
@@ -180,6 +183,11 @@ impl App {
                 let (listen, state, copied) = (&update.listen, &update.state, self.copied);
                 let page = crate::device::page(device, listen, state, gateways, failure, copied);
                 board::device::board(l, s, t, v, &page, m)
+            }
+            NavPage::Log => {
+                let (state, journal, offset) = (&update.state, &update.log, sys::utc_offset());
+                let page = log::page(state, journal, self.filter, offset, failure, self.copied);
+                board::log::board(l, s, t, v, &page, m)
             }
             NavPage::Gateways => {
                 let busy = self.launches.busy();
@@ -247,7 +255,18 @@ impl App {
     }
 
     fn select(&mut self, page: NavPage) {
+        let before = self.view.nav.selected();
         if self.view.nav.select(page) {
+            if self.copied {
+                unsafe { KillTimer(self.hwnd, COPIED_TIMER) };
+                self.copied = false;
+            }
+            if (before == NavPage::Log) != (page == NavPage::Log) {
+                self.link.send(Command::Watch(page == NavPage::Log));
+            }
+            if page == NavPage::Log {
+                self.view.scroll.set(page, i32::MAX);
+            }
             if page == NavPage::Settings {
                 match run::enabled() {
                     Ok(on) => self.sign_in = on,
@@ -306,6 +325,37 @@ impl App {
         }
         self.retarget();
         self.invalidate();
+    }
+
+    fn copy_log(&mut self) {
+        let Some(update) = &self.update else {
+            return;
+        };
+        let offset = sys::utc_offset();
+        let log::Body::Rows(rows) = log::body(&update.state, &update.log, self.filter, offset)
+        else {
+            return;
+        };
+        if device::copy(self.hwnd, &log::text(&rows)) {
+            self.copied = unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) } != 0;
+        } else {
+            self.fail(log::COPY_FAILED);
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn choose_filter(&mut self, filter: Filter) {
+        if std::mem::replace(&mut self.filter, filter) == filter {
+            return;
+        }
+        self.view.scroll.set(NavPage::Log, i32::MAX);
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn pinned(&self) -> bool {
+        self.view.nav.selected() == NavPage::Log && self.pane.is_none_or(|pane| pane.at_bottom())
     }
 
     fn uncopy(&mut self) {
@@ -501,6 +551,15 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             with_app(hwnd, App::copy_id);
             return;
         }
+        Some(Action::CopyLog) => {
+            with_app(hwnd, App::copy_log);
+            return;
+        }
+        Some(Action::Filter(filter)) => {
+            with_app(hwnd, |app| app.choose_filter(filter));
+            rehover(hwnd);
+            return;
+        }
         Some(Action::Minimize) => SC_MINIMIZE,
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
@@ -542,8 +601,12 @@ fn on_agent(hwnd: HWND) {
             app.view.pointer.gateways_changed();
         }
         let entries = app.entries();
+        let pinned = app.pinned();
         app.launches.settle(update.launched);
         app.update = Some(update);
+        if pinned {
+            app.view.scroll.set(NavPage::Log, i32::MAX);
+        }
         if app.entries() != entries {
             app.view.pointer.entries_changed();
         }

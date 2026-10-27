@@ -27,6 +27,7 @@ pub struct Journal {
 }
 
 impl Journal {
+    #[cfg(test)]
     pub fn events(&self) -> &VecDeque<LogEvent> {
         &self.events
     }

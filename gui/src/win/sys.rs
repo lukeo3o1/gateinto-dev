@@ -5,13 +5,14 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE, HWND, RECT,
+    SYSTEMTIME,
 };
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSY, ReleaseDC};
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Registry::{HKEY, REG_ROUTINE_FLAGS, RRF_RT_REG_SZ, RegGetValueW};
-use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, OSVERSIONINFOW};
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -19,7 +20,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNORMAL, SYSTEM_METRICS_INDEX, SetProcessDPIAware, SystemParametersInfoW,
 };
 
+use crate::log;
 use crate::menu;
+
+pub fn utc_offset() -> u64 {
+    let seconds = |t: SYSTEMTIME| {
+        u64::from(t.wHour) * 3600 + u64::from(t.wMinute) * 60 + u64::from(t.wSecond)
+    };
+    let (mut local, mut utc) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    unsafe {
+        GetLocalTime(&mut local);
+        GetSystemTime(&mut utc);
+    }
+    log::local_offset(seconds(local), seconds(utc))
+}
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
