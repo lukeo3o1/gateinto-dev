@@ -19,6 +19,8 @@ mod registry;
 pub mod session_table;
 pub mod sessions;
 #[cfg(test)]
+mod test_logs;
+#[cfg(test)]
 mod test_support;
 pub mod tls;
 #[cfg(windows)]
