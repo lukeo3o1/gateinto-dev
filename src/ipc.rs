@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn an_older_agent_rejects_a_log_request_as_invalid() {
+    fn unknown_words_are_rejected_with_the_invalid_request_message() {
         assert_eq!(
             "log 1"
                 .parse::<Request>()
