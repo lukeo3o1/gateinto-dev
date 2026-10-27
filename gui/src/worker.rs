@@ -9,6 +9,7 @@ use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::AgentState;
+use crate::device::Probe;
 use crate::settings::Agent;
 
 pub const POLL: Duration = Duration::from_secs(2);
@@ -20,6 +21,7 @@ pub enum Command {
     Close(u64),
     Stop,
     Launch(GatewayName),
+    Probe,
 }
 
 impl Command {
@@ -31,6 +33,7 @@ impl Command {
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
                     .map_err(|error| error.to_string())?,
             ),
+            Command::Probe => return Err("probing the device is not an agent request".to_owned()),
         })
     }
 }
@@ -42,6 +45,7 @@ pub struct Update {
     pub agent: Result<Agent, String>,
     pub failure: Option<String>,
     pub launched: u64,
+    pub device: Option<Probe>,
 }
 
 #[derive(Debug)]
@@ -106,6 +110,7 @@ pub async fn serve<F, R>(
     mut commands: UnboundedReceiver<Command>,
     send: F,
     mut load: impl FnMut() -> (Result<Known, String>, Result<Agent, String>),
+    mut probe: impl FnMut() -> Probe,
     mut deliver: impl FnMut(Update),
 ) where
     F: Fn(Request) -> R,
@@ -113,6 +118,7 @@ pub async fn serve<F, R>(
 {
     let mut failure = None;
     let mut launched = 0;
+    let mut device = None;
     loop {
         let state = AgentState::from_list(send(Request::List).await);
         let (gateways, agent) = load();
@@ -122,10 +128,15 @@ pub async fn serve<F, R>(
             agent,
             failure: failure.take(),
             launched,
+            device: device.clone(),
         });
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { return };
+                if command == Command::Probe {
+                    device = Some(probe());
+                    continue;
+                }
                 let launch = matches!(command, Command::Launch(_));
                 failure = run(command, &send).await;
                 launched += u64::from(launch);
@@ -144,7 +155,10 @@ mod tests {
 
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
+    use gateinto::identity::device_key::KeyName;
+
     use super::*;
+    use crate::device::{KeyState, System};
 
     fn agent(
         log: &RefCell<Vec<Request>>,
@@ -165,7 +179,48 @@ mod tests {
             agent: Ok(Agent::default()),
             failure: failure.map(str::to_owned),
             launched: 0,
+            device: None,
         }
+    }
+
+    fn unprobed() -> Probe {
+        panic!("probed the device without being asked")
+    }
+
+    fn probe(n: u32) -> Probe {
+        Probe {
+            key: KeyState::Missing(KeyName::default()),
+            listen: Err(format!("probe {n}")),
+            system: System::default(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_reads_the_device_once_and_later_polls_keep_it() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Probe).unwrap();
+        let probes = RefCell::new(0);
+        let read = || {
+            *probes.borrow_mut() += 1;
+            probe(*probes.borrow())
+        };
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            agent(&log),
+            || (Ok(Known::default()), Ok(Agent::default())),
+            read,
+            |u| updates.push(u.device),
+        );
+        assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
+        assert_eq!(
+            updates,
+            [None, Some(probe(1)), Some(probe(1)), Some(probe(1))]
+        );
+        assert_eq!(*probes.borrow(), 1);
+        assert_eq!(log.borrow().len(), 4);
+        assert!(log.borrow().iter().all(|r| *r == Request::List));
     }
 
     fn launched(update: Update) -> Update {
@@ -184,6 +239,7 @@ mod tests {
             rx,
             agent(&log),
             || (Ok(Known::default()), Ok(Agent::default())),
+            unprobed,
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
@@ -201,6 +257,7 @@ mod tests {
             rx,
             agent(&log),
             || (Ok(Known::default()), Ok(Agent::default())),
+            unprobed,
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
@@ -229,6 +286,7 @@ mod tests {
             rx,
             agent(&log),
             || (Ok(Known::default()), Ok(Agent::default())),
+            unprobed,
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_secs(10), run).await.is_ok());
@@ -246,7 +304,7 @@ mod tests {
             (Err(read.clone()), Err(read))
         };
         let mut updates = Vec::new();
-        let run = serve(rx, agent(&log), load, |u| {
+        let run = serve(rx, agent(&log), load, unprobed, |u| {
             updates.push((u.gateways, u.agent))
         });
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
@@ -282,6 +340,7 @@ mod tests {
             rx,
             launcher(&log, lines),
             || (Ok(Known::default()), Ok(Agent::default())),
+            unprobed,
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
@@ -304,6 +363,7 @@ mod tests {
             rx,
             launcher(&log, lines),
             || (Ok(Known::default()), Ok(Agent::default())),
+            unprobed,
             |u| updates.push(u),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());

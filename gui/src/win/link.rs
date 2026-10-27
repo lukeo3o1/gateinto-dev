@@ -10,7 +10,9 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
+use super::device::system;
 use crate::agent::AgentState;
+use crate::device::{self, Probe};
 use crate::gateways;
 use crate::settings::{self, Agent};
 use crate::worker::{Command, Mailbox, Update, serve};
@@ -34,6 +36,11 @@ fn load() -> (Result<Known, String>, Result<Agent, String>) {
         .map_err(Clone::clone);
     let agent = file.map(|file| settings::agent(&file, || find_browser(None).ok()));
     (known, agent)
+}
+
+fn probe() -> Probe {
+    let file = gateways::read(config::default_path());
+    device::probe(&file, gateinto::identity::system_store, system())
 }
 
 impl Link {
@@ -61,6 +68,7 @@ impl Link {
                             agent,
                             failure: None,
                             launched: 0,
+                            device: None,
                         });
                         return;
                     }
@@ -78,7 +86,7 @@ impl Link {
                         }
                     }
                 };
-                runtime.block_on(serve(inbox, send, load, deliver));
+                runtime.block_on(serve(inbox, send, load, probe, deliver));
             });
         Self { commands, mailbox }
     }

@@ -1,13 +1,16 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE, HWND, RECT,
+};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSY, ReleaseDC};
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
+use windows_sys::Win32::System::Registry::{HKEY, REG_ROUTINE_FLAGS, RRF_RT_REG_SZ, RegGetValueW};
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -20,6 +23,46 @@ use crate::menu;
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+pub fn reg_string(
+    root: HKEY,
+    key: &str,
+    name: &str,
+    flags: REG_ROUTINE_FLAGS,
+) -> Result<Option<String>, ()> {
+    let (key, name) = (wide(key), wide(name));
+    let mut buf: Vec<u16> = Vec::new();
+    for _ in 0..4 {
+        let mut size = (buf.len() * 2) as u32;
+        let data = if buf.is_empty() {
+            null_mut()
+        } else {
+            buf.as_mut_ptr().cast::<c_void>()
+        };
+        let code = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ | flags,
+                null_mut(),
+                data,
+                &mut size,
+            )
+        };
+        match code {
+            ERROR_SUCCESS if !buf.is_empty() => {
+                let text = &buf[..(size as usize / 2).min(buf.len())];
+                let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+                return Ok(Some(String::from_utf16_lossy(&text[..end])));
+            }
+            ERROR_SUCCESS | ERROR_MORE_DATA => buf = vec![0; (size as usize).div_ceil(2) + 1],
+            ERROR_FILE_NOT_FOUND | ERROR_UNSUPPORTED_TYPE => return Ok(None),
+            _ => return Err(()),
+        }
+    }
+    Err(())
 }
 
 pub fn open_https(hwnd: HWND, url: &str) -> bool {

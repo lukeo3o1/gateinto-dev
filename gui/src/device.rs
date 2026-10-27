@@ -1,8 +1,10 @@
 use std::net::SocketAddr;
 
+use gateinto::config::ConfigFile;
 use gateinto::identity::UnsupportedPlatform;
 use gateinto::identity::device_key::{self, Backend, KeyError, KeyName, KeyStore};
 use gateinto::link::{Known, Source};
+use gateinto::proxy::DEFAULT_LISTEN;
 
 use crate::agent::AgentState;
 
@@ -259,6 +261,25 @@ fn gateways(listing: &Result<Known, String>) -> Result<Vec<Gateway>, String> {
         .collect())
 }
 
+pub fn probe<S: KeyStore>(
+    file: &Result<ConfigFile, String>,
+    store: impl FnOnce() -> Result<S, UnsupportedPlatform>,
+    system: System,
+) -> Probe {
+    let (key, listen) = match file {
+        Ok(file) => (
+            key(store(), &file.device_key.settings().name),
+            Ok(file.device_session.listen.unwrap_or(DEFAULT_LISTEN)),
+        ),
+        Err(error) => (KeyState::Failed(error.clone()), Err(error.clone())),
+    };
+    Probe {
+        key,
+        listen,
+        system,
+    }
+}
+
 pub fn page(
     probe: Option<&Probe>,
     state: &AgentState,
@@ -505,7 +526,7 @@ mod tests {
         );
     }
 
-    fn probe(key: KeyState) -> Probe {
+    fn probed(key: KeyState) -> Probe {
         Probe {
             key,
             listen: listen("127.0.0.1:18736"),
@@ -530,7 +551,7 @@ mod tests {
 
     #[test]
     fn a_tpm_key_is_a_hardware_key_with_its_device_id() {
-        let probe = probe(tpm());
+        let probe = probed(tpm());
         assert_eq!(
             draw(Some(&probe)).key,
             KeyCard {
@@ -554,7 +575,7 @@ mod tests {
 
     #[test]
     fn a_software_key_is_never_called_a_hardware_key() {
-        let probe = probe(present(Backend::Software, id(2), false));
+        let probe = probed(present(Backend::Software, id(2), false));
         let card = draw(Some(&probe)).key;
         assert_eq!(card.title, "Device key");
         assert_eq!(
@@ -575,7 +596,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_key_warns_which_one_is_shown() {
-        let probe = probe(present(Backend::Tpm, id(1), true));
+        let probe = probed(present(Backend::Tpm, id(1), true));
         let card = draw(Some(&probe)).key;
         assert_eq!(
             card.note,
@@ -586,7 +607,7 @@ mod tests {
 
     #[test]
     fn copying_turns_the_button_into_a_confirmation() {
-        let probe = probe(tpm());
+        let probe = probed(tpm());
         let page = page(
             Some(&probe),
             &AgentState::Stopped,
@@ -599,7 +620,7 @@ mod tests {
 
     #[test]
     fn a_missing_key_says_how_to_create_one_without_offering_to() {
-        let probe = probe(KeyState::Missing("work".parse().unwrap()));
+        let probe = probed(KeyState::Missing("work".parse().unwrap()));
         let card = draw(Some(&probe)).key;
         assert_eq!(
             card,
@@ -616,14 +637,14 @@ mod tests {
 
     #[test]
     fn an_unreadable_or_unsupported_key_shows_why() {
-        let failed = probe(KeyState::Failed("opening failed: denied\nmore".to_owned()));
+        let failed = probed(KeyState::Failed("opening failed: denied\nmore".to_owned()));
         let card = draw(Some(&failed)).key;
         assert_eq!(
             (card.title, card.note.as_str(), card.alert, card.copy),
             ("Device key", "opening failed: denied", true, None)
         );
         assert!(card.rows.is_empty());
-        let other = probe(KeyState::Unsupported("only on Windows".to_owned()));
+        let other = probed(KeyState::Unsupported("only on Windows".to_owned()));
         assert_eq!(draw(Some(&other)).key.note, "only on Windows");
     }
 
@@ -647,7 +668,7 @@ mod tests {
 
     #[test]
     fn the_computer_card_shows_who_is_signed_in_and_how_the_agent_listens() {
-        let probe = probe(tpm());
+        let probe = probed(tpm());
         assert_eq!(
             draw(Some(&probe)).computer,
             Some(Computer {
@@ -666,7 +687,7 @@ mod tests {
     fn unknown_computer_details_are_dropped_rather_than_guessed() {
         let probe = Probe {
             system: System::default(),
-            ..probe(tpm())
+            ..probed(tpm())
         };
         let computer = draw(Some(&probe)).computer.unwrap();
         assert_eq!(computer.name, "This PC");
@@ -677,7 +698,7 @@ mod tests {
 
     #[test]
     fn the_agent_row_follows_the_running_sessions() {
-        let probe = probe(tpm());
+        let probe = probed(tpm());
         let running = AgentState::Running(vec![session("0.0.0.0:8080")]);
         let page = page(Some(&probe), &running, &known(Vec::new()), None, false);
         assert_eq!(
@@ -741,5 +762,48 @@ mod tests {
             ("Could not copy the device ID", true)
         );
         assert!(!draw(None).failed);
+    }
+
+    #[test]
+    fn a_probe_reads_the_configured_key_name_and_listen_address() {
+        let file = ConfigFile::parse(
+            "[device_key]\nname = \"work\"\n[device_session]\nlisten = \"0.0.0.0:9000\"\n",
+        )
+        .map_err(|error| error.to_string());
+        let found = probe(
+            &file,
+            || store(Err(StoreError::NotFound), Err(StoreError::NotFound)),
+            system(),
+        );
+        assert_eq!(
+            found,
+            Probe {
+                key: KeyState::Missing("work".parse().unwrap()),
+                listen: listen("0.0.0.0:9000"),
+                system: system(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_probe_without_settings_uses_the_default_key_and_listen_address() {
+        let found = probe(
+            &Ok(ConfigFile::default()),
+            || store(Ok(point(1)), Err(StoreError::NotFound)),
+            System::default(),
+        );
+        assert_eq!(found.key, tpm());
+        assert_eq!(found.listen, Ok(gateinto::proxy::DEFAULT_LISTEN));
+    }
+
+    #[test]
+    fn a_broken_config_opens_no_key() {
+        let broken = Err("config file c.toml: bad".to_owned());
+        let found = probe::<Store>(&broken, || panic!("opened the key store"), system());
+        assert_eq!(
+            found.key,
+            KeyState::Failed("config file c.toml: bad".to_owned())
+        );
+        assert_eq!(found.listen, broken.map(|_| unreachable!()));
     }
 }
