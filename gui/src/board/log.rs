@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use gateinto::ipc::LogLevel;
 
 use super::{Board, Painter, inset};
@@ -43,7 +45,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let top = tools.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
     let (pad, row_h) = (s.px(8.0), row_height(s));
-    let total = match &page.body {
+    let total = match page.body {
         Body::Rows(rows) => 2 * pad + rows.len() as i32 * row_h,
         Body::Empty(_) => s.px(56.0),
     };
@@ -51,7 +53,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let card = Rect::new(content.x, top - offset, content.w, total);
     p.framed(card, 10.0, t.card);
     let side = s.px(16.0);
-    match &page.body {
+    match page.body {
         Body::Rows(rows) => {
             let inner = Rect::new(card.x + side, card.y + pad, card.w - 2 * side, row_h);
             let columns = Columns::new(&p, inner, rows);
@@ -87,9 +89,10 @@ struct Columns {
 
 impl Columns {
     fn new<M: Measure>(p: &Painter<'_, M>, inner: Rect, rows: &[Row]) -> Self {
-        let widest = rows
-            .iter()
-            .map(|row| p.m.width(Font::Mono, &row.scope))
+        let scopes: BTreeSet<&str> = rows.iter().map(|row| row.scope.as_str()).collect();
+        let widest = scopes
+            .into_iter()
+            .map(|scope| p.m.width(Font::Mono, scope))
             .max()
             .unwrap_or(0);
         Self {
@@ -207,7 +210,7 @@ mod tests {
         ]
     }
 
-    fn page(body: Body) -> Page {
+    fn page(body: &Body) -> Page<'_> {
         let copy = matches!(body, Body::Rows(_)).then_some(COPY);
         Page {
             subtitle: SUBTITLE.to_owned(),
@@ -242,14 +245,14 @@ mod tests {
     #[test]
     fn other_pages_draw_nothing() {
         assert_eq!(
-            draw_with(&page(Body::Rows(rows())), &View::default()),
+            draw_with(&page(&Body::Rows(rows())), &View::default()),
             Board::default()
         );
     }
 
     #[test]
     fn the_subtitle_sits_under_the_title_and_the_lines_scroll_below_the_tools() {
-        let b = draw(&page(Body::Rows(rows())));
+        let b = draw(&page(&Body::Rows(rows())));
         assert_eq!(
             b.ops[..2],
             [
@@ -263,7 +266,8 @@ mod tests {
 
     #[test]
     fn a_problem_replaces_the_subtitle_as_a_warning() {
-        let mut p = page(Body::Rows(rows()));
+        let body = Body::Rows(rows());
+        let mut p = page(&body);
         p.subtitle = "Could not copy the log".to_owned();
         p.alert = true;
         assert_eq!(
@@ -279,7 +283,7 @@ mod tests {
 
     #[test]
     fn the_filter_is_a_two_part_toggle_marking_the_chosen_part() {
-        let ops = draw(&page(Body::Rows(rows()))).ops;
+        let ops = draw(&page(&Body::Rows(rows()))).ops;
         let toggle = Rect::new(248, 112, 133, 32);
         assert_eq!(
             inside(&ops, toggle),
@@ -291,7 +295,8 @@ mod tests {
                 text(Font::Body, "Warnings", Rect::new(311, 112, 56, 32), T.muted),
             ]
         );
-        let mut p = page(Body::Rows(rows()));
+        let body = Body::Rows(rows());
+        let mut p = page(&body);
         p.filter = Filter::Warnings;
         let ops = draw(&p).ops;
         let marked = inside(&ops, toggle);
@@ -317,7 +322,7 @@ mod tests {
     fn hovering_the_other_filter_tints_it() {
         let mut v = view();
         v.pointer.moved(Zone::LogFilter(Filter::Warnings));
-        let ops = draw_with(&page(Body::Rows(rows())), &v).ops;
+        let ops = draw_with(&page(&Body::Rows(rows())), &v).ops;
         assert!(ops.contains(&Op::Round(
             Rect::new(300, 115, 78, 26),
             4.0,
@@ -328,7 +333,7 @@ mod tests {
     #[test]
     fn the_filters_and_the_copy_button_are_the_targets() {
         assert_eq!(
-            draw(&page(Body::Rows(rows()))).targets,
+            draw(&page(&Body::Rows(rows()))).targets,
             [
                 (ALL, Zone::LogFilter(Filter::All)),
                 (WARNINGS, Zone::LogFilter(Filter::Warnings)),
@@ -339,7 +344,7 @@ mod tests {
 
     #[test]
     fn the_copy_button_is_outlined_and_says_when_it_copied() {
-        let ops = draw(&page(Body::Rows(rows()))).ops;
+        let ops = draw(&page(&Body::Rows(rows()))).ops;
         assert_eq!(
             inside(&ops, COPY_BUTTON),
             [
@@ -354,7 +359,8 @@ mod tests {
                 text(Font::BodyStrong, COPY, Rect::new(970, 112, 28, 32), T.text),
             ]
         );
-        let mut p = page(Body::Rows(rows()));
+        let body = Body::Rows(rows());
+        let mut p = page(&body);
         p.copy = Some(COPIED);
         let copied = draw(&p);
         assert_eq!(
@@ -365,7 +371,7 @@ mod tests {
 
     #[test]
     fn each_line_shows_time_level_scope_and_message_in_mono() {
-        let ops = draw(&page(Body::Rows(rows()))).ops;
+        let ops = draw(&page(&Body::Rows(rows()))).ops;
         let card = Rect::new(248, 158, 764, 88);
         let lines = inside(&ops, card);
         assert_eq!(
@@ -402,7 +408,7 @@ mod tests {
     #[test]
     fn long_scopes_leave_room_for_the_message() {
         let wide = "s".repeat(400);
-        let ops = draw(&page(Body::Rows(vec![row(LogLevel::Info, &wide, "m")]))).ops;
+        let ops = draw(&page(&Body::Rows(vec![row(LogLevel::Info, &wide, "m")]))).ops;
         assert!(ops.contains(&text(
             Font::Mono,
             &wide,
@@ -413,11 +419,32 @@ mod tests {
     }
 
     #[test]
+    fn each_scope_is_measured_once_however_many_lines_share_it() {
+        struct Counted(std::cell::RefCell<Vec<String>>);
+        impl Measure for Counted {
+            fn width(&self, font: Font, text: &str) -> i32 {
+                self.0.borrow_mut().push(text.to_owned());
+                Chars.width(font, text)
+            }
+        }
+        let many: Vec<Row> = rows().into_iter().cycle().take(300).collect();
+        let body = Body::Rows(many);
+        let counted = Counted(Default::default());
+        board(&layout(), S, &T, &view(), &page(&body), &counted);
+        let measured = counted.0.borrow();
+        for scope in ["agent", "session 4", "proxy"] {
+            let times = measured.iter().filter(|text| *text == scope).count();
+            assert_eq!(times, 1, "{scope}");
+        }
+    }
+
+    #[test]
     fn only_the_lines_in_view_are_drawn_and_the_last_screen_can_be_reached() {
         let many: Vec<Row> = (0..100)
             .map(|n| row(LogLevel::Info, "agent", &format!("line {n}")))
             .collect();
-        let p = page(Body::Rows(many));
+        let body = Body::Rows(many);
+        let p = page(&body);
         let messages = |b: &Board| -> Vec<String> {
             b.ops
                 .iter()
@@ -443,7 +470,7 @@ mod tests {
 
     #[test]
     fn without_lines_the_page_says_why_and_offers_nothing_to_copy() {
-        let b = draw(&page(Body::Empty(STOPPED.to_owned())));
+        let b = draw(&page(&Body::Empty(STOPPED.to_owned())));
         let card = Rect::new(248, 158, 764, 56);
         assert_eq!(
             inside(&b.ops, card),
@@ -467,7 +494,7 @@ mod tests {
         let l = Layout::new(1040, 300, S, true);
         let b = draw_on(
             &l,
-            &page(Body::Rows(rows().into_iter().cycle().take(12).collect())),
+            &page(&Body::Rows(rows().into_iter().cycle().take(12).collect())),
             &view(),
         );
         let pane = b.pane.expect("a scrolling pane");

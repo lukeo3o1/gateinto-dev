@@ -125,6 +125,7 @@ struct App {
     sign_in: bool,
     copied: bool,
     filter: Filter,
+    log: log::Body,
 }
 
 fn choose_frame() -> Frame {
@@ -157,6 +158,7 @@ impl App {
             sign_in: false,
             copied: false,
             filter: Filter::default(),
+            log: log::Body::Rows(Vec::new()),
         })
     }
 
@@ -185,8 +187,7 @@ impl App {
                 board::device::board(l, s, t, v, &page, m)
             }
             NavPage::Log => {
-                let (state, journal, offset) = (&update.state, &update.log, sys::utc_offset());
-                let page = log::page(state, journal, self.filter, offset, failure, self.copied);
+                let page = log::page(&update.log, &self.log, self.filter, failure, self.copied);
                 board::log::board(l, s, t, v, &page, m)
             }
             NavPage::Gateways => {
@@ -257,6 +258,7 @@ impl App {
     fn select(&mut self, page: NavPage) {
         let before = self.view.nav.selected();
         if self.view.nav.select(page) {
+            self.relog();
             if self.copied {
                 self.uncopy();
             }
@@ -347,8 +349,18 @@ impl App {
         if std::mem::replace(&mut self.filter, filter) == filter {
             return;
         }
+        self.relog();
         self.view.scroll.set(NavPage::Log, i32::MAX);
         self.uncopy();
+    }
+
+    fn relog(&mut self) {
+        self.log = match &self.update {
+            Some(update) if self.view.nav.selected() == NavPage::Log => {
+                log::body(&update.state, &update.log, self.filter, sys::utc_offset())
+            }
+            _ => log::Body::Rows(Vec::new()),
+        };
     }
 
     fn pinned(&self) -> bool {
@@ -604,6 +616,7 @@ fn on_agent(hwnd: HWND) {
         });
         app.launches.settle(update.launched);
         app.update = Some(update);
+        app.relog();
         if pinned {
             app.view.scroll.set(NavPage::Log, i32::MAX);
         } else if evicted > 0 {

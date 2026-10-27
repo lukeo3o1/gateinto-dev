@@ -210,23 +210,21 @@ pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) 
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Page {
+pub struct Page<'a> {
     pub subtitle: String,
     pub alert: bool,
     pub filter: Filter,
     pub copy: Option<&'static str>,
-    pub body: Body,
+    pub body: &'a Body,
 }
 
-pub fn page(
-    state: &AgentState,
+pub fn page<'a>(
     journal: &Journal,
+    body: &'a Body,
     filter: Filter,
-    offset: u64,
     failure: Option<&str>,
     copied: bool,
-) -> Page {
-    let body = body(state, journal, filter, offset);
+) -> Page<'a> {
     let rows = matches!(body, Body::Rows(_));
     let alert = failure.or(journal.problem().filter(|_| rows));
     Page {
@@ -566,22 +564,25 @@ mod tests {
 
     #[test]
     fn the_page_explains_what_is_logged_and_offers_to_copy_rows() {
-        let shown = page(&running(), &mixed(), Filter::All, 0, None, false);
+        let shown_body = body(&running(), &mixed(), Filter::All, 0);
+        let shown = page(&mixed(), &shown_body, Filter::All, None, false);
         assert_eq!(shown.subtitle, SUBTITLE);
         assert!(!shown.alert);
         assert_eq!(shown.filter, Filter::All);
         assert_eq!(shown.copy, Some(COPY));
-        assert!(matches!(shown.body, Body::Rows(ref rows) if rows.len() == 3));
-        let copied = page(&running(), &mixed(), Filter::Warnings, 0, None, true);
+        assert!(matches!(shown.body, Body::Rows(rows) if rows.len() == 3));
+        let copied_body = body(&running(), &mixed(), Filter::Warnings, 0);
+        let copied = page(&mixed(), &copied_body, Filter::Warnings, None, true);
         assert_eq!(copied.copy, Some(COPIED));
         assert_eq!(copied.filter, Filter::Warnings);
     }
 
     #[test]
     fn nothing_to_copy_without_rows() {
-        let shown = page(&AgentState::Stopped, &mixed(), Filter::All, 0, None, true);
+        let shown_body = body(&AgentState::Stopped, &mixed(), Filter::All, 0);
+        let shown = page(&mixed(), &shown_body, Filter::All, None, true);
         assert_eq!(shown.copy, None);
-        assert_eq!(shown.body, Body::Empty(STOPPED.to_owned()));
+        assert_eq!(*shown.body, Body::Empty(STOPPED.to_owned()));
         assert_eq!(shown.subtitle, SUBTITLE);
     }
 
@@ -589,14 +590,15 @@ mod tests {
     fn problems_with_kept_rows_and_failures_replace_the_subtitle() {
         let mut journal = mixed();
         journal.absorb(Err(RequestError::TimedOut));
-        let shown = page(&running(), &journal, Filter::All, 0, None, false);
+        let shown_body = body(&running(), &journal, Filter::All, 0);
+        let shown = page(&journal, &shown_body, Filter::All, None, false);
         assert_eq!(shown.subtitle, RequestError::TimedOut.to_string());
         assert!(shown.alert);
+        let failed_body = body(&running(), &journal, Filter::All, 0);
         let failed = page(
-            &running(),
             &journal,
+            &failed_body,
             Filter::All,
-            0,
             Some("Could not copy"),
             false,
         );
@@ -607,8 +609,9 @@ mod tests {
             older.absorb(Ok(Response::Error("invalid request".to_owned())));
             older
         };
-        let shown = page(&running(), &older, Filter::All, 0, None, false);
+        let shown_body = body(&running(), &older, Filter::All, 0);
+        let shown = page(&older, &shown_body, Filter::All, None, false);
         assert_eq!(shown.subtitle, SUBTITLE);
-        assert_eq!(shown.body, Body::Empty(OLDER.to_owned()));
+        assert_eq!(*shown.body, Body::Empty(OLDER.to_owned()));
     }
 }
