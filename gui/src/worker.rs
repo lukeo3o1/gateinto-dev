@@ -10,7 +10,7 @@ use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::AgentState;
-use crate::device::Probe;
+use crate::device::{KeyState, Probe, System};
 use crate::settings::Agent;
 
 pub const POLL: Duration = Duration::from_secs(2);
@@ -84,6 +84,21 @@ impl Mailbox {
     pub fn close(&mut self) {
         self.open = false;
         self.update = None;
+    }
+}
+
+pub fn stalled(error: String, loaded: Loaded) -> Update {
+    Update {
+        state: AgentState::Unreachable(error.clone()),
+        gateways: loaded.gateways,
+        agent: loaded.agent,
+        listen: loaded.listen,
+        failure: None,
+        launched: 0,
+        device: Some(Probe {
+            key: KeyState::Failed(error),
+            system: System::default(),
+        }),
     }
 }
 
@@ -172,7 +187,6 @@ mod tests {
     use gateinto::proxy::DEFAULT_LISTEN;
 
     use super::*;
-    use crate::device::{KeyState, System};
 
     fn agent(
         log: &RefCell<Vec<Request>>,
@@ -376,6 +390,22 @@ mod tests {
                 Request::Deny(token.parse().unwrap()),
                 Request::List
             ]
+        );
+    }
+
+    #[test]
+    fn a_worker_that_cannot_start_shows_why_instead_of_waiting_for_the_device() {
+        let update = stalled("no timer".to_owned(), loaded());
+        assert_eq!(
+            update,
+            Update {
+                state: AgentState::Unreachable("no timer".to_owned()),
+                device: Some(Probe {
+                    key: KeyState::Failed("no timer".to_owned()),
+                    system: System::default(),
+                }),
+                ..polled(None)
+            }
         );
     }
 

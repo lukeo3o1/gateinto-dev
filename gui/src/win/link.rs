@@ -11,11 +11,10 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use super::device::system;
-use crate::agent::AgentState;
 use crate::device::{self, Probe};
 use crate::gateways;
 use crate::settings;
-use crate::worker::{Command, Loaded, Mailbox, Update, serve};
+use crate::worker::{Command, Loaded, Mailbox, Update, serve, stalled};
 
 pub const WM_AGENT: u32 = WM_APP;
 
@@ -66,20 +65,7 @@ impl Link {
                 let runtime = match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        let Loaded {
-                            gateways,
-                            agent,
-                            listen,
-                        } = load();
-                        deliver(Update {
-                            state: AgentState::Unreachable(error.to_string()),
-                            gateways,
-                            agent,
-                            listen,
-                            failure: None,
-                            launched: 0,
-                            device: None,
-                        });
+                        deliver(stalled(error.to_string(), load()));
                         return;
                     }
                 };
