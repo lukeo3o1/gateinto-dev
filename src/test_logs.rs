@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::io;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, Once};
 
 type Buffer = Arc<Mutex<Vec<u8>>>;
@@ -38,19 +39,25 @@ fn install() {
                 .finish(),
         )
         .expect("no other global subscriber in the test binary");
+        tracing::callsite::rebuild_interest_cache();
     });
 }
 
 pub(crate) struct Capture {
     buffer: Buffer,
     previous: Option<Buffer>,
+    thread_bound: PhantomData<*const ()>,
 }
 
 pub(crate) fn capture() -> Capture {
     install();
     let buffer = Buffer::default();
     let previous = ACTIVE.replace(Some(buffer.clone()));
-    Capture { buffer, previous }
+    Capture {
+        buffer,
+        previous,
+        thread_bound: PhantomData,
+    }
 }
 
 impl Drop for Capture {
@@ -70,7 +77,6 @@ impl Capture {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -88,12 +94,12 @@ mod tests {
         let logs = capture();
         std::thread::scope(|scope| {
             scope
-                .spawn(|| tracing::debug!("not captured"))
+                .spawn(|| tracing::debug!("spawned thread"))
                 .join()
                 .unwrap()
         });
-        tracing::debug!("captured");
-        assert_eq!(logs.lines("captured"), logs.lines(" DEBUG "));
+        tracing::debug!("capturing thread");
+        assert_eq!(logs.lines("capturing thread"), logs.lines(" DEBUG "));
         assert_eq!(logs.lines(" DEBUG ").len(), 1, "{:?}", logs.lines(""));
     }
 }

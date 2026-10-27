@@ -866,7 +866,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let warnings = logs.lines("WARN");
+            let warnings = logs.lines(" WARN ");
             drop(logs);
 
             assert_eq!(*launcher.jobs.lock().unwrap(), [true, false]);
