@@ -159,7 +159,7 @@ pub fn details(
                 if title == name.as_str() {
                     title.clone()
                 } else {
-                    "None, approved without one".to_owned()
+                    "None".to_owned()
                 },
             ),
             ("Host", host),
@@ -169,7 +169,7 @@ pub fn details(
                 "Source",
                 match gateway.source {
                     Source::Config => "Config file",
-                    Source::Linked => "Approved link",
+                    Source::Linked => "Added on this device",
                 }
                 .to_owned(),
             ),
@@ -446,11 +446,11 @@ mod tests {
         assert_eq!(
             facts(&details),
             [
-                ("Name", "None, approved without one"),
+                ("Name", "None"),
                 ("Host", "edge.example"),
                 ("Port", "443"),
                 ("Server name", "edge.example"),
-                ("Source", "Approved link"),
+                ("Source", "Added on this device"),
                 ("Route", ROUTE_PER_START),
                 ("Portal page", "None"),
                 ("TLS mode", "Hybrid preferred"),

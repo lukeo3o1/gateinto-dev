@@ -255,7 +255,7 @@ fn gateways(listing: &Result<Known, String>) -> Result<Vec<Gateway>, String> {
             address: crate::gateways::address(gateway.host.as_deref(), gateway.port),
             source: match gateway.source {
                 Source::Config => "Config file",
-                Source::Linked => "Linked",
+                Source::Linked => "Added on this device",
             },
         })
         .collect())
@@ -810,7 +810,7 @@ mod tests {
                 Gateway {
                     label: "lab".to_owned(),
                     address: "lab.example:8443".to_owned(),
-                    source: "Linked",
+                    source: "Added on this device",
                 },
             ])
         );
