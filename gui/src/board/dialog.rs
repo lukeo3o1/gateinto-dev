@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use super::{Board, Painter};
+use crate::add::{self, Sheet, Tone};
 use crate::credentials::{Field, HINT, Page, SUBTITLE};
 use crate::fonts::{Font, Measure};
 use crate::gateways::Details;
@@ -16,6 +17,8 @@ pub const SHADE: f32 = 0.32;
 const TITLE: &str = "Session credentials";
 const REVOKE: &str = "Revoke session";
 const CLOSE: &str = "Close";
+const ADD: &str = "Add";
+const CANCEL: &str = "Cancel";
 
 pub fn wrap(m: &impl Measure, font: Font, text: &str, width: i32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -268,6 +271,117 @@ pub fn gateway(
     });
 }
 
+const LABEL_W: f32 = 130.0;
+const NOTE: f32 = 16.0;
+
+fn tone(t: &Theme, tone: Tone) -> Rgb {
+    match tone {
+        Tone::Hint => t.muted,
+        Tone::Error | Tone::Warning => t.warning,
+    }
+}
+
+pub fn add(
+    board: &mut Board,
+    l: &Layout,
+    s: Scale,
+    t: &Theme,
+    v: &View,
+    sheet: &Sheet,
+    m: &impl Measure,
+) {
+    let w = width(l, s);
+    let (row, note, gap, pad, glyph) = (s.px(ROW), s.px(NOTE), s.px(8.0), s.px(10.0), s.px(16.0));
+    let notice = sheet
+        .notice
+        .as_ref()
+        .map(|(text, tone)| (wrap(m, Font::Small, text, w - 3 * pad - glyph), *tone));
+    let notice_h = notice.as_ref().map_or(0, |(lines, _)| {
+        s.px(10.0) + 2 * pad + lines.len() as i32 * note
+    });
+    let entry = row + s.px(2.0) + note;
+    let body = s.px(42.0) + 3 * entry + 2 * gap + s.px(GAP) + entry + notice_h;
+    let mut modal = Modal::open(l, s, t, v, m, body);
+    let inner = modal.inner;
+    let p = &mut modal.p;
+    let x = inner.x;
+    p.text(
+        Font::Title,
+        add::TITLE,
+        Rect::new(x, inner.y, w, s.px(28.0)),
+        t.text,
+    );
+    let label_w = s.px(LABEL_W);
+    let fx = x + label_w;
+    let fw = w - label_w;
+    let mut y = inner.y + s.px(42.0);
+    for entry in &sheet.entries {
+        p.text(
+            Font::BodyStrong,
+            entry.label,
+            Rect::new(x, y, label_w, row),
+            t.text,
+        );
+        let field = Rect::new(fx, y, fw, row);
+        p.input(field, entry.value, sheet.focus == entry.input);
+        p.target(field, Zone::AddField(entry.input));
+        let r = Rect::new(fx, field.bottom() + s.px(2.0), fw, note);
+        p.text(Font::Small, entry.note.clone(), r, tone(t, entry.tone));
+        y = r.bottom() + gap;
+    }
+    y += s.px(GAP) - gap;
+    p.text(
+        Font::BodyStrong,
+        "Route",
+        Rect::new(x, y, label_w, row),
+        t.text,
+    );
+    let half = (fw - gap) / 2;
+    for (i, (route, label, description)) in add::ROUTES.into_iter().enumerate() {
+        let option = Rect::new(fx + i as i32 * (half + gap), y, half, row);
+        let chosen = sheet.route == route;
+        p.segment(option, label, Zone::RouteOption(route), chosen);
+        if chosen {
+            let r = Rect::new(fx, y + row + s.px(2.0), fw, note);
+            p.text(Font::Small, description, r, t.muted);
+        }
+    }
+    y += entry;
+    if let Some((lines, kind)) = notice {
+        y += s.px(10.0);
+        let r = Rect::new(x, y, w, notice_h - s.px(10.0));
+        p.push(Op::Round(r, s.pxf(8.0), t.notice));
+        let icon = Rect::new(x + pad, y + pad, glyph, note);
+        let mark = match kind {
+            Tone::Error => icons::CLOSE,
+            Tone::Hint | Tone::Warning => icons::GLOBE,
+        };
+        p.icon(mark, icon, 14.0, t.notice_text);
+        let tx = icon.right() + pad;
+        for (i, text) in lines.into_iter().enumerate() {
+            let r = Rect::new(tx, y + pad + i as i32 * note, r.right() - pad - tx, note);
+            p.text(Font::Small, text, r, t.notice_text);
+        }
+    }
+    modal.close(board, |p, footer| {
+        let confirm = p.footer_rect(footer, footer.right() - s.px(24.0), ADD);
+        let cancel = p.footer_rect(footer, confirm.x - s.px(8.0), CANCEL);
+        p.plain(cancel, CANCEL, Zone::CloseDialog);
+        if sheet.ready {
+            p.primary(confirm, ADD, Zone::ConfirmAdd);
+        } else {
+            p.push(Op::Round(confirm, s.pxf(6.0), t.tile));
+            let text = Rect::new(
+                confirm.x + s.px(14.0),
+                confirm.y,
+                confirm.w - s.px(28.0),
+                confirm.h,
+            );
+            p.text(Font::BodyStrong, ADD, text, t.eyes_idle);
+        }
+    });
+}
+
 impl<M: Measure> Painter<'_, M> {
     fn session(&mut self, r: Rect, page: &Page) {
         let (s, t) = (self.s, self.t);
@@ -346,12 +460,79 @@ impl<M: Measure> Painter<'_, M> {
         );
     }
 
-    fn close_rect(&self, footer: Rect) -> Rect {
+    fn footer_rect(&self, footer: Rect, right: i32, label: &str) -> Rect {
         let s = self.s;
         let h = s.px(32.0);
         let y = footer.y + (footer.h - h) / 2;
-        let w = 2 * s.px(14.0) + self.m.width(Font::BodyStrong, CLOSE);
-        Rect::new(footer.right() - s.px(24.0) - w, y, w, h)
+        let w = 2 * s.px(14.0) + self.m.width(Font::BodyStrong, label);
+        Rect::new(right - w, y, w, h)
+    }
+
+    fn close_rect(&self, footer: Rect) -> Rect {
+        self.footer_rect(footer, footer.right() - self.s.px(24.0), CLOSE)
+    }
+
+    fn plain(&mut self, button: Rect, label: &'static str, zone: Zone) {
+        let (s, t) = (self.s, self.t);
+        let fill = match self.v.pointer.look(zone) {
+            Look::Rest => t.card,
+            Look::Hover => t.caption_hover,
+            Look::Pressed => t.caption_pressed,
+        };
+        self.framed(button, 6.0, fill);
+        let pad = s.px(14.0);
+        let text = Rect::new(button.x + pad, button.y, button.w - 2 * pad, button.h);
+        self.text(Font::BodyStrong, label, text, t.text);
+        self.target(button, zone);
+    }
+
+    fn segment(&mut self, r: Rect, label: &'static str, zone: Zone, chosen: bool) {
+        let (s, t) = (self.s, self.t);
+        if chosen {
+            self.push(Op::Round(r, s.pxf(6.0), t.button));
+        } else {
+            let fill = match self.v.pointer.look(zone) {
+                Look::Rest => t.card,
+                Look::Hover => t.caption_hover,
+                Look::Pressed => t.caption_pressed,
+            };
+            self.framed(r, 6.0, fill);
+        }
+        let ink = if chosen { t.button_text } else { t.text };
+        let w = self.m.width(Font::BodyStrong, label).min(r.w);
+        let text = Rect::new(r.x + (r.w - w) / 2, r.y, w, r.h);
+        self.text(Font::BodyStrong, label, text, ink);
+        self.target(r, zone);
+    }
+
+    fn input(&mut self, r: Rect, value: &str, focused: bool) {
+        let (s, t) = (self.s, self.t);
+        let edge = s.hairline();
+        let radius = s.pxf(6.0);
+        let border = if focused { t.accent } else { t.border };
+        self.push(Op::Round(r, radius, border));
+        let thick = if focused { 2 * edge } else { edge };
+        self.push(Op::Round(
+            super::inset(r, thick),
+            radius - thick as f32,
+            t.field,
+        ));
+        let pad = s.px(10.0);
+        let room = Rect::new(r.x + pad, r.y, r.w - 2 * pad, r.h);
+        let caret = if focused { edge } else { 0 };
+        let width = self.m.width(Font::Body, value);
+        let x = room.x - (width + caret - room.w).max(0);
+        self.push(Op::Clip(room));
+        if !value.is_empty() {
+            let text = Rect::new(x, r.y, width.max(room.w), r.h);
+            self.text(Font::Body, value.to_owned(), text, t.text);
+        }
+        if focused {
+            let h = s.px(18.0);
+            let bar = Rect::new(x + width, r.y + (r.h - h) / 2, caret, h);
+            self.push(Op::Fill(bar, t.text));
+        }
+        self.push(Op::Unclip);
     }
 
     fn footer_buttons(&mut self, footer: Rect, revoke: Zone, close: Zone) {
@@ -368,6 +549,9 @@ impl<M: Measure> Painter<'_, M> {
 mod tests {
     use super::*;
     use crate::board::tests::{Chars, layout};
+    use gateinto::proxy::Route;
+
+    use crate::add::{ADDRESS_HINT, Entry, Input, NAME_HINT, PORTAL_HINT, Tone, disclosure};
     use crate::credentials::{Field, MASK, Page, UNAVAILABLE, WAITING};
     use crate::gateways::Details;
     use crate::hit::Zone;
@@ -612,5 +796,166 @@ mod tests {
             .next()
             .unwrap();
         assert!(last.bottom() <= board.targets[0].0.y, "{last:?}");
+    }
+
+    fn add_sheet(route: Route, ready: bool) -> Sheet<'static> {
+        let entry = |input, label, value, note: &str| Entry {
+            input,
+            label,
+            value,
+            note: note.to_owned(),
+            tone: Tone::Hint,
+        };
+        Sheet {
+            entries: [
+                entry(Input::Address, "Gateway address", "proxy", ADDRESS_HINT),
+                entry(Input::Name, "Name", "", NAME_HINT),
+                entry(Input::Portal, "Portal page", "", PORTAL_HINT),
+            ],
+            focus: Input::Address,
+            route,
+            notice: disclosure(route).map(|text| (text, Tone::Warning)),
+            ready,
+        }
+    }
+
+    fn draw_add(l: &crate::layout::Layout, sheet: &Sheet) -> Board {
+        let mut board = Board {
+            targets: vec![(Rect::new(900, 300, 32, 32), Zone::Revoke(3))],
+            ..Board::default()
+        };
+        add(&mut board, l, S, &T, &View::default(), sheet, &Chars);
+        board
+    }
+
+    #[test]
+    fn the_add_dialog_offers_its_fields_routes_cancel_and_add() {
+        let board = draw_add(&layout(), &add_sheet(Route::Gateway, true));
+        assert_eq!(
+            zones(&board),
+            [
+                Zone::AddField(Input::Address),
+                Zone::AddField(Input::Name),
+                Zone::AddField(Input::Portal),
+                Zone::RouteOption(Route::Gateway),
+                Zone::RouteOption(Route::Mixed),
+                Zone::CloseDialog,
+                Zone::ConfirmAdd,
+                Zone::Dialog,
+            ]
+        );
+        let texts = texts(&board);
+        for part in [
+            "Add gateway",
+            "Gateway address",
+            "Name",
+            "Portal page",
+            "Route",
+            "proxy",
+            ADDRESS_HINT,
+            NAME_HINT,
+            PORTAL_HINT,
+            "Gateway",
+            "Mixed",
+            "Every site goes through the gateway",
+            "Cancel",
+            "Add",
+        ] {
+            assert!(texts.iter().any(|t| t == part), "{part}");
+        }
+        assert!(!texts.iter().any(|t| t.contains("mixed mode")));
+    }
+
+    #[test]
+    fn add_is_drawn_but_not_offered_until_the_form_is_ready() {
+        let board = draw_add(&layout(), &add_sheet(Route::Gateway, false));
+        assert!(!zones(&board).contains(&Zone::ConfirmAdd));
+        assert!(zones(&board).contains(&Zone::CloseDialog));
+        assert!(texts(&board).iter().any(|t| t == "Add"));
+    }
+
+    #[test]
+    fn the_chosen_route_is_filled() {
+        let board = draw_add(&layout(), &add_sheet(Route::Mixed, true));
+        let mixed = board
+            .targets
+            .iter()
+            .find(|(_, zone)| *zone == Zone::RouteOption(Route::Mixed))
+            .unwrap()
+            .0;
+        assert!(board.ops.contains(&Op::Round(mixed, 6.0, T.button)));
+        assert!(board.ops.iter().any(
+            |op| matches!(op, Op::Text(_, text, _, c) if text == "Mixed" && *c == T.button_text)
+        ));
+    }
+
+    #[test]
+    fn the_focused_field_shows_a_caret_after_its_value() {
+        let board = draw_add(&layout(), &add_sheet(Route::Gateway, true));
+        let value = board
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Text(_, text, r, _) if text == "proxy" => Some(*r),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            board.ops.iter().any(|op| matches!(op, Op::Fill(r, c)
+                if *c == T.text && r.x == value.x + 7 * 5 && r.w == 1)),
+            "{value:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_value_keeps_its_end_in_view() {
+        let mut sheet = add_sheet(Route::Gateway, true);
+        let long = "a".repeat(200);
+        sheet.entries[0].value = Box::leak(long.into_boxed_str());
+        let board = draw_add(&layout(), &sheet);
+        let field = board.targets[0].0;
+        let caret = board
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Fill(r, c) if *c == T.text && r.w == 1 => Some(*r),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            caret.x < field.right() && caret.x > field.right() - 20,
+            "{caret:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_discloses_direct_connections_and_fits_the_minimum_window() {
+        let (w, h) = crate::layout::Layout::min_size(S);
+        let l = crate::layout::Layout::new(w, h, S, true);
+        let board = draw_add(&l, &add_sheet(Route::Mixed, true));
+        let panel = board.targets.last().unwrap().0;
+        assert!(
+            panel.y >= l.caption_row.bottom() && panel.bottom() <= h,
+            "{panel:?}"
+        );
+        let texts = texts(&board).join(" ");
+        assert!(texts.contains("exposing your IP address and local DNS lookups"));
+        let footer = board
+            .targets
+            .iter()
+            .find(|(_, zone)| *zone == Zone::CloseDialog)
+            .unwrap()
+            .0;
+        let lowest = board
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, _, r, _) if r.y < footer.y => Some(r.bottom()),
+                _ => None,
+            })
+            .max()
+            .unwrap();
+        assert!(lowest + 12 <= footer.y, "{lowest} {footer:?}");
+        assert!(zones(&board).contains(&Zone::ConfirmAdd));
     }
 }

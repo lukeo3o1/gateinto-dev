@@ -1,3 +1,6 @@
+use gateinto::proxy::Route;
+
+use crate::add::Input;
 use crate::credentials::Field;
 use crate::layout::{Layout, Rect};
 use crate::log::Filter;
@@ -31,6 +34,10 @@ pub enum Zone {
     TogglePassword(bool),
     RevokeCredentials,
     CloseDialog,
+    AddGateway,
+    AddField(Input),
+    RouteOption(Route),
+    ConfirmAdd,
     Client,
 }
 

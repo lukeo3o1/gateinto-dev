@@ -1,6 +1,6 @@
 use super::{Board, Painter};
 use crate::fonts::{Font, Measure};
-use crate::gateways::{EMPTY, FOOTNOTE, Page, Row, START};
+use crate::gateways::{ADD, EMPTY, FOOTNOTE, Page, Row, START};
 use crate::hit::Zone;
 use crate::icons;
 use crate::layout::{Layout, Rect};
@@ -15,9 +15,17 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     }
     let mut p = Painter::new(l, s, t, v, m);
     let content = l.content;
-    let subtitle = Rect::new(content.x, content.y, content.w, s.px(18.0));
+    let header = Rect::new(content.x, content.y, content.w, s.px(32.0));
+    let add = p.button(header, header.right(), ADD);
+    let subtitle = Rect::new(
+        content.x,
+        content.y + (header.h - s.px(18.0)) / 2,
+        add.x - s.px(16.0) - content.x,
+        s.px(18.0),
+    );
     p.text(Font::Body, page.subtitle.clone(), subtitle, t.muted);
-    let top = subtitle.bottom() + s.px(18.0);
+    p.outlined(add, icons::PLUS, ADD, Zone::AddGateway);
+    let top = header.bottom() + s.px(12.0);
     let mut bottom = content.bottom();
     if page.footnote {
         let foot = Rect::new(content.x, bottom - s.px(18.0), content.w, s.px(18.0));
@@ -121,7 +129,7 @@ mod tests {
     use super::*;
     use crate::board::tests::{Chars, inside, layout, text};
     use crate::fonts::Font;
-    use crate::gateways::{EMPTY, FOOTNOTE, Row, START, SUBTITLE};
+    use crate::gateways::{ADD, EMPTY, FOOTNOTE, Row, START, SUBTITLE};
     use crate::hit::Zone;
     use crate::icons;
     use crate::nav::{Nav, Page as NavPage};
@@ -131,7 +139,9 @@ mod tests {
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
-    const FIRST: i32 = 116;
+    const FIRST: i32 = 124;
+    const SUBTITLED: Rect = Rect::new(248, 87, 619, 18);
+    const ADDING: (Rect, Zone) = (Rect::new(883, 80, 129, 32), Zone::AddGateway);
 
     fn row(name: &str, config: bool) -> Row {
         Row {
@@ -162,8 +172,26 @@ mod tests {
         }
     }
 
+    fn add_button() -> [Op; 4] {
+        [
+            Op::Round(Rect::new(883, 80, 129, 32), 6.0, T.border),
+            Op::Round(Rect::new(884, 81, 127, 30), 5.0, T.card),
+            Op::Icon(icons::PLUS, Rect::new(897, 88, 16, 16), 1.0, T.text),
+            text(Font::BodyStrong, ADD, Rect::new(921, 80, 77, 32), T.text),
+        ]
+    }
+
     fn draw(page: &Page) -> Board {
         board(&layout(), S, &T, &view(), page, &Chars)
+    }
+
+    #[test]
+    fn an_add_gateway_button_sits_beside_the_subtitle() {
+        for page in [listed(vec![]), listed(vec![row("office", true)])] {
+            let b = draw(&page);
+            assert_eq!(b.targets[0], ADDING);
+            assert_eq!(b.ops[2..6], add_button());
+        }
     }
 
     #[test]
@@ -179,19 +207,16 @@ mod tests {
         let ops = draw(&listed(vec![])).ops;
         assert_eq!(ops.first(), Some(&Op::Clip(l.content)));
         assert_eq!(ops.last(), Some(&Op::Unclip));
-        assert_eq!(
-            ops[1],
-            text(Font::Body, SUBTITLE, Rect::new(248, 80, 764, 18), T.muted)
-        );
+        assert_eq!(ops[1], text(Font::Body, SUBTITLE, SUBTITLED, T.muted));
     }
 
     #[test]
     fn no_gateways_shows_the_empty_text_and_no_footnote() {
         let ops = draw(&listed(vec![])).ops;
+        assert_eq!(ops[1], text(Font::Body, SUBTITLE, SUBTITLED, T.muted));
         assert_eq!(
-            ops[1..],
+            ops[6..],
             [
-                text(Font::Body, SUBTITLE, Rect::new(248, 80, 764, 18), T.muted),
                 text(Font::Body, EMPTY, Rect::new(248, FIRST, 764, 20), T.muted),
                 Op::Unclip,
             ]
@@ -207,18 +232,13 @@ mod tests {
             footnote: false,
             launch: false,
         };
+        let ops = draw(&page).ops;
         assert_eq!(
-            draw(&page).ops[1..],
-            [
-                text(
-                    Font::Body,
-                    "config file c.toml: broken",
-                    Rect::new(248, 80, 764, 18),
-                    T.muted
-                ),
-                Op::Unclip,
-            ]
+            ops[1],
+            text(Font::Body, "config file c.toml: broken", SUBTITLED, T.muted)
         );
+        assert_eq!(ops[2..6], add_button());
+        assert_eq!(ops[6..], [Op::Unclip]);
     }
 
     #[test]
@@ -270,6 +290,7 @@ mod tests {
         assert_eq!(
             b.targets,
             [
+                ADDING,
                 (Rect::new(849, FIRST + 20, 143, 32), Zone::StartBrowser(0)),
                 (Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0)),
                 (Rect::new(849, FIRST + 102, 143, 32), Zone::StartBrowser(1)),
@@ -305,7 +326,10 @@ mod tests {
         let b = board(&layout(), S, &T, &v, &page, &Chars);
         assert_eq!(
             b.targets,
-            [(Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0))]
+            [
+                ADDING,
+                (Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0))
+            ]
         );
         assert_eq!(
             button(&b.ops),
@@ -389,7 +413,7 @@ mod tests {
             .ops
             .iter()
             .filter_map(|op| match op {
-                Op::Round(r, _, c) if *c == T.border => Some(r.y),
+                Op::Round(r, _, c) if *c == T.border && r.x == 248 => Some(r.y),
                 _ => None,
             })
             .collect()
@@ -398,9 +422,9 @@ mod tests {
     #[test]
     fn cards_scroll_between_the_subtitle_and_the_footnote() {
         let pane = |page: &Page| board(&layout(), S, &T, &view(), page, &Chars).pane;
-        let open = Rect::new(248, FIRST, 764, 540);
+        let open = Rect::new(248, FIRST, 764, 532);
         assert_eq!(pane(&nine(false)), Some(Pane::new(open, 728, 0)));
-        let above = Rect::new(248, FIRST, 764, 504);
+        let above = Rect::new(248, FIRST, 764, 496);
         assert_eq!(pane(&nine(true)), Some(Pane::new(above, 728, 0)));
         assert_eq!(pane(&listed(vec![])), None);
         let ops = draw(&nine(true)).ops;
@@ -409,19 +433,20 @@ mod tests {
 
     #[test]
     fn only_cards_in_the_viewport_are_drawn() {
-        assert_eq!(cards(&view()), [116, 198, 280, 362, 444, 526, 608]);
-        assert_eq!(cards(&scrolled(100)), [98, 180, 262, 344, 426, 508, 590]);
+        assert_eq!(cards(&view()), [124, 206, 288, 370, 452, 534, 616]);
+        assert_eq!(cards(&scrolled(100)), [106, 188, 270, 352, 434, 516, 598]);
     }
 
     #[test]
     fn scrolled_targets_are_clipped_to_the_viewport() {
         let b = board(&layout(), S, &T, &scrolled(110), &nine(false), &Chars);
         assert_eq!(
-            b.targets[..3],
+            b.targets[..4],
             [
+                ADDING,
                 (Rect::new(849, FIRST, 143, 24), Zone::StartBrowser(1)),
                 (Rect::new(248, FIRST, 764, 44), Zone::GatewayCard(1)),
-                (Rect::new(849, 190, 143, 32), Zone::StartBrowser(2)),
+                (Rect::new(849, 198, 143, 32), Zone::StartBrowser(2)),
             ]
         );
     }
@@ -429,10 +454,10 @@ mod tests {
     #[test]
     fn the_offset_is_clamped_and_shown_by_a_thumb() {
         let b = board(&layout(), S, &T, &scrolled(10_000), &nine(false), &Chars);
-        assert_eq!(b.pane.map(|p| p.offset), Some(188));
+        assert_eq!(b.pane.map(|p| p.offset), Some(196));
         assert_eq!(
             b.ops.last(),
-            Some(&Op::Round(Rect::new(1024, 256, 4, 400), 2.0, T.eyes_idle))
+            Some(&Op::Round(Rect::new(1024, 268, 4, 388), 2.0, T.eyes_idle))
         );
     }
 }

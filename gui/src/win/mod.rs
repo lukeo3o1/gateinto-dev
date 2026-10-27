@@ -595,6 +595,10 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::TogglePassword(_)
         | Zone::RevokeCredentials
         | Zone::CloseDialog
+        | Zone::AddGateway
+        | Zone::AddField(_)
+        | Zone::RouteOption(_)
+        | Zone::ConfirmAdd
         | Zone::Client => HTCLIENT,
     }
 }

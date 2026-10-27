@@ -1,3 +1,6 @@
+use gateinto::proxy::Route;
+
+use crate::add::Input;
 use crate::credentials::Field;
 use crate::hit::Zone;
 use crate::log::Filter;
@@ -25,6 +28,10 @@ pub enum Action {
     TogglePassword,
     RevokeCredentials,
     CloseDialog,
+    AddGateway,
+    Focus(Input),
+    Route(Route),
+    ConfirmAdd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +69,10 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::TogglePassword(_) => Some(Action::TogglePassword),
         Zone::RevokeCredentials => Some(Action::RevokeCredentials),
         Zone::CloseDialog => Some(Action::CloseDialog),
+        Zone::AddGateway => Some(Action::AddGateway),
+        Zone::AddField(input) => Some(Action::Focus(input)),
+        Zone::RouteOption(route) => Some(Action::Route(route)),
+        Zone::ConfirmAdd => Some(Action::ConfirmAdd),
         _ => None,
     }
 }
@@ -365,5 +376,19 @@ mod tests {
         assert_eq!(p.up(SETTINGS), None);
         assert!(!p.cancel());
         assert_eq!(p.look(SETTINGS), Look::Hover);
+    }
+
+    #[test]
+    fn the_add_gateway_zones_act() {
+        for (zone, action) in [
+            (Zone::AddGateway, Action::AddGateway),
+            (Zone::AddField(Input::Name), Action::Focus(Input::Name)),
+            (Zone::RouteOption(Route::Mixed), Action::Route(Route::Mixed)),
+            (Zone::ConfirmAdd, Action::ConfirmAdd),
+        ] {
+            let mut p = Pointer::default();
+            assert!(p.down(zone));
+            assert_eq!(p.up(zone), Some(action));
+        }
     }
 }
