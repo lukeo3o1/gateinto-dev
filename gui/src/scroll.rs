@@ -62,6 +62,7 @@ impl Pane {
 pub struct Offsets {
     sessions: i32,
     gateways: i32,
+    device: i32,
     settings: i32,
 }
 
@@ -70,6 +71,7 @@ impl Offsets {
         match page {
             Page::Sessions => Some(&mut self.sessions),
             Page::Gateways => Some(&mut self.gateways),
+            Page::Device => Some(&mut self.device),
             Page::Settings => Some(&mut self.settings),
             _ => None,
         }
@@ -159,6 +161,9 @@ mod tests {
         assert!(o.set(Page::Settings, 9));
         assert_eq!(o.get(Page::Settings), 9);
         assert_eq!(o.get(Page::Gateways), 40);
+        assert!(o.set(Page::Device, 5));
+        assert_eq!(o.get(Page::Device), 5);
+        assert_eq!(o.get(Page::Settings), 9);
         assert!(!o.set(Page::Log, 3));
         assert_eq!(o.get(Page::Log), 0);
     }

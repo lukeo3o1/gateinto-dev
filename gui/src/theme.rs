@@ -35,6 +35,7 @@ pub struct Theme {
     pub revoke_hover: Rgb,
     pub revoke_pressed: Rgb,
     pub revoke_glyph: Rgb,
+    pub warning: Rgb,
     pub button: Rgb,
     pub button_hover: Rgb,
     pub button_pressed: Rgb,
@@ -68,6 +69,7 @@ impl Theme {
         revoke_hover: Rgb(0xfde7e5),
         revoke_pressed: Rgb(0xfad4d0),
         revoke_glyph: Rgb(0xc42b1c),
+        warning: Rgb(0x9a5b00),
         button: Rgb(0x262b36),
         button_hover: Rgb(0x353b48),
         button_pressed: Rgb(0x1b1f27),
@@ -121,6 +123,12 @@ mod tests {
         assert_ne!(t.button_hover, t.button);
         assert_ne!(t.button_pressed, t.button_hover);
         assert_ne!(t.button_pressed, t.button);
+    }
+
+    #[test]
+    fn device_warnings_are_amber_and_readable_on_cards() {
+        let t = Theme::LIGHT;
+        assert_eq!(t.warning, Rgb(0x9a5b00));
     }
 
     #[test]

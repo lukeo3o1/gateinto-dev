@@ -14,6 +14,7 @@ use crate::scroll::{self, Pane};
 use crate::sessions::{EMPTY, Eyes, Kind, Launch, Page, Row};
 use crate::theme::{Rgb, Theme};
 
+pub mod device;
 pub mod gateways;
 pub mod menu;
 pub mod settings;

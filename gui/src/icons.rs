@@ -460,6 +460,19 @@ pub const MORE: Icon = Icon {
     ],
 };
 
+pub const COPY: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        rect(8.5, 8.5, 11.0, 11.0, 2.0),
+        Shape::Path(&[
+            Cmd::Move(4.5, 15.5),
+            Cmd::Line(4.5, 4.5),
+            Cmd::Line(15.5, 4.5),
+        ]),
+    ],
+};
+
 pub const EXTERNAL: Icon = Icon {
     view: RAIL,
     stroke: RAIL_STROKE,
@@ -515,9 +528,9 @@ pub fn rail_icon(page: Page) -> Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 16] = [
+    const ALL: [Icon; 17] = [
         SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, GLOBE,
-        POWER, STOP, LOCK, PLUS, MORE, EXTERNAL,
+        POWER, STOP, LOCK, PLUS, MORE, EXTERNAL, COPY,
     ];
 
     #[test]
