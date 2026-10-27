@@ -47,12 +47,16 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     p.finish()
 }
 
-fn card_height(s: Scale, rows: i32) -> i32 {
+pub(super) fn card_height(s: Scale, rows: i32) -> i32 {
     s.px(4.0) + s.px(44.0) + rows * s.px(44.0) + s.px(8.0)
 }
 
 impl<M: Measure> Painter<'_, M> {
-    fn section(&mut self, card: Rect, title: &'static str) -> Rect {
+    pub(super) fn section(
+        &mut self,
+        card: Rect,
+        title: impl Into<std::borrow::Cow<'static, str>>,
+    ) -> Rect {
         let (s, t) = (self.s, self.t);
         self.framed(card, 12.0, t.card);
         let pad = s.px(20.0);
@@ -66,7 +70,7 @@ impl<M: Measure> Painter<'_, M> {
         heading
     }
 
-    fn line(&mut self, heading: Rect, i: i32) -> Rect {
+    pub(super) fn line(&mut self, heading: Rect, i: i32) -> Rect {
         let s = self.s;
         let h = s.px(44.0);
         let row = Rect::new(heading.x, heading.bottom() + i * h, heading.w, h);
@@ -109,6 +113,21 @@ impl<M: Measure> Painter<'_, M> {
         self.target(track, Zone::SignIn);
     }
 
+    pub(super) fn pair(&mut self, row: Rect, label: &'static str, value: String, font: Font) {
+        let (s, t) = (self.s, self.t);
+        let lw = self.m.width(Font::Body, label).min(row.w);
+        self.text(
+            Font::Body,
+            label,
+            Rect::new(row.x, row.y, lw, row.h),
+            t.text,
+        );
+        let vw = self.m.width(font, &value);
+        let x = (row.right() - vw).max(row.x + lw + s.px(16.0));
+        let value_r = Rect::new(x, row.y, (row.right() - x).max(0), row.h);
+        self.text(font, value, value_r, t.muted);
+    }
+
     fn agent(&mut self, card: Rect, agent: &Result<Vec<(&'static str, String)>, String>) {
         let (s, t) = (self.s, self.t);
         let heading = self.section(card, AGENT);
@@ -122,17 +141,7 @@ impl<M: Measure> Painter<'_, M> {
             Ok(rows) => {
                 for (i, (label, value)) in rows.iter().enumerate() {
                     let row = self.line(heading, i as i32);
-                    let lw = self.m.width(Font::Body, label).min(row.w);
-                    self.text(
-                        Font::Body,
-                        *label,
-                        Rect::new(row.x, row.y, lw, row.h),
-                        t.text,
-                    );
-                    let vw = self.m.width(Font::Body, value);
-                    let x = (row.right() - vw).max(row.x + lw + s.px(16.0));
-                    let value_r = Rect::new(x, row.y, (row.right() - x).max(0), row.h);
-                    self.text(Font::Body, value.clone(), value_r, t.muted);
+                    self.pair(row, label, value.clone(), Font::Body);
                 }
             }
             Err(error) => {
