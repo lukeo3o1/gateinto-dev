@@ -1,13 +1,15 @@
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
-    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory,
-    IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_UNICODE_RANGE, DWRITE_WORD_WRAPPING_NO_WRAP,
+    IDWriteFactory, IDWriteFactory2, IDWriteFontCollection, IDWriteFontFallback, IDWriteTextFormat,
+    IDWriteTextFormat1, IDWriteTextLayout,
 };
-use windows::core::{BOOL, PCWSTR, Result};
+use windows::core::{BOOL, Interface, PCWSTR, Result};
 
 use super::sys::wide;
-use crate::fonts::{self, Font, MONO_FAMILIES, Measure, UI_FAMILIES};
+use crate::fonts::{self, CJK_FAMILY, CJK_RANGES, Font, MONO_FAMILIES, Measure, UI_FAMILIES};
+use crate::i18n;
 use crate::scale::Scale;
 
 pub struct Fonts {
@@ -31,13 +33,47 @@ fn installed(collection: &IDWriteFontCollection) -> Vec<&'static str> {
         .collect()
 }
 
+fn fallback(
+    dw: &IDWriteFactory,
+    collection: &IDWriteFontCollection,
+) -> Option<IDWriteFontFallback> {
+    let dw: IDWriteFactory2 = dw.cast().ok()?;
+    let ranges: Vec<DWRITE_UNICODE_RANGE> = CJK_RANGES
+        .iter()
+        .map(|r| DWRITE_UNICODE_RANGE {
+            first: *r.start(),
+            last: *r.end(),
+        })
+        .collect();
+    let family = wide(CJK_FAMILY);
+    let locale = wide(fonts::locale(i18n::Language::Chinese));
+    unsafe {
+        let builder = dw.CreateFontFallbackBuilder().ok()?;
+        builder
+            .AddMapping(
+                &ranges,
+                &[family.as_ptr()],
+                collection,
+                PCWSTR(locale.as_ptr()),
+                PCWSTR::null(),
+                1.0,
+            )
+            .ok()?;
+        builder
+            .AddMappings(&dw.GetSystemFontFallback().ok()?)
+            .ok()?;
+        builder.CreateFontFallback().ok()
+    }
+}
+
 impl Fonts {
     pub fn new(dw: &IDWriteFactory, s: Scale) -> Result<Self> {
         let mut collection = None;
         unsafe { dw.GetSystemFontCollection(&mut collection, false)? };
         let collection = collection.ok_or_else(windows::core::Error::empty)?;
         let installed = installed(&collection);
-        let locale = wide("en-us");
+        let locale = wide(fonts::locale(i18n::current()));
+        let fallback = fallback(dw, &collection);
         let trimming = DWRITE_TRIMMING {
             granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
             ..Default::default()
@@ -61,6 +97,11 @@ impl Fonts {
                     format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                     let ellipsis = dw.CreateEllipsisTrimmingSign(&format)?;
                     format.SetTrimming(&trimming, &ellipsis)?;
+                    if let (Some(fallback), Ok(format)) =
+                        (&fallback, format.cast::<IDWriteTextFormat1>())
+                    {
+                        format.SetFontFallback(fallback)?;
+                    }
                     Ok(format)
                 }
             })

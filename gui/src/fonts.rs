@@ -1,3 +1,7 @@
+use std::ops::RangeInclusive;
+
+use crate::i18n::Language;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Font {
     Brand,
@@ -71,6 +75,27 @@ pub trait Measure {
 
 pub const UI_FAMILIES: &[&str] = &["Segoe UI Variable Text", "Segoe UI"];
 pub const MONO_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas"];
+pub const CJK_FAMILY: &str = "Microsoft JhengHei UI";
+pub const CJK_RANGES: &[RangeInclusive<u32>] = &[
+    0x2E80..=0x2FDF,
+    0x3000..=0x303F,
+    0x3100..=0x312F,
+    0x31A0..=0x31BF,
+    0x3400..=0x4DBF,
+    0x4E00..=0x9FFF,
+    0xF900..=0xFAFF,
+    0xFE10..=0xFE1F,
+    0xFE30..=0xFE4F,
+    0xFF00..=0xFFEF,
+    0x20000..=0x3134F,
+];
+
+pub fn locale(language: Language) -> &'static str {
+    match language {
+        Language::English => "en-us",
+        Language::Chinese => "zh-tw",
+    }
+}
 
 pub fn choose_family<'a, S: AsRef<str>>(installed: &[S], preferred: &[&'a str]) -> &'a str {
     preferred
@@ -139,5 +164,27 @@ mod tests {
     #[test]
     fn falls_back_to_the_last_preference() {
         assert_eq!(choose_family::<&str>(&[], UI_FAMILIES), "Segoe UI");
+    }
+
+    #[test]
+    fn chinese_text_falls_back_to_a_traditional_chinese_ui_font() {
+        assert_eq!(CJK_FAMILY, "Microsoft JhengHei UI");
+        let covered = |c: char| CJK_RANGES.iter().any(|r| r.contains(&u32::from(c)));
+        for text in crate::i18n::Text::ALL {
+            for c in text.chinese().chars() {
+                assert!(
+                    c.is_ascii() || matches!(c, '·' | '…') || covered(c),
+                    "{c:?} in {text:?}"
+                );
+            }
+        }
+        assert!(!covered('a') && !covered('é') && !covered('…'));
+    }
+
+    #[test]
+    fn text_is_shaped_for_the_language_it_is_in() {
+        use crate::i18n::Language;
+        assert_eq!(locale(Language::English), "en-us");
+        assert_eq!(locale(Language::Chinese), "zh-tw");
     }
 }
