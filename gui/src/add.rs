@@ -327,19 +327,29 @@ pub fn sheet<'a>(form: &'a Form, listing: &Result<Known, String>) -> Sheet<'a> {
     }
 }
 
+fn accepted(form: &mut Form, listing: &Result<Known, String>) -> Option<Ready> {
+    match check(form, listing) {
+        Verdict::Ready(ready) => Some(ready),
+        Verdict::Invalid(_, message) => {
+            form.failure = Some(message);
+            None
+        }
+        Verdict::Incomplete => None,
+    }
+}
+
+pub fn rehearse(form: &mut Form, listing: &Result<Known, String>) -> bool {
+    accepted(form, listing).is_some()
+}
+
 pub fn commit(
     form: &mut Form,
     listing: &Result<Known, String>,
     dir: Option<PathBuf>,
     now: u64,
 ) -> bool {
-    let ready = match check(form, listing) {
-        Verdict::Ready(ready) => ready,
-        Verdict::Invalid(_, message) => {
-            form.failure = Some(message);
-            return false;
-        }
-        Verdict::Incomplete => return false,
+    let Some(ready) = accepted(form, listing) else {
+        return false;
     };
     let Some(dir) = dir else {
         form.failure = Some(NO_FOLDER.to_owned());
@@ -797,6 +807,20 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rehearsing_checks_the_form_like_committing_but_stores_nothing() {
+        let listing = Ok(Known::default());
+        let mut ready = lab();
+        assert!(rehearse(&mut ready, &listing));
+        assert_eq!(ready.failure, None);
+        let mut incomplete = form("", "", "");
+        assert!(!rehearse(&mut incomplete, &listing));
+        assert_eq!(incomplete.failure, None);
+        let mut wrong = form("proxy.example.net", "lab", "http://portal.example.net/");
+        assert!(!rehearse(&mut wrong, &listing));
+        assert!(wrong.failure.is_some());
     }
 
     fn lab() -> Form {
