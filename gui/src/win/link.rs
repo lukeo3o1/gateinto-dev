@@ -12,6 +12,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use super::device::system;
 use crate::credentials::Reveal;
+use crate::demo;
 use crate::device::{self, Probe};
 use crate::gateways;
 use crate::settings;
@@ -55,6 +56,14 @@ fn probe() -> Probe {
 
 impl Link {
     pub fn start(hwnd: HWND) -> Self {
+        Self::spawn(hwnd, false)
+    }
+
+    pub fn demo(hwnd: HWND) -> Self {
+        Self::spawn(hwnd, true)
+    }
+
+    fn spawn(hwnd: HWND, demo: bool) -> Self {
         let (commands, inbox) = unbounded_channel();
         let mailbox = Arc::new(Mutex::new(Mailbox::default()));
         let shared = Arc::clone(&mailbox);
@@ -76,10 +85,23 @@ impl Link {
                 let runtime = match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        deliver(stalled(error.to_string(), load()));
+                        let loaded = if demo { demo::loaded() } else { load() };
+                        deliver(stalled(error.to_string(), loaded));
                         return;
                     }
                 };
+                if demo {
+                    let reveal = move |r| reveal(demo::reveal(r));
+                    runtime.block_on(serve(
+                        inbox,
+                        demo::send,
+                        demo::loaded,
+                        demo::probe,
+                        deliver,
+                        reveal,
+                    ));
+                    return;
+                }
                 let endpoint = Endpoint::for_current_user();
                 let send = |request: Request| {
                     let endpoint = &endpoint;

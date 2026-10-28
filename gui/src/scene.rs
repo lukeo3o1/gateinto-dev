@@ -34,7 +34,11 @@ pub struct View {
     pub popup: Option<Popup>,
     pub popup_scroll: i32,
     pub logo: State,
+    pub demo: bool,
 }
+
+pub const BANNER: &str = "Demo";
+pub const BANNER_NOTE: &str = "Sample data only";
 
 const RAIL_ICON: f32 = 20.0;
 const CAPTION_GLYPH: f32 = 10.0;
@@ -72,6 +76,22 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
             glyph,
         ));
         ops.push(Op::Text(font, item.page.label().into(), item.label, ink));
+    }
+    if v.demo {
+        let b = l.banner;
+        ops.push(Op::Round(b.card, s.pxf(6.0), t.notice));
+        ops.push(Op::Text(
+            Font::SmallStrong,
+            BANNER.into(),
+            b.title,
+            t.notice_text,
+        ));
+        ops.push(Op::Text(
+            Font::Small,
+            BANNER_NOTE.into(),
+            b.note,
+            t.notice_text,
+        ));
     }
     if let Some(b) = l.buttons {
         let maximize = if v.maximized {
@@ -188,6 +208,24 @@ mod tests {
             assert_eq!(draw(&v)[3], Op::Logo(l.logo, logo));
         }
         assert_eq!(draw(&View::default())[3], Op::Logo(l.logo, State::Idle));
+    }
+
+    #[test]
+    fn only_the_demo_draws_its_banner() {
+        let b = layout(true).banner;
+        let demo = View {
+            demo: true,
+            ..View::default()
+        };
+        assert_eq!(
+            inside(&draw(&demo), b.card),
+            [
+                Op::Round(b.card, 6.0, T.notice),
+                Op::Text(Font::SmallStrong, BANNER.into(), b.title, T.notice_text),
+                Op::Text(Font::Small, BANNER_NOTE.into(), b.note, T.notice_text),
+            ]
+        );
+        assert!(inside(&draw(&View::default()), b.card).is_empty());
     }
 
     #[test]

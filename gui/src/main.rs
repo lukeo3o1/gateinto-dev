@@ -5,6 +5,7 @@ mod add;
 mod agent;
 mod board;
 mod credentials;
+mod demo;
 mod device;
 mod focus;
 mod fonts;

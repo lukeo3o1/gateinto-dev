@@ -56,6 +56,13 @@ impl CaptionButtons {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Banner {
+    pub card: Rect,
+    pub title: Rect,
+    pub note: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub rail: Rect,
     pub rail_edge: Rect,
@@ -63,6 +70,7 @@ pub struct Layout {
     pub logo: Rect,
     pub brand_text: Rect,
     pub nav: [NavItem; 5],
+    pub banner: Banner,
     pub caption_row: Rect,
     pub buttons: Option<CaptionButtons>,
     pub title: Rect,
@@ -110,6 +118,21 @@ impl Layout {
             }
         });
 
+        let card_h = s.px(52.0);
+        let card = Rect::new(
+            gutter,
+            nav[Page::Log as usize].frame.y - s.px(12.0) - card_h,
+            inner - 2 * gutter,
+            card_h,
+        );
+        let pad = s.px(12.0);
+        let line = |y: f32| Rect::new(card.x + pad, card.y + s.px(y), card.w - 2 * pad, s.px(16.0));
+        let banner = Banner {
+            card,
+            title: line(9.0),
+            note: line(27.0),
+        };
+
         let content_w = width - rail.w;
         let (caption_h, title_gap) = if caption_buttons {
             (s.px(40.0), s.px(4.0))
@@ -136,6 +159,7 @@ impl Layout {
             logo: Rect::new(s.px(16.0), (brand.h - logo_size) / 2, logo_size, logo_size),
             brand_text: Rect::new(text_x, 0, inner - text_x - gutter, brand.h),
             nav,
+            banner,
             caption_row,
             buttons: caption_buttons.then(|| CaptionButtons {
                 minimize: button(3),
@@ -279,6 +303,23 @@ mod tests {
         assert_eq!(Layout::default_size(Scale::new(144)), (1560, 1020));
         assert_eq!(Layout::min_size(Scale::new(96)), (760, 520));
         assert_eq!(Layout::min_size(Scale::new(192)), (1520, 1040));
+    }
+
+    #[test]
+    fn the_demo_banner_sits_in_the_rail_between_both_groups() {
+        for (dpi, h) in [(96, 520), (96, 680), (144, 780), (192, 1040)] {
+            let s = Scale::new(dpi);
+            let l = Layout::new(s.px(1040.0), h, s, true);
+            let b = l.banner;
+            assert!(b.card.x >= l.rail.x && b.card.right() <= l.rail_edge.x);
+            assert!(b.card.y > l.item(Page::Device).frame.bottom() + s.px(8.0));
+            assert!(b.card.bottom() < l.item(Page::Log).frame.y);
+            for line in [b.title, b.note] {
+                assert!(line.x > b.card.x && line.right() < b.card.right());
+                assert!(line.y > b.card.y && line.bottom() < b.card.bottom());
+            }
+            assert!(b.title.bottom() <= b.note.y);
+        }
     }
 
     #[test]

@@ -50,6 +50,7 @@ use self::icon::Owned;
 use crate::add::{self, Form, Keyed, Units};
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
+use crate::demo;
 use crate::focus::{self, Focus, Stop};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
@@ -156,6 +157,7 @@ struct App {
     secret: Option<u32>,
     notify: Notify,
     panel: Panel,
+    demo: bool,
 }
 
 fn choose_frame() -> Frame {
@@ -168,7 +170,12 @@ impl App {
         let frame = choose_frame();
         let fonts = Fonts::new(gfx.dwrite(), s).ok()?;
         let layout = measure(hwnd, s, frame);
-        let theme = appearance::choice();
+        let demo = demo::requested(std::env::args_os());
+        let theme = if demo {
+            theme::Choice::default()
+        } else {
+            appearance::choice()
+        };
         Some(Self {
             hwnd,
             s,
@@ -185,7 +192,11 @@ impl App {
             popup: None,
             update: None,
             launches: Launches::default(),
-            link: Link::start(hwnd),
+            link: if demo {
+                Link::demo(hwnd)
+            } else {
+                Link::start(hwnd)
+            },
             tips: Tips::new(hwnd),
             config: config_line(),
             sign_in: false,
@@ -203,6 +214,7 @@ impl App {
             secret: None,
             notify: Notify::default(),
             panel: Panel::new(s),
+            demo,
         })
     }
 
@@ -423,7 +435,7 @@ impl App {
             if page == NavPage::Log {
                 self.view.scroll.set(page, i32::MAX);
             }
-            if page == NavPage::Settings {
+            if page == NavPage::Settings && !self.demo {
                 match run::enabled() {
                     Ok(on) => self.sign_in = on,
                     Err(()) => self.fail(settings::SIGN_IN_UNREAD),
@@ -562,6 +574,17 @@ impl App {
         let Some(form) = &mut self.adding else {
             return false;
         };
+        if self.demo {
+            let listing = self.update.as_ref().map(|u| u.gateways.clone());
+            let listing = listing.unwrap_or_else(|| Ok(Default::default()));
+            if add::rehearse(form, &listing) {
+                self.adding = None;
+                self.fail(demo::NOT_SAVED);
+            }
+            self.retarget();
+            self.invalidate();
+            return true;
+        }
         let listing = gateways::read(config::default_path())
             .map(|file| gateways::catalog(&file, store::default_dir()));
         if add::commit(form, &listing, store::default_dir(), unix_now()) {
@@ -617,6 +640,13 @@ impl App {
 
     fn toggle_sign_in(&mut self) {
         let on = !self.sign_in;
+        if self.demo {
+            self.sign_in = on;
+            self.fail(demo::NOT_SAVED);
+            self.retarget();
+            self.invalidate();
+            return;
+        }
         match run::set(on) {
             Ok(()) => self.sign_in = on,
             Err(()) => self.fail(settings::SIGN_IN_FAILED),
@@ -626,7 +656,7 @@ impl App {
     }
 
     fn choose_theme(&mut self, choice: theme::Choice) {
-        if appearance::save(choice).is_err() {
+        if !self.demo && appearance::save(choice).is_err() {
             self.fail(settings::THEME_FAILED);
         }
         self.theme = choice;
@@ -890,11 +920,16 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 None
             });
             rehover(hwnd);
+            let demo = with_app(hwnd, |app| app.demo).unwrap_or(true);
             if let Some(url) = portal.flatten()
-                && !sys::open_https(hwnd, &url)
+                && (demo || !sys::open_https(hwnd, &url))
             {
                 with_app(hwnd, |app| {
-                    app.fail(menu::PORTAL_FAILED);
+                    app.fail(if demo {
+                        demo::NOT_OPENED
+                    } else {
+                        menu::PORTAL_FAILED
+                    });
                     app.retarget();
                     app.invalidate();
                 });
@@ -902,6 +937,15 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::OpenConfig) => {
+            let demo = with_app(hwnd, |app| app.demo).unwrap_or(true);
+            if demo {
+                with_app(hwnd, |app| {
+                    app.fail(demo::NOT_OPENED);
+                    app.retarget();
+                    app.invalidate();
+                });
+                return;
+            }
             let opened = config::default_path()
                 .filter(|path| path.is_file())
                 .is_some_and(|path| sys::open_file(hwnd, &path));
@@ -1015,6 +1059,7 @@ fn on_paint(hwnd: HWND) {
         let (w, h) = client_size(hwnd);
         let view = View {
             logo: app.logo(),
+            demo: app.demo,
             ..app.view
         };
         let mut ops = scene(&app.layout, app.s, app.palette(), &view);
@@ -1561,7 +1606,11 @@ pub fn run() {
     let instance = unsafe { GetModuleHandleW(null()) };
     let system_dpi = sys::window_dpi(null_mut());
     let class = wide("GateintoWindow");
-    let title = wide(TITLE);
+    let title = wide(if demo::requested(std::env::args_os()) {
+        demo::TITLE
+    } else {
+        TITLE
+    });
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(window_proc),
