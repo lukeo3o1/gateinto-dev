@@ -1457,15 +1457,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_DPICHANGED => {
             on_dpi_changed(hwnd, wp, lp);
-            tray::rescale_icon(hwnd);
+            tray::refresh_icon(hwnd);
             Some(0)
         }
         WM_DISPLAYCHANGE => {
-            tray::rescale_icon(hwnd);
+            tray::refresh_icon(hwnd);
             None
         }
         WM_SETTINGCHANGE => {
             on_setting_change(hwnd, lp);
+            tray::refresh_icon(hwnd);
             None
         }
         WM_DWMCOMPOSITIONCHANGED => {

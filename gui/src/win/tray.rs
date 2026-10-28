@@ -69,7 +69,7 @@ impl Drop for TrayIcon {
 pub struct Notify {
     added: bool,
     version4: bool,
-    shown: Option<(Eyes, String)>,
+    shown: Option<(Eyes, String, i32)>,
     icon: Option<TrayIcon>,
 }
 
@@ -209,12 +209,17 @@ pub fn taskbar_created(msg: u32) -> bool {
     id != 0 && msg == id
 }
 
-fn current(app: &App) -> (Eyes, String) {
+fn current(app: &App) -> (Eyes, String, i32) {
     let status = app
         .update
         .as_ref()
         .map_or_else(tray::pending, |u| tray::status(&u.state));
-    (status.eyes, tray::tooltip(&status))
+    (status.eyes, tray::tooltip(&status), icon_size())
+}
+
+fn icon_size() -> i32 {
+    let primary = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+    sys::metric_for_dpi(SM_CXSMICON, sys::monitor_dpi(primary)).max(1)
 }
 
 fn notify_data(main: HWND, icon: HICON, tip: &str) -> NOTIFYICONDATAW {
@@ -237,9 +242,7 @@ fn notify_data(main: HWND, icon: HICON, tip: &str) -> NOTIFYICONDATAW {
     }
 }
 
-fn make_icon(eyes: Eyes) -> Option<TrayIcon> {
-    let primary = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
-    let size = sys::metric_for_dpi(SM_CXSMICON, sys::monitor_dpi(primary)).max(1);
+fn make_icon(eyes: Eyes, size: i32) -> Option<TrayIcon> {
     let pixels = logo::pixels(size, eyes);
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -285,7 +288,7 @@ fn add_icon(main: HWND) -> bool {
     let Some(wanted) = with_app(main, |app| current(app)) else {
         return false;
     };
-    let Some(icon) = make_icon(wanted.0) else {
+    let Some(icon) = make_icon(wanted.0, wanted.2) else {
         return false;
     };
     let data = notify_data(main, icon.0, &wanted.1);
@@ -316,11 +319,6 @@ fn add_icon(main: HWND) -> bool {
     added
 }
 
-pub fn rescale_icon(main: HWND) {
-    with_app(main, |app| app.notify.shown = None);
-    refresh_icon(main);
-}
-
 pub fn refresh_icon(main: HWND) {
     let wanted = with_app(main, |app| {
         let wanted = current(app);
@@ -329,7 +327,7 @@ pub fn refresh_icon(main: HWND) {
     let Some(Some(wanted)) = wanted else {
         return;
     };
-    let Some(icon) = make_icon(wanted.0) else {
+    let Some(icon) = make_icon(wanted.0, wanted.2) else {
         return;
     };
     let data = notify_data(main, icon.0, &wanted.1);
