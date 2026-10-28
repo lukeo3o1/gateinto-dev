@@ -828,11 +828,11 @@ mod tests {
     }
 
     fn add_sheet(ready: bool) -> Sheet<'static> {
-        let entry = |input, label, value, note: &str| Entry {
+        let entry = |input, label, value, note: Text| Entry {
             input,
             label,
             value,
-            note: note.to_owned(),
+            note: tr(note).to_owned(),
             tone: Tone::Hint,
         };
         Sheet {
@@ -844,6 +844,20 @@ mod tests {
             focus: Input::Address,
             notice: Some((disclosure(), Tone::Warning)),
             ready,
+        }
+    }
+
+    #[test]
+    fn the_add_dialog_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let texts = texts(&draw_add(&layout(), &add_sheet(true)));
+        for part in [
+            "新增閘道",
+            "主機名稱或 IP 位址。預設連接埠為 443。",
+            "取消",
+            "新增",
+        ] {
+            assert!(texts.iter().any(|t| t == part), "{part}: {texts:?}");
         }
     }
 
@@ -877,9 +891,9 @@ mod tests {
             "Name",
             "Portal page",
             "proxy",
-            ADDRESS_HINT,
-            NAME_HINT,
-            PORTAL_HINT,
+            ADDRESS_HINT.english(),
+            NAME_HINT.english(),
+            PORTAL_HINT.english(),
             "Cancel",
             "Add",
         ] {

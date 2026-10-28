@@ -257,6 +257,27 @@ table! {
     HyphenHint => "Type it exactly, including the hyphens.", "請完整輸入，包括連字號。";
     DialogNames => "sign-in dialog names {0}", "登入對話框會顯示 {0}";
     CredentialsWarning => "Enter these only in the browser's proxy sign-in dialog that names {0}. Never enter them in a website's sign-in page or dialog.", "只能在顯示 {0} 的瀏覽器 Proxy 登入對話框中輸入。切勿在網站的登入頁面或對話框中輸入。";
+    GatewayAddress => "Gateway address", "閘道位址";
+    AddressHint => "Host name or IP address. Port 443 is the default.", "主機名稱或 IP 位址。預設連接埠為 443。";
+    NameHint => "Shown in lists. Leave empty to use the host name.", "顯示在清單中。留空則使用主機名稱。";
+    PortalHint => "Optional. An https:// page the browser opens first.", "選填。瀏覽器最先開啟的 https:// 網頁。";
+    NoFolder => "This device has no folder for added gateways.", "這台裝置沒有存放新增閘道的資料夾。";
+    Ambiguous => "Several gateways use this address. Enter the name of the one you mean.", "有多個閘道使用這個位址。請輸入您要的閘道名稱。";
+    Damaged => "A damaged gateway entry on this device uses this name or address. Fix or remove it, then try again.", "這台裝置上有一筆損毀的閘道項目使用這個名稱或位址。請修正或移除後再試一次。";
+    Unstorable => "This address is too long to store on this device.", "這個位址太長，無法存放在這台裝置上。";
+    StoreUnavailable => "The gateways added on this device cannot be read, so no gateway can be added now.", "無法讀取這台裝置上新增的閘道，因此目前無法新增閘道。";
+    Taken => "Another gateway with this name or address was just added. Nothing was changed.", "剛才已新增另一個使用這個名稱或位址的閘道。未做任何變更。";
+    Full => "This device holds as many added gateways as it can. Remove one first.", "這台裝置可新增的閘道已達上限。請先移除一個。";
+    NotSaved => "The gateway could not be saved on this device.", "無法在這台裝置上儲存閘道。";
+    Unlisted => "The gateway list cannot be read.", "無法讀取閘道清單。";
+    Unusable => "These values cannot be used for a gateway.", "這些值無法用於閘道。";
+    EnterHost => "Enter a host name or IP address, with an optional :port.", "請輸入主機名稱或 IP 位址，可加上 :連接埠。";
+    ReservedHost => "The host may not start with a Windows device name such as CON or NUL.", "主機名稱不可用 CON 或 NUL 等 Windows 裝置名稱開頭。";
+    NameRule => "Use letters, digits, _ or -, not starting with -.", "請使用字母、數字、_ 或 -，且不可以 - 開頭。";
+    EnterHttps => "Enter an https:// address.", "請輸入 https:// 位址。";
+    AlreadySetUp => "Already set up as \"{0}\".", "已設定為「{0}」。";
+    NameUsed => "\"{0}\" is already used by another gateway.", "「{0}」已被其他閘道使用。";
+    TooClose => "Too close to \"{0}\": names may not differ only in letter case.", "與「{0}」太相近：名稱不可只有大小寫不同。";
 }
 
 impl Text {

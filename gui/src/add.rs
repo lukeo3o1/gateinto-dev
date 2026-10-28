@@ -8,24 +8,22 @@ use gateinto::link::{
 use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
 
 use crate::gateways;
+use crate::i18n::{Text, fill, tr};
 
-pub const TITLE: &str = "Add gateway";
-pub const ADDRESS_HINT: &str = "Host name or IP address. Port 443 is the default.";
-pub const NAME_HINT: &str = "Shown in lists. Leave empty to use the host name.";
-pub const PORTAL_HINT: &str = "Optional. An https:// page the browser opens first.";
-pub const NO_FOLDER: &str = "This device has no folder for added gateways.";
-const AMBIGUOUS: &str = "Several gateways use this address. Enter the name of the one you mean.";
-const DAMAGED: &str = "A damaged gateway entry on this device uses this name or address. \
-     Fix or remove it, then try again.";
-const UNSTORABLE: &str = "This address is too long to store on this device.";
-const UNAVAILABLE: &str =
-    "The gateways added on this device cannot be read, so no gateway can be added now.";
-const TAKEN: &str =
-    "Another gateway with this name or address was just added. Nothing was changed.";
-const FULL: &str = "This device holds as many added gateways as it can. Remove one first.";
-const NOT_SAVED: &str = "The gateway could not be saved on this device.";
-const UNLISTED: &str = "The gateway list cannot be read.";
-const UNUSABLE: &str = "These values cannot be used for a gateway.";
+pub const TITLE: Text = Text::AddGateway;
+pub const ADDRESS_HINT: Text = Text::AddressHint;
+pub const NAME_HINT: Text = Text::NameHint;
+pub const PORTAL_HINT: Text = Text::PortalHint;
+pub const NO_FOLDER: Text = Text::NoFolder;
+const AMBIGUOUS: Text = Text::Ambiguous;
+const DAMAGED: Text = Text::Damaged;
+const UNSTORABLE: Text = Text::Unstorable;
+const UNAVAILABLE: Text = Text::StoreUnavailable;
+const TAKEN: Text = Text::Taken;
+const FULL: Text = Text::Full;
+const NOT_SAVED: Text = Text::NotSaved;
+const UNLISTED: Text = Text::Unlisted;
+const UNUSABLE: Text = Text::Unusable;
 // The longest DNS name, a colon and a five digit port.
 const MAX_ADDRESS: usize = 253 + 1 + 5;
 
@@ -47,13 +45,32 @@ impl Input {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message(Text, String);
+
+impl Message {
+    fn with(text: Text, arg: impl std::fmt::Display) -> Self {
+        Self(text, arg.to_string())
+    }
+
+    pub fn text(&self) -> String {
+        fill(self.0, &[&self.1])
+    }
+}
+
+impl From<Text> for Message {
+    fn from(text: Text) -> Self {
+        Self(text, String::new())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Form {
     address: String,
     name: String,
     portal: String,
     focus: Input,
-    failure: Option<String>,
+    failure: Option<Message>,
 }
 
 impl Form {
@@ -161,7 +178,7 @@ pub struct Ready {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Incomplete,
-    Invalid(Option<Input>, String),
+    Invalid(Option<Input>, Message),
     Ready(Ready),
 }
 
@@ -171,22 +188,13 @@ fn optional(text: &str) -> Option<&str> {
 
 fn field_error(error: UriError) -> Verdict {
     let (input, message) = match error {
-        UriError::InvalidValue("gateway") => (
-            Input::Address,
-            "Enter a host name or IP address, with an optional :port.",
-        ),
-        UriError::ReservedGateway => (
-            Input::Address,
-            "The host may not start with a Windows device name such as CON or NUL.",
-        ),
-        UriError::InvalidValue("profile") => (
-            Input::Name,
-            "Use letters, digits, _ or -, not starting with -.",
-        ),
-        UriError::InvalidValue("portal") => (Input::Portal, "Enter an https:// address."),
-        _ => return Verdict::Invalid(None, UNUSABLE.to_owned()),
+        UriError::InvalidValue("gateway") => (Input::Address, Text::EnterHost),
+        UriError::ReservedGateway => (Input::Address, Text::ReservedHost),
+        UriError::InvalidValue("profile") => (Input::Name, Text::NameRule),
+        UriError::InvalidValue("portal") => (Input::Portal, Text::EnterHttps),
+        _ => return Verdict::Invalid(None, UNUSABLE.into()),
     };
-    Verdict::Invalid(Some(input), message.to_owned())
+    Verdict::Invalid(Some(input), message.into())
 }
 
 fn shown(known: &Known, name: &GatewayName) -> String {
@@ -201,21 +209,19 @@ fn link_error(known: &Known, error: LinkError) -> Verdict {
     let (input, message) = match error {
         LinkError::KnownGateway { existing, .. } => (
             Some(Input::Address),
-            format!("Already set up as \"{}\".", shown(known, &existing)),
+            Message::with(Text::AlreadySetUp, shown(known, &existing)),
         ),
-        LinkError::GatewayMismatch(name) | LinkError::ProfileCollision(name) => (
-            Some(Input::Name),
-            format!("\"{name}\" is already used by another gateway."),
-        ),
-        LinkError::LookAlikeProfile { existing, .. } => (
-            Some(Input::Name),
-            format!("Too close to \"{existing}\": names may not differ only in letter case."),
-        ),
-        LinkError::AmbiguousGateway(_) => (Some(Input::Name), AMBIGUOUS.to_owned()),
-        LinkError::Damaged { .. } => (None, DAMAGED.to_owned()),
-        LinkError::Unstorable { .. } => (Some(Input::Address), UNSTORABLE.to_owned()),
-        LinkError::StoreUnavailable(_) => (None, UNAVAILABLE.to_owned()),
-        _ => (None, UNUSABLE.to_owned()),
+        LinkError::GatewayMismatch(name) | LinkError::ProfileCollision(name) => {
+            (Some(Input::Name), Message::with(Text::NameUsed, name))
+        }
+        LinkError::LookAlikeProfile { existing, .. } => {
+            (Some(Input::Name), Message::with(Text::TooClose, existing))
+        }
+        LinkError::AmbiguousGateway(_) => (Some(Input::Name), AMBIGUOUS.into()),
+        LinkError::Damaged { .. } => (None, DAMAGED.into()),
+        LinkError::Unstorable { .. } => (Some(Input::Address), UNSTORABLE.into()),
+        LinkError::StoreUnavailable(_) => (None, UNAVAILABLE.into()),
+        _ => (None, UNUSABLE.into()),
     };
     Verdict::Invalid(input, message)
 }
@@ -226,7 +232,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
     }
     let known = match listing {
         Ok(known) => known,
-        Err(_) => return Verdict::Invalid(None, UNLISTED.to_owned()),
+        Err(_) => return Verdict::Invalid(None, UNLISTED.into()),
     };
     let request = match LaunchRequest::from_fields(
         optional(&form.name),
@@ -250,7 +256,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
         }),
         Ok(Resolution::Launch(launch)) => Verdict::Invalid(
             Some(Input::Address),
-            format!("Already set up as \"{}\".", shown(known, &launch.profile)),
+            Message::with(Text::AlreadySetUp, shown(known, &launch.profile)),
         ),
         Err(error) => link_error(known, error),
     }
@@ -286,38 +292,38 @@ pub struct Sheet<'a> {
 
 pub fn sheet<'a>(form: &'a Form, listing: &Result<Known, String>) -> Sheet<'a> {
     let verdict = check(form, listing);
-    let entry = |input, label, hint: &str| {
+    let entry = |input, label: Text, hint: Text| {
         let (note, tone) = match &verdict {
             Verdict::Invalid(Some(wrong), message) if *wrong == input => {
-                (message.clone(), Tone::Error)
+                (message.text(), Tone::Error)
             }
             Verdict::Ready(ready) if ready.local && input == Input::Address => {
                 (LOCAL_ADDRESS.to_owned(), Tone::Warning)
             }
-            _ => (hint.to_owned(), Tone::Hint),
+            _ => (tr(hint).to_owned(), Tone::Hint),
         };
         Entry {
             input,
-            label,
+            label: tr(label),
             value: form.value(input),
             note,
             tone,
         }
     };
     let entries = [
-        entry(Input::Address, "Gateway address", ADDRESS_HINT),
-        entry(Input::Name, "Name", NAME_HINT),
-        entry(Input::Portal, "Portal page", PORTAL_HINT),
+        entry(Input::Address, Text::GatewayAddress, ADDRESS_HINT),
+        entry(Input::Name, Text::Name, NAME_HINT),
+        entry(Input::Portal, Text::PortalPage, PORTAL_HINT),
     ];
     let general = match &verdict {
-        Verdict::Invalid(None, message) => Some(message.clone()),
+        Verdict::Invalid(None, message) => Some(message),
         _ => None,
     };
     let notice = form
         .failure
-        .clone()
+        .as_ref()
         .or(general)
-        .map(|message| (message, Tone::Error))
+        .map(|message| (message.text(), Tone::Error))
         .or_else(|| Some((disclosure(), Tone::Warning)));
     Sheet {
         entries,
@@ -352,7 +358,7 @@ pub fn commit(
         return false;
     };
     let Some(dir) = dir else {
-        form.failure = Some(NO_FOLDER.to_owned());
+        form.failure = Some(NO_FOLDER.into());
         return false;
     };
     let gateway = LinkedGateway {
@@ -367,7 +373,7 @@ pub fn commit(
                 StoreError::Full => FULL,
                 _ => NOT_SAVED,
             };
-            form.failure = Some(message.to_owned());
+            form.failure = Some(message.into());
             false
         }
     }
@@ -416,7 +422,7 @@ mod tests {
 
     fn error(form: &Form, listing: &Result<Known, String>) -> (Option<Input>, String) {
         match check(form, listing) {
-            Verdict::Invalid(input, message) => (input, message),
+            Verdict::Invalid(input, message) => (input, message.text()),
             other => panic!("expected an error, got {other:?}"),
         }
     }
@@ -619,7 +625,7 @@ mod tests {
         let listing = known(vec![office(), home]);
         assert_eq!(
             error(&form("proxy.example.com", "", ""), &listing),
-            (Some(Input::Name), AMBIGUOUS.to_owned())
+            (Some(Input::Name), AMBIGUOUS.english().to_owned())
         );
     }
 
@@ -636,7 +642,7 @@ mod tests {
         });
         assert_eq!(
             error(&form("proxy.example.net", "lab", ""), &listing),
-            (None, DAMAGED.to_owned())
+            (None, DAMAGED.english().to_owned())
         );
     }
 
@@ -645,7 +651,7 @@ mod tests {
         let host = format!("{}example", "a.".repeat(123));
         assert_eq!(
             error(&form(&host, "lab", ""), &known(vec![])),
-            (Some(Input::Address), UNSTORABLE.to_owned())
+            (Some(Input::Address), UNSTORABLE.english().to_owned())
         );
     }
 
@@ -657,15 +663,15 @@ mod tests {
         });
         assert_eq!(
             error(&form("proxy.example.net", "lab", ""), &unavailable),
-            (None, UNAVAILABLE.to_owned())
+            (None, UNAVAILABLE.english().to_owned())
         );
         assert_eq!(
             field_error(UriError::TooLong),
-            Verdict::Invalid(None, UNUSABLE.to_owned())
+            Verdict::Invalid(None, UNUSABLE.into())
         );
         for text in [AMBIGUOUS, DAMAGED, UNSTORABLE, UNAVAILABLE, UNUSABLE] {
             for word in ["link", "launch", "URI", "profile"] {
-                assert!(!text.contains(word), "{text}");
+                assert!(!text.english().contains(word), "{text}");
             }
         }
     }
@@ -678,8 +684,8 @@ mod tests {
             .collect()
     }
 
-    fn hint(text: &str) -> (String, Tone) {
-        (text.to_owned(), Tone::Hint)
+    fn hint(text: Text) -> (String, Tone) {
+        (text.english().to_owned(), Tone::Hint)
     }
 
     #[test]
@@ -713,8 +719,8 @@ mod tests {
         let sheet = sheet(&form, &known(vec![]));
         assert_eq!(sheet.entries[1].value, "a.b");
         assert_eq!(sheet.entries[1].tone, Tone::Error);
-        assert_eq!(sheet.entries[0].note, ADDRESS_HINT);
-        assert_eq!(sheet.entries[2].note, PORTAL_HINT);
+        assert_eq!(sheet.entries[0].note, ADDRESS_HINT.english());
+        assert_eq!(sheet.entries[2].note, PORTAL_HINT.english());
         assert!(!sheet.ready);
     }
 
@@ -745,12 +751,44 @@ mod tests {
             sheet_failed.notice,
             Some(("The gateway list cannot be read.".to_owned(), Tone::Error))
         );
-        form.failure = Some("The gateway was not added: full".to_owned());
+        form.failure = Some(FULL.into());
         let sheet = sheet(&form, &known(vec![]));
         assert!(!sheet.ready);
+        assert_eq!(sheet.notice, Some((FULL.english().to_owned(), Tone::Error)));
+    }
+
+    #[test]
+    fn the_form_speaks_chinese_but_the_disclosure_stays_as_the_agent_words_it() {
+        let mut stuck = lab();
+        assert!(!commit(&mut stuck, &known(vec![]), None, 1));
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let blank = Form::default();
+        let sheet = sheet(&blank, &known(vec![]));
+        let labels: Vec<_> = sheet
+            .entries
+            .iter()
+            .map(|e| (e.label, e.note.as_str()))
+            .collect();
         assert_eq!(
-            sheet.notice,
-            Some(("The gateway was not added: full".to_owned(), Tone::Error))
+            labels,
+            [
+                ("閘道位址", "主機名稱或 IP 位址。預設連接埠為 443。"),
+                ("名稱", "顯示在清單中。留空則使用主機名稱。"),
+                ("入口網頁", "選填。瀏覽器最先開啟的 https:// 網頁。"),
+            ]
+        );
+        assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
+        assert!(disclosure().starts_with(gateinto::link::IDENTITY));
+        assert_eq!(
+            error(
+                &form("proxy.example.net", "office", ""),
+                &known(vec![office()])
+            ),
+            (Some(Input::Name), "「office」已被其他閘道使用。".to_owned())
+        );
+        assert_eq!(
+            super::sheet(&stuck, &known(vec![])).notice,
+            Some(("這台裝置沒有存放新增閘道的資料夾。".to_owned(), Tone::Error))
         );
     }
 
@@ -769,12 +807,12 @@ mod tests {
     #[test]
     fn editing_clears_a_failure() {
         let mut form = form("proxy.example.net", "lab", "");
-        form.failure = Some("x".to_owned());
+        form.failure = Some(FULL.into());
         form.erase();
-        assert_eq!(form.failure.as_deref(), None);
-        form.failure = Some("x".to_owned());
+        assert_eq!(form.failure, None);
+        form.failure = Some(FULL.into());
         form.type_text("x");
-        assert_eq!(form.failure.as_deref(), None);
+        assert_eq!(form.failure, None);
     }
 
     #[test]
@@ -799,7 +837,7 @@ mod tests {
         let mut twin = form("proxy.example.org", "lab", "");
         assert!(!commit(&mut twin, &again, Some(dir.clone()), 43));
         assert_eq!(
-            twin.failure.as_deref(),
+            twin.failure.as_ref().map(Message::text).as_deref(),
             Some("\"lab\" is already used by another gateway.")
         );
         assert_eq!(
@@ -853,7 +891,7 @@ mod tests {
         std::fs::write(&dir, b"").unwrap();
         let mut form = lab();
         assert!(!commit(&mut form, &listing, Some(dir.clone()), 1));
-        assert_eq!(form.failure.as_deref(), Some(NOT_SAVED));
+        assert_eq!(form.failure, Some(NOT_SAVED.into()));
         assert!(std::fs::read(&dir).unwrap().is_empty());
         std::fs::remove_file(dir).unwrap();
     }
@@ -866,7 +904,7 @@ mod tests {
         store.add(&other("lab", "proxy.example.org")).unwrap();
         let mut form = lab();
         assert!(!commit(&mut form, &listing, Some(dir.clone()), 1));
-        assert_eq!(form.failure.as_deref(), Some(TAKEN));
+        assert_eq!(form.failure, Some(TAKEN.into()));
         assert_eq!(stored(&dir), ["lab proxy.example.org:443"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -879,7 +917,7 @@ mod tests {
         store.add(&other("edge", "proxy.example.net")).unwrap();
         let mut form = lab();
         assert!(!commit(&mut form, &listing, Some(dir.clone()), 1));
-        assert_eq!(form.failure.as_deref(), Some(TAKEN));
+        assert_eq!(form.failure, Some(TAKEN.into()));
         assert_eq!(stored(&dir), ["edge proxy.example.net:443"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -888,7 +926,7 @@ mod tests {
     fn store_failures_get_fixed_wording() {
         for text in [TAKEN, FULL, NOT_SAVED] {
             for word in ["link", "gateinto"] {
-                assert!(!text.contains(word), "{text}");
+                assert!(!text.english().contains(word), "{text}");
             }
         }
     }
@@ -897,7 +935,7 @@ mod tests {
     fn committing_without_a_store_folder_writes_nothing() {
         let mut form = form("proxy.example.net", "lab", "");
         assert!(!commit(&mut form, &known(vec![]), None, 1));
-        assert_eq!(form.failure.as_deref(), Some(NO_FOLDER));
+        assert_eq!(form.failure, Some(NO_FOLDER.into()));
     }
 
     #[test]
