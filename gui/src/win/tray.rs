@@ -130,7 +130,7 @@ impl Panel {
         let mut ops = board.ops;
         let ring = self.focus.ring();
         if let Some(stop) = self.stops.iter().find(|s| Some(s.zone) == ring) {
-            ops.push(focus::ring(stop.rect, self.s, &Theme::DARK));
+            ops.extend(focus::outline(stop, self.s, &Theme::DARK));
         }
         ops
     }
@@ -653,10 +653,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_KEYDOWN => key(main, wp as u16),
         WM_CHAR if wp == WPARAM::from(b'\r') || wp == WPARAM::from(b' ') => {
-            let action = with_app(main, |app| {
-                app.panel.focus.ring()?;
-                app.panel.focus.action()
-            });
+            let action = with_app(main, |app| app.panel.focus.action(&app.panel.stops));
             act(main, action.flatten());
             Some(0)
         }

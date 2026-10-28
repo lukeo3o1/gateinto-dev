@@ -183,6 +183,7 @@ impl<'a, M: Measure> Painter<'a, M> {
             rect: r,
             zone,
             scrolls,
+            clip: self.clip,
         });
         let top = r.y.max(self.clip.y);
         let bottom = r.bottom().min(self.clip.bottom());
@@ -1028,6 +1029,7 @@ mod tests {
         assert!(!b.order[0].scrolls);
         let last = b.order.last().unwrap();
         assert!(last.scrolls);
+        assert_eq!(Some(last.clip), b.pane.map(|pane| pane.view));
         assert_eq!(last.rect, Rect::new(964, 638 + 2 * 60, 32, 32));
         assert_eq!(b.targets.len(), 16);
     }

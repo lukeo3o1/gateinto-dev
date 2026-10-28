@@ -10,10 +10,23 @@ pub struct Stop {
     pub rect: Rect,
     pub zone: Zone,
     pub scrolls: bool,
+    pub clip: Rect,
+}
+
+impl Stop {
+    fn seen(&self) -> bool {
+        let (r, c) = (self.rect, self.clip);
+        r.x.max(c.x) < r.right().min(c.right()) && r.y.max(c.y) < r.bottom().min(c.bottom())
+    }
+
+    fn whole(&self) -> bool {
+        let (r, c) = (self.rect, self.clip);
+        r.x >= c.x && r.y >= c.y && r.right() <= c.right() && r.bottom() <= c.bottom()
+    }
 }
 
 pub fn stops(rail: &[Stop], order: &[Stop]) -> (Vec<Stop>, bool) {
-    let actionable = |s: &&Stop| pointer::action(s.zone).is_some();
+    let actionable = |s: &&Stop| pointer::action(s.zone).is_some() && (s.scrolls || s.seen());
     match order
         .iter()
         .position(|s| matches!(s.zone, Zone::Menu | Zone::Dialog))
@@ -71,8 +84,12 @@ impl Focus {
         self.zone.filter(|_| self.visible)
     }
 
-    pub fn action(&self) -> Option<Action> {
-        pointer::action(self.zone?)
+    pub fn action(&self, stops: &[Stop]) -> Option<Action> {
+        let zone = self.ring()?;
+        stops
+            .iter()
+            .find(|s| s.zone == zone && s.seen())
+            .and_then(|s| pointer::action(s.zone))
     }
 
     pub fn tab(&mut self, stops: &[Stop], back: bool) -> Option<Zone> {
@@ -146,7 +163,18 @@ impl Focus {
     }
 }
 
-pub fn ring(rect: Rect, s: Scale, t: &Theme) -> Op {
+pub fn outline(stop: &Stop, s: Scale, t: &Theme) -> Vec<Op> {
+    let ring = ring(stop.rect, s, t);
+    if !stop.seen() {
+        Vec::new()
+    } else if stop.scrolls || !stop.whole() {
+        vec![Op::Clip(stop.clip), ring, Op::Unclip]
+    } else {
+        vec![ring]
+    }
+}
+
+fn ring(rect: Rect, s: Scale, t: &Theme) -> Op {
     let d = s.px(2.5);
     Op::Ring(
         Rect::new(rect.x - d, rect.y - d, rect.w + 2 * d, rect.h + 2 * d),
@@ -170,6 +198,16 @@ mod tests {
             rect: Rect::new(10, 10, 20, 20),
             zone,
             scrolls: false,
+            clip: Rect::new(0, 0, 1000, 1000),
+        }
+    }
+
+    fn at(zone: Zone, rect: Rect, scrolls: bool) -> Stop {
+        Stop {
+            rect,
+            zone,
+            scrolls,
+            clip: Rect::new(0, 100, 200, 100),
         }
     }
 
@@ -381,9 +419,73 @@ mod tests {
 
     #[test]
     fn keys_activate_actionable_stops() {
+        let stops = [stop(Zone::Theme(Choice::Dark))];
         let mut f = Focus::default();
-        assert_eq!(f.action(), None);
-        f.tab(&[stop(Zone::Theme(Choice::Dark))], false);
-        assert_eq!(f.action(), Some(Action::Theme(Choice::Dark)));
+        assert_eq!(f.action(&stops), None);
+        f.tab(&stops, false);
+        assert_eq!(f.action(&stops), Some(Action::Theme(Choice::Dark)));
+        f.clicked(Zone::Theme(Choice::Dark), &stops);
+        assert_eq!(f.action(&stops), None);
+    }
+
+    #[test]
+    fn stops_outside_their_view_are_skipped_unless_they_scroll() {
+        let order = vec![
+            at(
+                Zone::CopyCredential(Field::Username),
+                Rect::new(10, 190, 20, 20),
+                false,
+            ),
+            at(
+                Zone::CopyCredential(Field::Password),
+                Rect::new(10, 200, 20, 20),
+                false,
+            ),
+            at(Zone::Revoke(1), Rect::new(10, 300, 20, 20), true),
+            stop(Zone::CloseDialog),
+            stop(Zone::Dialog),
+        ];
+        let (found, _) = stops(&rail(), &order);
+        assert_eq!(
+            zones(&found),
+            [
+                Zone::CopyCredential(Field::Username),
+                Zone::Revoke(1),
+                Zone::CloseDialog
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_never_activate_a_stop_scrolled_out_of_view() {
+        let shown = [at(Zone::Revoke(4), Rect::new(10, 120, 20, 20), true)];
+        let mut f = Focus::default();
+        f.tab(&shown, false);
+        assert_eq!(f.action(&shown), Some(Action::Revoke(4)));
+        let gone = [at(Zone::Revoke(4), Rect::new(10, 40, 20, 20), true)];
+        f.sync(&gone, false);
+        assert_eq!(f.zone(), Some(Zone::Revoke(4)));
+        assert_eq!(f.action(&gone), None);
+    }
+
+    #[test]
+    fn the_ring_is_clipped_to_the_view_of_a_scrolling_or_cut_stop() {
+        let s = Scale { dpi: 96 };
+        let t = Theme::DARK;
+        let view = Rect::new(0, 100, 200, 100);
+        let inside = Rect::new(10, 120, 20, 20);
+        let cut = Rect::new(10, 190, 20, 20);
+        assert_eq!(
+            outline(&stop(Zone::SignIn), s, &t),
+            [ring(stop(Zone::SignIn).rect, s, &t)]
+        );
+        let clipped = |r: Rect| vec![Op::Clip(view), ring(r, s, &t), Op::Unclip];
+        assert_eq!(
+            outline(&at(Zone::Revoke(1), inside, true), s, &t),
+            clipped(inside)
+        );
+        assert_eq!(outline(&at(Zone::CopyId, cut, false), s, &t), clipped(cut));
+        let below = Rect::new(10, 201, 20, 20);
+        assert_eq!(outline(&at(Zone::Revoke(1), below, true), s, &t), []);
     }
 }

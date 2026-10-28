@@ -294,6 +294,7 @@ impl App {
                 rect: item.frame,
                 zone: Zone::Nav(item.page),
                 scrolls: false,
+                clip: item.frame,
             })
             .collect();
         let (stops, trapped) = focus::stops(&rail, &board.order);
@@ -353,10 +354,10 @@ impl App {
     }
 
     fn keyed_action(&self) -> Option<Action> {
-        if self.focus.ring().is_none() || matches!(self.focus.zone(), Some(Zone::AddField(_))) {
+        if matches!(self.focus.zone(), Some(Zone::AddField(_))) {
             return None;
         }
-        self.focus.action()
+        self.focus.action(&self.stops)
     }
 
     fn hide_ring(&mut self, zone: Zone) {
@@ -367,21 +368,13 @@ impl App {
     }
 
     fn ring(&self) -> Vec<Op> {
-        let Some(zone) = self.focus.ring() else {
-            return Vec::new();
-        };
-        let Some(stop) = self.stops.iter().find(|s| s.zone == zone) else {
-            return Vec::new();
-        };
-        let ring = focus::ring(stop.rect, self.s, self.palette());
-        let pane = match zone {
-            Zone::Entry(_) => self.popup,
-            _ => self.pane,
-        };
-        match pane.filter(|_| stop.scrolls) {
-            Some(pane) => vec![Op::Clip(pane.view), ring, Op::Unclip],
-            None => vec![ring],
-        }
+        let ring = self.focus.ring();
+        self.stops
+            .iter()
+            .find(|s| Some(s.zone) == ring)
+            .map_or_else(Vec::new, |stop| {
+                focus::outline(stop, self.s, self.palette())
+            })
     }
 
     fn gateway_details(&self) -> Option<gateways::Details> {
