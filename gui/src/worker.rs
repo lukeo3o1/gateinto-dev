@@ -251,6 +251,7 @@ mod tests {
     use gateinto::proxy::{DEFAULT_LISTEN, SessionCredentials};
 
     use super::*;
+    use crate::credentials::Issued;
 
     fn agent(
         log: &RefCell<Vec<Request>>,
@@ -779,7 +780,7 @@ mod tests {
         Reveal {
             id,
             ticket: 1,
-            credentials: SessionCredentials::parse("gateinto", PASSWORD),
+            credentials: SessionCredentials::parse("gateinto", PASSWORD).map(Issued::Agent),
         }
     }
 

@@ -20,7 +20,29 @@ pub const HINT: &str = "Type it exactly, including the hyphens.";
 pub struct Reveal {
     pub id: u64,
     pub ticket: u64,
-    pub credentials: Option<SessionCredentials>,
+    pub credentials: Option<Issued>,
+}
+
+#[derive(Debug)]
+pub enum Issued {
+    Agent(SessionCredentials),
+    Demo,
+}
+
+impl Issued {
+    pub fn username(&self) -> &str {
+        match self {
+            Self::Agent(credentials) => credentials.username(),
+            Self::Demo => "demo-user",
+        }
+    }
+
+    pub fn password(&self) -> &str {
+        match self {
+            Self::Agent(credentials) => credentials.password(),
+            Self::Demo => "demo-password",
+        }
+    }
 }
 
 pub fn reveal(id: u64, ticket: u64, reply: Result<Response, RequestError>) -> Reveal {
@@ -28,7 +50,7 @@ pub fn reveal(id: u64, ticket: u64, reply: Result<Response, RequestError>) -> Re
         Ok(Response::Ok(mut lines)) => {
             let credentials = ipc::issued_credentials(&lines);
             lines.zeroize();
-            credentials
+            credentials.map(Issued::Agent)
         }
         Ok(Response::Error(mut message)) => {
             message.zeroize();
@@ -52,7 +74,7 @@ pub enum Field {
 #[derive(Debug)]
 enum Secret {
     Waiting,
-    Shown(SessionCredentials),
+    Shown(Issued),
     Failed,
 }
 
@@ -268,6 +290,23 @@ mod tests {
         ] {
             assert!(reveal(3, 1, reply).credentials.is_none());
         }
+    }
+
+    #[test]
+    fn demo_credentials_show_their_placeholder_values() {
+        let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
+        dialog.receive(Reveal {
+            id: 3,
+            ticket: 1,
+            credentials: Some(Issued::Demo),
+        });
+        dialog.toggle();
+        let page = dialog.page(&running());
+        assert_eq!(
+            (page.username, page.password),
+            ("demo-user", "demo-password")
+        );
+        assert_eq!(dialog.secret(Field::Password), Some("demo-password"));
     }
 
     #[test]
