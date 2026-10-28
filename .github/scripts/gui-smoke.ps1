@@ -112,6 +112,7 @@ $configDir = Join-Path $env:APPDATA 'Gateinto'
 $config = Join-Path $configDir 'gateinto.toml'
 $themeKey = 'HKCU:\Software\Gateinto\App'
 $pages = 'sessions', 'gateways', 'device', 'log', 'settings'
+$flyoutTitles = @{ 'English' = 'Gateinto status'; 'zh-TW' = "Gateinto $([char] 0x72c0)$([char] 0x614b)" }
 $VK_CONTROL = 0x11
 $VK_TAB = 0x09
 $VK_ESCAPE = 0x1b
@@ -164,9 +165,10 @@ function Get-ConfigHash {
   (Get-FileHash -Algorithm SHA256 -LiteralPath $config).Hash
 }
 
-function Set-Theme([string] $Theme) {
+function Set-Appearance([string] $Theme, [string] $Language) {
   New-Item -Force -Path $themeKey | Out-Null
   Set-ItemProperty -Path $themeKey -Name Theme -Value $Theme -Type String
+  Set-ItemProperty -Path $themeKey -Name Language -Value $Language -Type String
 }
 
 function Assert-Gui($Gui) {
@@ -187,22 +189,23 @@ function Find-Window($Process, [string] $Class, [string] $Title) {
   [IntPtr]::Zero
 }
 
-function Start-Gui([string] $Theme) {
-  Set-Theme $Theme
-  $gui = Start-Process -FilePath $guiExe -PassThru
+function Start-Gui([string] $Theme, [string] $Language = 'English', [switch] $Demo) {
+  Set-Appearance $Theme $Language
+  $title = if ($Demo) { 'Gateinto Demo' } else { 'Gateinto' }
+  $gui = if ($Demo) { Start-Process -FilePath $guiExe -ArgumentList '--demo' -PassThru } else { Start-Process -FilePath $guiExe -PassThru }
   $null = $gui.Handle
   $deadline = (Get-Date).AddSeconds(60)
   while ((Get-Date) -lt $deadline) {
     Assert-Gui $gui
-    $hwnd = Find-Window $gui 'GateintoWindow' 'Gateinto'
+    $hwnd = Find-Window $gui 'GateintoWindow' $title
     if ($hwnd -ne [IntPtr]::Zero) {
       Start-Sleep -Seconds 3
       Assert-Gui $gui
-      return [pscustomobject] @{ Process = $gui; Hwnd = $hwnd; Theme = $Theme }
+      return [pscustomobject] @{ Process = $gui; Hwnd = $hwnd; Theme = $Theme; Language = $Language }
     }
     Start-Sleep -Milliseconds 250
   }
-  throw 'gateinto-gui.exe showed no visible top-level window titled Gateinto within 60 seconds'
+  throw "gateinto-gui.exe showed no visible top-level window titled $title within 60 seconds"
 }
 
 function Stop-Gui($Gui) {
@@ -213,6 +216,8 @@ function Stop-Gui($Gui) {
   }
   $theme = (Get-ItemProperty -Path $themeKey -Name Theme).Theme
   if ($theme -ne $Gui.Theme) { throw "gateinto-gui.exe changed the Theme value from $($Gui.Theme) to $theme" }
+  $language = (Get-ItemProperty -Path $themeKey -Name Language).Language
+  if ($language -ne $Gui.Language) { throw "gateinto-gui.exe changed the Language value from $($Gui.Language) to $language" }
   Stop-Process -Id $Gui.Process.Id -Force
   $Gui.Process.WaitForExit()
 }
@@ -307,7 +312,7 @@ function Save-Flyout($Gui, [string] $Name) {
     $null = [GuiSmoke]::PostMessage($Gui.Hwnd, $WM_TRAY, $anchor, [IntPtr] $message)
     $deadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $deadline) {
-      $flyout = Find-Window $Gui.Process 'GateintoFlyout' 'Gateinto status'
+      $flyout = Find-Window $Gui.Process 'GateintoFlyout' $flyoutTitles[$Gui.Language]
       if ($flyout -ne [IntPtr]::Zero) {
         Start-Sleep -Milliseconds 800
         $shot = Save-Window $Gui $flyout $Name
@@ -322,10 +327,11 @@ function Save-Flyout($Gui, [string] $Name) {
   Write-Host "::warning::the tray flyout did not appear after a simulated tray icon click; $Name.png was not captured"
 }
 
-function Invoke-Theme([string] $Theme) {
+function Invoke-Theme([string] $Theme, [string] $Language = 'English') {
   $before = Get-GateintoIds
-  $gui = Start-Gui $Theme
+  $gui = Start-Gui $Theme $Language
   $prefix = $Theme.ToLowerInvariant()
+  if ($Language -ne 'English') { $prefix = "$prefix-$($Language.ToLowerInvariant())" }
   $shots = @(Save-Window $gui $gui.Hwnd "$prefix-0-startup")
   for ($i = 0; $i -lt $pages.Count; $i++) {
     Send-Keys $gui @($VK_CONTROL) (0x31 + $i)
@@ -425,6 +431,8 @@ ca_file = '$ca'
   Step 'Dark theme: pages, focus ring and tray flyout' { $script:dark = Invoke-Theme 'Dark' }
   if ($script:light.Hash -eq $script:dark.Hash) { throw 'the Light and Dark Sessions screenshots are pixel-identical' }
   if ($script:light.Luma -le $script:dark.Luma) { throw "the Light Sessions screenshot (mean luma $($script:light.Luma)) is not brighter than the Dark one ($($script:dark.Luma))" }
+  Step 'Traditional Chinese: pages, focus ring and tray flyout' { $script:chinese = Invoke-Theme 'Light' 'zh-TW' }
+  if ($script:light.Hash -eq $script:chinese.Hash) { throw 'the English and Traditional Chinese Sessions screenshots are pixel-identical' }
 
   Step 'Stop the agent, then check that gateinto-gui.exe does not start one' {
     & $gateinto stop
@@ -436,6 +444,20 @@ ca_file = '$ca'
     $ids = Get-GateintoIds
     if ($ids) { throw "gateinto.exe runs although the agent was stopped: $ids" }
     if ((Get-AgentStatus).Running) { throw 'an agent is running although only gateinto-gui.exe was started' }
+    Stop-Gui $gui
+  }
+
+  Step 'Demo: pages and tray flyout without an agent' {
+    $gui = Start-Gui 'Dark' 'zh-TW' -Demo
+    $shots = @(Save-Window $gui $gui.Hwnd 'demo-0-startup')
+    for ($i = 0; $i -lt $pages.Count; $i++) {
+      Send-Keys $gui @($VK_CONTROL) (0x31 + $i)
+      $shots += Save-Window $gui $gui.Hwnd "demo-$($i + 1)-$($pages[$i])"
+    }
+    Assert-Distinct @($shots | Select-Object -Skip 1) 'the demo page screenshots after Ctrl+1..Ctrl+5'
+    $null = Save-Flyout ([pscustomobject] @{ Process = $gui.Process; Hwnd = $gui.Hwnd; Language = 'English' }) 'demo-tray-flyout'
+    $ids = Get-GateintoIds
+    if ($ids) { throw "gateinto.exe runs although only the demo was started: $ids" }
     Stop-Gui $gui
   }
 
