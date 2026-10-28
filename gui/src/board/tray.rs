@@ -10,12 +10,10 @@ use crate::sessions::Eyes;
 use crate::theme::Theme;
 use crate::tray::{ADD, Flyout, LABEL, OPEN, Row, STOP};
 
-const T: &Theme = &Theme::DARK;
-
-pub fn flyout(frame: Rect, s: Scale, v: &View, f: &Flyout, m: &impl Measure) -> Board {
-    let mut p = Painter::within(frame, s, T, v, m);
+pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl Measure) -> Board {
+    let mut p = Painter::within(frame, s, t, v, m);
     let edge = s.hairline();
-    p.push(Op::Fill(frame, T.border));
+    p.push(Op::Fill(frame, t.border));
     p.push(Op::Fill(
         Rect::new(
             frame.x + edge,
@@ -23,13 +21,13 @@ pub fn flyout(frame: Rect, s: Scale, v: &View, f: &Flyout, m: &impl Measure) -> 
             frame.w - 2 * edge,
             frame.h - 2 * edge,
         ),
-        T.bg,
+        t.bg,
     ));
     let pad = s.px(18.0);
     let logo = Rect::new(frame.x + pad, frame.y + pad, s.px(48.0), s.px(48.0));
     let eyes = match f.eyes {
-        Eyes::Lit => Some(T.accent),
-        Eyes::Dim => Some(T.eyes_idle),
+        Eyes::Lit => Some(t.accent),
+        Eyes::Dim => Some(t.eyes_idle),
         Eyes::Closed => None,
     };
     p.push(Op::Logo(logo, eyes));
@@ -37,19 +35,19 @@ pub fn flyout(frame: Rect, s: Scale, v: &View, f: &Flyout, m: &impl Measure) -> 
     let w = frame.right() - pad - x;
     let (title, sub, gap) = (s.px(23.0), s.px(16.0), s.px(3.0));
     let top = logo.y + (logo.h - title - gap - sub) / 2;
-    p.text(Font::Lead, f.title, Rect::new(x, top, w, title), T.text);
+    p.text(Font::Lead, f.title, Rect::new(x, top, w, title), t.text);
     let subtitle = Rect::new(x, top + title + gap, w, sub);
-    p.text(Font::Small, f.subtitle.clone(), subtitle, T.muted);
+    p.text(Font::Small, f.subtitle.clone(), subtitle, t.muted);
 
     let line = Rect::new(frame.x + pad, 0, frame.w - 2 * pad, 0);
     let mut y = logo.bottom() + s.px(14.0);
     if let Some(notice) = &f.notice {
         let r = Rect::new(line.x, y, line.w, s.px(18.0));
-        p.text(Font::Small, notice.clone(), r, T.notice_text);
+        p.text(Font::Small, notice.clone(), r, t.notice_text);
         y = r.bottom() + s.px(6.0);
     }
     let label = Rect::new(line.x, y, line.w, s.px(24.0));
-    p.text(Font::Small, LABEL, label, T.muted);
+    p.text(Font::Small, LABEL, label, t.muted);
     y = label.bottom() + s.px(6.0);
 
     let mut actions = vec![
@@ -69,7 +67,7 @@ pub fn flyout(frame: Rect, s: Scale, v: &View, f: &Flyout, m: &impl Measure) -> 
             Font::Body,
             empty.clone(),
             Rect::new(line.x, y, line.w, s.px(20.0)),
-            T.muted,
+            t.muted,
         );
     }
     let (shown, more) = fit(f.rows.len(), area - inner - y, row_h, row_gap);
@@ -79,10 +77,10 @@ pub fn flyout(frame: Rect, s: Scale, v: &View, f: &Flyout, m: &impl Measure) -> 
     }
     if more > 0 {
         let r = Rect::new(line.x, y + shown as i32 * (row_h + row_gap), line.w, row_h);
-        p.text(Font::Small, format!("{more} more in Gateinto"), r, T.muted);
+        p.text(Font::Small, format!("{more} more in Gateinto"), r, t.muted);
     }
 
-    p.push(Op::Fill(Rect::new(frame.x, area, frame.w, edge), T.border));
+    p.push(Op::Fill(Rect::new(frame.x, area, frame.w, edge), t.border));
     for (i, (icon, label, zone)) in actions.into_iter().enumerate() {
         let r = Rect::new(
             frame.x + inner,
@@ -111,7 +109,7 @@ pub fn fit(rows: usize, room: i32, row: i32, gap: i32) -> (usize, usize) {
 
 impl<M: Measure> Painter<'_, M> {
     fn flyout_row(&mut self, r: Rect, row: &Row, index: usize, launch: bool) {
-        let s = self.s;
+        let (s, t) = (self.s, self.t);
         let zone = Zone::StartBrowser(index);
         let look = if launch {
             self.v.pointer.look(zone)
@@ -119,15 +117,15 @@ impl<M: Measure> Painter<'_, M> {
             Look::Rest
         };
         let (fill, button) = match (launch, look) {
-            (false, _) => (T.card, T.tile),
-            (true, Look::Rest) => (T.card, T.button),
-            (true, Look::Hover) => (T.caption_hover, T.button_hover),
-            (true, Look::Pressed) => (T.caption_pressed, T.button_pressed),
+            (false, _) => (t.card, t.tile),
+            (true, Look::Rest) => (t.card, t.button),
+            (true, Look::Hover) => (t.caption_hover, t.button_hover),
+            (true, Look::Pressed) => (t.caption_pressed, t.button_pressed),
         };
         self.push(Op::Round(r, s.pxf(8.0), fill));
 
         let (dot_w, dot_h) = (s.px(5.0), s.px(7.0));
-        let dot = if row.lit { T.accent } else { T.eyes_idle };
+        let dot = if row.lit { t.accent } else { t.eyes_idle };
         let radius = s.pxf(3.0).min(dot_w as f32 / 2.0);
         let dot_y = r.y + (r.h - dot_h) / 2;
         let dot_x = r.x + s.px(12.0);
@@ -157,15 +155,15 @@ impl<M: Measure> Painter<'_, M> {
             Font::BodyStrong,
             row.name.clone(),
             Rect::new(x, top, w, name_h),
-            T.text,
+            t.text,
         );
         let address = Rect::new(x, top + name_h + between, w, address_h);
-        self.text(Font::Mono, row.address.clone(), address, T.muted);
+        self.text(Font::Mono, row.address.clone(), address, t.muted);
         if let Some(count) = count {
-            self.text(Font::Pill, row.open.clone(), count, T.muted);
+            self.text(Font::Pill, row.open.clone(), count, t.muted);
         }
         self.push(Op::Round(plus, s.pxf(6.0), button));
-        let ink = if launch { T.button_text } else { T.muted };
+        let ink = if launch { t.button_text } else { t.muted };
         self.icon(icons::PLUS, plus, 16.0, ink);
         if launch {
             self.target(r, zone);
@@ -173,23 +171,23 @@ impl<M: Measure> Painter<'_, M> {
     }
 
     fn action(&mut self, r: Rect, icon: Icon, label: &'static str, zone: Zone) {
-        let s = self.s;
+        let (s, t) = (self.s, self.t);
         let fill = match self.v.pointer.look(zone) {
             Look::Rest => None,
-            Look::Hover => Some(T.caption_hover),
-            Look::Pressed => Some(T.caption_pressed),
+            Look::Hover => Some(t.caption_hover),
+            Look::Pressed => Some(t.caption_pressed),
         };
         if let Some(fill) = fill {
             self.push(Op::Round(r, s.pxf(6.0), fill));
         }
         let glyph = Rect::new(r.x + s.px(10.0), r.y, s.px(16.0), r.h);
-        self.icon(icon, glyph, 16.0, T.muted);
+        self.icon(icon, glyph, 16.0, t.muted);
         let x = glyph.right() + s.px(10.0);
         self.text(
             Font::Body,
             label,
             Rect::new(x, r.y, r.right() - s.px(10.0) - x, r.h),
-            T.text,
+            t.text,
         );
         self.target(r, zone);
     }
@@ -229,7 +227,7 @@ mod tests {
     }
 
     fn draw(f: &Flyout) -> Board {
-        flyout(SIZE, S, &View::default(), f, &Chars)
+        flyout(SIZE, S, &T, &View::default(), f, &Chars)
     }
 
     fn texts(board: &Board) -> Vec<&str> {
@@ -264,6 +262,31 @@ mod tests {
             ]
         );
         assert_eq!(ops.last(), Some(&Op::Unclip));
+    }
+
+    #[test]
+    fn the_flyout_paints_with_the_theme_it_is_given() {
+        let l = Theme::LIGHT;
+        let f = relaying(vec![row("Office", "2 open", true)]);
+        let ops = flyout(SIZE, S, &l, &View::default(), &f, &Chars).ops;
+        assert_eq!(
+            ops[1..3],
+            [
+                Op::Fill(SIZE, l.border),
+                Op::Fill(Rect::new(1, 1, 358, 518), l.bg),
+            ]
+        );
+        assert!(ops.contains(&Op::Round(Rect::new(14, 110, 332, 55), 8.0, l.card)));
+        assert!(ops.contains(&text(
+            Font::Lead,
+            "Relaying",
+            Rect::new(80, 21, 262, 23),
+            l.text
+        )));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, Op::Text(.., c) if *c == T.text))
+        );
     }
 
     #[test]
@@ -388,6 +411,7 @@ mod tests {
         let ops = flyout(
             SIZE,
             S,
+            &T,
             &v,
             &relaying(vec![row("office", "", false)]),
             &Chars,
@@ -400,7 +424,7 @@ mod tests {
         )));
         assert!(ops.contains(&Op::Round(Rect::new(304, 122, 30, 30), 6.0, T.button_hover)));
         v.pointer.moved(Zone::OpenMain);
-        let ops = flyout(SIZE, S, &v, &relaying(Vec::new()), &Chars).ops;
+        let ops = flyout(SIZE, S, &T, &v, &relaying(Vec::new()), &Chars).ops;
         assert!(ops.contains(&Op::Round(Rect::new(8, 404, 344, 36), 6.0, T.caption_hover)));
     }
 

@@ -122,7 +122,7 @@ impl Panel {
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
-    fn adopt(&mut self, board: Board) -> Vec<Op> {
+    fn adopt(&mut self, board: Board, t: &Theme) -> Vec<Op> {
         let (stops, trapped) = focus::stops(&[], &board.order);
         self.focus.sync(&stops, trapped);
         self.stops = stops;
@@ -130,7 +130,7 @@ impl Panel {
         let mut ops = board.ops;
         let ring = self.focus.ring();
         if let Some(stop) = self.stops.iter().find(|s| Some(s.zone) == ring) {
-            ops.extend(focus::outline(stop, self.s, &Theme::DARK));
+            ops.extend(focus::outline(stop, self.s, t));
         }
         ops
     }
@@ -171,7 +171,14 @@ impl App {
         };
         let (w, h) = client_size(panel.hwnd);
         let frame = Rect::new(0, 0, w, h);
-        Some(board::tray::flyout(frame, panel.s, &panel.view, &f, fonts))
+        Some(board::tray::flyout(
+            frame,
+            panel.s,
+            self.palette(),
+            &panel.view,
+            &f,
+            fonts,
+        ))
     }
 
     pub(super) fn refresh_flyout(&mut self) {
@@ -179,7 +186,8 @@ impl App {
             return;
         }
         let board = self.flyout_board().unwrap_or_default();
-        self.panel.adopt(board);
+        let t = self.palette();
+        self.panel.adopt(board, t);
         self.panel.invalidate();
     }
 
@@ -546,7 +554,8 @@ fn paint(hwnd: HWND, main: HWND) {
             return;
         };
         let (w, h) = client_size(hwnd);
-        let ops = app.panel.adopt(board);
+        let t = app.palette();
+        let ops = app.panel.adopt(board, t);
         let Some(fonts) = &app.panel.fonts else {
             return;
         };

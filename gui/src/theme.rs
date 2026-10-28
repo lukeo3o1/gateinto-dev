@@ -161,7 +161,7 @@ impl Theme {
         close_glyph_hover: Rgb(0xffffff),
         card: Rgb(0xffffff),
         border: Rgb(0xe4e2dc),
-        muted: Rgb(0x5f636d),
+        muted: Rgb(0x5a5e68),
         tile: Rgb(0xefeee9),
         pill_text: Rgb(0x3d4049),
         eyes_idle: Rgb(0x9aa1b1),
@@ -201,7 +201,7 @@ impl Theme {
         close_glyph_hover: Rgb(0xffffff),
         card: Rgb(0x20232a),
         border: Rgb(0x2e323c),
-        muted: Rgb(0x9aa0ad),
+        muted: Rgb(0xa3a9b5),
         tile: Rgb(0x2a2e37),
         pill_text: Rgb(0xc9cdd6),
         eyes_idle: Rgb(0x9aa1b1),
@@ -253,7 +253,7 @@ mod tests {
         let t = Theme::LIGHT;
         assert_eq!(t.card, Rgb(0xffffff));
         assert_eq!(t.border, Rgb(0xe4e2dc));
-        assert_eq!(t.muted, Rgb(0x5f636d));
+        assert_eq!(t.muted, Rgb(0x5a5e68));
         assert_eq!(t.tile, Rgb(0xefeee9));
         assert_eq!(t.pill_text, Rgb(0x3d4049));
         assert_eq!(t.eyes_idle, Rgb(0x9aa1b1));
@@ -303,22 +303,24 @@ mod tests {
     }
 
     #[test]
-    fn the_tray_flyout_uses_the_dark_palette() {
-        let t = Theme::DARK;
-        assert_eq!(t.bg, Rgb(0x17191e));
-        assert_eq!(t.border, Rgb(0x2e323c));
-        assert_eq!(t.text, Rgb(0xe8e9ec));
-        assert_eq!(t.muted, Rgb(0x9aa0ad));
-        assert_eq!(t.card, Rgb(0x20232a));
-        assert_eq!(t.accent, Rgb(0xffc94a));
-        assert_eq!(t.eyes_idle, Rgb(0x9aa1b1));
-        assert_eq!(t.button, Rgb(0xffc94a));
-        assert_eq!(t.button_text, Rgb(0x1d1f24));
-        assert_ne!(t.caption_hover, t.card);
-        assert_ne!(t.caption_hover, t.bg);
-        assert_ne!(t.caption_pressed, t.caption_hover);
-        assert_ne!(t.button_hover, t.button);
-        assert_ne!(t.button_pressed, t.button_hover);
+    fn the_tray_flyout_is_readable_in_both_themes() {
+        for t in [Theme::LIGHT, Theme::DARK] {
+            for under in [t.bg, t.card, t.caption_hover, t.caption_pressed] {
+                for ink in [t.text, t.muted] {
+                    assert!(contrast(ink, under) >= 4.5, "{ink:?} on {under:?}");
+                }
+                assert!(contrast(t.focus, under) >= 3.0, "{under:?}");
+            }
+            assert!(contrast(t.notice_text, t.bg) >= 4.5);
+            for under in [t.button, t.button_hover, t.button_pressed] {
+                assert!(contrast(t.button_text, under) >= 4.5, "{under:?}");
+            }
+            assert!(contrast(t.muted, t.tile) >= 3.0);
+            assert_ne!(t.caption_hover, t.card);
+            assert_ne!(t.caption_pressed, t.caption_hover);
+            assert_ne!(t.button_hover, t.button);
+            assert_ne!(t.button_pressed, t.button_hover);
+        }
     }
 
     #[test]

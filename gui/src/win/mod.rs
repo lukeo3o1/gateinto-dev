@@ -631,9 +631,10 @@ impl App {
         self.dark = self.theme.dark(appearance::light_apps());
         self.retarget();
         self.invalidate();
+        self.refresh_flyout();
     }
 
-    fn palette(&self) -> &'static Theme {
+    pub(super) fn palette(&self) -> &'static Theme {
         Theme::of(self.dark)
     }
 
