@@ -8,15 +8,15 @@ use gateinto::link::{Known, KnownGateway, Source};
 use gateinto::tls::TlsMode;
 
 use crate::agent::AgentState;
-use crate::i18n::Text;
+use crate::i18n::{Text, fill, tr};
 use crate::sessions::gateway_label;
 
-pub const SUBTITLE: &str = "Remote HTTPS proxies this device can relay through";
-pub const EMPTY: &str = "No gateways. Open a gateinto:// link or add one to the config file.";
-pub const FOOTNOTE: &str = "From the config file, read-only here.";
+pub const SUBTITLE: Text = Text::GatewaysSubtitle;
+pub const EMPTY: Text = Text::NoGatewaysHint;
+pub const FOOTNOTE: Text = Text::ConfigReadOnly;
 pub const START: Text = Text::StartBrowser;
-pub const ADD: &str = "Add gateway";
-pub const ROUTE_PER_START: &str = "Set per browser start; Start browser uses Gateway";
+pub const ADD: Text = Text::AddGateway;
+pub const ROUTE_PER_START: Text = Text::RoutePerStart;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
@@ -98,7 +98,7 @@ pub fn page(
         subtitle: failure
             .map(str::to_owned)
             .or(problem)
-            .unwrap_or_else(|| SUBTITLE.to_owned()),
+            .unwrap_or_else(|| tr(SUBTITLE).to_owned()),
         empty: listing.is_ok() && rows.is_empty(),
         footnote: rows.iter().any(|row: &Row| row.config),
         launch: matches!(state, AgentState::Running(_)) && !busy,
@@ -121,7 +121,7 @@ pub fn label(gateway: &KnownGateway) -> String {
 pub struct Details {
     pub title: String,
     pub address: String,
-    pub facts: Vec<(&'static str, String)>,
+    pub facts: Vec<(Text, String)>,
 }
 
 pub fn details(
@@ -142,7 +142,10 @@ pub fn details(
         .map(|(_, section)| section);
     let open = open(gateway, running(state));
     let title = label(gateway);
-    let host = gateway.host.clone().unwrap_or_else(|| "Not set".to_owned());
+    let host = gateway
+        .host
+        .clone()
+        .unwrap_or_else(|| tr(Text::NotSet).to_owned());
     let server_name = section
         .and_then(|section| section.server_name.clone())
         .unwrap_or_else(|| host.clone());
@@ -156,46 +159,46 @@ pub fn details(
     Some(Details {
         facts: vec![
             (
-                "Name",
+                Text::Name,
                 if title == name.as_str() {
                     title.clone()
                 } else {
-                    "None".to_owned()
+                    tr(Text::NoValue).to_owned()
                 },
             ),
-            ("Host", host),
-            ("Port", gateway.port.unwrap_or(443).to_string()),
-            ("Server name", server_name),
+            (Text::Host, host),
+            (Text::Port, gateway.port.unwrap_or(443).to_string()),
+            (Text::ServerName, server_name),
             (
-                "Source",
-                match gateway.source {
-                    Source::Config => "Config file",
-                    Source::Linked => "Added on this device",
-                }
+                Text::Source,
+                tr(match gateway.source {
+                    Source::Config => Text::ConfigFile,
+                    Source::Linked => Text::AddedHere,
+                })
                 .to_owned(),
             ),
-            ("Route", routes(&open)),
+            (Text::Route, routes(&open)),
             (
-                "Portal page",
+                Text::PortalPage,
                 gateway
                     .portal_url
                     .as_ref()
-                    .map_or_else(|| "None".to_owned(), ToString::to_string),
+                    .map_or_else(|| tr(Text::NoValue).to_owned(), ToString::to_string),
             ),
             (
-                "TLS mode",
-                match tls {
-                    TlsMode::HybridPreferred => "Hybrid preferred",
-                    TlsMode::HybridRequired => "Hybrid required",
-                    TlsMode::ClassicalOnly => "Classical only",
-                }
+                Text::TlsMode,
+                tr(match tls {
+                    TlsMode::HybridPreferred => Text::HybridPreferred,
+                    TlsMode::HybridRequired => Text::HybridRequired,
+                    TlsMode::ClassicalOnly => Text::ClassicalOnly,
+                })
                 .to_owned(),
             ),
             (
-                "Client certificate",
+                Text::ClientCertificate,
                 certificate_text(certificate, self_signed),
             ),
-            ("Active sessions", count(open.len())),
+            (Text::ActiveSessions, count(open.len())),
         ],
         address: address(gateway.host.as_deref(), gateway.port),
         title,
@@ -218,9 +221,9 @@ fn open<'a>(gateway: &KnownGateway, sessions: &'a [SessionInfo]) -> Vec<&'a Sess
 
 fn count(sessions: usize) -> String {
     match sessions {
-        0 => "No sessions".to_owned(),
-        1 => "1 session".to_owned(),
-        n => format!("{n} sessions"),
+        0 => tr(Text::NoSessions).to_owned(),
+        1 => fill(Text::SessionCount, &[&1]),
+        n => fill(Text::SessionsCount, &[&n]),
     }
 }
 
@@ -231,25 +234,25 @@ fn routes(open: &[&SessionInfo]) -> String {
     let mixed = open
         .iter()
         .any(|session| session.route == SessionRoute::Mixed);
-    match (all, mixed) {
-        (true, true) => "Gateway and Mixed",
-        (true, false) => "Gateway",
-        (false, true) => "Mixed",
+    tr(match (all, mixed) {
+        (true, true) => Text::GatewayAndMixed,
+        (true, false) => Text::Gateway,
+        (false, true) => Text::Mixed,
         (false, false) => ROUTE_PER_START,
-    }
+    })
     .to_owned()
 }
 
 fn certificate_text(mode: ClientCertificateMode, self_signed: bool) -> String {
     let mode = match mode {
-        ClientCertificateMode::Off => return "Off".to_owned(),
-        ClientCertificateMode::Optional => "Optional",
-        ClientCertificateMode::Required => "Required",
+        ClientCertificateMode::Off => return tr(Text::Off).to_owned(),
+        ClientCertificateMode::Optional => Text::Optional,
+        ClientCertificateMode::Required => Text::Required,
     };
     if self_signed {
-        format!("{mode}, self-signed")
+        fill(Text::SelfSigned, &[&mode])
     } else {
-        mode.to_owned()
+        tr(mode).to_owned()
     }
 }
 
@@ -340,7 +343,7 @@ mod tests {
         assert_eq!(
             page(&listing, &state, None, false),
             Page {
-                subtitle: SUBTITLE.to_owned(),
+                subtitle: SUBTITLE.english().to_owned(),
                 rows: vec![Row {
                     label: "office".to_owned(),
                     address: "proxy.example.com".to_owned(),
@@ -387,7 +390,7 @@ mod tests {
         details
             .facts
             .iter()
-            .map(|(key, value)| (*key, value.as_str()))
+            .map(|(key, value)| (crate::i18n::tr(*key), value.as_str()))
             .collect()
     }
 
@@ -452,13 +455,46 @@ mod tests {
                 ("Port", "443"),
                 ("Server name", "edge.example"),
                 ("Source", "Added on this device"),
-                ("Route", ROUTE_PER_START),
+                ("Route", tr(ROUTE_PER_START)),
                 ("Portal page", "None"),
                 ("TLS mode", "Hybrid preferred"),
                 ("Client certificate", "Optional"),
                 ("Active sessions", "No sessions"),
             ]
         );
+    }
+
+    #[test]
+    fn the_gateways_page_and_details_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let state = AgentState::Running(vec![session(1, "office", 0), session(2, "office", 0)]);
+        let listing = known(vec![office(), gateway(PROFILE, None, None, Source::Linked)]);
+        let page = page(&listing, &state, None, false);
+        assert_eq!(page.subtitle, "這部裝置可透過其轉送的遠端 HTTPS 代理");
+        assert_eq!(page.rows[0].sessions, "2 個工作階段");
+        assert_eq!(page.rows[1].sessions, "沒有工作階段");
+        let details = details(&listing, &Gateways::default(), &state, &name(PROFILE)).unwrap();
+        assert_eq!(
+            facts(&details),
+            [
+                ("名稱", "無"),
+                ("主機", "未設定"),
+                ("連接埠", "443"),
+                ("伺服器名稱", "未設定"),
+                ("來源", "在這部裝置上新增"),
+                ("路由", "每次啟動瀏覽器時設定；「啟動瀏覽器」使用閘道"),
+                ("入口網頁", "無"),
+                ("TLS 模式", "優先使用混合"),
+                ("用戶端憑證", "選用"),
+                ("使用中的工作階段", "沒有工作階段"),
+            ]
+        );
+        assert_eq!(certificate_text(ClientCertificateMode::Off, false), "關閉");
+        assert_eq!(
+            certificate_text(ClientCertificateMode::Required, true),
+            "必要，自我簽署"
+        );
+        assert_eq!(count(1), "1 個工作階段");
     }
 
     #[test]
@@ -526,13 +562,13 @@ mod tests {
         assert!(page.rows.is_empty());
         assert!(!page.footnote);
         assert_eq!(
-            EMPTY,
+            tr(EMPTY),
             "No gateways. Open a gateinto:// link or add one to the config file."
         );
-        assert_eq!(FOOTNOTE, "From the config file, read-only here.");
+        assert_eq!(tr(FOOTNOTE), "From the config file, read-only here.");
         assert_eq!(START.english(), "Start browser");
         assert_eq!(
-            SUBTITLE,
+            tr(SUBTITLE),
             "Remote HTTPS proxies this device can relay through"
         );
     }

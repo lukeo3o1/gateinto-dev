@@ -161,6 +161,36 @@ table! {
     Uptime => "Uptime", "運作時間";
     Activity => "Activity", "活動";
     Active => "Active", "使用中";
+    GatewaysSubtitle => "Remote HTTPS proxies this device can relay through", "這部裝置可透過其轉送的遠端 HTTPS 代理";
+    NoGatewaysHint => "No gateways. Open a gateinto:// link or add one to the config file.", "沒有閘道。請開啟 gateinto:// 連結，或在設定檔中新增。";
+    ConfigReadOnly => "From the config file, read-only here.", "來自設定檔，此處為唯讀。";
+    AddGateway => "Add gateway", "新增閘道";
+    RoutePerStart => "Set per browser start; Start browser uses Gateway", "每次啟動瀏覽器時設定；「啟動瀏覽器」使用閘道";
+    NotSet => "Not set", "未設定";
+    Name => "Name", "名稱";
+    NoValue => "None", "無";
+    Host => "Host", "主機";
+    Port => "Port", "連接埠";
+    ServerName => "Server name", "伺服器名稱";
+    Source => "Source", "來源";
+    ConfigFile => "Config file", "設定檔";
+    AddedHere => "Added on this device", "在這部裝置上新增";
+    Route => "Route", "路由";
+    PortalPage => "Portal page", "入口網頁";
+    TlsMode => "TLS mode", "TLS 模式";
+    HybridPreferred => "Hybrid preferred", "優先使用混合";
+    HybridRequired => "Hybrid required", "必須使用混合";
+    ClassicalOnly => "Classical only", "僅限傳統";
+    ClientCertificate => "Client certificate", "用戶端憑證";
+    ActiveSessions => "Active sessions", "使用中的工作階段";
+    NoSessions => "No sessions", "沒有工作階段";
+    SessionCount => "{0} session", "{0} 個工作階段";
+    SessionsCount => "{0} sessions", "{0} 個工作階段";
+    GatewayAndMixed => "Gateway and Mixed", "閘道與混合";
+    Off => "Off", "關閉";
+    Optional => "Optional", "選用";
+    Required => "Required", "必要";
+    SelfSigned => "{0}, self-signed", "{0}，自我簽署";
 }
 
 impl Text {

@@ -518,6 +518,7 @@ mod tests {
     use crate::credentials::{Field, MASK, Page, UNAVAILABLE, WAITING};
     use crate::gateways::Details;
     use crate::hit::Zone;
+    use crate::i18n::Text;
     use crate::layout::Rect;
     use crate::scale::Scale;
     use crate::scene::{Op, View};
@@ -684,16 +685,16 @@ mod tests {
             title: "office".to_owned(),
             address: "proxy.example.com:8443".to_owned(),
             facts: vec![
-                ("Name", "office".to_owned()),
-                ("Host", "proxy.example.com".to_owned()),
-                ("Port", "8443".to_owned()),
-                ("Server name", "edge.example.com".to_owned()),
-                ("Source", "Config file".to_owned()),
-                ("Route", "Gateway and Mixed".to_owned()),
-                ("Portal page", "https://portal.example.com/".to_owned()),
-                ("TLS mode", "Hybrid required".to_owned()),
-                ("Client certificate", "Required, self-signed".to_owned()),
-                ("Active sessions", "2 sessions".to_owned()),
+                (Text::Name, "office".to_owned()),
+                (Text::Host, "proxy.example.com".to_owned()),
+                (Text::Port, "8443".to_owned()),
+                (Text::ServerName, "edge.example.com".to_owned()),
+                (Text::Source, "Config file".to_owned()),
+                (Text::Route, "Gateway and Mixed".to_owned()),
+                (Text::PortalPage, "https://portal.example.com/".to_owned()),
+                (Text::TlsMode, "Hybrid required".to_owned()),
+                (Text::ClientCertificate, "Required, self-signed".to_owned()),
+                (Text::ActiveSessions, "2 sessions".to_owned()),
             ],
         }
     }
@@ -720,7 +721,7 @@ mod tests {
             assert!(texts.iter().any(|t| t == part), "{part}");
         }
         for (key, value) in &details.facts {
-            let at = texts.iter().position(|t| t == key).unwrap();
+            let at = texts.iter().position(|t| t == key.english()).unwrap();
             assert_eq!(&texts[at + 1], value);
         }
         assert!(

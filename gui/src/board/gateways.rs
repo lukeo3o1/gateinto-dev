@@ -17,7 +17,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let mut p = Painter::new(l, s, t, v, m);
     let content = l.content;
     let header = Rect::new(content.x, content.y, content.w, s.px(32.0));
-    let add = p.button(header, header.right(), ADD);
+    let add = p.button(header, header.right(), tr(ADD));
     let subtitle = Rect::new(
         content.x,
         content.y + (header.h - s.px(18.0)) / 2,
@@ -25,7 +25,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
         s.px(18.0),
     );
     p.text(Font::Body, page.subtitle.clone(), subtitle, t.muted);
-    p.outlined(add, icons::PLUS, ADD, Zone::AddGateway);
+    p.outlined(add, icons::PLUS, tr(ADD), Zone::AddGateway);
     let top = header.bottom() + s.px(12.0);
     let mut bottom = content.bottom();
     if page.footnote {
@@ -154,7 +154,7 @@ mod tests {
 
     fn listed(rows: Vec<Row>) -> Page {
         Page {
-            subtitle: SUBTITLE.to_owned(),
+            subtitle: SUBTITLE.english().to_owned(),
             footnote: rows.iter().any(|r| r.config),
             empty: rows.is_empty(),
             launch: true,
@@ -364,7 +364,7 @@ mod tests {
         assert!(card.contains(&Op::Round(Rect::new(713, FIRST + 32, 5, 7), 2.5, T.accent)));
         assert!(
             !ops.iter()
-                .any(|op| matches!(op, Op::Text(_, s, ..) if s == FOOTNOTE))
+                .any(|op| matches!(op, Op::Text(_, s, ..) if s == FOOTNOTE.english()))
         );
     }
 
