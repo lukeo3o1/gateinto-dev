@@ -5,14 +5,15 @@ use gateinto::link::{Known, KnownGateway};
 
 use crate::agent::AgentState;
 use crate::credentials;
+use crate::i18n::Text;
 
 use crate::gateways;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::Rect;
 
-pub const NO_GATEWAYS: &str = "No gateways";
-pub const PORTAL_FAILED: &str = "Could not open the portal page";
+pub const NO_GATEWAYS: Text = Text::NoGateways;
+pub const PORTAL_FAILED: Text = Text::PortalFailed;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Popup {
@@ -61,17 +62,17 @@ pub fn picker(listing: &Result<Known, String>) -> Vec<Entry> {
 pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> Vec<Entry> {
     let credentials = credentials::offers(state, id).then(|| Entry {
         icon: icons::LOCK,
-        label: "Show credentials".into(),
+        label: Text::ShowCredentials.into(),
         choice: Some(Choice::Credentials(id)),
     });
     let portal = portal(listing, state, id).map(|_| Entry {
         icon: icons::EXTERNAL,
-        label: "Open portal page".into(),
+        label: Text::OpenPortal.into(),
         choice: Some(Choice::Portal(id)),
     });
     let details = Entry {
         icon: icons::GATEWAYS,
-        label: "Gateway details".into(),
+        label: Text::GatewayDetails.into(),
         choice: Some(Choice::Details(id)),
     };
     credentials
@@ -313,6 +314,21 @@ mod tests {
     }
 
     #[test]
+    fn the_menus_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let mut signed = session_info(5, "office");
+        signed.auth = SessionAuth::Password;
+        let state = AgentState::Running(vec![signed]);
+        let listing = known(vec![with_portal("office", "https://portal.example.com/")]);
+        let labels: Vec<String> = session(&listing, &state, 5)
+            .into_iter()
+            .map(|entry| entry.label.into_owned())
+            .collect();
+        assert_eq!(labels, ["顯示憑證", "開啟入口網頁", "閘道詳細資料"]);
+        assert_eq!(picker(&known(Vec::new()))[0].label, "沒有閘道");
+    }
+
+    #[test]
     fn only_https_addresses_count_as_portals() {
         assert!(https("https://portal.example.com/"));
         assert!(https("HTTPS://portal.example.com/"));
@@ -351,7 +367,7 @@ mod tests {
         assert!(!opened(32));
         assert!(opened(33));
         assert!(opened(isize::MAX));
-        assert!(!PORTAL_FAILED.contains("://"));
+        assert!(!PORTAL_FAILED.english().contains("://"));
     }
 
     const BOUNDS: Rect = Rect::new(0, 0, 1040, 680);

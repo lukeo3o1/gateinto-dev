@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn a_disabled_item_is_greyed_and_not_a_target() {
-        let b = draw(&View::default(), &[entry(NO_GATEWAYS, None)]);
+        let b = draw(&View::default(), &[entry(NO_GATEWAYS.english(), None)]);
         let panel = Rect::new(654, 148, 200, 42);
         assert_eq!(
             b.ops[3..5],

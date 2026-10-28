@@ -218,6 +218,11 @@ table! {
     Copy => "Copy", "複製";
     CopyLogFailed => "Could not copy the log", "無法複製記錄";
     Warnings => "Warnings", "警告";
+    NoGateways => "No gateways", "沒有閘道";
+    PortalFailed => "Could not open the portal page", "無法開啟入口網頁";
+    ShowCredentials => "Show credentials", "顯示憑證";
+    OpenPortal => "Open portal page", "開啟入口網頁";
+    GatewayDetails => "Gateway details", "閘道詳細資料";
 }
 
 impl Text {

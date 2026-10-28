@@ -928,7 +928,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                     app.fail(if demo {
                         demo::NOT_OPENED
                     } else {
-                        menu::PORTAL_FAILED
+                        menu::PORTAL_FAILED.english()
                     });
                     app.retarget();
                     app.invalidate();
