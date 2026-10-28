@@ -7,6 +7,7 @@ impl Rgb {
         [c(16), c(8), c(0), 1.0]
     }
 
+    #[cfg(test)]
     fn luminance(self) -> f64 {
         let linear = |c: f32| {
             let c = f64::from(c);
@@ -21,6 +22,7 @@ impl Rgb {
     }
 }
 
+#[cfg(test)]
 pub fn contrast(a: Rgb, b: Rgb) -> f64 {
     let (a, b) = (a.luminance(), b.luminance());
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
@@ -61,6 +63,39 @@ impl Choice {
     }
 }
 
+pub const PERSONALIZE: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+pub const APPS_USE_LIGHT: &str = "AppsUseLightTheme";
+pub const KEY: &str = "Software\\Gateinto\\App";
+pub const VALUE: &str = "Theme";
+
+const DARK_EXPLORER: u32 = 17763;
+const APP_MODE: u32 = 18362;
+const DOCUMENTED_ATTRIBUTE: u32 = 18985;
+
+pub fn light_apps(value: Option<u32>) -> bool {
+    value != Some(0)
+}
+
+pub fn immersive_attribute(build: u32) -> Option<u32> {
+    match build {
+        DOCUMENTED_ATTRIBUTE.. => Some(20),
+        DARK_EXPLORER.. => Some(19),
+        _ => None,
+    }
+}
+
+pub fn dark_controls(build: u32) -> bool {
+    build >= DARK_EXPLORER
+}
+
+pub fn menu_mode(choice: Choice, build: u32) -> Option<u32> {
+    (build >= APP_MODE).then_some(match choice {
+        Choice::System => 1,
+        Choice::Dark => 2,
+        Choice::Light => 3,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub bg: Rgb,
@@ -99,6 +134,7 @@ pub struct Theme {
     pub notice_text: Rgb,
     pub focus: Rgb,
     pub knob: Rgb,
+    pub scrim: Rgb,
 }
 
 impl Theme {
@@ -143,6 +179,7 @@ impl Theme {
         notice_text: Rgb(0x7a5000),
         focus: Rgb(0x262b36),
         knob: Rgb(0xffffff),
+        scrim: Rgb(0x1d1f24),
     };
 
     pub const DARK: Theme = Theme {
@@ -182,6 +219,7 @@ impl Theme {
         notice_text: Rgb(0xffc94a),
         focus: Rgb(0xffc94a),
         knob: Rgb(0xc9cdd6),
+        scrim: Rgb(0x000000),
     };
 }
 
@@ -250,6 +288,12 @@ mod tests {
         assert_eq!(t.revoke_glyph, Rgb(0xff8a80));
         assert_eq!(t.button_glyph, Rgb(0x1d1f24));
         assert_eq!(t.focus, Rgb(0xffc94a));
+    }
+
+    #[test]
+    fn dialogs_darken_what_lies_behind_them() {
+        assert_eq!(Theme::LIGHT.scrim, Rgb(0x1d1f24));
+        assert_eq!(Theme::DARK.scrim, Rgb(0x000000));
     }
 
     #[test]
@@ -366,5 +410,36 @@ mod tests {
         assert!(Choice::Dark.dark(true));
         assert_eq!(Theme::of(false), &Theme::LIGHT);
         assert_eq!(Theme::of(true), &Theme::DARK);
+    }
+
+    #[test]
+    fn a_missing_app_mode_reads_as_light() {
+        assert!(light_apps(None));
+        assert!(light_apps(Some(1)));
+        assert!(!light_apps(Some(0)));
+    }
+
+    #[test]
+    fn the_dark_title_bar_attribute_depends_on_the_build() {
+        assert_eq!(immersive_attribute(7601), None);
+        assert_eq!(immersive_attribute(17762), None);
+        assert_eq!(immersive_attribute(17763), Some(19));
+        assert_eq!(immersive_attribute(18984), Some(19));
+        assert_eq!(immersive_attribute(18985), Some(20));
+        assert_eq!(immersive_attribute(22631), Some(20));
+    }
+
+    #[test]
+    fn menus_follow_the_choice_only_where_the_app_mode_exists() {
+        assert_eq!(menu_mode(Choice::System, 18361), None);
+        assert_eq!(menu_mode(Choice::System, 18362), Some(1));
+        assert_eq!(menu_mode(Choice::Dark, 19045), Some(2));
+        assert_eq!(menu_mode(Choice::Light, 22631), Some(3));
+    }
+
+    #[test]
+    fn dark_tooltips_need_the_dark_explorer_theme() {
+        assert!(!dark_controls(17762));
+        assert!(dark_controls(17763));
     }
 }

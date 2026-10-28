@@ -13,6 +13,7 @@ pub const OPEN: &str = "Open config file";
 pub const OPEN_FAILED: &str = "Could not open the config file";
 pub const APP: &str = "App";
 pub const THEME: &str = "Theme";
+pub const THEME_FAILED: &str = "Could not save the theme setting";
 pub const SIGN_IN: &str = "Start at sign-in";
 pub const SIGN_IN_NOTE: &str = "Opens Gateinto when you sign in";
 pub const SIGN_IN_UNREAD: &str = "Could not read the sign-in setting";

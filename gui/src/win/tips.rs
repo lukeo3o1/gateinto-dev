@@ -52,6 +52,10 @@ impl Tips {
         }
     }
 
+    pub fn window(&self) -> HWND {
+        self.window
+    }
+
     pub fn replace(&mut self, tips: Vec<Tip>) -> Option<Change> {
         if self.window.is_null() || tips == self.shown {
             return None;

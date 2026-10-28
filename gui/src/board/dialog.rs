@@ -57,7 +57,7 @@ fn width(l: &Layout, s: Scale) -> i32 {
 impl<'a, M: Measure> Modal<'a, M> {
     pub fn open(l: &Layout, s: Scale, t: &'a Theme, v: &'a View, m: &'a M, body: i32) -> Self {
         let mut p = Painter::within(client(l), s, t, v, m);
-        p.push(Op::Shade(client(l), t.text, SHADE));
+        p.push(Op::Shade(client(l), t.scrim, SHADE));
         let (top, gap, footer_h) = (s.px(20.0), s.px(16.0), s.px(56.0));
         let w = s.px(520.0).min(l.content.w);
         let area_y = l.caption_row.bottom();
@@ -585,7 +585,7 @@ mod tests {
         let board = draw(&page(MASK, None));
         assert_eq!(
             board.ops[1],
-            Op::Shade(Rect::new(0, 0, 1040, 680), T.text, SHADE)
+            Op::Shade(Rect::new(0, 0, 1040, 680), T.scrim, SHADE)
         );
         assert_eq!(
             zones(&board),

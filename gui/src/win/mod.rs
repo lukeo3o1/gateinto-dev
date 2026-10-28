@@ -1,3 +1,4 @@
+mod appearance;
 mod d2d;
 mod device;
 mod link;
@@ -35,8 +36,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
     WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
-    WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -59,7 +60,7 @@ use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
 use crate::settings;
-use crate::theme::{Choice, Theme};
+use crate::theme::{self, Theme};
 use crate::worker::{Command, Update};
 use d2d::Graphics;
 use link::{Link, WM_AGENT};
@@ -73,6 +74,7 @@ const EX_STYLE: u32 = 0;
 const APP_ICON: usize = 1;
 const TITLE: &str = "Gateinto";
 const COPIED_TIMER: usize = 1;
+const IMMERSIVE: &str = "ImmersiveColorSet";
 const COPIED_MS: u32 = 1500;
 const PASTE_UNITS: usize = 4096;
 
@@ -130,7 +132,9 @@ struct App {
     tips: Tips,
     config: String,
     sign_in: bool,
-    theme: Choice,
+    theme: theme::Choice,
+    dark: bool,
+    build: u32,
     copied: bool,
     filter: Filter,
     log: log::Body,
@@ -154,6 +158,7 @@ impl App {
         let frame = choose_frame();
         let fonts = Fonts::new(gfx.dwrite(), s).ok()?;
         let layout = measure(hwnd, s, frame);
+        let theme = appearance::choice();
         Some(Self {
             hwnd,
             s,
@@ -172,7 +177,9 @@ impl App {
             tips: Tips::new(hwnd),
             config: config_line(),
             sign_in: false,
-            theme: Choice::default(),
+            theme,
+            dark: theme.dark(appearance::light_apps()),
+            build: sys::os_build(),
             copied: false,
             filter: Filter::default(),
             log: log::Body::Rows(Vec::new()),
@@ -197,7 +204,13 @@ impl App {
         let Some(update) = &self.update else {
             return Board::default();
         };
-        let (l, s, t, v, m) = (&self.layout, self.s, &Theme::LIGHT, &self.view, &self.fonts);
+        let (l, s, t, v, m) = (
+            &self.layout,
+            self.s,
+            self.palette(),
+            &self.view,
+            &self.fonts,
+        );
         let failure = update.failure.as_deref();
         let mut board = match v.nav.selected() {
             NavPage::Settings => {
@@ -522,10 +535,22 @@ impl App {
         self.invalidate();
     }
 
-    fn choose_theme(&mut self, choice: Choice) {
+    fn choose_theme(&mut self, choice: theme::Choice) {
+        if appearance::save(choice).is_err() {
+            self.fail(settings::THEME_FAILED);
+        }
         self.theme = choice;
+        self.follow_system();
+    }
+
+    fn follow_system(&mut self) {
+        self.dark = self.theme.dark(appearance::light_apps());
         self.retarget();
         self.invalidate();
+    }
+
+    fn palette(&self) -> &'static Theme {
+        Theme::of(self.dark)
     }
 
     fn copy_id(&mut self) {
@@ -800,6 +825,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Theme(choice)) => {
             with_app(hwnd, |app| app.choose_theme(choice));
+            apply_theme(hwnd);
             rehover(hwnd);
             return;
         }
@@ -892,7 +918,7 @@ fn on_paint(hwnd: HWND) {
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
     let change = with_app(hwnd, |app| {
         let (w, h) = client_size(hwnd);
-        let mut ops = scene(&app.layout, app.s, &Theme::LIGHT, &app.view);
+        let mut ops = scene(&app.layout, app.s, app.palette(), &app.view);
         let board = app.board();
         ops.extend(app.adopt(board));
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
@@ -1221,6 +1247,31 @@ fn on_composition_changed(hwnd: HWND) {
     with_app(hwnd, |app| app.relayout());
 }
 
+fn apply_theme(hwnd: HWND) {
+    let Some((dark, choice, build, tips)) = with_app(hwnd, |app| {
+        (app.dark, app.theme, app.build, app.tips.window())
+    }) else {
+        return;
+    };
+    sys::dark_title_bar(hwnd, dark, build);
+    sys::dark_controls(tips, dark, build);
+    sys::menu_mode(choice, build);
+}
+
+fn on_setting_change(hwnd: HWND, lp: LPARAM) {
+    if lp == 0 {
+        return;
+    }
+    let area = lp as *const u16;
+    for (i, want) in wide(IMMERSIVE).into_iter().enumerate() {
+        if unsafe { *area.add(i) } != want {
+            return;
+        }
+    }
+    with_app(hwnd, App::follow_system);
+    apply_theme(hwnd);
+}
+
 fn refresh_frame(hwnd: HWND) {
     let flags = SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
     unsafe { SetWindowPos(hwnd, null_mut(), 0, 0, 0, 0, flags) };
@@ -1299,6 +1350,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_DPICHANGED => {
             on_dpi_changed(hwnd, wp, lp);
             Some(0)
+        }
+        WM_SETTINGCHANGE => {
+            on_setting_change(hwnd, lp);
+            None
         }
         WM_DWMCOMPOSITIONCHANGED => {
             on_composition_changed(hwnd);
@@ -1417,6 +1472,7 @@ pub fn run() {
         fail("Gateinto could not create its window.");
         return;
     }
+    apply_theme(hwnd);
     center_on_monitor(hwnd);
     unsafe { ShowWindow(hwnd, SW_SHOW) };
     tray::install(hwnd, instance);
