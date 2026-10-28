@@ -50,6 +50,18 @@ impl Pane {
         }
     }
 
+    pub fn reveal(&self, r: Rect) -> i32 {
+        let view = self.view;
+        let shift = if r.y < view.y || r.h > view.h {
+            r.y - view.y
+        } else if r.bottom() > view.bottom() {
+            r.bottom() - view.bottom()
+        } else {
+            0
+        };
+        clamp(self.offset.saturating_add(shift), self.content, view.h)
+    }
+
     pub fn at_bottom(&self) -> bool {
         self.offset == clamp(i32::MAX, self.content, self.view.h)
     }
@@ -94,6 +106,17 @@ impl Offsets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_scrolls_just_enough_to_show_a_rect() {
+        let pane = Pane::new(Rect::new(0, 100, 50, 200), 1000, 300);
+        assert_eq!(pane.reveal(Rect::new(0, 150, 10, 40)), 300);
+        assert_eq!(pane.reveal(Rect::new(0, 80, 10, 40)), 280);
+        assert_eq!(pane.reveal(Rect::new(0, 290, 10, 40)), 330);
+        assert_eq!(pane.reveal(Rect::new(0, 90, 10, 400)), 290);
+        assert_eq!(pane.reveal(Rect::new(0, -900, 10, 40)), 0);
+        assert_eq!(pane.reveal(Rect::new(0, 2000, 10, 40)), 800);
+    }
 
     #[test]
     fn offsets_stay_between_the_top_and_the_last_screen() {

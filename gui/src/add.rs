@@ -96,12 +96,8 @@ impl Form {
         self.field().pop();
     }
 
-    pub fn next(&mut self, back: bool) {
-        self.focus = match (self.focus, back) {
-            (Input::Address, false) | (Input::Portal, true) => Input::Name,
-            (Input::Name, false) | (Input::Address, true) => Input::Portal,
-            (Input::Portal, false) | (Input::Name, true) => Input::Address,
-        };
+    pub fn selected(&self) -> Input {
+        self.focus
     }
 }
 
@@ -464,16 +460,11 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_fields_both_ways() {
+    fn the_selected_field_is_reported() {
         let mut form = Form::default();
-        form.next(false);
-        assert_eq!(form.focus, Input::Name);
-        form.next(false);
-        assert_eq!(form.focus, Input::Portal);
-        form.next(false);
-        assert_eq!(form.focus, Input::Address);
-        form.next(true);
-        assert_eq!(form.focus, Input::Portal);
+        assert_eq!(form.selected(), Input::Address);
+        form.select(Input::Portal);
+        assert_eq!(form.selected(), Input::Portal);
     }
 
     #[test]

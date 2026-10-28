@@ -52,7 +52,7 @@ pub fn outside_click_closes(adding: bool) -> bool {
     !adding
 }
 
-fn action(zone: Zone) -> Option<Action> {
+pub fn action(zone: Zone) -> Option<Action> {
     match zone {
         Zone::Nav(page) => Some(Action::Select(page)),
         Zone::Minimize => Some(Action::Minimize),

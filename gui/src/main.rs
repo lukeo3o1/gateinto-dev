@@ -6,6 +6,7 @@ mod agent;
 mod board;
 mod credentials;
 mod device;
+mod focus;
 mod fonts;
 mod frame;
 mod gateways;

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use crate::focus::Stop;
 use crate::fonts::{Font, Measure};
 use crate::gateways::START;
 use crate::hit::Zone;
@@ -26,6 +27,7 @@ pub mod tray;
 pub struct Board {
     pub ops: Vec<Op>,
     pub targets: Vec<(Rect, Zone)>,
+    pub order: Vec<Stop>,
     pub pane: Option<Pane>,
     pub anchor: Option<Rect>,
     pub popup: Option<Pane>,
@@ -65,6 +67,7 @@ struct Painter<'a, M> {
     v: &'a View,
     m: &'a M,
     clip: Rect,
+    hidden: bool,
     board: Board,
 }
 
@@ -101,6 +104,7 @@ impl<'a, M: Measure> Painter<'a, M> {
             v,
             m,
             clip,
+            hidden: false,
             board: Board::default(),
         };
         p.push(Op::Clip(clip));
@@ -137,7 +141,15 @@ impl<'a, M: Measure> Painter<'a, M> {
     }
 
     fn push(&mut self, op: Op) {
-        self.board.ops.push(op);
+        if !self.hidden {
+            self.board.ops.push(op);
+        }
+    }
+
+    fn unseen(&mut self, draw: impl FnOnce(&mut Self)) {
+        self.hidden = true;
+        draw(self);
+        self.hidden = false;
     }
 
     fn text(&mut self, font: Font, text: impl Into<Cow<'static, str>>, r: Rect, c: Rgb) {
@@ -163,9 +175,18 @@ impl<'a, M: Measure> Painter<'a, M> {
     }
 
     fn target(&mut self, r: Rect, zone: Zone) {
+        let scrolls = [self.board.pane, self.board.popup]
+            .iter()
+            .flatten()
+            .any(|pane| pane.view == self.clip);
+        self.board.order.push(Stop {
+            rect: r,
+            zone,
+            scrolls,
+        });
         let top = r.y.max(self.clip.y);
         let bottom = r.bottom().min(self.clip.bottom());
-        if bottom > top {
+        if bottom > top && !self.hidden {
             self.board
                 .targets
                 .push((Rect::new(r.x, top, r.w, bottom - top), zone));
@@ -319,11 +340,9 @@ impl<'a, M: Measure> Painter<'a, M> {
         }
         for (i, row) in rows.iter().enumerate() {
             let r = Rect::new(table.x, header.bottom() + i as i32 * row_h, table.w, row_h);
-            if r.bottom() <= view.y {
+            if r.bottom() <= view.y || r.y >= view.bottom() {
+                self.unseen(|p| p.row(r, row));
                 continue;
-            }
-            if r.y >= view.bottom() {
-                break;
             }
             self.row(r, row);
             if i + 1 < rows.len() {
@@ -556,7 +575,8 @@ mod tests {
                 | Op::Round(o, ..)
                 | Op::Icon(_, o, ..)
                 | Op::Text(_, _, o, _)
-                | Op::Logo(o, _) => within(*o),
+                | Op::Logo(o, _)
+                | Op::Ring(o, ..) => within(*o),
                 Op::Clip(_) | Op::Unclip => false,
             })
             .cloned()
@@ -993,6 +1013,23 @@ mod tests {
             row[6],
             Op::Round(Rect::new(699, FIRST_ROW + 13, 35, 16), 8.0, T.tile)
         );
+    }
+
+    #[test]
+    fn the_focus_order_keeps_rows_outside_the_view() {
+        let rows = (1..=9).map(row).collect();
+        let b = draw(&running(rows));
+        let zones: Vec<_> = b.order.iter().map(|stop| stop.zone).collect();
+        let buttons: Vec<_> = (1..=9)
+            .flat_map(|id| [Zone::Revoke(id), Zone::More(id)])
+            .collect();
+        assert_eq!(zones[..2], [Zone::Picker, Zone::StopAgent]);
+        assert_eq!(zones[2..], buttons[..]);
+        assert!(!b.order[0].scrolls);
+        let last = b.order.last().unwrap();
+        assert!(last.scrolls);
+        assert_eq!(last.rect, Rect::new(964, 638 + 2 * 60, 32, 32));
+        assert_eq!(b.targets.len(), 16);
     }
 
     #[test]

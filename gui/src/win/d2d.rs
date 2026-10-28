@@ -248,6 +248,20 @@ impl Canvas<'_> {
                 }
             }
             Op::Logo(r, eyes) => self.logo(r, eyes),
+            Op::Ring(r, radius, width, c) => unsafe {
+                let half = width / 2.0;
+                let mut box_ = rect(r);
+                box_.left += half;
+                box_.top += half;
+                box_.right -= half;
+                box_.bottom -= half;
+                self.rt.DrawRoundedRectangle(
+                    &rounded(box_, radius - half),
+                    self.paint(c),
+                    width,
+                    None,
+                )
+            },
             Op::Clip(r) => unsafe {
                 self.rt
                     .PushAxisAlignedClip(&rect(r), D2D1_ANTIALIAS_MODE_ALIASED)

@@ -20,7 +20,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
-    TrackMouseEvent, VK_ESCAPE, VK_SHIFT, VK_TAB,
+    TrackMouseEvent, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
     WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
@@ -47,6 +47,7 @@ use gateinto::link::store;
 use crate::add::{self, Form, Keyed, Units};
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
+use crate::focus::{self, Focus, Stop};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
@@ -123,6 +124,8 @@ struct App {
     layout: Layout,
     view: View,
     targets: Vec<(Rect, Zone)>,
+    stops: Vec<Stop>,
+    focus: Focus,
     pane: Option<Pane>,
     popup: Option<Pane>,
     icons: Icons,
@@ -169,6 +172,8 @@ impl App {
             layout,
             view: View::default(),
             targets: Vec::new(),
+            stops: Vec::new(),
+            focus: Focus::default(),
             pane: None,
             popup: None,
             update: None,
@@ -281,6 +286,22 @@ impl App {
     }
 
     fn adopt(&mut self, board: Board) -> Vec<Op> {
+        let rail: Vec<Stop> = self
+            .layout
+            .nav
+            .iter()
+            .map(|item| Stop {
+                rect: item.frame,
+                zone: Zone::Nav(item.page),
+                scrolls: false,
+            })
+            .collect();
+        let (stops, trapped) = focus::stops(&rail, &board.order);
+        self.focus.sync(&stops, trapped);
+        if let (Some(form), None) = (&self.adding, self.focus.zone()) {
+            self.focus.clicked(Zone::AddField(form.selected()), &stops);
+        }
+        self.stops = stops;
         self.targets = board.targets;
         self.pane = board.pane;
         if let Some(pane) = board.pane {
@@ -296,6 +317,71 @@ impl App {
             self.view.popup_scroll = 0;
         }
         board.ops
+    }
+
+    fn tab(&mut self, back: bool) {
+        let zone = self.focus.tab(&self.stops, back);
+        self.focused(zone);
+    }
+
+    fn arrow(&mut self, forward: bool) -> bool {
+        let zone = self.focus.arrow(&self.stops, forward);
+        self.focused(zone);
+        zone.is_some()
+    }
+
+    fn focused(&mut self, zone: Option<Zone>) {
+        let Some(zone) = zone else {
+            return;
+        };
+        if let (Zone::AddField(input), Some(form)) = (zone, &mut self.adding) {
+            form.select(input);
+        }
+        if let Some(stop) = self.stops.iter().find(|s| s.zone == zone && s.scrolls) {
+            match (zone, self.popup, self.pane) {
+                (Zone::Entry(_), Some(pane), _) => self.view.popup_scroll = pane.reveal(stop.rect),
+                (Zone::Entry(_), None, _) => {}
+                (_, _, Some(pane)) => {
+                    let page = self.view.nav.selected();
+                    self.view.scroll.set(page, pane.reveal(stop.rect));
+                }
+                _ => {}
+            }
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn keyed_action(&self) -> Option<Action> {
+        if self.focus.ring().is_none() || matches!(self.focus.zone(), Some(Zone::AddField(_))) {
+            return None;
+        }
+        self.focus.action()
+    }
+
+    fn hide_ring(&mut self, zone: Zone) {
+        if self.focus.ring().is_some() {
+            self.invalidate();
+        }
+        self.focus.clicked(zone, &self.stops);
+    }
+
+    fn ring(&self) -> Vec<Op> {
+        let Some(zone) = self.focus.ring() else {
+            return Vec::new();
+        };
+        let Some(stop) = self.stops.iter().find(|s| s.zone == zone) else {
+            return Vec::new();
+        };
+        let ring = focus::ring(stop.rect, self.s, self.palette());
+        let pane = match zone {
+            Zone::Entry(_) => self.popup,
+            _ => self.pane,
+        };
+        match pane.filter(|_| stop.scrolls) {
+            Some(pane) => vec![Op::Clip(pane.view), ring, Op::Unclip],
+            None => vec![ring],
+        }
     }
 
     fn gateway_details(&self) -> Option<gateways::Details> {
@@ -921,6 +1007,7 @@ fn on_paint(hwnd: HWND) {
         let mut ops = scene(&app.layout, app.s, app.palette(), &app.view);
         let board = app.board();
         ops.extend(app.adopt(board));
+        ops.extend(app.ring());
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
         }
@@ -1049,6 +1136,9 @@ fn on_nc_mouse(hwnd: HWND, msg: u32, wp: WPARAM) -> Option<LRESULT> {
     let button = caption_button(wp);
     let zone = button.unwrap_or(Zone::Caption);
     let action = with_custom(hwnd, |app| {
+        if msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONDBLCLK {
+            app.hide_ring(zone);
+        }
         let (changed, action) = match msg {
             WM_NCMOUSEMOVE => (app.view.pointer.moved(zone), None),
             WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => (app.view.pointer.down(zone), None),
@@ -1079,6 +1169,9 @@ fn on_mouse(hwnd: HWND, msg: u32, lp: LPARAM) {
     let (x, y) = coords(lp);
     let follow = with_app(hwnd, |app| {
         let zone = app.zone(x, y);
+        if msg == WM_LBUTTONDOWN {
+            app.hide_ring(zone);
+        }
         if msg == WM_LBUTTONDOWN && app.view.popup.is_some() && menu::dismisses(zone) {
             app.dismiss();
             return Follow::Dismissed;
@@ -1160,6 +1253,12 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
 }
 
 fn on_char(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
+    let activates = wp == WPARAM::from(b'\r') || wp == WPARAM::from(b' ');
+    if activates && let Some(action) = with_app(hwnd, |app| app.keyed_action())? {
+        perform(hwnd, Some(action));
+        rehover(hwnd);
+        return Some(0);
+    }
     let handled = with_app(hwnd, |app| app.typed(wp as u16))?;
     if !handled {
         return None;
@@ -1169,14 +1268,30 @@ fn on_char(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
 }
 
 fn on_key(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
-    if wp == WPARAM::from(VK_TAB) {
-        let back = unsafe { GetKeyState(i32::from(VK_SHIFT)) } < 0;
-        let moved = with_app(hwnd, |app| {
-            let open = app.adding.is_some();
-            app.edit(|form| form.next(back));
-            open
-        })?;
-        return moved.then_some(0);
+    let held = |key: u16| unsafe { GetKeyState(i32::from(key)) } < 0;
+    let key = wp as u16;
+    if key == VK_TAB {
+        with_app(hwnd, |app| app.tab(held(VK_SHIFT)))?;
+        return Some(0);
+    }
+    let forward = match key {
+        VK_LEFT | VK_UP => Some(false),
+        VK_RIGHT | VK_DOWN => Some(true),
+        _ => None,
+    };
+    if let Some(forward) = forward {
+        return with_app(hwnd, |app| app.arrow(forward))?.then_some(0);
+    }
+    if held(VK_CONTROL) {
+        let page = key
+            .checked_sub(u16::from(b'1'))
+            .and_then(|i| NavPage::ALL.get(usize::from(i)).copied());
+        if let Some(page) = page {
+            if !with_app(hwnd, |app| app.modal())? {
+                perform(hwnd, Some(Action::Select(page)));
+            }
+            return Some(0);
+        }
     }
     if wp != WPARAM::from(VK_ESCAPE) {
         return None;
@@ -1349,7 +1464,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_DPICHANGED => {
             on_dpi_changed(hwnd, wp, lp);
+            tray::rescale_icon(hwnd);
             Some(0)
+        }
+        WM_DISPLAYCHANGE => {
+            tray::rescale_icon(hwnd);
+            None
         }
         WM_SETTINGCHANGE => {
             on_setting_change(hwnd, lp);
@@ -1361,7 +1481,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_CLOSE => on_close(hwnd),
         WM_TRAY => {
-            tray::on_tray(hwnd, lp);
+            tray::on_tray(hwnd, wp, lp);
             Some(0)
         }
         _ if tray::taskbar_created(msg) => {

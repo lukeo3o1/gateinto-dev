@@ -106,6 +106,7 @@ impl<'a, M: Measure> Modal<'a, M> {
         self.p.push(Op::Unclip);
         board.ops.append(&mut self.p.board.ops);
         board.targets = self.p.board.targets;
+        board.order = self.p.board.order;
         board.anchor = None;
         board.popup = None;
     }

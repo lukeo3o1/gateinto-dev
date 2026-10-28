@@ -19,6 +19,7 @@ pub enum Op {
     Icon(Icon, Rect, f32, Rgb),
     Text(Font, Cow<'static, str>, Rect, Rgb),
     Logo(Rect, Option<Rgb>),
+    Ring(Rect, f32, f32, Rgb),
     Clip(Rect),
     Unclip,
 }
@@ -150,7 +151,8 @@ mod tests {
                 | Op::Round(o, ..)
                 | Op::Icon(_, o, ..)
                 | Op::Text(_, _, o, _)
-                | Op::Logo(o, _) => within(*o),
+                | Op::Logo(o, _)
+                | Op::Ring(o, ..) => within(*o),
                 Op::Clip(_) | Op::Unclip => false,
             })
             .cloned()

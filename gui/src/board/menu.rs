@@ -35,6 +35,7 @@ pub fn overlay(
     let (mut offset, mut width) = (0, panel.w - 2 * pad);
     let pane = (content > view.h).then(|| Pane::new(view, content, v.popup_scroll));
     if let Some(pane) = pane {
+        p.board.popup = Some(pane);
         offset = pane.offset;
         width -= s.px(8.0);
         p.push(Op::Clip(view));
@@ -44,6 +45,8 @@ pub fn overlay(
         let item = Rect::new(view.x + pad, view.y + i as i32 * line - offset, width, line);
         if item.bottom() > view.y && item.y < view.bottom() {
             p.item(item, i, entry);
+        } else {
+            p.unseen(|p| p.item(item, i, entry));
         }
     }
     if let Some(pane) = pane {
@@ -60,6 +63,8 @@ pub fn overlay(
     board.ops.append(&mut p.board.ops);
     p.board.targets.append(&mut board.targets);
     board.targets = p.board.targets;
+    p.board.order.append(&mut board.order);
+    board.order = p.board.order;
 }
 
 impl<M: Measure> Painter<'_, M> {
@@ -214,6 +219,18 @@ mod tests {
         let b = draw(&v, &many(20));
         assert_eq!(b.popup.map(|p| p.offset), Some(180));
         assert_eq!(b.targets[14], (row(19, 180), Zone::Entry(19)));
+    }
+
+    #[test]
+    fn the_focus_order_holds_every_entry_of_a_long_menu() {
+        let b = draw(&View::default(), &many(20));
+        let zones: Vec<_> = b.order.iter().map(|stop| stop.zone).collect();
+        let mut expected: Vec<_> = (0..20).map(Zone::Entry).collect();
+        expected.push(Zone::Menu);
+        assert_eq!(zones, expected);
+        assert_eq!(b.order[19].rect, row(19, 0));
+        assert!(b.order[19].scrolls);
+        assert!(!b.order[20].scrolls);
     }
 
     #[test]

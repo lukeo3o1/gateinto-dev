@@ -6,16 +6,17 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RE
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateBitmap, CreateDIBSection,
     DIB_RGB_COLORS, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, VK_ESCAPE,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT,
+    VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_DROPSHADOW, ChangeWindowMessageFilterEx, CreateIconIndirect,
@@ -24,24 +25,26 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, LoadCursorW, MF_STRING, MSGFLT_ALLOW, PostMessageW, RegisterClassExW,
     RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SWP_SHOWWINDOW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED,
+    TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED,
     WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NULL,
-    WM_PAINT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::d2d::Graphics;
 use super::text::Fonts;
 use super::{App, Follow, client_size, coords, show_main, sys, track, with_app};
 use crate::board::{self, Board};
+use crate::focus::{self, Focus, Stop};
 use crate::hit::{Zone, find};
 use crate::layout::Rect;
 use crate::logo;
 use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
-use crate::scene::View;
+use crate::scene::{Op, View};
 use crate::sessions::Eyes;
-use crate::tray::{self, Notice};
+use crate::theme::Theme;
+use crate::tray::{self, Event, Notice};
 use crate::worker::Command;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
@@ -65,6 +68,7 @@ impl Drop for TrayIcon {
 #[derive(Default)]
 pub struct Notify {
     added: bool,
+    version4: bool,
     shown: Option<(Eyes, String)>,
     icon: Option<TrayIcon>,
 }
@@ -81,6 +85,8 @@ pub struct Panel {
     fonts: Option<Fonts>,
     view: View,
     targets: Vec<(Rect, Zone)>,
+    stops: Vec<Stop>,
+    focus: Focus,
     visible: bool,
     hidden_at: Option<u64>,
     notice: Notice,
@@ -94,6 +100,8 @@ impl Panel {
             fonts: None,
             view: View::default(),
             targets: Vec::new(),
+            stops: Vec::new(),
+            focus: Focus::default(),
             visible: false,
             hidden_at: None,
             notice: Notice::default(),
@@ -112,6 +120,39 @@ impl Panel {
 
     fn invalidate(&self) {
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
+    }
+
+    fn adopt(&mut self, board: Board) -> Vec<Op> {
+        let (stops, trapped) = focus::stops(&[], &board.order);
+        self.focus.sync(&stops, trapped);
+        self.stops = stops;
+        self.targets = board.targets;
+        let mut ops = board.ops;
+        let ring = self.focus.ring();
+        if let Some(stop) = self.stops.iter().find(|s| Some(s.zone) == ring) {
+            ops.push(focus::ring(stop.rect, self.s, &Theme::DARK));
+        }
+        ops
+    }
+
+    fn tab(&mut self, back: bool) {
+        if self.focus.tab(&self.stops, back).is_some() {
+            self.invalidate();
+        }
+    }
+
+    fn hide_ring(&mut self, zone: Zone) {
+        if self.focus.ring().is_some() {
+            self.invalidate();
+        }
+        self.focus.clicked(zone, &self.stops);
+    }
+
+    fn reset(&mut self) {
+        self.view = View::default();
+        self.focus = Focus::default();
+        self.stops.clear();
+        self.targets.clear();
     }
 }
 
@@ -137,7 +178,8 @@ impl App {
         if !self.panel.visible {
             return;
         }
-        self.panel.targets = self.flyout_board().map(|b| b.targets).unwrap_or_default();
+        let board = self.flyout_board().unwrap_or_default();
+        self.panel.adopt(board);
         self.panel.invalidate();
     }
 
@@ -196,7 +238,8 @@ fn notify_data(main: HWND, icon: HICON, tip: &str) -> NOTIFYICONDATAW {
 }
 
 fn make_icon(eyes: Eyes) -> Option<TrayIcon> {
-    let size = sys::metric_for_dpi(SM_CXSMICON, sys::window_dpi(null_mut())).max(1);
+    let primary = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+    let size = sys::metric_for_dpi(SM_CXSMICON, sys::monitor_dpi(primary)).max(1);
     let pixels = logo::pixels(size, eyes);
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -246,11 +289,23 @@ fn add_icon(main: HWND) -> bool {
         return false;
     };
     let data = notify_data(main, icon.0, &wanted.1);
-    let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0;
+    let added = unsafe {
+        Shell_NotifyIconW(NIM_ADD, &data) != 0
+            || (Shell_NotifyIconW(NIM_DELETE, &data) != 0 && Shell_NotifyIconW(NIM_ADD, &data) != 0)
+            || Shell_NotifyIconW(NIM_MODIFY, &data) != 0
+    };
+    let version = NOTIFYICONDATAW {
+        Anonymous: NOTIFYICONDATAW_0 {
+            uVersion: NOTIFYICON_VERSION_4,
+        },
+        ..data
+    };
+    let version4 = added && unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) } != 0;
     with_app(main, |app| {
         app.notify = if added {
             Notify {
                 added,
+                version4,
                 shown: Some(wanted),
                 icon: Some(icon),
             }
@@ -259,6 +314,11 @@ fn add_icon(main: HWND) -> bool {
         };
     });
     added
+}
+
+pub fn rescale_icon(main: HWND) {
+    with_app(main, |app| app.notify.shown = None);
+    refresh_icon(main);
 }
 
 pub fn refresh_icon(main: HWND) {
@@ -315,30 +375,48 @@ pub fn destroy(main: HWND) {
     }
 }
 
-pub fn on_tray(main: HWND, lp: LPARAM) {
-    match (lp & 0xffff) as u32 {
-        WM_LBUTTONUP => {
-            let now = unsafe { GetTickCount64() };
-            let reopen = with_app(main, |app| {
-                (!app.panel.visible).then(|| tray::reopens(now, app.panel.hidden_at))
-            });
-            match reopen {
-                Some(Some(true)) => show_flyout(main),
-                Some(None) => hide_flyout(main),
-                _ => {}
-            }
-        }
-        WM_RBUTTONUP => context_menu(main),
+fn point(anchor: Option<(i32, i32)>) -> Option<POINT> {
+    if let Some((x, y)) = anchor {
+        return Some(POINT { x, y });
+    }
+    let mut p = POINT::default();
+    (unsafe { GetCursorPos(&mut p) } != 0).then_some(p)
+}
+
+fn toggle(main: HWND, anchor: Option<(i32, i32)>) {
+    let now = unsafe { GetTickCount64() };
+    let reopen = with_app(main, |app| {
+        (!app.panel.visible).then(|| tray::reopens(now, app.panel.hidden_at))
+    });
+    match reopen {
+        Some(Some(true)) => show_flyout(main, anchor, false),
+        Some(None) => hide_flyout(main),
         _ => {}
     }
 }
 
-fn context_menu(main: HWND) {
+pub fn on_tray(main: HWND, wp: WPARAM, lp: LPARAM) {
+    let version4 = with_app(main, |app| app.notify.version4).unwrap_or(false);
+    match tray::event(version4, wp, lp) {
+        Some(Event::Click) => toggle(main, None),
+        Some(Event::Select(anchor)) => toggle(main, Some(anchor)),
+        Some(Event::KeySelect(anchor)) => {
+            if with_app(main, |app| !app.panel.visible) == Some(true) {
+                show_flyout(main, Some(anchor), true);
+            }
+        }
+        Some(Event::Menu(anchor)) => context_menu(main, anchor),
+        None => {}
+    }
+}
+
+fn context_menu(main: HWND, anchor: Option<(i32, i32)>) {
     hide_flyout(main);
-    let mut p = POINT::default();
+    let Some(p) = point(anchor) else {
+        return;
+    };
     let (open, exit) = (super::wide(tray::OPEN), super::wide(tray::EXIT));
     let choice = unsafe {
-        GetCursorPos(&mut p);
         let menu = CreatePopupMenu();
         if menu.is_null() {
             return;
@@ -378,11 +456,10 @@ fn work_area(cursor: POINT) -> Option<(Rect, Rect, u32)> {
     ))
 }
 
-fn show_flyout(main: HWND) {
-    let mut cursor = POINT::default();
-    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+fn show_flyout(main: HWND, anchor: Option<(i32, i32)>, keyboard: bool) {
+    let Some(cursor) = point(anchor) else {
         return;
-    }
+    };
     let Some((work, monitor, dpi)) = work_area(cursor) else {
         return;
     };
@@ -395,7 +472,7 @@ fn show_flyout(main: HWND) {
         if panel.hwnd.is_null() || panel.fonts.is_none() {
             return None;
         }
-        panel.view = View::default();
+        panel.reset();
         panel.visible = true;
         panel.notice.shown();
         Some(panel.hwnd)
@@ -407,7 +484,12 @@ fn show_flyout(main: HWND) {
         SetWindowPos(hwnd, HWND_TOPMOST, r.x, r.y, r.w, r.h, SWP_SHOWWINDOW);
         SetForegroundWindow(hwnd);
     }
-    with_app(main, App::refresh_flyout);
+    with_app(main, |app| {
+        app.refresh_flyout();
+        if keyboard {
+            app.panel.tab(false);
+        }
+    });
 }
 
 pub fn hide_flyout(main: HWND) {
@@ -420,8 +502,7 @@ pub fn hide_flyout(main: HWND) {
         panel.visible = false;
         panel.hidden_at = Some(now);
         panel.notice.hidden();
-        panel.view = View::default();
-        panel.targets.clear();
+        panel.reset();
         Some(panel.hwnd)
     });
     if let Some(Some(hwnd)) = hwnd {
@@ -466,14 +547,14 @@ fn paint(hwnd: HWND, main: HWND) {
         let Some(board) = app.flyout_board() else {
             return;
         };
+        let (w, h) = client_size(hwnd);
+        let ops = app.panel.adopt(board);
         let Some(fonts) = &app.panel.fonts else {
             return;
         };
-        let (w, h) = client_size(hwnd);
-        if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &board.ops, fonts) {
+        if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, fonts) {
             app.panel.invalidate();
         }
-        app.panel.targets = board.targets;
     });
     unsafe { EndPaint(hwnd, &ps) };
 }
@@ -482,6 +563,9 @@ fn mouse(hwnd: HWND, main: HWND, msg: u32, lp: LPARAM) {
     let (x, y) = coords(lp);
     let follow = with_app(main, |app| {
         let zone = find(&app.panel.targets, x, y);
+        if msg == WM_LBUTTONDOWN {
+            app.panel.hide_ring(zone);
+        }
         let pointer = &mut app.panel.view.pointer;
         let (changed, follow) = match msg {
             WM_MOUSEMOVE => (pointer.moved(zone), Follow::Track),
@@ -505,6 +589,17 @@ fn mouse(hwnd: HWND, main: HWND, msg: u32, lp: LPARAM) {
         }
         Some(Follow::Dismissed | Follow::Nothing) | None => {}
     }
+}
+
+fn key(main: HWND, key: u16) -> Option<LRESULT> {
+    let back = match key {
+        VK_TAB => (unsafe { GetKeyState(i32::from(VK_SHIFT)) }) < 0,
+        VK_UP | VK_LEFT => true,
+        VK_DOWN | VK_RIGHT => false,
+        _ => return None,
+    };
+    with_app(main, |app| app.panel.tab(back));
+    Some(0)
 }
 
 fn repoint(main: HWND, change: impl FnOnce(&mut View) -> bool) {
@@ -556,6 +651,15 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             hide_flyout(main);
             Some(0)
         }
+        WM_KEYDOWN => key(main, wp as u16),
+        WM_CHAR if wp == WPARAM::from(b'\r') || wp == WPARAM::from(b' ') => {
+            let action = with_app(main, |app| {
+                app.panel.focus.ring()?;
+                app.panel.focus.action()
+            });
+            act(main, action.flatten());
+            Some(0)
+        }
         WM_DPICHANGED => {
             rescaled(main, wp);
             Some(0)
@@ -577,7 +681,7 @@ pub fn install(main: HWND, instance: HINSTANCE) {
 
 fn create_flyout(main: HWND, instance: HINSTANCE) -> HWND {
     let class = super::wide("GateintoFlyout");
-    let title = super::wide(super::TITLE);
+    let title = super::wide(tray::FLYOUT_TITLE);
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: CS_DROPSHADOW,

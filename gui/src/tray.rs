@@ -15,6 +15,7 @@ pub const OPEN: &str = "Open Gateinto";
 pub const ADD: &str = "Add gateway…";
 pub const STOP: &str = "Stop agent";
 pub const EXIT: &str = "Exit";
+pub const FLYOUT_TITLE: &str = "Gateinto status";
 const GRACE_MS: u64 = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -252,6 +253,35 @@ pub fn reopens(now_ms: u64, hidden_at: Option<u64>) -> bool {
     hidden_at.is_none_or(|at| now_ms < at || now_ms - at >= GRACE_MS)
 }
 
+const NIN_SELECT: u32 = 0x400;
+const NIN_KEYSELECT: u32 = 0x401;
+const WM_CONTEXTMENU: u32 = 0x7b;
+const WM_LBUTTONUP: u32 = 0x202;
+const WM_RBUTTONUP: u32 = 0x205;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    Click,
+    Select((i32, i32)),
+    KeySelect((i32, i32)),
+    Menu(Option<(i32, i32)>),
+}
+
+pub fn event(version4: bool, wp: usize, lp: isize) -> Option<Event> {
+    let anchor = (
+        i32::from(wp as u16 as i16),
+        i32::from((wp >> 16) as u16 as i16),
+    );
+    match ((lp & 0xffff) as u32, version4) {
+        (NIN_SELECT, true) => Some(Event::Select(anchor)),
+        (NIN_KEYSELECT, true) => Some(Event::KeySelect(anchor)),
+        (WM_CONTEXTMENU, true) => Some(Event::Menu(Some(anchor))),
+        (WM_LBUTTONUP, false) => Some(Event::Click),
+        (WM_RBUTTONUP, false) => Some(Event::Menu(None)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gateinto::config::GatewayName;
@@ -259,6 +289,34 @@ mod tests {
     use gateinto::link::{Known, KnownGateway, Source};
 
     use super::*;
+
+    #[test]
+    fn version_four_events_carry_their_anchor_in_wparam() {
+        let anchor = (0xfffe_usize << 16) | 0x0280;
+        let lp = |event: u32| ((1 << 16) | event) as isize;
+        assert_eq!(
+            event(true, anchor, lp(0x400)),
+            Some(Event::Select((640, -2)))
+        );
+        assert_eq!(
+            event(true, anchor, lp(0x401)),
+            Some(Event::KeySelect((640, -2)))
+        );
+        assert_eq!(
+            event(true, anchor, lp(0x7b)),
+            Some(Event::Menu(Some((640, -2))))
+        );
+        assert_eq!(event(true, anchor, lp(0x202)), None);
+        assert_eq!(event(true, anchor, lp(0x205)), None);
+    }
+
+    #[test]
+    fn legacy_events_use_the_cursor() {
+        assert_eq!(event(false, 0, 0x202), Some(Event::Click));
+        assert_eq!(event(false, 0, 0x205), Some(Event::Menu(None)));
+        assert_eq!(event(false, 0, 0x400), None);
+        assert_eq!(event(false, 0, 0x7b), None);
+    }
 
     fn gateway(name: &str, host: &str) -> KnownGateway {
         KnownGateway {

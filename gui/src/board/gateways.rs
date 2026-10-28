@@ -46,11 +46,9 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
         let offset = p.scroll(view, page.rows.len() as i32 * (h + gap) - gap);
         for (i, row) in page.rows.iter().enumerate() {
             let card = Rect::new(content.x, top - offset + i as i32 * (h + gap), content.w, h);
-            if card.bottom() <= view.y {
+            if card.bottom() <= view.y || card.y >= view.bottom() {
+                p.unseen(|p| p.gateway(card, row, (i, page.launch)));
                 continue;
-            }
-            if card.y >= view.bottom() {
-                break;
             }
             p.gateway(card, row, (i, page.launch));
         }
