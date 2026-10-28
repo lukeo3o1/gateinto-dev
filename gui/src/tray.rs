@@ -76,6 +76,34 @@ pub fn status(state: &AgentState) -> Status {
     }
 }
 
+pub fn pending() -> Status {
+    Status {
+        title: "Checking",
+        subtitle: "Waiting for the agent status".to_owned(),
+        eyes: Eyes::Dim,
+        stop: false,
+    }
+}
+
+pub fn waiting() -> Flyout {
+    let Status {
+        title,
+        subtitle,
+        eyes,
+        stop,
+    } = pending();
+    Flyout {
+        title,
+        subtitle,
+        eyes,
+        stop,
+        launch: false,
+        rows: Vec::new(),
+        empty: None,
+        notice: None,
+    }
+}
+
 pub fn tooltip(status: &Status) -> String {
     let full = format!("Gateinto: {}\n{}", status.title, status.subtitle);
     let mut units = 0;
@@ -498,5 +526,25 @@ mod tests {
         assert!(!reopens(10_000, Some(9_700)));
         assert!(reopens(10_000, Some(9_000)));
         assert!(reopens(10_000, Some(10_900)));
+    }
+
+    #[test]
+    fn before_the_first_update_the_tray_is_checking() {
+        let status = pending();
+        assert_eq!(status.title, "Checking");
+        assert_eq!(status.subtitle, "Waiting for the agent status");
+        assert_eq!(status.eyes, Eyes::Dim);
+        assert!(!status.stop);
+        assert_eq!(
+            tooltip(&status),
+            "Gateinto: Checking\nWaiting for the agent status"
+        );
+        let f = waiting();
+        assert_eq!(
+            (f.title, f.subtitle.as_str()),
+            (status.title, "Waiting for the agent status")
+        );
+        assert!(!f.stop && !f.launch && f.rows.is_empty());
+        assert_eq!((f.empty, f.notice), (None, None));
     }
 }

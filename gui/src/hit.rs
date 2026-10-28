@@ -39,6 +39,13 @@ pub enum Zone {
     Client,
 }
 
+pub fn find(targets: &[(Rect, Zone)], x: i32, y: i32) -> Zone {
+    targets
+        .iter()
+        .find(|(r, _)| r.contains(x, y))
+        .map_or(Zone::Client, |&(_, zone)| zone)
+}
+
 pub fn hit(l: &Layout, x: i32, y: i32, resize: i32, targets: &[(Rect, Zone)]) -> Zone {
     let width = l.caption_row.right();
     if y < resize {
@@ -64,7 +71,8 @@ pub fn hit(l: &Layout, x: i32, y: i32, resize: i32, targets: &[(Rect, Zone)]) ->
     if let Some(item) = l.nav.iter().find(|i| i.frame.contains(x, y)) {
         return Zone::Nav(item.page);
     }
-    if let Some(&(_, zone)) = targets.iter().find(|(r, _)| r.contains(x, y)) {
+    let zone = find(targets, x, y);
+    if zone != Zone::Client {
         return zone;
     }
     if l.caption_row.contains(x, y) || (x < l.rail.right() && y < l.brand.bottom()) {
@@ -157,5 +165,16 @@ mod tests {
         let l = Layout::new(1040, 680, Scale::new(96), false);
         assert_eq!(hit(&l, 1000, 20, 0, &[]), Zone::Client);
         assert_eq!(hit(&l, 600, 0, 0, &[]), Zone::Client);
+    }
+
+    #[test]
+    fn find_picks_the_first_target_or_the_client() {
+        let targets = [
+            (Rect::new(0, 0, 10, 10), Zone::OpenMain),
+            (Rect::new(0, 0, 20, 20), Zone::StartBrowser(0)),
+        ];
+        assert_eq!(find(&targets, 5, 5), Zone::OpenMain);
+        assert_eq!(find(&targets, 15, 15), Zone::StartBrowser(0));
+        assert_eq!(find(&targets, 25, 5), Zone::Client);
     }
 }
