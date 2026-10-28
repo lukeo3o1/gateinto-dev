@@ -12,17 +12,18 @@ use gateinto::proxy::DEFAULT_LISTEN;
 
 use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
+use crate::i18n::Text;
 use crate::settings;
 use crate::worker::Loaded;
 
 pub const FLAG: &str = "--demo";
-pub const TITLE: &str = "Gateinto Demo";
-pub const NOT_STARTED: &str = "Demo: nothing was started";
-pub const NOT_REVOKED: &str = "Demo: nothing was revoked";
-pub const NOT_STOPPED: &str = "Demo: the agent was not stopped";
-pub const IGNORED: &str = "Demo: the sample agent ignores this request";
-pub const NOT_SAVED: &str = "Demo: nothing was saved";
-pub const NOT_OPENED: &str = "Demo: nothing was opened";
+pub const TITLE: Text = Text::DemoTitle;
+pub const NOT_STARTED: Text = Text::DemoNotStarted;
+pub const NOT_REVOKED: Text = Text::DemoNotRevoked;
+pub const NOT_STOPPED: Text = Text::DemoNotStopped;
+pub const IGNORED: Text = Text::DemoIgnored;
+pub const NOT_SAVED: Text = Text::DemoNotSaved;
+pub const NOT_OPENED: Text = Text::DemoNotOpened;
 
 const PROFILE: &str = "g-4f0c2a9d7e1b83c56a0d9e2f4b7c1a3e5d8f0b2c4a6e8d1f3b5c7e9a0c2e4d";
 const PID: u32 = 4242;
@@ -184,10 +185,10 @@ pub fn answer(request: Request, now: u64) -> Response {
         Request::List => Response::Ok(sessions(now).iter().map(SessionInfo::to_line).collect()),
         Request::Log { after } => Response::Ok(log(after, now)),
         Request::Credentials(_) => Response::Ok(Vec::new()),
-        Request::Launch(_) => Response::Error(NOT_STARTED.to_owned()),
-        Request::Close(_) => Response::Error(NOT_REVOKED.to_owned()),
-        Request::Stop => Response::Error(NOT_STOPPED.to_owned()),
-        Request::Approve(_) | Request::Deny(_) => Response::Error(IGNORED.to_owned()),
+        Request::Launch(_) => Response::Error(NOT_STARTED.english().to_owned()),
+        Request::Close(_) => Response::Error(NOT_REVOKED.english().to_owned()),
+        Request::Stop => Response::Error(NOT_STOPPED.english().to_owned()),
+        Request::Approve(_) | Request::Deny(_) => Response::Error(IGNORED.english().to_owned()),
     }
 }
 
@@ -318,13 +319,16 @@ mod tests {
     #[test]
     fn actions_are_refused_with_a_demo_notice() {
         let launch = LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
-        assert_eq!(refused(Request::Launch(launch)), NOT_STARTED);
-        assert_eq!(refused(Request::Close(SessionId::from(3))), NOT_REVOKED);
-        assert_eq!(refused(Request::Stop), NOT_STOPPED);
+        assert_eq!(refused(Request::Launch(launch)), NOT_STARTED.english());
+        assert_eq!(
+            refused(Request::Close(SessionId::from(3))),
+            NOT_REVOKED.english()
+        );
+        assert_eq!(refused(Request::Stop), NOT_STOPPED.english());
         let token = "0123456789abcdef0123456789abcdef".parse().unwrap();
-        assert_eq!(refused(Request::Approve(token)), IGNORED);
+        assert_eq!(refused(Request::Approve(token)), IGNORED.english());
         let token = "0123456789abcdef0123456789abcdef".parse().unwrap();
-        assert_eq!(refused(Request::Deny(token)), IGNORED);
+        assert_eq!(refused(Request::Deny(token)), IGNORED.english());
     }
 
     #[test]
@@ -412,7 +416,7 @@ mod tests {
         assert!(
             updates
                 .iter()
-                .any(|u| u.failure.as_deref() == Some(NOT_STARTED))
+                .any(|u| u.failure.as_deref() == Some(NOT_STARTED.english()))
         );
         let reveals = reveals.borrow();
         let issued = reveals[0].credentials.as_ref().unwrap();
@@ -426,5 +430,26 @@ mod tests {
                 .iter()
                 .all(|r| !matches!(r, Request::Approve(_)))
         );
+    }
+
+    #[test]
+    fn demo_refusals_and_the_title_read_in_chinese_when_shown() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let shown = |request| crate::i18n::localize(&refused(request)).into_owned();
+        let launch = LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
+        assert_eq!(shown(Request::Launch(launch)), "示範：未啟動任何項目");
+        assert_eq!(
+            shown(Request::Close(SessionId::from(3))),
+            "示範：未撤銷任何項目"
+        );
+        assert_eq!(shown(Request::Stop), "示範：未停止代理程式");
+        let token = "0123456789abcdef0123456789abcdef".parse().unwrap();
+        assert_eq!(
+            shown(Request::Approve(token)),
+            "示範：範例代理程式會忽略這個要求"
+        );
+        assert_eq!(crate::i18n::tr(NOT_SAVED), "示範：未儲存任何項目");
+        assert_eq!(crate::i18n::tr(NOT_OPENED), "示範：未開啟任何項目");
+        assert_eq!(crate::i18n::tr(TITLE), "Gateinto 示範");
     }
 }

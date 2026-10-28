@@ -293,6 +293,16 @@ table! {
     OpenCount => "{0} open", "{0} 個已開啟";
     MoreInApp => "{0} more in Gateinto", "Gateinto 中還有 {0} 個";
     TrayTip => "Gateinto: {0}\n{1}", "Gateinto：{0}\n{1}";
+    DemoTitle => "Gateinto Demo", "Gateinto 示範";
+    DemoNotStarted => "Demo: nothing was started", "示範：未啟動任何項目";
+    DemoNotRevoked => "Demo: nothing was revoked", "示範：未撤銷任何項目";
+    DemoNotStopped => "Demo: the agent was not stopped", "示範：未停止代理程式";
+    DemoIgnored => "Demo: the sample agent ignores this request", "示範：範例代理程式會忽略這個要求";
+    DemoNotSaved => "Demo: nothing was saved", "示範：未儲存任何項目";
+    DemoNotOpened => "Demo: nothing was opened", "示範：未開啟任何項目";
+    NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";
+    NoWindowClass => "Gateinto could not register its window class.", "Gateinto 無法登錄視窗類別。";
+    NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
 }
 
 impl Text {

@@ -55,6 +55,7 @@ use crate::focus::{self, Focus, Stop};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
+use crate::i18n::{Text, localize, tr};
 use crate::layout::{Layout, Rect};
 use crate::log::{self, Filter};
 use crate::logo;
@@ -235,7 +236,8 @@ impl App {
             &self.view,
             &self.fonts,
         );
-        let failure = update.failure.as_deref();
+        let failure = update.failure.as_deref().map(localize);
+        let failure = failure.as_deref();
         let mut board = match v.nav.selected() {
             NavPage::Settings => {
                 let page = settings::page(
@@ -579,7 +581,7 @@ impl App {
             let listing = listing.unwrap_or_else(|| Ok(Default::default()));
             if add::rehearse(form, &listing) {
                 self.adding = None;
-                self.fail(demo::NOT_SAVED);
+                self.fail(demo::NOT_SAVED.english());
             }
             self.retarget();
             self.invalidate();
@@ -642,7 +644,7 @@ impl App {
         let on = !self.sign_in;
         if self.demo {
             self.sign_in = on;
-            self.fail(demo::NOT_SAVED);
+            self.fail(demo::NOT_SAVED.english());
             self.retarget();
             self.invalidate();
             return;
@@ -926,7 +928,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             {
                 with_app(hwnd, |app| {
                     app.fail(if demo {
-                        demo::NOT_OPENED
+                        demo::NOT_OPENED.english()
                     } else {
                         menu::PORTAL_FAILED.english()
                     });
@@ -940,7 +942,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             let demo = with_app(hwnd, |app| app.demo).unwrap_or(true);
             if demo {
                 with_app(hwnd, |app| {
-                    app.fail(demo::NOT_OPENED);
+                    app.fail(demo::NOT_OPENED.english());
                     app.retarget();
                     app.invalidate();
                 });
@@ -1583,8 +1585,12 @@ fn center_on_monitor(hwnd: HWND) {
     unsafe { SetWindowPos(hwnd, null_mut(), x, y, w, h, flags) };
 }
 
-fn fail(message: &str) {
-    let text = wide(message);
+fn window_title(demo: bool) -> &'static str {
+    if demo { tr(demo::TITLE) } else { TITLE }
+}
+
+fn fail(message: Text) {
+    let text = wide(tr(message));
     let caption = wide(TITLE);
     unsafe {
         MessageBoxW(
@@ -1599,18 +1605,14 @@ fn fail(message: &str) {
 pub fn run() {
     sys::enable_dpi_awareness();
     let Ok(gfx) = Graphics::new() else {
-        fail("Gateinto could not start Direct2D and DirectWrite rendering.");
+        fail(Text::NoRendering);
         return;
     };
     let mut gfx = Some(gfx);
     let instance = unsafe { GetModuleHandleW(null()) };
     let system_dpi = sys::window_dpi(null_mut());
     let class = wide("GateintoWindow");
-    let title = wide(if demo::requested(std::env::args_os()) {
-        demo::TITLE
-    } else {
-        TITLE
-    });
+    let title = wide(window_title(demo::requested(std::env::args_os())));
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(window_proc),
@@ -1622,7 +1624,7 @@ pub fn run() {
         ..Default::default()
     };
     if unsafe { RegisterClassExW(&wc) } == 0 {
-        fail("Gateinto could not register its window class.");
+        fail(Text::NoWindowClass);
         return;
     }
     let hwnd = unsafe {
@@ -1642,7 +1644,7 @@ pub fn run() {
         )
     };
     if hwnd.is_null() {
-        fail("Gateinto could not create its window.");
+        fail(Text::NoWindow);
         return;
     }
     apply_theme(hwnd);
