@@ -307,10 +307,10 @@ Windows 7 is experimental and unsupported. See
   Windows 7, and those releases require Windows 10 or later. Newer builds
   no longer import this function, but the regular releases still do not run
   before Windows 10. Use Windows 10 or 11. The only Windows 7 candidates are the
-  experimental `i686-win7-windows-msvc` (32-bit) and `x86_64-win7-windows-msvc`
-  executables attached to the `alpha` and `beta` releases (see
-  [install.md](install.md#releases)) and built by the Windows 7 workflow, which
-  have not been verified on Windows 7.
+  experimental 32-bit `i686-win7-windows-msvc` executable attached to the
+  `alpha` and `beta` releases (see [install.md](install.md#releases)) and built
+  by the Windows 7 workflow, which has not been verified on Windows 7. There is
+  no x64 Windows 7 build.
 - On Windows 7 there is no TPM key storage provider, so keys are software keys.
   `Tbsi_GetDeviceInfo unavailable (expected on Windows 7)` in a warning or
   error means Gateinto detected this. With the default

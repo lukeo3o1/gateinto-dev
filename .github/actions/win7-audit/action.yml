@@ -3,7 +3,7 @@ description: Checks the static C runtime and audits the imports of a -win7-windo
 
 inputs:
   target:
-    description: x86_64-win7-windows-msvc or i686-win7-windows-msvc
+    description: A -win7-windows-msvc target, such as i686-win7-windows-msvc
     required: true
 
 runs:

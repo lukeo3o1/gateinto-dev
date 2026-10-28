@@ -32,9 +32,8 @@ default policies and browser availability.
 `windows-latest` currently resolves to the same Windows Server 2025 image as
 `windows-2025`, so `ci.yml` already covers it on every push.
 [.github/workflows/compat.yml](../.github/workflows/compat.yml) runs on
-`windows-2022` only for pushes to `master` that change `src/**`, `Cargo.*`,
-`packaging/**`, `.github/scripts/**` or the workflow itself, and on both
-`windows-2022` and `windows-2025` weekly and by `workflow_dispatch`, so
+`windows-2022` and `windows-2025` weekly and by `workflow_dispatch`, not on
+pushes, so
 Windows Server 2025 stays pinned when `windows-latest` moves on. Its jobs are
 independent: the x64 tests with the static C runtime check, the i686 tests
 under WOW64 with the same check, and a release build installed as an MSI by
@@ -271,7 +270,7 @@ without the Visual C++ Redistributable, because the UCRT ships with Windows
 10; the UCRT only matters on Windows 7 and 8.1. `.cargo/config.toml` now sets
 `-C target-feature=+crt-static` for `cfg(all(windows, target_env = "msvc"))`,
 which covers `x86_64-pc-windows-msvc`, `i686-pc-windows-msvc` and
-`x86_64-win7-windows-msvc`. No
+`i686-win7-windows-msvc`. No
 workflow sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`, which would replace
 these flags.
 
@@ -293,7 +292,7 @@ environment they got `-MD`.
 used by the `quickstart` and `msi` jobs, the release workflow on the release
 binary of each target before packaging, the `windows-i686` CI job on the
 `i686-pc-windows-msvc` debug binary, and the Windows 7 workflow on the
-`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` builds,
+`i686-win7-windows-msvc` build,
 whose import table names `kernel32.dll` in lower case; the `KERNEL32.dll` check
 is case-insensitive. Whether the binary starts on a Windows 10 machine without
 the redistributable has not been checked; only this import check verifies it.

@@ -5,11 +5,13 @@ unsupported. Recorded on 2026-10-16, updated on 2026-10-17.
 
 The regular releases, `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc`,
 require Windows 10 or later: Rust std for those targets needs Windows 10. They
-do not start on Windows 7. The only Windows 7 candidates are the experimental
-`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` builds of
+do not start on Windows 7. The only Windows 7 candidate is the experimental
+`i686-win7-windows-msvc` build of
 [windows7.yml](../.github/workflows/windows7.yml), which the `alpha` and `beta`
-releases also attach as `gateinto-<commit>-<target>-experimental.exe` (see
-[install.md](install.md#releases)); neither has been run on Windows 7.
+releases also attach as `gateinto-<commit>-i686-win7-windows-msvc-experimental.exe`
+(see [install.md](install.md#releases)); it has not been run on Windows 7. The
+`x86_64-win7-windows-msvc` build below is no longer made by CI or attached to
+releases; its results are kept as evidence.
 
 ## Observed failure on Windows 7
 
@@ -113,9 +115,8 @@ assembled with `nasm -f win32`. The build log should contain the `aws-lc-sys` wa
 `Setting _WIN32_WINNT to _WIN32_WINNT_WIN7 for x86_64-win7-windows-msvc target`;
 without it the binary uses `ProcessPrng` (see below).
 
-CI: [.github/workflows/windows7.yml](../.github/workflows/windows7.yml) runs the
-same build for both `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` on
-`windows-latest`. It runs on `workflow_dispatch` and on pull requests that
+CI: [.github/workflows/windows7.yml](../.github/workflows/windows7.yml) runs this
+build for `i686-win7-windows-msvc` only on `windows-latest`. It runs on `workflow_dispatch` and on pull requests that
 change the workflow, its actions, its scripts, `.cargo/config.toml`,
 `Cargo.toml`, `Cargo.lock`, anything under `src/` or this document. The steps
 live in two composite actions,
@@ -243,7 +244,8 @@ so the update is not required.
 
 `partial`
 
-`gateinto.exe` builds and links for `x86_64-win7-windows-msvc` in CI. The builds
+`gateinto.exe` built and linked for `x86_64-win7-windows-msvc` in CI before that
+build was dropped; CI now builds only `i686-win7-windows-msvc`. The builds
 recorded so far imported `Tbsi_GetDeviceInfo` and `BCryptHash`, so they would not
 have loaded on Windows 7. Both imports are removed now, and the allow-list audit
 fails if another import that Windows 7 lacks appears. In run 39074036884 the
@@ -268,10 +270,9 @@ does not exist on Windows 7, so only software keys can work there.
 
 To reach `working`:
 
-1. A Windows 7 SP1 machine or VM with all updates, 32-bit or x64 to match the
-   artifact.
-2. Copy `gateinto.exe` from the `gateinto-i686-win7-windows-msvc` (32-bit) or
-   `gateinto-x86_64-win7-windows-msvc` artifact of a passing
+1. A Windows 7 SP1 machine or VM with all updates, 32-bit preferred; an x64
+   machine would run the 32-bit build under WOW64, which is also unverified.
+2. Copy `gateinto.exe` from the `gateinto-i686-win7-windows-msvc` artifact of a passing
    [windows7.yml](../.github/workflows/windows7.yml) run made after the fixes
    above. Older artifacts import `Tbsi_GetDeviceInfo` and do not load. Check
    that it starts: `gateinto --help`.

@@ -70,8 +70,8 @@ that moves to the commit it was built from
 - `latest`: replaced by hand the same way; marked as the latest release.
 
 Every release has the x64 and x86 MSIs and the x64 and i686 executables;
-`alpha` and `beta` also have the experimental Windows 7 executables for
-`x86_64-win7-windows-msvc` and `i686-win7-windows-msvc`. Each file is attached
+`alpha` and `beta` also have the experimental Windows 7 executable for
+`i686-win7-windows-msvc`. Each file is attached
 with the short commit in its name and as a copy without it, each with a
 `.sha256`, so a URL such as
 `https://github.com/lukeo3o1/gateinto-dev/releases/download/latest/gateinto-x86_64-pc-windows-msvc.exe`
@@ -873,11 +873,11 @@ Windows 7, where the i686 executable does not start. See
 ## Windows 7
 
 Windows 7 is not supported and the `latest` release has no Windows 7 build.
-The `alpha` and `beta` releases attach experimental `x86_64-win7-windows-msvc`
-and `i686-win7-windows-msvc` executables that pass a static import audit in
-CI. On Windows 7 they can use only the Software Key Storage Provider, since
-Windows 7 has no TPM key storage provider. They have never been run on Windows
-7; see
+The `alpha` and `beta` releases attach an experimental 32-bit
+`i686-win7-windows-msvc` executable that passes a static import audit in CI.
+On Windows 7 it can use only the Software Key Storage Provider, since Windows 7
+has no TPM key storage provider. It has never been run on Windows 7; there is
+no x64 Windows 7 build. See
 [docs/windows7-feasibility.md](docs/windows7-feasibility.md).
 
 ## Build and test

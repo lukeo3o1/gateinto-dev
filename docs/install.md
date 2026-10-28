@@ -38,7 +38,7 @@ The release title and notes name the channel, the full commit SHA and the build 
 by a notice that the files are not code-signed, that TPM keys, real browsers, physical Windows
 machines and Windows 7 are not yet verified on real hardware
 ([#23](https://github.com/lukeo3o1/gateinto-dev/issues/23)), and, for `alpha` and `beta`, that
-the Windows 7 builds are experimental and can use only the Microsoft Software Key Storage
+the Windows 7 build is experimental and can use only the Microsoft Software Key Storage
 Provider.
 
 Each file is attached twice: with the first 12 characters of the commit in its name, and as a
@@ -50,7 +50,6 @@ copy without it. The copy keeps the same download URL from one publish to the ne
 | `gateinto-x86_64-pc-windows-msvc.msi`, the per-user installer below, 64-bit | yes | yes |
 | `gateinto-i686-pc-windows-msvc.exe`, 32-bit Windows 10 | yes | yes |
 | `gateinto-i686-pc-windows-msvc.msi`, the per-user installer below, 32-bit (x86) | yes | yes |
-| `gateinto-x86_64-win7-windows-msvc-experimental.exe` | no | yes |
 | `gateinto-i686-win7-windows-msvc-experimental.exe` | no | yes |
 
 Each file has a `.sha256` next to it, one line with the lowercase SHA-256, two spaces and the
@@ -357,7 +356,7 @@ command until the next uninstall or repair.
 
 The CI job `msi` on `windows-latest` (once for an x64 MSI with the x64 release build, and once
 for an x86 MSI with the i686 debug build under WOW64), and the `msi` jobs of the compatibility
-workflow on `windows-2022` (and on `windows-2025` in its weekly and manual runs), build the MSI
+workflow on `windows-2022` and `windows-2025` (weekly and manual runs), build the MSI
 and run
 [.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), which checks the
 following with the Microsoft Software Key Storage Provider (the runners have no TPM):

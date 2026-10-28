@@ -35,6 +35,6 @@ NOTES
 
 if [[ $channel != latest ]]; then
   cat <<'NOTES'
-> - The Windows 7 builds (`*-win7-windows-msvc-experimental.exe`) are experimental and can use only the Microsoft Software Key Storage Provider, because Windows 7 has no TPM key storage provider.
+> - The 32-bit Windows 7 build (`gateinto-i686-win7-windows-msvc-experimental.exe`) is experimental and can use only the Microsoft Software Key Storage Provider, because Windows 7 has no TPM key storage provider.
 NOTES
 fi

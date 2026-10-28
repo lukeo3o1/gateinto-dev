@@ -24,9 +24,7 @@ payloads() {
     "gateinto-$short-i686-pc-windows-msvc.exe" \
     "gateinto-$short-i686-pc-windows-msvc.msi"
   if [[ $channel != latest ]]; then
-    printf '%s\n' \
-      "gateinto-$short-x86_64-win7-windows-msvc-experimental.exe" \
-      "gateinto-$short-i686-win7-windows-msvc-experimental.exe"
+    printf '%s\n' "gateinto-$short-i686-win7-windows-msvc-experimental.exe"
   fi
 }
 
@@ -86,12 +84,17 @@ expect_assets 'latest assets' latest
 expect_assets_fail 'unknown channel' stable "$sha" "$(dist latest)" 'unknown release channel'
 expect_assets_fail 'short commit' alpha "$short" "$(dist alpha)" 'full 40-character commit'
 expect_assets_fail 'uppercase commit' alpha "${sha^^}" "$(dist alpha)" 'full 40-character commit'
-expect_assets_fail 'latest with Windows 7 builds' latest "$sha" "$(dist alpha)" 'unexpected file'
-expect_assets_fail 'beta without Windows 7 builds' beta "$sha" "$(dist latest)" 'missing'
+expect_assets_fail 'latest with Windows 7 build' latest "$sha" "$(dist alpha)" 'unexpected file'
+expect_assets_fail 'beta without Windows 7 build' beta "$sha" "$(dist latest)" 'missing'
 
 dir=$(dist alpha)
 printf 'pdb\n' > "$dir/gateinto-$short-x86_64-pc-windows-msvc.wixpdb"
 expect_assets_fail 'WiX debug file' alpha "$sha" "$dir" "unexpected file gateinto-$short-x86_64-pc-windows-msvc.wixpdb"
+
+dir=$(dist alpha)
+printf 'exe\n' > "$dir/gateinto-$short-x86_64-win7-windows-msvc-experimental.exe"
+expect_assets_fail 'x64 Windows 7 build' alpha "$sha" "$dir" \
+  "unexpected file gateinto-$short-x86_64-win7-windows-msvc-experimental.exe"
 
 dir=$(dist alpha)
 rm "$dir/gateinto-$short-x86_64-pc-windows-msvc.msi.sha256"
@@ -134,7 +137,7 @@ expect_notes() {
 }
 
 common=$'`'"$sha"$'`\n2026-10-18 09:30 UTC\nnot code-signed\nhttps://github.com/lukeo3o1/gateinto-dev/issues/23\nTPM\nreal browsers\nphysical Windows machines\nWindows 7'
-win7=$'experimental\nSoftware Key Storage Provider'
+win7=$'i686-win7-windows-msvc-experimental.exe\nexperimental\nSoftware Key Storage Provider'
 expect_notes 'latest notes' latest "$common"$'\n`latest`' "$win7"
 expect_notes 'beta notes' beta "$common"$'\n`beta`\n'"$win7" ''
 expect_notes 'alpha notes' alpha "$common"$'\n`alpha`\n'"$win7" ''
