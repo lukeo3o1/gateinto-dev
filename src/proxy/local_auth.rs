@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use serde::de::{self, SeqAccess, Visitor};
 use tracing::{debug, warn};
 
 use super::os_user::{Denial, Owners};
@@ -51,94 +50,6 @@ impl fmt::Display for LocalAuth {
             (false, true) => f.write_str("session_credentials"),
             (true, true) => f.write_str("os_user, session_credentials"),
         }
-    }
-}
-
-const METHODS: &[&str] = if cfg!(windows) {
-    &["none", "os_user", "session_credentials"]
-} else {
-    &["none", "session_credentials"]
-};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Method {
-    None,
-    OsUser,
-    SessionCredentials,
-}
-
-impl Method {
-    fn parse<E: de::Error>(name: &str) -> Result<Self, E> {
-        match name {
-            "none" => Ok(Self::None),
-            "os_user" if cfg!(windows) => Ok(Self::OsUser),
-            "os_user" => Err(E::custom("auth = \"os_user\" is only available on Windows")),
-            "session_credentials" => Ok(Self::SessionCredentials),
-            "basic_tofu" => Err(E::custom(
-                "auth = \"basic_tofu\" was removed; use \"session_credentials\"",
-            )),
-            other => Err(E::unknown_variant(other, METHODS)),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::OsUser => "os_user",
-            Self::SessionCredentials => "session_credentials",
-        }
-    }
-}
-
-struct MethodsVisitor;
-
-impl<'de> Visitor<'de> for MethodsVisitor {
-    type Value = LocalAuth;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a method name or a list of method names")
-    }
-
-    fn visit_str<E: de::Error>(self, name: &str) -> Result<LocalAuth, E> {
-        Ok(match Method::parse(name)? {
-            Method::None => LocalAuth::NONE,
-            Method::OsUser => LocalAuth::OS_USER,
-            Method::SessionCredentials => LocalAuth::SESSION_CREDENTIALS,
-        })
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<LocalAuth, A::Error> {
-        use de::Error as _;
-
-        let mut methods = Vec::new();
-        while let Some(name) = seq.next_element::<String>()? {
-            let method = Method::parse(&name)?;
-            if methods.contains(&method) {
-                return Err(A::Error::custom(format!(
-                    "auth lists \"{}\" more than once",
-                    method.name()
-                )));
-            }
-            methods.push(method);
-        }
-        if methods.is_empty() {
-            return Err(A::Error::custom("auth must name at least one method"));
-        }
-        if methods.len() > 1 && methods.contains(&Method::None) {
-            return Err(A::Error::custom(
-                "auth = \"none\" cannot be combined with other methods",
-            ));
-        }
-        Ok(LocalAuth {
-            os_user: methods.contains(&Method::OsUser),
-            session_credentials: methods.contains(&Method::SessionCredentials),
-        })
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for LocalAuth {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(MethodsVisitor)
     }
 }
 

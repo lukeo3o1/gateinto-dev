@@ -850,7 +850,7 @@ async fn sessions_use_separate_http2_connections_and_closing_one_leaves_the_othe
         ids.push(
             sessions
                 .start(SessionConfig {
-                    kind: SessionKind::Device,
+                    kind: SessionKind::Browser,
                     gateway: "test".parse().unwrap(),
                     proxy: config.clone(),
                 })

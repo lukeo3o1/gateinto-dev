@@ -590,7 +590,6 @@ pub async fn unused_port() -> SocketAddr {
 pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &str) -> Config {
     Config {
         listen: SocketAddr::from((LOOPBACK, 0)),
-        allow_non_loopback: false,
         local_auth: LocalAuth::NONE,
         route: gateinto::proxy::Route::Gateway,
         upstream: Upstream {
