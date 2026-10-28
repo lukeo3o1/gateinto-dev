@@ -9,6 +9,7 @@ pub enum Font {
     Body,
     BodyStrong,
     Small,
+    SmallStrong,
     Pill,
     Mono,
     Lead,
@@ -21,7 +22,7 @@ pub struct Spec {
 }
 
 impl Font {
-    pub const ALL: [Font; 12] = [
+    pub const ALL: [Font; 13] = [
         Font::Brand,
         Font::Item,
         Font::ItemSelected,
@@ -31,6 +32,7 @@ impl Font {
         Font::Body,
         Font::BodyStrong,
         Font::Small,
+        Font::SmallStrong,
         Font::Pill,
         Font::Mono,
         Font::Lead,
@@ -47,6 +49,7 @@ impl Font {
             Font::Body => (13, 400),
             Font::BodyStrong => (13, 600),
             Font::Small => (12, 400),
+            Font::SmallStrong => (12, 600),
             Font::Pill => (11, 400),
             Font::Mono => (12, 400),
             Font::Lead => (17, 600),
@@ -98,6 +101,7 @@ mod tests {
         assert_eq!(Font::Body.spec(), s(13, 400));
         assert_eq!(Font::BodyStrong.spec(), s(13, 600));
         assert_eq!(Font::Small.spec(), s(12, 400));
+        assert_eq!(Font::SmallStrong.spec(), s(12, 600));
         assert_eq!(Font::Pill.spec(), s(11, 400));
         assert_eq!(Font::Mono.spec(), s(12, 400));
         assert_eq!(Font::Lead.spec(), s(17, 600));

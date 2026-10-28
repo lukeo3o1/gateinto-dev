@@ -59,7 +59,7 @@ use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
 use crate::settings;
-use crate::theme::Theme;
+use crate::theme::{Choice, Theme};
 use crate::worker::{Command, Update};
 use d2d::Graphics;
 use link::{Link, WM_AGENT};
@@ -130,6 +130,7 @@ struct App {
     tips: Tips,
     config: String,
     sign_in: bool,
+    theme: Choice,
     copied: bool,
     filter: Filter,
     log: log::Body,
@@ -171,6 +172,7 @@ impl App {
             tips: Tips::new(hwnd),
             config: config_line(),
             sign_in: false,
+            theme: Choice::default(),
             copied: false,
             filter: Filter::default(),
             log: log::Body::Rows(Vec::new()),
@@ -199,7 +201,13 @@ impl App {
         let failure = update.failure.as_deref();
         let mut board = match v.nav.selected() {
             NavPage::Settings => {
-                let page = settings::page(&self.config, &update.agent, failure, self.sign_in);
+                let page = settings::page(
+                    &self.config,
+                    &update.agent,
+                    failure,
+                    self.sign_in,
+                    self.theme,
+                );
                 board::settings::board(l, s, t, v, &page, m)
             }
             NavPage::Device => {
@@ -514,6 +522,12 @@ impl App {
         self.invalidate();
     }
 
+    fn choose_theme(&mut self, choice: Choice) {
+        self.theme = choice;
+        self.retarget();
+        self.invalidate();
+    }
+
     fn copy_id(&mut self) {
         let id = self
             .update
@@ -679,6 +693,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::Entry(_)
         | Zone::OpenConfig
         | Zone::SignIn
+        | Zone::Theme(_)
         | Zone::CopyId
         | Zone::CopyLog
         | Zone::LogFilter(_)
@@ -781,6 +796,11 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::ToggleSignIn) => {
             with_app(hwnd, App::toggle_sign_in);
+            return;
+        }
+        Some(Action::Theme(choice)) => {
+            with_app(hwnd, |app| app.choose_theme(choice));
+            rehover(hwnd);
             return;
         }
         Some(Action::CopyId) => {

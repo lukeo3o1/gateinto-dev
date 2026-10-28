@@ -3,6 +3,7 @@ use crate::credentials::Field;
 use crate::hit::Zone;
 use crate::log::Filter;
 use crate::nav::Page;
+use crate::theme::Choice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -19,6 +20,7 @@ pub enum Action {
     Choose(usize),
     OpenConfig,
     ToggleSignIn,
+    Theme(Choice),
     CopyId,
     CopyLog,
     Filter(Filter),
@@ -65,6 +67,7 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::Entry(i) => Some(Action::Choose(i)),
         Zone::OpenConfig => Some(Action::OpenConfig),
         Zone::SignIn => Some(Action::ToggleSignIn),
+        Zone::Theme(choice) => Some(Action::Theme(choice)),
         Zone::CopyId => Some(Action::CopyId),
         Zone::CopyLog => Some(Action::CopyLog),
         Zone::LogFilter(filter) => Some(Action::Filter(filter)),
@@ -405,5 +408,14 @@ mod tests {
     fn an_outside_click_closes_every_dialog_but_add_gateway() {
         assert!(outside_click_closes(false));
         assert!(!outside_click_closes(true));
+    }
+
+    #[test]
+    fn a_theme_part_chooses_its_theme() {
+        let mut p = Pointer::default();
+        let zone = Zone::Theme(Choice::Dark);
+        assert!(p.moved(zone));
+        assert!(p.down(zone));
+        assert_eq!(p.up(zone), Some(Action::Theme(Choice::Dark)));
     }
 }

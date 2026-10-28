@@ -4,10 +4,11 @@ use crate::hit::Zone;
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
+use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
-use crate::settings::{AGENT, APP, FROM_CONFIG, OPEN, Page, SIGN_IN, SIGN_IN_NOTE};
-use crate::theme::Theme;
+use crate::settings::{AGENT, APP, FROM_CONFIG, OPEN, Page, SIGN_IN, SIGN_IN_NOTE, THEME};
+use crate::theme::{Choice, Theme};
 
 pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Measure) -> Board {
     if v.nav.selected() != NavPage::Settings {
@@ -37,11 +38,11 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let top = line.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
     let rows = page.agent.as_ref().map_or(1, Vec::len) as i32;
-    let app_h = card_height(s, 1);
+    let app_h = card_height(s, 2);
     let agent_h = card_height(s, rows);
     let offset = p.scroll(view, app_h + gap + agent_h);
     let app = Rect::new(content.x, top - offset, content.w, app_h);
-    p.app(app, page.sign_in);
+    p.app(app, page);
     let agent = Rect::new(content.x, app.bottom() + gap, content.w, agent_h);
     p.agent(agent, &page.agent);
     p.finish()
@@ -79,10 +80,12 @@ impl<M: Measure> Painter<'_, M> {
         row
     }
 
-    fn app(&mut self, card: Rect, on: bool) {
+    fn app(&mut self, card: Rect, page: &Page) {
         let (s, t) = (self.s, self.t);
         let heading = self.section(card, APP);
         let row = self.line(heading, 0);
+        self.theme(row, page.theme);
+        let row = self.line(heading, 1);
         let (w, h) = (s.px(40.0), s.px(22.0));
         let switch = Rect::new(row.right() - w, row.y + (row.h - h) / 2, w, h);
         let x = switch.x - s.px(16.0);
@@ -92,16 +95,55 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Body, SIGN_IN, text, t.text);
         let below = Rect::new(row.x, text.bottom() + s.px(2.0), text.w, note);
         self.text(Font::Small, SIGN_IN_NOTE, below, t.muted);
-        self.switch(switch, on);
+        self.switch(switch, page.sign_in);
+    }
+
+    fn theme(&mut self, row: Rect, chosen: Choice) {
+        let (s, t) = (self.s, self.t);
+        let (inset, gap, pad, h) = (s.px(3.0), s.px(2.0), s.px(12.0), s.px(26.0));
+        let widths = Choice::ALL.map(|c| {
+            let label = c.name();
+            let w = self.m.width(Font::Small, label);
+            w.max(self.m.width(Font::SmallStrong, label)) + 2 * pad
+        });
+        let inner: i32 = widths.iter().sum::<i32>() + gap * (widths.len() as i32 - 1);
+        let (gw, gh) = (inner + 2 * inset, h + 2 * inset);
+        let group = Rect::new(row.right() - gw, row.y + (row.h - gh) / 2, gw, gh);
+        let label = Rect::new(row.x, row.y, group.x - s.px(16.0) - row.x, row.h);
+        self.text(Font::Body, THEME, label, t.text);
+        self.push(Op::Round(group, s.pxf(7.0), t.tile));
+        let mut x = group.x + inset;
+        for (choice, w) in Choice::ALL.into_iter().zip(widths) {
+            let part = Rect::new(x, group.y + inset, w, h);
+            x = part.right() + gap;
+            let zone = Zone::Theme(choice);
+            let fill = match (choice == chosen, self.v.pointer.look(zone)) {
+                (true, _) => Some(t.card),
+                (false, Look::Rest) => None,
+                (false, Look::Hover) => Some(t.caption_pressed),
+                (false, Look::Pressed) => Some(t.border),
+            };
+            if let Some(fill) = fill {
+                self.push(Op::Round(part, s.pxf(5.0), fill));
+            }
+            let (font, ink) = if choice == chosen {
+                (Font::SmallStrong, t.text)
+            } else {
+                (Font::Small, t.muted)
+            };
+            let text = Rect::new(part.x + pad, part.y, part.w - 2 * pad, part.h);
+            self.text(font, choice.name(), text, ink);
+            self.target(part, zone);
+        }
     }
 
     fn switch(&mut self, track: Rect, on: bool) {
         let (s, t) = (self.s, self.t);
         let (knob, inset) = (s.px(16.0), s.px(3.0));
         let (fill, dot, x) = if on {
-            (t.button, t.accent, track.right() - inset - knob)
+            (t.button, t.button_glyph, track.right() - inset - knob)
         } else {
-            (t.border, t.card, track.x + inset)
+            (t.border, t.knob, track.x + inset)
         };
         self.push(Op::Round(track, track.h as f32 / 2.0, fill));
         let y = track.y + (track.h - knob) / 2;
@@ -163,13 +205,17 @@ mod tests {
     use crate::nav::{Nav, Page as NavPage};
     use crate::scene::{Op, stroke};
     use crate::scroll::Pane;
-    use crate::settings::{AGENT, APP, FROM_CONFIG, OPEN, SIGN_IN, SIGN_IN_NOTE};
+    use crate::settings::{AGENT, APP, FROM_CONFIG, OPEN, SIGN_IN, SIGN_IN_NOTE, THEME};
+    use crate::theme::Choice;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
     const BUTTON: Rect = Rect::new(848, 66, 164, 32);
-    const SWITCH: Rect = Rect::new(952, 171, 40, 22);
-    const AGENT_Y: i32 = 226;
+    const SWITCH: Rect = Rect::new(952, 215, 40, 22);
+    const AGENT_Y: i32 = 270;
+    const SYSTEM: Rect = Rect::new(808, 169, 66, 26);
+    const LIGHT: Rect = Rect::new(876, 169, 59, 26);
+    const DARK: Rect = Rect::new(937, 169, 52, 26);
 
     fn page(sign_in: bool) -> Page {
         Page {
@@ -183,6 +229,7 @@ mod tests {
                 ("Request header limit", "16 KB".to_owned()),
             ]),
             sign_in,
+            theme: Choice::System,
         }
     }
 
@@ -227,7 +274,7 @@ mod tests {
                     T.muted
                 ),
                 Op::Clip(Rect::new(248, 112, 764, 544)),
-                Op::Round(Rect::new(248, 112, 764, 100), 12.0, T.border),
+                Op::Round(Rect::new(248, 112, 764, 144), 12.0, T.border),
             ]
         );
     }
@@ -267,45 +314,109 @@ mod tests {
     }
 
     #[test]
-    fn the_app_card_has_the_sign_in_switch_on() {
+    fn the_app_card_has_the_theme_row_then_the_sign_in_switch_on() {
         let ops = draw(&page(true)).ops;
+        let card = inside(&ops, Rect::new(248, 112, 764, 144));
         assert_eq!(
-            inside(&ops, Rect::new(248, 112, 764, 100)),
+            card[..5],
             [
-                Op::Round(Rect::new(248, 112, 764, 100), 12.0, T.border),
-                Op::Round(Rect::new(249, 113, 762, 98), 11.0, T.card),
+                Op::Round(Rect::new(248, 112, 764, 144), 12.0, T.border),
+                Op::Round(Rect::new(249, 113, 762, 142), 11.0, T.card),
                 text(Font::Heading, APP, Rect::new(268, 116, 724, 44), T.text),
                 Op::Fill(Rect::new(268, 160, 724, 1), T.border),
-                text(Font::Body, SIGN_IN, Rect::new(268, 164, 668, 18), T.text),
+                text(Font::Body, THEME, Rect::new(268, 160, 521, 44), T.text),
+            ]
+        );
+        assert_eq!(
+            card[card.len() - 5..],
+            [
+                Op::Fill(Rect::new(268, 204, 724, 1), T.border),
+                text(Font::Body, SIGN_IN, Rect::new(268, 208, 668, 18), T.text),
                 text(
                     Font::Small,
                     SIGN_IN_NOTE,
-                    Rect::new(268, 184, 668, 16),
+                    Rect::new(268, 228, 668, 16),
                     T.muted
                 ),
                 Op::Round(SWITCH, 11.0, T.button),
-                Op::Round(Rect::new(973, 174, 16, 16), 8.0, T.accent),
+                Op::Round(Rect::new(973, 218, 16, 16), 8.0, T.button_glyph),
             ]
         );
     }
 
     #[test]
-    fn the_switch_off_is_grey_with_a_white_knob_on_the_left() {
+    fn the_theme_control_marks_the_chosen_part() {
+        let ops = draw(&page(true)).ops;
+        assert_eq!(
+            inside(&ops, Rect::new(805, 166, 187, 32)),
+            [
+                Op::Round(Rect::new(805, 166, 187, 32), 7.0, T.tile),
+                Op::Round(SYSTEM, 5.0, T.card),
+                text(
+                    Font::SmallStrong,
+                    "System",
+                    Rect::new(820, 169, 42, 26),
+                    T.text
+                ),
+                text(Font::Small, "Light", Rect::new(888, 169, 35, 26), T.muted),
+                text(Font::Small, "Dark", Rect::new(949, 169, 28, 26), T.muted),
+            ]
+        );
+        let mut p = page(true);
+        p.theme = Choice::Dark;
+        let ops = draw(&p).ops;
+        assert!(ops.contains(&Op::Round(DARK, 5.0, T.card)));
+        assert!(!ops.contains(&Op::Round(SYSTEM, 5.0, T.card)));
+        assert!(ops.contains(&text(
+            Font::SmallStrong,
+            "Dark",
+            Rect::new(949, 169, 28, 26),
+            T.text
+        )));
+    }
+
+    #[test]
+    fn theme_parts_tint_on_hover_and_press() {
+        let mut v = view();
+        v.pointer.moved(Zone::Theme(Choice::Light));
+        let ops = draw_with(&page(true), &v).ops;
+        assert!(ops.contains(&Op::Round(LIGHT, 5.0, T.caption_pressed)));
+        v.pointer.down(Zone::Theme(Choice::Light));
+        let ops = draw_with(&page(true), &v).ops;
+        assert!(ops.contains(&Op::Round(LIGHT, 5.0, T.border)));
+    }
+
+    #[test]
+    fn the_switch_off_shows_its_knob_on_the_left() {
         let ops = draw(&page(false)).ops;
         assert_eq!(
             inside(&ops, SWITCH),
             [
                 Op::Round(SWITCH, 11.0, T.border),
-                Op::Round(Rect::new(955, 174, 16, 16), 8.0, T.card),
+                Op::Round(Rect::new(955, 218, 16, 16), 8.0, T.knob),
             ]
         );
     }
 
     #[test]
-    fn the_button_and_the_switch_are_targets() {
+    fn the_switch_knob_stands_out_in_both_themes() {
+        for t in [Theme::LIGHT, Theme::DARK] {
+            assert_ne!(t.button_glyph, t.button);
+            assert_ne!(t.knob, t.border);
+        }
+    }
+
+    #[test]
+    fn the_button_the_theme_parts_and_the_switch_are_targets() {
         assert_eq!(
             draw(&page(false)).targets,
-            [(BUTTON, Zone::OpenConfig), (SWITCH, Zone::SignIn)]
+            [
+                (BUTTON, Zone::OpenConfig),
+                (SYSTEM, Zone::Theme(Choice::System)),
+                (LIGHT, Zone::Theme(Choice::Light)),
+                (DARK, Zone::Theme(Choice::Dark)),
+                (SWITCH, Zone::SignIn),
+            ]
         );
     }
 
@@ -400,7 +511,7 @@ mod tests {
             ]
         );
         assert!(ops.contains(&Op::Round(Rect::new(248, y, 764, 100), 12.0, T.border)));
-        assert_eq!(draw(&p).pane.map(|p| p.content), Some(214));
+        assert_eq!(draw(&p).pane.map(|p| p.content), Some(258));
     }
 
     #[test]
@@ -408,7 +519,7 @@ mod tests {
         let b = draw(&page(true));
         assert_eq!(
             b.pane,
-            Some(Pane::new(Rect::new(248, 112, 764, 544), 390, 0))
+            Some(Pane::new(Rect::new(248, 112, 764, 544), 434, 0))
         );
         let short = Layout::new(1040, 400, S, true);
         let mut v = view();
@@ -418,9 +529,9 @@ mod tests {
         assert_eq!(pane.offset, 50);
         assert!(
             b.ops
-                .contains(&Op::Round(Rect::new(248, 62, 764, 100), 12.0, T.border))
+                .contains(&Op::Round(Rect::new(248, 62, 764, 144), 12.0, T.border))
         );
         assert_eq!(b.targets[0], (BUTTON, Zone::OpenConfig));
-        assert_eq!(b.targets[1], (Rect::new(952, 121, 40, 22), Zone::SignIn));
+        assert_eq!(b.targets[4], (Rect::new(952, 165, 40, 22), Zone::SignIn));
     }
 }

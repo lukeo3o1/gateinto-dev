@@ -5,12 +5,14 @@ use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
 
 use crate::sessions::browser_title;
+use crate::theme::Choice;
 
 pub const NOT_FOUND: &str = "Not found";
 pub const NO_PATH: &str = "No config file location";
 pub const OPEN: &str = "Open config file";
 pub const OPEN_FAILED: &str = "Could not open the config file";
 pub const APP: &str = "App";
+pub const THEME: &str = "Theme";
 pub const SIGN_IN: &str = "Start at sign-in";
 pub const SIGN_IN_NOTE: &str = "Opens Gateinto when you sign in";
 pub const SIGN_IN_UNREAD: &str = "Could not read the sign-in setting";
@@ -25,6 +27,7 @@ pub struct Page {
     pub failed: bool,
     pub agent: Result<Vec<(&'static str, String)>, String>,
     pub sign_in: bool,
+    pub theme: Choice,
 }
 
 pub fn page(
@@ -32,6 +35,7 @@ pub fn page(
     agent: &Result<Agent, String>,
     failure: Option<&str>,
     sign_in: bool,
+    theme: Choice,
 ) -> Page {
     Page {
         line: failure.unwrap_or(path).to_owned(),
@@ -41,6 +45,7 @@ pub fn page(
             Err(error) => Err(error.lines().next().unwrap_or_default().to_owned()),
         },
         sign_in,
+        theme,
     }
 }
 
@@ -188,7 +193,13 @@ mod tests {
 
     #[test]
     fn the_page_shows_the_path_rows_and_sign_in_state() {
-        let page = page("%APPDATA%\\g.toml", &Ok(Agent::default()), None, true);
+        let page = page(
+            "%APPDATA%\\g.toml",
+            &Ok(Agent::default()),
+            None,
+            true,
+            Choice::Dark,
+        );
         assert_eq!(
             page,
             Page {
@@ -196,20 +207,27 @@ mod tests {
                 failed: false,
                 agent: Ok(rows(&Agent::default())),
                 sign_in: true,
+                theme: Choice::Dark,
             }
         );
     }
 
     #[test]
     fn a_failure_replaces_the_path_line() {
-        let page = page("p", &Ok(Agent::default()), Some(OPEN_FAILED), false);
+        let page = page(
+            "p",
+            &Ok(Agent::default()),
+            Some(OPEN_FAILED),
+            false,
+            Choice::System,
+        );
         assert_eq!((page.line.as_str(), page.failed), (OPEN_FAILED, true));
     }
 
     #[test]
     fn a_config_error_shows_its_first_line_instead_of_values() {
         let error = Err("config file c.toml: TOML parse error\n  |\n1 | x".to_owned());
-        let page = page("p", &error, None, false);
+        let page = page("p", &error, None, false, Choice::System);
         assert_eq!(
             page.agent,
             Err("config file c.toml: TOML parse error".to_owned())

@@ -3,6 +3,7 @@ use crate::credentials::Field;
 use crate::layout::{Layout, Rect};
 use crate::log::Filter;
 use crate::nav::Page;
+use crate::theme::Choice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zone {
@@ -23,6 +24,7 @@ pub enum Zone {
     Entry(usize),
     OpenConfig,
     SignIn,
+    Theme(Choice),
     CopyId,
     CopyLog,
     LogFilter(Filter),

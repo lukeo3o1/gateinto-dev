@@ -98,6 +98,7 @@ pub struct Theme {
     pub notice: Rgb,
     pub notice_text: Rgb,
     pub focus: Rgb,
+    pub knob: Rgb,
 }
 
 impl Theme {
@@ -141,6 +142,7 @@ impl Theme {
         notice: Rgb(0xfff4d6),
         notice_text: Rgb(0x7a5000),
         focus: Rgb(0x262b36),
+        knob: Rgb(0xffffff),
     };
 
     pub const DARK: Theme = Theme {
@@ -179,6 +181,7 @@ impl Theme {
         notice: Rgb(0x2a2619),
         notice_text: Rgb(0xffc94a),
         focus: Rgb(0xffc94a),
+        knob: Rgb(0xc9cdd6),
     };
 }
 
