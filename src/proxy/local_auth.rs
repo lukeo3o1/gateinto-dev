@@ -36,12 +36,6 @@ impl LocalAuth {
     }
 }
 
-impl Default for LocalAuth {
-    fn default() -> Self {
-        Self::SESSION_CREDENTIALS
-    }
-}
-
 impl fmt::Display for LocalAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.os_user, self.session_credentials) {

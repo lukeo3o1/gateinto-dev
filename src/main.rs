@@ -640,7 +640,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
     let limits = &settings.limits;
     Ok(Config {
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        local_auth: LocalAuth::NONE,
+        local_auth: LocalAuth::SESSION_CREDENTIALS,
         route: gateinto::proxy::Route::Gateway,
         upstream: upstream(settings)?,
         tls_mode: settings.gateway.tls_mode,
@@ -663,10 +663,7 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     })?;
     init_logging("warn");
     args.upstream.config.log_default();
-    let config = Config {
-        local_auth: LocalAuth::SESSION_CREDENTIALS,
-        ..proxy_config(&settings)?
-    };
+    let config = proxy_config(&settings)?;
     let mut sessions = SessionManager::new();
     let id = sessions
         .start(SessionConfig {
@@ -1476,6 +1473,30 @@ mod tests {
         let lines = ["session: 1 device office 127.0.0.1:8080".to_owned()];
         let error = session_list_lines(&lines, true, 0).unwrap_err();
         assert!(error.contains("gateinto stop"), "{error}");
+    }
+
+    #[test]
+    fn a_session_proxy_requires_its_session_credentials_unless_told_otherwise() {
+        let cli = Cli::try_parse_from([
+            "gateinto",
+            "session",
+            "browser",
+            "--upstream-host",
+            "127.0.0.1",
+            "--upstream-port",
+            "9",
+            "--client-certificate",
+            "off",
+        ])
+        .unwrap();
+        let Command::Session(SessionCommand::Browser(args)) = cli.command else {
+            unreachable!()
+        };
+        let settings = args.upstream.settings(|_| {}).unwrap();
+        assert_eq!(
+            proxy_config(&settings).unwrap().local_auth,
+            LocalAuth::SESSION_CREDENTIALS
+        );
     }
 
     #[test]
