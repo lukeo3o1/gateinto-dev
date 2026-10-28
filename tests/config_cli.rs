@@ -419,6 +419,29 @@ fn upstream_commands_refuse_several_gateways_without_a_gateway_flag() {
 }
 
 #[test]
+fn an_old_config_with_a_device_session_section_is_refused_naming_it() {
+    let dir = temp_dir();
+    let config = write_config(
+        &dir,
+        "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\n\n[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:18736\"\nauth = \"os_user\"\n",
+    );
+    for command in [&["session", "browser"][..], &["check-upstream"]] {
+        let output = gateinto(command, &config);
+        assert!(!output.status.success(), "{command:?}");
+        let error = stderr(&output);
+        assert!(error.contains(&config.display().to_string()), "{error}");
+        assert!(
+            error.contains(
+                "[device_session] was removed: Gateinto no longer runs a shared local proxy; \
+                 delete the section and start browser sessions with `gateinto open` or a \
+                 gateinto:// link"
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn upstream_commands_refuse_tunnel_limits_beyond_the_http2_window_bound() {
     let dir = temp_dir();
     let config = write_config(
