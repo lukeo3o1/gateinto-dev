@@ -20,17 +20,44 @@ const CLOSE: &str = "Close";
 const ADD: &str = "Add";
 const CANCEL: &str = "Cancel";
 
+fn wide(c: char) -> bool {
+    matches!(c, '\u{2E80}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF00}'..='\u{FFEF}')
+}
+
+fn closing(c: char) -> bool {
+    "\u{3001}\u{3002}\u{FF0C}\u{FF1B}\u{FF1A}\u{FF01}\u{FF1F}\u{FF09}\u{300D}\u{300F}\u{3009}\u{300B}".contains(c)
+}
+
+fn pieces(text: &str) -> Vec<(bool, String)> {
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let mut spaced = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            spaced = !out.is_empty();
+            continue;
+        }
+        match out.last_mut() {
+            Some((_, piece)) if !spaced && (closing(c) || !(wide(c) || piece.ends_with(wide))) => {
+                piece.push(c)
+            }
+            _ => out.push((spaced, c.to_string())),
+        }
+        spaced = false;
+    }
+    out
+}
+
 pub fn wrap(m: &impl Measure, font: Font, text: &str, width: i32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && m.width(font, &format!("{line} {word}")) > width {
-            lines.push(std::mem::take(&mut line));
+    for (spaced, piece) in pieces(text) {
+        let gap = if spaced { " " } else { "" };
+        let joined = format!("{line}{gap}{piece}");
+        if !line.is_empty() && m.width(font, &joined) > width {
+            lines.push(std::mem::replace(&mut line, piece));
+        } else {
+            line = joined;
         }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
     }
     if !line.is_empty() {
         lines.push(line);
@@ -580,6 +607,22 @@ mod tests {
             ["abcdefgh", "ij"]
         );
         assert_eq!(wrap(&Chars, Font::Small, "", 70), Vec::<String>::new());
+    }
+
+    #[test]
+    fn chinese_wraps_between_characters_but_not_before_closing_punctuation() {
+        assert_eq!(
+            wrap(&Chars, Font::Small, "請在瀏覽器中輸入，然後關閉。", 7 * 5),
+            ["請在瀏覽器", "中輸入，然", "後關閉。"]
+        );
+        assert_eq!(
+            wrap(&Chars, Font::Small, "Gateinto 代理程式", 7 * 11),
+            ["Gateinto 代理", "程式"]
+        );
+        assert_eq!(
+            wrap(&Chars, Font::Small, "名稱為127.0.0.1:49210的對話框", 7 * 19),
+            ["名稱為127.0.0.1:49210的", "對話框"]
+        );
     }
 
     #[test]
