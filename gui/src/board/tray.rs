@@ -10,7 +10,7 @@ use crate::sessions::Eyes;
 use crate::theme::Theme;
 use crate::tray::{ADD, Flyout, LABEL, OPEN, Row, STOP};
 
-const T: &Theme = &Theme::FLYOUT;
+const T: &Theme = &Theme::DARK;
 
 pub fn flyout(frame: Rect, s: Scale, v: &View, f: &Flyout, m: &impl Measure) -> Board {
     let mut p = Painter::within(frame, s, T, v, m);
@@ -202,7 +202,7 @@ mod tests {
     use crate::sessions::Eyes;
     use crate::tray::{ADD, LABEL, NO_GATEWAYS, OPEN, Row, STOP};
 
-    const T: Theme = Theme::FLYOUT;
+    const T: Theme = Theme::DARK;
     const S: Scale = Scale { dpi: 96 };
     const SIZE: Rect = Rect::new(0, 0, 360, 520);
 

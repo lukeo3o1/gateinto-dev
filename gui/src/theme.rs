@@ -6,6 +6,59 @@ impl Rgb {
         let c = |shift: u32| ((self.0 >> shift) & 0xff) as f32 / 255.0;
         [c(16), c(8), c(0), 1.0]
     }
+
+    fn luminance(self) -> f64 {
+        let linear = |c: f32| {
+            let c = f64::from(c);
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let [r, g, b, _] = self.channels();
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+}
+
+pub fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (a, b) = (a.luminance(), b.luminance());
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Choice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Choice {
+    pub const ALL: [Choice; 3] = [Choice::System, Choice::Light, Choice::Dark];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Choice::System => "System",
+            Choice::Light => "Light",
+            Choice::Dark => "Dark",
+        }
+    }
+
+    pub fn parse(value: Option<&str>) -> Choice {
+        Choice::ALL
+            .into_iter()
+            .find(|c| Some(c.name()) == value)
+            .unwrap_or_default()
+    }
+
+    pub fn dark(self, light_apps: bool) -> bool {
+        match self {
+            Choice::System => !light_apps,
+            Choice::Light => false,
+            Choice::Dark => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,12 +93,18 @@ pub struct Theme {
     pub button_hover: Rgb,
     pub button_pressed: Rgb,
     pub button_text: Rgb,
+    pub button_glyph: Rgb,
     pub field: Rgb,
     pub notice: Rgb,
     pub notice_text: Rgb,
+    pub focus: Rgb,
 }
 
 impl Theme {
+    pub fn of(dark: bool) -> &'static Theme {
+        if dark { &Theme::DARK } else { &Theme::LIGHT }
+    }
+
     pub const LIGHT: Theme = Theme {
         bg: Rgb(0xf4f3f0),
         text: Rgb(0x1d1f24),
@@ -77,45 +136,49 @@ impl Theme {
         button_hover: Rgb(0x353b48),
         button_pressed: Rgb(0x1b1f27),
         button_text: Rgb(0xffffff),
+        button_glyph: Rgb(0xffc94a),
         field: Rgb(0xfbfbfa),
         notice: Rgb(0xfff4d6),
         notice_text: Rgb(0x7a5000),
+        focus: Rgb(0x262b36),
     };
 
-    pub const FLYOUT: Theme = Theme {
+    pub const DARK: Theme = Theme {
         bg: Rgb(0x17191e),
         text: Rgb(0xe8e9ec),
-        rail: Rgb(0x17191e),
-        rail_edge: Rgb(0x2e323c),
-        rail_hover: Rgb(0x262a32),
-        rail_selected: Rgb(0x20232a),
-        rail_text: Rgb(0xe8e9ec),
-        rail_on: Rgb(0xe8e9ec),
-        rail_icon: Rgb(0x9aa0ad),
+        rail: Rgb(0x0f1115),
+        rail_edge: Rgb(0x0f1115),
+        rail_hover: Rgb(0x1b1e25),
+        rail_selected: Rgb(0x232731),
+        rail_text: Rgb(0xc9cdd6),
+        rail_on: Rgb(0xffffff),
+        rail_icon: Rgb(0xffc94a),
         accent: Rgb(0xffc94a),
         caption: Rgb(0xe8e9ec),
-        caption_hover: Rgb(0x272a33),
-        caption_pressed: Rgb(0x2e323c),
+        caption_hover: Rgb(0x2a2e37),
+        caption_pressed: Rgb(0x343944),
         close_hover: Rgb(0xc42b1c),
         close_pressed: Rgb(0xc84031),
         close_glyph_hover: Rgb(0xffffff),
         card: Rgb(0x20232a),
         border: Rgb(0x2e323c),
         muted: Rgb(0x9aa0ad),
-        tile: Rgb(0x2e323c),
-        pill_text: Rgb(0x9aa0ad),
+        tile: Rgb(0x2a2e37),
+        pill_text: Rgb(0xc9cdd6),
         eyes_idle: Rgb(0x9aa1b1),
-        revoke_hover: Rgb(0x3a2422),
-        revoke_pressed: Rgb(0x4a2b28),
+        revoke_hover: Rgb(0x3a2020),
+        revoke_pressed: Rgb(0x4a2826),
         revoke_glyph: Rgb(0xff8a80),
         warning: Rgb(0xffc94a),
         button: Rgb(0xffc94a),
         button_hover: Rgb(0xffd56e),
         button_pressed: Rgb(0xe6b43f),
         button_text: Rgb(0x1d1f24),
-        field: Rgb(0x20232a),
+        button_glyph: Rgb(0x1d1f24),
+        field: Rgb(0x1a1c22),
         notice: Rgb(0x2a2619),
         notice_text: Rgb(0xffc94a),
+        focus: Rgb(0xffc94a),
     };
 }
 
@@ -168,8 +231,33 @@ mod tests {
     }
 
     #[test]
+    fn the_dark_theme_uses_the_dark_board_palette() {
+        let t = Theme::DARK;
+        assert_eq!(t.bg, Rgb(0x17191e));
+        assert_eq!(t.rail, Rgb(0x0f1115));
+        assert_eq!(t.rail_selected, Rgb(0x232731));
+        assert_eq!(t.rail_text, Rgb(0xc9cdd6));
+        assert_eq!(t.rail_on, Rgb(0xffffff));
+        assert_eq!(t.rail_icon, Rgb(0xffc94a));
+        assert_eq!(t.caption, Rgb(0xe8e9ec));
+        assert_eq!(t.tile, Rgb(0x2a2e37));
+        assert_eq!(t.pill_text, Rgb(0xc9cdd6));
+        assert_eq!(t.caption_hover, Rgb(0x2a2e37));
+        assert_eq!(t.revoke_hover, Rgb(0x3a2020));
+        assert_eq!(t.revoke_glyph, Rgb(0xff8a80));
+        assert_eq!(t.button_glyph, Rgb(0x1d1f24));
+        assert_eq!(t.focus, Rgb(0xffc94a));
+    }
+
+    #[test]
+    fn the_light_start_button_keeps_its_amber_glyph() {
+        assert_eq!(Theme::LIGHT.button_glyph, Rgb(0xffc94a));
+        assert_eq!(Theme::LIGHT.focus, Rgb(0x262b36));
+    }
+
+    #[test]
     fn the_tray_flyout_uses_the_dark_palette() {
-        let t = Theme::FLYOUT;
+        let t = Theme::DARK;
         assert_eq!(t.bg, Rgb(0x17191e));
         assert_eq!(t.border, Rgb(0x2e323c));
         assert_eq!(t.text, Rgb(0xe8e9ec));
@@ -194,12 +282,86 @@ mod tests {
 
     #[test]
     fn hover_fills_differ_from_what_they_cover() {
-        let t = Theme::LIGHT;
-        assert_ne!(t.rail_hover, t.rail);
-        assert_ne!(t.rail_hover, t.rail_selected);
-        assert_ne!(t.caption_hover, t.bg);
-        assert_ne!(t.close_glyph_hover, t.close_hover);
-        assert_ne!(t.revoke_pressed, t.revoke_hover);
-        assert_ne!(t.revoke_hover, t.card);
+        for t in [Theme::LIGHT, Theme::DARK] {
+            assert_ne!(t.rail_hover, t.rail);
+            assert_ne!(t.rail_hover, t.rail_selected);
+            assert_ne!(t.caption_hover, t.bg);
+            assert_ne!(t.caption_hover, t.card);
+            assert_ne!(t.caption_pressed, t.caption_hover);
+            assert_ne!(t.close_glyph_hover, t.close_hover);
+            assert_ne!(t.revoke_pressed, t.revoke_hover);
+            assert_ne!(t.revoke_hover, t.card);
+        }
+    }
+
+    #[test]
+    fn contrast_follows_the_wcag_formula() {
+        assert!((contrast(Rgb(0x000000), Rgb(0xffffff)) - 21.0).abs() < 0.01);
+        assert!((contrast(Rgb(0x777777), Rgb(0xffffff)) - 4.48).abs() < 0.01);
+        assert_eq!(contrast(Rgb(0x123456), Rgb(0x123456)), 1.0);
+    }
+
+    #[test]
+    fn text_meets_wcag_aa_in_both_themes() {
+        for t in [Theme::LIGHT, Theme::DARK] {
+            for (ink, under) in [
+                (t.text, t.bg),
+                (t.text, t.card),
+                (t.text, t.field),
+                (t.text, t.tile),
+                (t.muted, t.bg),
+                (t.muted, t.card),
+                (t.rail_text, t.rail),
+                (t.rail_text, t.rail_hover),
+                (t.rail_on, t.rail_selected),
+                (t.caption, t.caption_hover),
+                (t.pill_text, t.tile),
+                (t.button_text, t.button),
+                (t.button_text, t.button_hover),
+                (t.warning, t.card),
+                (t.revoke_glyph, t.card),
+                (t.notice_text, t.notice),
+            ] {
+                assert!(contrast(ink, under) >= 4.5, "{ink:?} on {under:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_focus_ring_stands_out_in_both_themes() {
+        for t in [Theme::LIGHT, Theme::DARK] {
+            for under in [t.bg, t.card, t.rail] {
+                assert!(contrast(t.focus, under) >= 3.0, "{under:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_or_missing_choice_follows_the_system() {
+        assert_eq!(Choice::parse(None), Choice::System);
+        assert_eq!(Choice::parse(Some("")), Choice::System);
+        assert_eq!(Choice::parse(Some("Sepia")), Choice::System);
+        assert_eq!(Choice::parse(Some("System")), Choice::System);
+        assert_eq!(Choice::parse(Some("Light")), Choice::Light);
+        assert_eq!(Choice::parse(Some("Dark")), Choice::Dark);
+        assert_eq!(Choice::default(), Choice::System);
+    }
+
+    #[test]
+    fn choices_round_trip_through_their_names() {
+        for c in Choice::ALL {
+            assert_eq!(Choice::parse(Some(c.name())), c);
+        }
+        assert_eq!(Choice::ALL.map(Choice::name), ["System", "Light", "Dark"]);
+    }
+
+    #[test]
+    fn the_system_choice_follows_the_app_mode() {
+        assert!(!Choice::System.dark(true));
+        assert!(Choice::System.dark(false));
+        assert!(!Choice::Light.dark(false));
+        assert!(Choice::Dark.dark(true));
+        assert_eq!(Theme::of(false), &Theme::LIGHT);
+        assert_eq!(Theme::of(true), &Theme::DARK);
     }
 }

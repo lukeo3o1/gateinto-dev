@@ -231,9 +231,9 @@ impl<'a, M: Measure> Painter<'a, M> {
         let (s, t) = (self.s, self.t);
         let (fill, glyph, ink) = match (enabled, self.v.pointer.look(zone)) {
             (false, _) => (t.tile, t.eyes_idle, t.eyes_idle),
-            (true, Look::Rest) => (t.button, t.accent, t.button_text),
-            (true, Look::Hover) => (t.button_hover, t.accent, t.button_text),
-            (true, Look::Pressed) => (t.button_pressed, t.accent, t.button_text),
+            (true, Look::Rest) => (t.button, t.button_glyph, t.button_text),
+            (true, Look::Hover) => (t.button_hover, t.button_glyph, t.button_text),
+            (true, Look::Pressed) => (t.button_pressed, t.button_glyph, t.button_text),
         };
         self.push(Op::Round(button, s.pxf(6.0), fill));
         let icon = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
