@@ -794,11 +794,9 @@ impl App {
 }
 
 fn config_line(demo: bool) -> String {
-    if demo {
-        return demo::CONFIG_PATH.to_owned();
-    }
-    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-    settings::shown(config::default_path().as_deref(), appdata.as_deref())
+    settings::config_line(demo, config::default_path, || {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    })
 }
 
 fn measure(hwnd: HWND, s: Scale, frame: Frame) -> Layout {

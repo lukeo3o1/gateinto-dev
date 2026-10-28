@@ -308,9 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_page_shows_a_sample_config_path_whatever_the_machine() {
-        assert_eq!(CONFIG_PATH, r"%APPDATA%\Gateinto\gateinto.toml");
-        assert!(!CONFIG_PATH.contains(':'));
+    fn the_settings_page_shows_the_sample_config_path_without_looking_up_the_real_one() {
+        let unasked = || -> Option<PathBuf> { panic!("the demo looked up a real path") };
+        assert_eq!(settings::config_line(true, unasked, unasked), CONFIG_PATH);
+        let real = PathBuf::from("/home/me/.config/gateinto/gateinto.toml");
+        assert_eq!(
+            settings::config_line(false, || Some(real.clone()), || None),
+            real.display().to_string()
+        );
     }
 
     #[test]

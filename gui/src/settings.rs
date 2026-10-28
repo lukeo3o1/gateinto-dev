@@ -155,6 +155,17 @@ pub fn shown(path: Option<&Path>, appdata: Option<&Path>) -> String {
     }
 }
 
+pub fn config_line(
+    demo: bool,
+    path: impl FnOnce() -> Option<PathBuf>,
+    appdata: impl FnOnce() -> Option<PathBuf>,
+) -> String {
+    if demo {
+        return crate::demo::CONFIG_PATH.to_owned();
+    }
+    shown(path().as_deref(), appdata().as_deref())
+}
+
 pub fn command(exe: &Path) -> Option<String> {
     let exe = exe.to_str()?;
     (!exe.contains('"')).then(|| format!("\"{exe}\""))
