@@ -80,10 +80,11 @@ impl Layout {
 
         let gutter = s.px(10.0);
         let item_h = s.px(40.0);
+        let step = s.px(44.0);
         let nav = std::array::from_fn(|i| {
             let page = Page::ALL[i];
             let y = if page.at_bottom() {
-                height - s.px(14.0) - item_h * (Page::ALL.len() - i) as i32
+                height - s.px(14.0) - item_h - step * (Page::ALL.len() - 1 - i) as i32
             } else {
                 s.px(64.0 + 44.0 * i as f32)
             };
@@ -200,10 +201,25 @@ mod tests {
                 (Page::Sessions, Rect::new(10, 64, 199, 40)),
                 (Page::Gateways, Rect::new(10, 108, 199, 40)),
                 (Page::Device, Rect::new(10, 152, 199, 40)),
-                (Page::Log, Rect::new(10, 586, 199, 40)),
+                (Page::Log, Rect::new(10, 582, 199, 40)),
                 (Page::Settings, Rect::new(10, 626, 199, 40)),
             ]
         );
+    }
+
+    #[test]
+    fn every_rail_item_keeps_the_same_gap_to_the_next_at_any_size() {
+        for (dpi, h) in [(96, 680), (96, 520), (144, 780), (192, 1040)] {
+            let s = Scale::new(dpi);
+            let l = Layout::new(s.px(1040.0), h, s, true);
+            let gap = s.px(44.0) - s.px(40.0);
+            for pair in l.nav.windows(2) {
+                let space = pair[1].frame.y - pair[0].frame.bottom();
+                assert!(space >= gap, "{dpi} dpi, {h} px: {pair:?}");
+            }
+            let bottom = &l.nav[Page::ALL.len() - 2..];
+            assert_eq!(bottom[1].frame.y - bottom[0].frame.bottom(), gap);
+        }
     }
 
     #[test]
