@@ -150,7 +150,7 @@ impl Authenticator {
         if self.verifier.is_some() {
             "the session credentials still work: run `gateinto session credentials <session>`"
         } else {
-            "add \"session_credentials\" to auth for a fallback"
+            "this session has no session credentials to fall back to"
         }
     }
 }
@@ -302,9 +302,10 @@ mod tests {
             "{warnings:?}"
         );
         assert!(
-            warnings[0].contains("add \"session_credentials\" to auth"),
+            warnings[0].contains("this session has no session credentials to fall back to"),
             "{warnings:?}"
         );
+        assert!(!warnings[0].contains("to auth"), "{warnings:?}");
     }
 
     #[tokio::test]
