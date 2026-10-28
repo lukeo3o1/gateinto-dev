@@ -1,0 +1,55 @@
+name: GUI smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - gui/**
+      - ipc-types/**
+      - src/**
+      - .github/scripts/gui-smoke.ps1
+      - .github/workflows/gui-smoke.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  screenshots:
+    name: gui screenshots (windows-latest, Software KSP)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          save-if: false
+      - run: cargo build --release --locked -p gateinto -p gateinto-gui
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gateinto-gui-windows-x64
+          path: |
+            target/release/gateinto.exe
+            target/release/gateinto-gui.exe
+          if-no-files-found: error
+          retention-days: 14
+      - run: cargo build --release --locked --example test_upstream
+      - name: Drive gateinto-gui.exe against a running agent and capture each page
+        run: .github/scripts/gui-smoke.ps1 -Bin target\release -OutDir "$env:RUNNER_TEMP\gui-screenshots" -WorkDir "$env:RUNNER_TEMP\gui-smoke"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gui-screenshots
+          path: ${{ runner.temp }}/gui-screenshots/*.png
+          if-no-files-found: warn
