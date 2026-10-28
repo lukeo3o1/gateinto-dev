@@ -90,6 +90,10 @@ pub fn pending() -> Status {
     }
 }
 
+pub fn logo(state: Option<&AgentState>) -> State {
+    state.map_or_else(pending, status).logo
+}
+
 pub fn waiting() -> Flyout {
     let Status {
         title,
@@ -293,6 +297,15 @@ mod tests {
     use gateinto::link::{Known, KnownGateway, Source};
 
     use super::*;
+
+    #[test]
+    fn the_window_logo_waits_idle_and_flags_an_unreachable_agent() {
+        assert_eq!(logo(None), State::Idle);
+        assert_eq!(logo(Some(&AgentState::Stopped)), State::Stopped);
+        let lost = AgentState::Unreachable("pipe busy".to_owned());
+        assert_eq!(logo(Some(&lost)), State::Attention);
+        assert_eq!(logo(Some(&AgentState::Running(Vec::new()))), State::Idle);
+    }
 
     #[test]
     fn version_four_events_carry_their_anchor_in_wparam() {

@@ -1,6 +1,7 @@
 mod appearance;
 mod d2d;
 mod device;
+mod icon;
 mod link;
 mod run;
 mod sys;
@@ -24,16 +25,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT,
-    HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, IMAGE_ICON, IsIconic, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR,
-    MB_OK, MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
-    SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetClientRect,
+    GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
+    HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON,
+    IsIconic, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG,
+    MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SC_CLOSE,
+    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED,
+    WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
     WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
@@ -45,6 +46,7 @@ use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
 use gateinto::link::store;
 
+use self::icon::Owned;
 use crate::add::{self, Form, Keyed, Units};
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
@@ -54,6 +56,7 @@ use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
 use crate::log::{self, Filter};
+use crate::logo;
 use crate::menu::{self, Choice, Entry, Popup, Wheel};
 use crate::nav::{self, Page as NavPage};
 use crate::pointer::{self, Action};
@@ -89,30 +92,33 @@ fn metric_icon(instance: HINSTANCE, metric: SYSTEM_METRICS_INDEX, dpi: u32) -> H
 }
 
 struct Icons {
-    window: [HICON; 2],
+    shown: (logo::State, u32),
+    _window: [Option<Owned>; 2],
 }
 
 impl Icons {
-    fn apply(hwnd: HWND, s: Scale) -> Self {
-        let instance = unsafe { GetModuleHandleW(null()) };
+    fn apply(hwnd: HWND, s: Scale, state: logo::State) -> Self {
         let window = [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)].map(|(kind, metric)| {
-            let icon = metric_icon(instance, metric, s.dpi);
-            if !icon.is_null() {
-                unsafe { SendMessageW(hwnd, WM_SETICON, kind as WPARAM, icon as LPARAM) };
-            }
+            let icon = icon::render(state, sys::metric_for_dpi(metric, s.dpi));
+            let handle = icon.as_ref().map_or(null_mut(), |i| i.0);
+            unsafe { SendMessageW(hwnd, WM_SETICON, kind as WPARAM, handle as LPARAM) };
             icon
         });
-        Self { window }
+        Self {
+            shown: (state, s.dpi),
+            _window: window,
+        }
     }
 }
 
-impl Drop for Icons {
-    fn drop(&mut self) {
-        for icon in self.window {
-            if !icon.is_null() {
-                unsafe { DestroyIcon(icon) };
-            }
-        }
+fn refresh_window_icon(hwnd: HWND) {
+    let wanted = with_app(hwnd, |app| {
+        let wanted = (app.logo(), app.s);
+        (app.icons.shown != (wanted.0, wanted.1.dpi)).then_some(wanted)
+    });
+    if let Some(Some((state, s))) = wanted {
+        let icons = Icons::apply(hwnd, s, state);
+        with_app(hwnd, |app| std::mem::replace(&mut app.icons, icons));
     }
 }
 
@@ -169,7 +175,7 @@ impl App {
             frame,
             gfx,
             fonts,
-            icons: Icons::apply(hwnd, s),
+            icons: Icons::apply(hwnd, s, logo::State::default()),
             layout,
             view: View::default(),
             targets: Vec::new(),
@@ -638,6 +644,10 @@ impl App {
         Theme::of(self.dark)
     }
 
+    fn logo(&self) -> logo::State {
+        crate::tray::logo(self.update.as_ref().map(|u| &u.state))
+    }
+
     fn copy_id(&mut self) {
         let id = self
             .update
@@ -1003,7 +1013,11 @@ fn on_paint(hwnd: HWND) {
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
     let change = with_app(hwnd, |app| {
         let (w, h) = client_size(hwnd);
-        let mut ops = scene(&app.layout, app.s, app.palette(), &app.view);
+        let view = View {
+            logo: app.logo(),
+            ..app.view
+        };
+        let mut ops = scene(&app.layout, app.s, app.palette(), &view);
         let board = app.board();
         ops.extend(app.adopt(board));
         ops.extend(app.ring());
@@ -1073,6 +1087,7 @@ fn on_agent(hwnd: HWND) {
     });
     if delivered == Some(true) {
         tray::refresh_icon(hwnd);
+        refresh_window_icon(hwnd);
         rehover(hwnd);
     }
 }
@@ -1340,14 +1355,8 @@ fn on_dpi_changed(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
             SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
-    let Some(s) = with_app(hwnd, |app| {
-        app.relayout();
-        app.s
-    }) else {
-        return;
-    };
-    let icons = Icons::apply(hwnd, s);
-    with_app(hwnd, |app| std::mem::replace(&mut app.icons, icons));
+    with_app(hwnd, |app| app.relayout());
+    refresh_window_icon(hwnd);
 }
 
 fn on_composition_changed(hwnd: HWND) {

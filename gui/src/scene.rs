@@ -33,6 +33,7 @@ pub struct View {
     pub scroll: Offsets,
     pub popup: Option<Popup>,
     pub popup_scroll: i32,
+    pub logo: State,
 }
 
 const RAIL_ICON: f32 = 20.0;
@@ -47,7 +48,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         Op::Fill(Rect::new(0, 0, l.caption_row.right(), l.rail.h), t.bg),
         Op::Fill(l.rail, t.rail),
         Op::Fill(l.rail_edge, t.rail_edge),
-        Op::Logo(l.logo, State::App),
+        Op::Logo(l.logo, v.logo),
         Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, t.rail_on),
     ];
     for item in l.nav {
@@ -170,10 +171,23 @@ mod tests {
                 Op::Fill(Rect::new(0, 0, 1040, 680), T.bg),
                 Op::Fill(l.rail, T.rail),
                 Op::Fill(l.rail_edge, T.rail_edge),
-                Op::Logo(l.logo, State::App),
+                Op::Logo(l.logo, State::Idle),
                 Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, T.rail_on),
             ]
         );
+    }
+
+    #[test]
+    fn the_brand_logo_follows_the_agent_state() {
+        let l = layout(true);
+        for logo in [State::Stopped, State::Relaying, State::Attention] {
+            let v = View {
+                logo,
+                ..View::default()
+            };
+            assert_eq!(draw(&v)[3], Op::Logo(l.logo, logo));
+        }
+        assert_eq!(draw(&View::default())[3], Op::Logo(l.logo, State::Idle));
     }
 
     #[test]

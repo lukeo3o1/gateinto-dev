@@ -10,10 +10,10 @@ pub const DASH: Rgb = Rgb(0x8a90a0);
 pub const BADGE: Rgb = Rgb(0xc42b1c);
 pub const BADGE_INK: Rgb = Rgb(0xffffff);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
-    App,
     Stopped,
+    #[default]
     Idle,
     Relaying,
     Attention,
@@ -22,7 +22,7 @@ pub enum State {
 impl State {
     pub fn eyes(self) -> Option<Rgb> {
         match self {
-            State::App | State::Relaying => Some(LIT),
+            State::Relaying => Some(LIT),
             State::Idle | State::Attention => Some(DIM),
             State::Stopped => None,
         }
@@ -298,9 +298,9 @@ mod tests {
     }
 
     #[test]
-    fn the_app_icon_has_amber_eyes_like_relaying() {
-        assert_eq!(at(48, State::App, 20, 27), 0xffffc94a);
-        assert_eq!(at(48, State::App, 46, 38) >> 24, 0);
+    fn relaying_has_amber_eyes_and_no_badge() {
+        assert_eq!(at(48, State::Relaying, 20, 27), 0xffffc94a);
+        assert_eq!(at(48, State::Relaying, 46, 38) >> 24, 0);
     }
 
     #[test]
@@ -318,7 +318,6 @@ mod tests {
     #[test]
     fn only_attention_has_a_badge_and_only_stopped_closes_its_eyes() {
         let states = [
-            State::App,
             State::Stopped,
             State::Idle,
             State::Relaying,
@@ -327,7 +326,6 @@ mod tests {
         assert_eq!(
             states.map(|s| (s.eyes(), s.badge())),
             [
-                (Some(LIT), false),
                 (None, false),
                 (Some(DIM), false),
                 (Some(LIT), false),

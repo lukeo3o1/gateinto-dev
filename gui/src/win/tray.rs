@@ -4,9 +4,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateBitmap, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
+    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
@@ -19,18 +18,19 @@ use windows_sys::Win32::UI::Shell::{
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CREATESTRUCTW, CS_DROPSHADOW, ChangeWindowMessageFilterEx, CreateIconIndirect,
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
-    GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, HICON, HWND_TOPMOST, ICONINFO, IDC_ARROW,
-    IsWindowVisible, LoadCursorW, MF_STRING, MSGFLT_ALLOW, PostMessageW, RegisterClassExW,
-    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NULL,
-    WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    AppendMenuW, CREATESTRUCTW, CS_DROPSHADOW, ChangeWindowMessageFilterEx, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetCursorPos,
+    GetWindowLongPtrW, HICON, HWND_TOPMOST, IDC_ARROW, IsWindowVisible, LoadCursorW, MF_STRING,
+    MSGFLT_ALLOW, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE,
+    SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NULL, WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::d2d::Graphics;
+use super::icon::{self, Owned};
 use super::text::Fonts;
 use super::{App, Follow, client_size, coords, show_main, sys, track, with_app};
 use crate::board::{self, Board};
@@ -56,20 +56,12 @@ const MARGIN: f32 = 12.0;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
-struct TrayIcon(HICON);
-
-impl Drop for TrayIcon {
-    fn drop(&mut self) {
-        unsafe { DestroyIcon(self.0) };
-    }
-}
-
 #[derive(Default)]
 pub struct Notify {
     added: bool,
     version4: bool,
     shown: Option<(logo::State, String, i32)>,
-    icon: Option<TrayIcon>,
+    icon: Option<Owned>,
 }
 
 impl Notify {
@@ -249,53 +241,11 @@ fn notify_data(main: HWND, icon: HICON, tip: &str) -> NOTIFYICONDATAW {
     }
 }
 
-fn make_icon(state: logo::State, size: i32) -> Option<TrayIcon> {
-    let pixels = logo::pixels(size, state);
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size,
-            biHeight: -size,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let stride = (size as usize).div_ceil(16) * 2;
-    let mask_bits = vec![0u8; stride * size as usize];
-    let mut bits: *mut c_void = null_mut();
-    unsafe {
-        let color = CreateDIBSection(null_mut(), &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-        if color.is_null() {
-            return None;
-        }
-        let mut icon = null_mut();
-        if !bits.is_null() {
-            std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u32>(), pixels.len());
-            let mask = CreateBitmap(size, size, 1, 1, mask_bits.as_ptr().cast());
-            if !mask.is_null() {
-                icon = CreateIconIndirect(&ICONINFO {
-                    fIcon: 1,
-                    xHotspot: 0,
-                    yHotspot: 0,
-                    hbmMask: mask,
-                    hbmColor: color,
-                });
-                DeleteObject(mask);
-            }
-        }
-        DeleteObject(color);
-        (!icon.is_null()).then_some(TrayIcon(icon))
-    }
-}
-
 fn add_icon(main: HWND) -> bool {
     let Some(wanted) = with_app(main, |app| current(app)) else {
         return false;
     };
-    let Some(icon) = make_icon(wanted.0, wanted.2) else {
+    let Some(icon) = icon::render(wanted.0, wanted.2) else {
         return false;
     };
     let data = notify_data(main, icon.0, &wanted.1);
@@ -334,7 +284,7 @@ pub fn refresh_icon(main: HWND) {
     let Some(Some(wanted)) = wanted else {
         return;
     };
-    let Some(icon) = make_icon(wanted.0, wanted.2) else {
+    let Some(icon) = icon::render(wanted.0, wanted.2) else {
         return;
     };
     let data = notify_data(main, icon.0, &wanted.1);
