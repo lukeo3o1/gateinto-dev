@@ -20,6 +20,7 @@ pub mod gateways;
 pub mod log;
 pub mod menu;
 pub mod settings;
+pub mod tray;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Board {
