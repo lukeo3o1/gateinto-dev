@@ -5,6 +5,7 @@ mod run;
 mod sys;
 mod text;
 mod tips;
+mod tray;
 
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
@@ -27,14 +28,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IMAGE_ICON, IsIconic, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR,
     MB_OK, MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
     RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
-    SM_CXSMICON, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer,
+    SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON,
-    WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -64,6 +66,7 @@ use link::{Link, WM_AGENT};
 use sys::wide;
 use text::Fonts;
 use tips::Tips;
+use tray::{Notify, Panel, WM_TRAY};
 
 const STYLE: u32 = WS_OVERLAPPEDWINDOW;
 const EX_STYLE: u32 = 0;
@@ -136,6 +139,8 @@ struct App {
     units: Units,
     tickets: u64,
     secret: Option<u32>,
+    notify: Notify,
+    panel: Panel,
 }
 
 fn choose_frame() -> Frame {
@@ -175,6 +180,8 @@ impl App {
             units: Units::default(),
             tickets: 0,
             secret: None,
+            notify: Notify::default(),
+            panel: Panel::new(s),
         })
     }
 
@@ -486,13 +493,15 @@ impl App {
         self.invalidate();
     }
 
-    fn launch(&mut self, row: usize) {
+    fn launch(&mut self, row: usize) -> bool {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
-        if let Some(name) = self.launches.start(&names.unwrap_or_default(), row) {
-            self.link.send(Command::Launch(name));
-            self.retarget();
-            self.invalidate();
-        }
+        let Some(name) = self.launches.start(&names.unwrap_or_default(), row) else {
+            return false;
+        };
+        self.link.send(Command::Launch(name));
+        self.retarget();
+        self.invalidate();
+        true
     }
 
     fn toggle_sign_in(&mut self) {
@@ -735,7 +744,9 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 let choice = app.entries().get(index).and_then(|entry| entry.choice);
                 app.dismiss();
                 match choice {
-                    Some(Choice::Launch(row)) => app.launch(row),
+                    Some(Choice::Launch(row)) => {
+                        app.launch(row);
+                    }
                     Some(Choice::Details(id)) => app.session_gateway(id),
                     Some(Choice::Portal(id)) => return app.portal(id),
                     Some(Choice::Credentials(id)) => app.reveal(id),
@@ -840,6 +851,22 @@ fn show_main(hwnd: HWND) {
     }
 }
 
+fn on_close(hwnd: HWND) -> Option<LRESULT> {
+    let hides = with_app(hwnd, |app| {
+        if !app.notify.added() {
+            return false;
+        }
+        while app.close_dialog() {}
+        app.dismiss();
+        true
+    })?;
+    if !hides {
+        return None;
+    }
+    unsafe { ShowWindow(hwnd, SW_HIDE) };
+    Some(0)
+}
+
 fn on_paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let dc = unsafe { BeginPaint(hwnd, &mut ps) };
@@ -879,7 +906,7 @@ fn on_agent(hwnd: HWND) {
         }
         let before = app.update.as_ref().map(|u| gateways::names(&u.gateways));
         if before != Some(gateways::names(&update.gateways)) {
-            app.view.pointer.gateways_changed();
+            app.gateways_changed();
         }
         let entries = app.entries();
         let pinned = app.pinned();
@@ -887,6 +914,7 @@ fn on_agent(hwnd: HWND) {
             log::evicted(&before.log, &update.log, app.filter)
         });
         app.launches.settle(update.launched);
+        app.launch_settled(update.failure.as_deref());
         if app.dialog.as_ref().is_some_and(|d| !d.lasts(&update.state)) {
             app.close_dialog();
         }
@@ -908,9 +936,11 @@ fn on_agent(hwnd: HWND) {
         }
         app.retarget();
         app.invalidate();
+        app.refresh_flyout();
         true
     });
     if delivered == Some(true) {
+        tray::refresh_icon(hwnd);
         rehover(hwnd);
     }
 }
@@ -1254,7 +1284,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             on_composition_changed(hwnd);
             Some(0)
         }
+        WM_CLOSE => on_close(hwnd),
+        WM_TRAY => {
+            tray::on_tray(hwnd, lp);
+            Some(0)
+        }
+        _ if tray::taskbar_created(msg) => {
+            tray::on_taskbar_created(hwnd);
+            Some(0)
+        }
         WM_DESTROY => {
+            tray::destroy(hwnd);
             with_app(hwnd, App::forget_secret);
             unsafe { PostQuitMessage(0) };
             Some(0)
@@ -1359,6 +1399,7 @@ pub fn run() {
     }
     center_on_monitor(hwnd);
     unsafe { ShowWindow(hwnd, SW_SHOW) };
+    tray::install(hwnd, instance);
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {

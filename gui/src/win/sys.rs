@@ -7,7 +7,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE, HWND, RECT,
     SYSTEMTIME,
 };
-use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSY, ReleaseDC};
+use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, HMONITOR, LOGPIXELSY, ReleaseDC};
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -133,6 +133,12 @@ type AdjustForDpi = unsafe extern "system" fn(*mut RECT, u32, i32, u32, u32) -> 
 type MetricsForDpi = unsafe extern "system" fn(SYSTEM_METRICS_INDEX, u32) -> i32;
 type GetVersion = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> i32;
 type CompositionEnabled = unsafe extern "system" fn(*mut i32) -> i32;
+type DpiForMonitor = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> i32;
+type WindowAttribute = unsafe extern "system" fn(HWND, u32, *const c_void, u32) -> i32;
+
+const EFFECTIVE_DPI: i32 = 0;
+const CORNER_PREFERENCE: u32 = 33;
+const ROUND: u32 = 2;
 
 pub fn enable_dpi_awareness() {
     let context = resolve!(
@@ -164,6 +170,26 @@ pub fn window_dpi(hwnd: HWND) -> u32 {
             dpi => dpi,
         },
         None => screen_dpi(hwnd),
+    }
+}
+
+pub fn monitor_dpi(monitor: HMONITOR) -> u32 {
+    let (mut x, mut y) = (0, 0);
+    match resolve!("shcore.dll", c"GetDpiForMonitor", true, DpiForMonitor) {
+        Some(f) if unsafe { f(monitor, EFFECTIVE_DPI, &mut x, &mut y) } == 0 && y > 0 => y,
+        _ => window_dpi(null_mut()),
+    }
+}
+
+pub fn round_corners(hwnd: HWND) {
+    if let Some(set) = resolve!(
+        "dwmapi.dll",
+        c"DwmSetWindowAttribute",
+        true,
+        WindowAttribute
+    ) {
+        let round = ROUND;
+        unsafe { set(hwnd, CORNER_PREFERENCE, (&raw const round).cast(), 4) };
     }
 }
 
