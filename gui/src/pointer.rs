@@ -29,6 +29,7 @@ pub enum Action {
     AddGateway,
     Focus(Input),
     ConfirmAdd,
+    OpenMain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +75,7 @@ fn action(zone: Zone) -> Option<Action> {
         Zone::AddGateway => Some(Action::AddGateway),
         Zone::AddField(input) => Some(Action::Focus(input)),
         Zone::ConfirmAdd => Some(Action::ConfirmAdd),
+        Zone::OpenMain => Some(Action::OpenMain),
         _ => None,
     }
 }
@@ -175,6 +177,13 @@ mod tests {
             p.down(zone);
             assert_eq!(p.up(zone), Some(action));
         }
+    }
+
+    #[test]
+    fn the_tray_flyout_opens_the_main_window() {
+        let mut p = Pointer::default();
+        p.down(Zone::OpenMain);
+        assert_eq!(p.up(Zone::OpenMain), Some(Action::OpenMain));
     }
 
     #[test]

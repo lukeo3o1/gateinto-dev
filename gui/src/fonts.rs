@@ -11,6 +11,7 @@ pub enum Font {
     Small,
     Pill,
     Mono,
+    Lead,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub struct Spec {
 }
 
 impl Font {
-    pub const ALL: [Font; 11] = [
+    pub const ALL: [Font; 12] = [
         Font::Brand,
         Font::Item,
         Font::ItemSelected,
@@ -32,6 +33,7 @@ impl Font {
         Font::Small,
         Font::Pill,
         Font::Mono,
+        Font::Lead,
     ];
 
     pub fn spec(self) -> Spec {
@@ -47,6 +49,7 @@ impl Font {
             Font::Small => (12, 400),
             Font::Pill => (11, 400),
             Font::Mono => (12, 400),
+            Font::Lead => (17, 600),
         };
         Spec { size, weight }
     }
@@ -97,6 +100,7 @@ mod tests {
         assert_eq!(Font::Small.spec(), s(12, 400));
         assert_eq!(Font::Pill.spec(), s(11, 400));
         assert_eq!(Font::Mono.spec(), s(12, 400));
+        assert_eq!(Font::Lead.spec(), s(17, 600));
     }
 
     #[test]

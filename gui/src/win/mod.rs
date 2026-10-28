@@ -24,17 +24,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
     GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT,
     HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
-    IDC_ARROW, IMAGE_ICON, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK,
-    MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
+    IDC_ARROW, IMAGE_ICON, IsIconic, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR,
+    MB_OK, MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
     RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
-    SM_CXSMICON, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_METRICS_INDEX, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CREATE, WM_DESTROY,
-    WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    SM_CXSMICON, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON,
+    WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -682,6 +682,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::AddGateway
         | Zone::AddField(_)
         | Zone::ConfirmAdd
+        | Zone::OpenMain
         | Zone::Client => HTCLIENT,
     }
 }
@@ -816,12 +817,27 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             rehover(hwnd);
             return;
         }
+        Some(Action::OpenMain) => {
+            show_main(hwnd);
+            return;
+        }
         Some(Action::Minimize) => SC_MINIMIZE,
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
         Some(Action::Close) => SC_CLOSE,
     };
     unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0) };
+}
+
+fn show_main(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            ShowWindow(hwnd, SW_SHOW);
+        }
+        SetForegroundWindow(hwnd);
+    }
 }
 
 fn on_paint(hwnd: HWND) {

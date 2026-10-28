@@ -35,6 +35,7 @@ pub enum Zone {
     AddGateway,
     AddField(Input),
     ConfirmAdd,
+    OpenMain,
     Client,
 }
 

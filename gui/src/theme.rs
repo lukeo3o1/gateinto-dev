@@ -81,6 +81,42 @@ impl Theme {
         notice: Rgb(0xfff4d6),
         notice_text: Rgb(0x7a5000),
     };
+
+    pub const FLYOUT: Theme = Theme {
+        bg: Rgb(0x17191e),
+        text: Rgb(0xe8e9ec),
+        rail: Rgb(0x17191e),
+        rail_edge: Rgb(0x2e323c),
+        rail_hover: Rgb(0x262a32),
+        rail_selected: Rgb(0x20232a),
+        rail_text: Rgb(0xe8e9ec),
+        rail_on: Rgb(0xe8e9ec),
+        rail_icon: Rgb(0x9aa0ad),
+        accent: Rgb(0xffc94a),
+        caption: Rgb(0xe8e9ec),
+        caption_hover: Rgb(0x272a33),
+        caption_pressed: Rgb(0x2e323c),
+        close_hover: Rgb(0xc42b1c),
+        close_pressed: Rgb(0xc84031),
+        close_glyph_hover: Rgb(0xffffff),
+        card: Rgb(0x20232a),
+        border: Rgb(0x2e323c),
+        muted: Rgb(0x9aa0ad),
+        tile: Rgb(0x2e323c),
+        pill_text: Rgb(0x9aa0ad),
+        eyes_idle: Rgb(0x9aa1b1),
+        revoke_hover: Rgb(0x3a2422),
+        revoke_pressed: Rgb(0x4a2b28),
+        revoke_glyph: Rgb(0xff8a80),
+        warning: Rgb(0xffc94a),
+        button: Rgb(0xffc94a),
+        button_hover: Rgb(0xffd56e),
+        button_pressed: Rgb(0xe6b43f),
+        button_text: Rgb(0x1d1f24),
+        field: Rgb(0x20232a),
+        notice: Rgb(0x2a2619),
+        notice_text: Rgb(0xffc94a),
+    };
 }
 
 #[cfg(test)]
@@ -129,6 +165,25 @@ mod tests {
         assert_ne!(t.button_hover, t.button);
         assert_ne!(t.button_pressed, t.button_hover);
         assert_ne!(t.button_pressed, t.button);
+    }
+
+    #[test]
+    fn the_tray_flyout_uses_the_dark_palette() {
+        let t = Theme::FLYOUT;
+        assert_eq!(t.bg, Rgb(0x17191e));
+        assert_eq!(t.border, Rgb(0x2e323c));
+        assert_eq!(t.text, Rgb(0xe8e9ec));
+        assert_eq!(t.muted, Rgb(0x9aa0ad));
+        assert_eq!(t.card, Rgb(0x20232a));
+        assert_eq!(t.accent, Rgb(0xffc94a));
+        assert_eq!(t.eyes_idle, Rgb(0x9aa1b1));
+        assert_eq!(t.button, Rgb(0xffc94a));
+        assert_eq!(t.button_text, Rgb(0x1d1f24));
+        assert_ne!(t.caption_hover, t.card);
+        assert_ne!(t.caption_hover, t.bg);
+        assert_ne!(t.caption_pressed, t.caption_hover);
+        assert_ne!(t.button_hover, t.button);
+        assert_ne!(t.button_pressed, t.button_hover);
     }
 
     #[test]
