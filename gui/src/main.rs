@@ -25,6 +25,7 @@ mod scroll;
 mod sessions;
 mod settings;
 mod theme;
+mod tray;
 #[cfg(windows)]
 mod win;
 mod worker;
