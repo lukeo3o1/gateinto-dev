@@ -73,7 +73,7 @@ impl<M: Measure> Painter<'_, M> {
         };
         for (i, (label, value)) in key.rows.iter().enumerate() {
             let row = self.line(above, i as i32);
-            let font = if *label == crate::device::DEVICE_ID {
+            let font = if *label == crate::i18n::tr(crate::device::DEVICE_ID) {
                 Font::Mono
             } else {
                 Font::Body
@@ -156,7 +156,7 @@ mod tests {
 
     fn page() -> Page {
         Page {
-            subtitle: SUBTITLE.to_owned(),
+            subtitle: SUBTITLE.english().to_owned(),
             failed: false,
             key: KeyCard {
                 title: "Hardware key",

@@ -191,6 +191,26 @@ table! {
     Optional => "Optional", "選用";
     Required => "Required", "必要";
     SelfSigned => "{0}, self-signed", "{0}，自我簽署";
+    DeviceSubtitle => "What gateways see when this PC signs in", "這部電腦登入時閘道看到的資訊";
+    Storage => "Storage", "儲存位置";
+    DeviceId => "Device ID", "裝置識別碼";
+    UsedWith => "Used with", "用於";
+    CopyDeviceIdFailed => "Could not copy the device ID", "無法複製裝置識別碼";
+    NoDeviceKey => "No device key yet. Run `gateinto setup` to create one.", "尚無裝置金鑰。請執行 `gateinto setup` 建立。";
+    ReadingDeviceKey => "Reading the device key…", "正在讀取裝置金鑰…";
+    HardwareKey => "Hardware key", "硬體金鑰";
+    DeviceKey => "Device key", "裝置金鑰";
+    KeyName => "Key name", "金鑰名稱";
+    CopyDeviceId => "Copy device ID", "複製裝置識別碼";
+    Copied => "Copied", "已複製";
+    ThisPc => "This PC", "這部電腦";
+    LoopbackOnly => "Loopback only", "僅限本機回送";
+    UnknownReason => "Unknown: {0}", "未知：{0}";
+    OpenToNetwork => "Open to the network on {0}", "在 {0} 對網路開放";
+    Software => "Software", "軟體";
+    Algorithm => "Algorithm", "演算法";
+    Agent => "Agent", "代理程式";
+    SignedInAs => "Signed in as {0}", "登入身分：{0}";
 }
 
 impl Text {

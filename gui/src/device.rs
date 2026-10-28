@@ -7,12 +7,13 @@ use gateinto::link::{Known, Source};
 use gateinto::proxy::DEFAULT_LISTEN;
 
 use crate::agent::AgentState;
+use crate::i18n::{Text, fill, tr};
 
-pub const SUBTITLE: &str = "What gateways see when this PC signs in";
-pub const STORAGE: &str = "Storage";
-pub const DEVICE_ID: &str = "Device ID";
-pub const USED_WITH: &str = "Used with";
-pub const COPY_FAILED: &str = "Could not copy the device ID";
+pub const SUBTITLE: Text = Text::DeviceSubtitle;
+pub const STORAGE: Text = Text::Storage;
+pub const DEVICE_ID: Text = Text::DeviceId;
+pub const USED_WITH: Text = Text::UsedWith;
+pub const COPY_FAILED: Text = Text::CopyDeviceIdFailed;
 pub const VERSION: &str = match option_env!("GATEINTO_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -96,15 +97,15 @@ pub struct Page {
     pub gateways: Result<Vec<Gateway>, String>,
 }
 
-const MISSING: &str = "No device key yet. Run `gateinto setup` to create one.";
-const READING: &str = "Reading the device key\u{2026}";
-const HARDWARE_KEY: &str = "Hardware key";
-const DEVICE_KEY: &str = "Device key";
-const KEY_NAME: &str = "Key name";
-const COPY: &str = "Copy device ID";
-const COPIED: &str = "Copied";
-const THIS_PC: &str = "This PC";
-const LOOPBACK: &str = "Loopback only";
+const MISSING: Text = Text::NoDeviceKey;
+const READING: Text = Text::ReadingDeviceKey;
+const HARDWARE_KEY: Text = Text::HardwareKey;
+const DEVICE_KEY: Text = Text::DeviceKey;
+const KEY_NAME: Text = Text::KeyName;
+const COPY: Text = Text::CopyDeviceId;
+const COPIED: Text = Text::Copied;
+const THIS_PC: Text = Text::ThisPc;
+const LOOPBACK: Text = Text::LoopbackOnly;
 const FIRST_WINDOWS_11_BUILD: u32 = 22000;
 
 fn first_line(text: &str) -> String {
@@ -147,7 +148,7 @@ pub fn os(system: &System) -> Option<String> {
 pub fn exposure(listen: &Result<SocketAddr, String>, state: &AgentState) -> String {
     let listen = match listen {
         Ok(listen) => *listen,
-        Err(error) => return format!("Unknown: {}", first_line(error)),
+        Err(error) => return fill(Text::UnknownReason, &[&first_line(error)]),
     };
     let sessions = match state {
         AgentState::Running(sessions) => sessions.as_slice(),
@@ -157,8 +158,8 @@ pub fn exposure(listen: &Result<SocketAddr, String>, state: &AgentState) -> Stri
         .chain(sessions.iter().map(|session| session.listen))
         .find(|addr| !addr.ip().to_canonical().is_loopback())
         .map_or_else(
-            || LOOPBACK.to_owned(),
-            |addr| format!("Open to the network on {addr}"),
+            || tr(LOOPBACK).to_owned(),
+            |addr| fill(Text::OpenToNetwork, &[&addr]),
         )
 }
 
@@ -172,39 +173,41 @@ pub fn device_id(probe: Option<&Probe>) -> Option<&str> {
 fn storage(backend: Backend) -> String {
     let kind = match backend {
         Backend::Tpm => "TPM",
-        Backend::Software => "Software",
+        Backend::Software => tr(Text::Software),
     };
     format!("{kind} ({})", backend.provider())
 }
 
 fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
     let card = |note: String, alert, rows| KeyCard {
-        title: DEVICE_KEY,
+        title: tr(DEVICE_KEY),
         note: Some(note),
         alert,
         rows,
         copy: None,
     };
     match key {
-        None => card(READING.to_owned(), false, Vec::new()),
+        None => card(tr(READING).to_owned(), false, Vec::new()),
         Some(KeyState::Present(key)) => {
             let tpm = key.backend == Backend::Tpm;
             KeyCard {
-                title: if tpm { HARDWARE_KEY } else { DEVICE_KEY },
+                title: tr(if tpm { HARDWARE_KEY } else { DEVICE_KEY }),
                 note: None,
                 alert: false,
                 rows: vec![
-                    (STORAGE, storage(key.backend)),
-                    ("Algorithm", device_key::ALGORITHM.to_owned()),
-                    (KEY_NAME, key.name.to_string()),
-                    (DEVICE_ID, key.fingerprint.clone()),
+                    (tr(STORAGE), storage(key.backend)),
+                    (tr(Text::Algorithm), device_key::ALGORITHM.to_owned()),
+                    (tr(KEY_NAME), key.name.to_string()),
+                    (tr(DEVICE_ID), key.fingerprint.clone()),
                 ],
-                copy: Some(if copied { COPIED } else { COPY }),
+                copy: Some(tr(if copied { COPIED } else { COPY })),
             }
         }
-        Some(KeyState::Missing(name)) => {
-            card(MISSING.to_owned(), true, vec![(KEY_NAME, name.to_string())])
-        }
+        Some(KeyState::Missing(name)) => card(
+            tr(MISSING).to_owned(),
+            true,
+            vec![(tr(KEY_NAME), name.to_string())],
+        ),
         Some(KeyState::Unsupported(error) | KeyState::Failed(error)) => {
             card(first_line(error), true, Vec::new())
         }
@@ -214,22 +217,22 @@ fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
 fn computer(probe: &Probe, listen: &Result<SocketAddr, String>, state: &AgentState) -> Computer {
     let system = &probe.system;
     let rows = os(system)
-        .map(|os| ("System", os))
+        .map(|os| (tr(Text::System), os))
         .into_iter()
         .chain([
             ("Gateinto", VERSION.to_owned()),
-            ("Agent", exposure(listen, state)),
+            (tr(Text::Agent), exposure(listen, state)),
         ])
         .collect();
     Computer {
         name: system
             .computer
             .clone()
-            .unwrap_or_else(|| THIS_PC.to_owned()),
+            .unwrap_or_else(|| tr(THIS_PC).to_owned()),
         account: system
             .account
             .as_ref()
-            .map(|account| format!("Signed in as {account}")),
+            .map(|account| fill(Text::SignedInAs, &[account])),
         rows,
     }
 }
@@ -242,10 +245,10 @@ fn gateways(listing: &Result<Known, String>) -> Result<Vec<Gateway>, String> {
         .map(|gateway| Gateway {
             label: crate::gateways::label(gateway),
             address: crate::gateways::address(gateway.host.as_deref(), gateway.port),
-            source: match gateway.source {
-                Source::Config => "Config file",
-                Source::Linked => "Added on this device",
-            },
+            source: tr(match gateway.source {
+                Source::Config => Text::ConfigFile,
+                Source::Linked => Text::AddedHere,
+            }),
         })
         .collect())
 }
@@ -277,7 +280,7 @@ pub fn page(
     copied: bool,
 ) -> Page {
     Page {
-        subtitle: failure.unwrap_or(SUBTITLE).to_owned(),
+        subtitle: failure.unwrap_or(tr(SUBTITLE)).to_owned(),
         failed: failure.is_some(),
         key: key_card(probe.map(|probe| &probe.key), copied),
         computer: probe.map(|probe| computer(probe, listen, state)),
@@ -580,6 +583,68 @@ mod tests {
     }
 
     #[test]
+    fn the_device_page_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let probe = probed(present(Backend::Software, id(2)));
+        let page = page(
+            Some(&probe),
+            &listen("0.0.0.0:18736"),
+            &AgentState::Stopped,
+            &known(vec![KnownGateway {
+                name: "office".parse::<GatewayName>().unwrap(),
+                host: Some("proxy.example.com".to_owned()),
+                port: None,
+                portal_url: None,
+                source: Source::Linked,
+            }]),
+            None,
+            true,
+        );
+        assert_eq!(page.subtitle, "這部電腦登入時閘道看到的資訊");
+        let card = page.key;
+        assert_eq!(card.title, "裝置金鑰");
+        let keys: Vec<&str> = card.rows.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["儲存位置", "演算法", "金鑰名稱", "裝置識別碼"]);
+        assert_eq!(
+            card.rows[0].1,
+            "軟體 (Microsoft Software Key Storage Provider)"
+        );
+        assert_eq!(card.copy, Some("已複製"));
+        let computer = page.computer.unwrap();
+        assert_eq!(computer.account.as_deref(), Some("登入身分：CORP\\ana"));
+        assert_eq!(
+            computer.rows,
+            [
+                ("系統", "Windows 11 Pro \u{b7} x64".to_owned()),
+                ("Gateinto", VERSION.to_owned()),
+                ("代理程式", "在 0.0.0.0:18736 對網路開放".to_owned()),
+            ]
+        );
+        assert_eq!(page.gateways.unwrap()[0].source, "在這部裝置上新增");
+        assert_eq!(draw(None).key.note.as_deref(), Some("正在讀取裝置金鑰…"));
+        assert_eq!(draw(Some(&probed(tpm()))).key.title, "硬體金鑰");
+        assert_eq!(draw(Some(&probed(tpm()))).key.copy, Some("複製裝置識別碼"));
+        let missing = draw(Some(&probed(KeyState::Missing(KeyName::default()))));
+        assert_eq!(
+            missing.key.note.as_deref(),
+            Some("尚無裝置金鑰。請執行 `gateinto setup` 建立。")
+        );
+        let nameless = Probe {
+            key: tpm(),
+            system: System::default(),
+        };
+        assert_eq!(draw(Some(&nameless)).computer.unwrap().name, "這部電腦");
+        assert_eq!(
+            exposure(&listen("127.0.0.1:1"), &AgentState::Stopped),
+            "僅限本機回送"
+        );
+        assert_eq!(
+            exposure(&Err("bad".to_owned()), &AgentState::Stopped),
+            "未知：bad"
+        );
+    }
+
+    #[test]
     fn a_tpm_key_is_a_hardware_key_with_its_device_id() {
         let probe = probed(tpm());
         assert_eq!(
@@ -590,12 +655,12 @@ mod tests {
                 alert: false,
                 rows: vec![
                     (
-                        STORAGE,
+                        tr(STORAGE),
                         "TPM (Microsoft Platform Crypto Provider)".to_owned()
                     ),
                     ("Algorithm", "ECDSA P-256".to_owned()),
                     ("Key name", "gateinto-device-v1".to_owned()),
-                    (DEVICE_ID, id(1)),
+                    (tr(DEVICE_ID), id(1)),
                 ],
                 copy: Some("Copy device ID"),
             }
@@ -612,12 +677,12 @@ mod tests {
         assert_eq!(
             card.rows[0],
             (
-                STORAGE,
+                tr(STORAGE),
                 "Software (Microsoft Software Key Storage Provider)".to_owned()
             )
         );
         assert!(card.rows.iter().all(|(_, value)| !value.contains("TPM")));
-        assert_eq!(card.rows[3], (DEVICE_ID, id(2)));
+        assert_eq!(card.rows[3], (tr(DEVICE_ID), id(2)));
     }
 
     #[test]
@@ -670,7 +735,7 @@ mod tests {
     #[test]
     fn before_the_first_probe_only_the_key_card_waits() {
         let page = draw(None);
-        assert_eq!(page.subtitle, SUBTITLE);
+        assert_eq!(page.subtitle, tr(SUBTITLE));
         assert_eq!(
             page.key,
             KeyCard {
