@@ -301,6 +301,8 @@ table! {
     MoreInApp => "{0} more in Gateinto", "Gateinto 中還有 {0} 個";
     TrayTip => "Gateinto: {0}\n{1}", "Gateinto：{0}\n{1}";
     DemoTitle => "Gateinto Demo", "Gateinto 示範";
+    DemoFlyoutTitle => "Gateinto Demo status", "Gateinto 示範狀態";
+    DemoTrayTip => "Gateinto Demo: {0}\n{1}", "Gateinto 示範：{0}\n{1}";
     DemoNotStarted => "Demo: nothing was started", "示範：未啟動任何項目";
     DemoNotRevoked => "Demo: nothing was revoked", "示範：未撤銷任何項目";
     DemoNotStopped => "Demo: the agent was not stopped", "示範：未停止代理程式";

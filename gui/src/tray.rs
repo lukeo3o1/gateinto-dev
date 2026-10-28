@@ -118,8 +118,21 @@ pub fn waiting() -> Flyout {
     }
 }
 
-pub fn tooltip(status: &Status) -> String {
-    let full = fill(Text::TrayTip, &[&status.title, &status.subtitle]);
+pub fn flyout_title(demo: bool) -> &'static str {
+    tr(if demo {
+        Text::DemoFlyoutTitle
+    } else {
+        FLYOUT_TITLE
+    })
+}
+
+pub fn tooltip(status: &Status, demo: bool) -> String {
+    let tip = if demo {
+        Text::DemoTrayTip
+    } else {
+        Text::TrayTip
+    };
+    let full = fill(tip, &[&status.title, &status.subtitle]);
     let mut units = 0;
     full.chars()
         .take_while(|c| {
@@ -427,18 +440,35 @@ mod tests {
 
     #[test]
     fn the_tooltip_names_the_app_and_the_status() {
-        let tip = tooltip(&status(&running(vec![session(1, "office", 1)])));
+        let tip = tooltip(&status(&running(vec![session(1, "office", 1)])), false);
         assert_eq!(tip, "Gateinto: Relaying\n1 session · 1 with traffic");
+    }
+
+    #[test]
+    fn the_demo_labels_its_tray_tooltip_and_flyout_in_each_language() {
+        assert_eq!(
+            tooltip(&pending(), true),
+            "Gateinto Demo: Checking\nWaiting for the agent status"
+        );
+        assert_eq!(flyout_title(true), "Gateinto Demo status");
+        assert_eq!(flyout_title(false), "Gateinto status");
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(
+            tooltip(&pending(), true),
+            "Gateinto 示範：檢查中\n正在等候代理程式狀態"
+        );
+        assert_eq!(flyout_title(true), "Gateinto 示範狀態");
+        assert_eq!(flyout_title(false), "Gateinto 狀態");
     }
 
     #[test]
     fn the_tooltip_fits_the_notify_icon_buffer() {
         let long = "é".repeat(300);
-        let tip = tooltip(&status(&AgentState::Unreachable(long)));
+        let tip = tooltip(&status(&AgentState::Unreachable(long)), false);
         assert!(tip.encode_utf16().count() <= TIP_UNITS);
         assert!(tip.starts_with("Gateinto: Agent unreachable\né"));
         let wide = "😀".repeat(100);
-        let tip = tooltip(&status(&AgentState::Unreachable(wide)));
+        let tip = tooltip(&status(&AgentState::Unreachable(wide)), false);
         assert!(tip.encode_utf16().count() <= TIP_UNITS);
     }
 
@@ -621,7 +651,7 @@ mod tests {
         assert_eq!(status.logo, State::Idle);
         assert!(!status.stop);
         assert_eq!(
-            tooltip(&status),
+            tooltip(&status, false),
             "Gateinto: Checking\nWaiting for the agent status"
         );
         let f = waiting();
@@ -641,7 +671,7 @@ mod tests {
         assert_eq!(busy.title, "轉送中");
         assert_eq!(busy.subtitle, "2 個工作階段 · 1 個有流量");
         assert_eq!(
-            tooltip(&busy),
+            tooltip(&busy, false),
             "Gateinto：轉送中\n2 個工作階段 · 1 個有流量"
         );
         let one = status(&running(vec![session(1, "office", 0)]));

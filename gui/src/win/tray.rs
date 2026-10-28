@@ -110,8 +110,8 @@ impl Panel {
         }
     }
 
-    pub(super) fn reshape(&mut self, gfx: &Graphics) {
-        let title = super::wide(tr(tray::FLYOUT_TITLE));
+    pub(super) fn reshape(&mut self, gfx: &Graphics, demo: bool) {
+        let title = super::wide(tray::flyout_title(demo));
         unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
         if self.fonts.is_some()
             && let Ok(fonts) = Fonts::new(gfx.dwrite(), self.s)
@@ -224,7 +224,7 @@ fn current(app: &App) -> (logo::State, String, i32) {
         .update
         .as_ref()
         .map_or_else(tray::pending, |u| tray::status(&u.state));
-    (status.logo, tray::tooltip(&status), icon_size())
+    (status.logo, tray::tooltip(&status, app.demo), icon_size())
 }
 
 fn icon_size() -> i32 {
@@ -633,8 +633,8 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wp, lp) })
 }
 
-pub fn install(main: HWND, instance: HINSTANCE) {
-    let flyout = create_flyout(main, instance);
+pub fn install(main: HWND, instance: HINSTANCE, demo: bool) {
+    let flyout = create_flyout(main, instance, demo);
     if flyout.is_null() {
         return;
     }
@@ -643,9 +643,9 @@ pub fn install(main: HWND, instance: HINSTANCE) {
     add_icon(main);
 }
 
-fn create_flyout(main: HWND, instance: HINSTANCE) -> HWND {
+fn create_flyout(main: HWND, instance: HINSTANCE, demo: bool) -> HWND {
     let class = super::wide("GateintoFlyout");
-    let title = super::wide(tr(tray::FLYOUT_TITLE));
+    let title = super::wide(tray::flyout_title(demo));
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: CS_DROPSHADOW,

@@ -676,7 +676,7 @@ impl App {
         if let Ok(fonts) = Fonts::new(self.gfx.dwrite(), self.s) {
             self.fonts = fonts;
         }
-        self.panel.reshape(&self.gfx);
+        self.panel.reshape(&self.gfx, self.demo);
         self.config = config_line(self.demo);
         let title = wide(window_title(self.demo));
         unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
@@ -1686,7 +1686,7 @@ pub fn run() {
     apply_theme(hwnd);
     center_on_monitor(hwnd);
     unsafe { ShowWindow(hwnd, SW_SHOW) };
-    tray::install(hwnd, instance);
+    tray::install(hwnd, instance, demo);
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
