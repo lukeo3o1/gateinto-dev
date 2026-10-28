@@ -1,3 +1,5 @@
+use crate::i18n::{Text, tr};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u32);
 
@@ -45,6 +47,14 @@ impl Choice {
             Choice::Light => "Light",
             Choice::Dark => "Dark",
         }
+    }
+
+    pub fn label(self) -> &'static str {
+        tr(match self {
+            Choice::System => Text::System,
+            Choice::Light => Text::Light,
+            Choice::Dark => Text::Dark,
+        })
     }
 
     pub fn parse(value: Option<&str>) -> Choice {

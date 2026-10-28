@@ -223,6 +223,28 @@ table! {
     ShowCredentials => "Show credentials", "顯示憑證";
     OpenPortal => "Open portal page", "開啟入口網頁";
     GatewayDetails => "Gateway details", "閘道詳細資料";
+    NotFound => "Not found", "找不到";
+    NoConfigPath => "No config file location", "沒有設定檔位置";
+    OpenConfig => "Open config file", "開啟設定檔";
+    OpenConfigFailed => "Could not open the config file", "無法開啟設定檔";
+    App => "App", "應用程式";
+    Theme => "Theme", "主題";
+    ThemeFailed => "Could not save the theme setting", "無法儲存主題設定";
+    SignIn => "Start at sign-in", "登入時啟動";
+    SignInNote => "Opens Gateinto when you sign in", "登入時開啟 Gateinto";
+    SignInUnread => "Could not read the sign-in setting", "無法讀取登入時啟動設定";
+    SignInFailed => "Could not change the sign-in setting", "無法變更登入時啟動設定";
+    FromConfig => "From the config file", "來自設定檔";
+    Detected => "{0} (detected)", "{0}（已偵測）";
+    Kilobytes => "{0} KB", "{0} KB";
+    Bytes => "{0} bytes", "{0} 位元組";
+    Seconds => "{0} s", "{0} 秒";
+    ConcurrentTunnels => "Concurrent tunnels", "同時通道數";
+    ConnectTimeout => "Connect timeout", "連線逾時";
+    IdleTimeout => "Idle timeout", "閒置逾時";
+    HeaderLimit => "Request header limit", "請求標頭上限";
+    Light => "Light", "淺色";
+    Dark => "Dark", "深色";
 }
 
 impl Text {

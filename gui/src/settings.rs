@@ -4,23 +4,24 @@ use std::path::{Path, PathBuf};
 use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
 
+use crate::i18n::{Text, fill, localize, tr};
 use crate::sessions::browser_title;
 use crate::theme::Choice;
 
-pub const NOT_FOUND: &str = "Not found";
-pub const NO_PATH: &str = "No config file location";
-pub const OPEN: &str = "Open config file";
-pub const OPEN_FAILED: &str = "Could not open the config file";
-pub const APP: &str = "App";
-pub const THEME: &str = "Theme";
-pub const THEME_FAILED: &str = "Could not save the theme setting";
-pub const SIGN_IN: &str = "Start at sign-in";
-pub const SIGN_IN_NOTE: &str = "Opens Gateinto when you sign in";
-pub const SIGN_IN_UNREAD: &str = "Could not read the sign-in setting";
-pub const SIGN_IN_FAILED: &str = "Could not change the sign-in setting";
+pub const NOT_FOUND: Text = Text::NotFound;
+pub const NO_PATH: Text = Text::NoConfigPath;
+pub const OPEN: Text = Text::OpenConfig;
+pub const OPEN_FAILED: Text = Text::OpenConfigFailed;
+pub const APP: Text = Text::App;
+pub const THEME: Text = Text::Theme;
+pub const THEME_FAILED: Text = Text::ThemeFailed;
+pub const SIGN_IN: Text = Text::SignIn;
+pub const SIGN_IN_NOTE: Text = Text::SignInNote;
+pub const SIGN_IN_UNREAD: Text = Text::SignInUnread;
+pub const SIGN_IN_FAILED: Text = Text::SignInFailed;
 pub const RUN_VALUE: &str = "Gateinto App";
-pub const AGENT: &str = "Agent";
-pub const FROM_CONFIG: &str = "From the config file";
+pub const AGENT: Text = Text::Agent;
+pub const FROM_CONFIG: Text = Text::FromConfig;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
@@ -39,7 +40,7 @@ pub fn page(
     theme: Choice,
 ) -> Page {
     Page {
-        line: failure.unwrap_or(path).to_owned(),
+        line: failure.map_or(path.into(), localize).into_owned(),
         failed: failure.is_some(),
         agent: match agent {
             Ok(agent) => Ok(rows(agent)),
@@ -104,40 +105,44 @@ fn browser(browser: &Browser) -> String {
                 Some(kind) => browser_title(Some(kind)).to_owned(),
                 None => file_name(path),
             };
-            format!("{name} (detected)")
+            fill(Text::Detected, &[&name])
         }
-        Browser::Missing => NOT_FOUND.to_owned(),
+        Browser::Missing => tr(NOT_FOUND).to_owned(),
     }
 }
 
 fn bytes(n: u32) -> String {
     if n.is_multiple_of(1024) {
-        format!("{} KB", n / 1024)
+        fill(Text::Kilobytes, &[&(n / 1024)])
     } else {
-        format!("{n} bytes")
+        fill(Text::Bytes, &[&n])
     }
+}
+
+fn seconds(n: u64) -> String {
+    fill(Text::Seconds, &[&n])
 }
 
 pub fn rows(agent: &Agent) -> Vec<(&'static str, String)> {
     let limits = &agent.limits;
     vec![
-        ("Browser", browser(&agent.browser)),
+        (tr(Text::Browser), browser(&agent.browser)),
         (
-            "Concurrent tunnels",
+            tr(Text::ConcurrentTunnels),
             limits.max_concurrent_tunnels.to_string(),
         ),
         (
-            "Connect timeout",
-            format!("{} s", limits.connect_timeout_seconds),
+            tr(Text::ConnectTimeout),
+            seconds(limits.connect_timeout_seconds),
         ),
-        ("Idle timeout", format!("{} s", limits.idle_timeout_seconds)),
-        ("Request header limit", bytes(limits.header_max_bytes)),
+        (tr(Text::IdleTimeout), seconds(limits.idle_timeout_seconds)),
+        (tr(Text::HeaderLimit), bytes(limits.header_max_bytes)),
     ]
 }
 
 pub fn shown(path: Option<&Path>, appdata: Option<&Path>) -> String {
     let Some(path) = path else {
-        return NO_PATH.to_owned();
+        return tr(NO_PATH).to_owned();
     };
     match appdata.and_then(|dir| path.strip_prefix(dir).ok()) {
         Some(rest) => Path::new("%APPDATA%").join(rest).display().to_string(),
@@ -214,15 +219,23 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_replaces_the_path_line() {
-        let page = page(
-            "p",
-            &Ok(Agent::default()),
-            Some(OPEN_FAILED),
-            false,
-            Choice::System,
+    fn a_failure_replaces_the_path_line_in_the_current_language() {
+        let failed = || {
+            page(
+                "p",
+                &Ok(Agent::default()),
+                Some(OPEN_FAILED.english()),
+                false,
+                Choice::System,
+            )
+        };
+        let page = failed();
+        assert_eq!(
+            (page.line.as_str(), page.failed),
+            (OPEN_FAILED.english(), true)
         );
-        assert_eq!((page.line.as_str(), page.failed), (OPEN_FAILED, true));
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(failed().line, "無法開啟設定檔");
     }
 
     #[test]
@@ -264,6 +277,32 @@ mod tests {
     fn a_header_limit_off_a_kilobyte_is_shown_in_bytes() {
         let file = parsed("[limits]\nheader_max_bytes = 20000\n");
         assert_eq!(rows(&agent(&file, none))[4].1, "20000 bytes");
+    }
+
+    #[test]
+    fn the_settings_rows_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let chrome = || Some(PathBuf::from("/opt/google/chrome.exe"));
+        let file = parsed("[limits]\nheader_max_bytes = 20000\n");
+        let mut agent = agent(&file, chrome);
+        assert_eq!(
+            rows(&agent),
+            [
+                ("瀏覽器", "Chrome（已偵測）".to_owned()),
+                ("同時通道數", "64".to_owned()),
+                ("連線逾時", "10 秒".to_owned()),
+                ("閒置逾時", "300 秒".to_owned()),
+                ("請求標頭上限", "20000 位元組".to_owned()),
+            ]
+        );
+        agent.browser = Browser::Missing;
+        agent.limits.header_max_bytes = 16384;
+        let values: Vec<String> = rows(&agent).into_iter().map(|r| r.1).collect();
+        assert_eq!(
+            (values[0].as_str(), values[4].as_str()),
+            ("找不到", "16 KB")
+        );
+        assert_eq!(shown(None, None), "沒有設定檔位置");
     }
 
     #[test]
@@ -312,7 +351,7 @@ mod tests {
             "/etc/gateinto/gateinto.toml"
         );
         assert_eq!(shown(Some(path), None), "/etc/gateinto/gateinto.toml");
-        assert_eq!(shown(None, None), NO_PATH);
+        assert_eq!(shown(None, None), NO_PATH.english());
     }
 
     #[test]

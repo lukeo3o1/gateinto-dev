@@ -438,7 +438,7 @@ impl App {
             if page == NavPage::Settings && !self.demo {
                 match run::enabled() {
                     Ok(on) => self.sign_in = on,
-                    Err(()) => self.fail(settings::SIGN_IN_UNREAD),
+                    Err(()) => self.fail(settings::SIGN_IN_UNREAD.english()),
                 }
             }
             if page == NavPage::Device {
@@ -649,7 +649,7 @@ impl App {
         }
         match run::set(on) {
             Ok(()) => self.sign_in = on,
-            Err(()) => self.fail(settings::SIGN_IN_FAILED),
+            Err(()) => self.fail(settings::SIGN_IN_FAILED.english()),
         }
         self.retarget();
         self.invalidate();
@@ -657,7 +657,7 @@ impl App {
 
     fn choose_theme(&mut self, choice: theme::Choice) {
         if !self.demo && appearance::save(choice).is_err() {
-            self.fail(settings::THEME_FAILED);
+            self.fail(settings::THEME_FAILED.english());
         }
         self.theme = choice;
         self.follow_system();
@@ -951,7 +951,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 .is_some_and(|path| sys::open_file(hwnd, &path));
             if !opened {
                 with_app(hwnd, |app| {
-                    app.fail(settings::OPEN_FAILED);
+                    app.fail(settings::OPEN_FAILED.english());
                     app.retarget();
                     app.invalidate();
                 });

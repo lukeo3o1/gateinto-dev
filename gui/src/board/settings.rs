@@ -1,6 +1,7 @@
 use super::{Board, Painter};
 use crate::fonts::{Font, Measure};
 use crate::hit::Zone;
+use crate::i18n::tr;
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
@@ -27,9 +28,9 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let button = p.button(
         Rect::new(line.x, line.bottom() - height, line.w, height),
         content.right(),
-        OPEN,
+        tr(OPEN),
     );
-    p.outlined(button, icons::LOG, OPEN, Zone::OpenConfig);
+    p.outlined(button, icons::LOG, tr(OPEN), Zone::OpenConfig);
     let line = Rect::new(line.x, line.y, button.x - s.px(16.0) - line.x, line.h);
     let font = if page.failed { Font::Body } else { Font::Mono };
     p.text(font, page.line.clone(), line, t.muted);
@@ -102,7 +103,7 @@ impl<M: Measure> Painter<'_, M> {
         let (s, t) = (self.s, self.t);
         let (inset, gap, pad, h) = (s.px(3.0), s.px(2.0), s.px(12.0), s.px(26.0));
         let widths = Choice::ALL.map(|c| {
-            let label = c.name();
+            let label = c.label();
             let w = self.m.width(Font::Small, label);
             w.max(self.m.width(Font::SmallStrong, label)) + 2 * pad
         });
@@ -132,7 +133,7 @@ impl<M: Measure> Painter<'_, M> {
                 (Font::Small, t.muted)
             };
             let text = Rect::new(part.x + pad, part.y, part.w - 2 * pad, part.h);
-            self.text(font, choice.name(), text, ink);
+            self.text(font, choice.label(), text, ink);
             self.target(part, zone);
         }
     }
@@ -173,7 +174,7 @@ impl<M: Measure> Painter<'_, M> {
     fn agent(&mut self, card: Rect, agent: &Result<Vec<(&'static str, String)>, String>) {
         let (s, t) = (self.s, self.t);
         let heading = self.section(card, AGENT);
-        let w = self.m.width(Font::Small, FROM_CONFIG).min(heading.w);
+        let w = self.m.width(Font::Small, tr(FROM_CONFIG)).min(heading.w);
         let source = Rect::new(heading.right() - w, heading.y, w, heading.h);
         let glyph = s.px(13.0);
         let glyph = Rect::new(source.x - s.px(6.0) - glyph, heading.y, glyph, heading.h);
@@ -373,6 +374,33 @@ mod tests {
             Rect::new(949, 169, 28, 26),
             T.text
         )));
+    }
+
+    #[test]
+    fn the_settings_cards_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let drawn: Vec<String> = draw(&page(true))
+            .ops
+            .into_iter()
+            .filter_map(|op| match op {
+                Op::Text(_, text, ..) => Some(text.into_owned()),
+                _ => None,
+            })
+            .collect();
+        for expected in [
+            "開啟設定檔",
+            "應用程式",
+            "主題",
+            "系統",
+            "淺色",
+            "深色",
+            "登入時啟動",
+            "登入時開啟 Gateinto",
+            "代理程式",
+            "來自設定檔",
+        ] {
+            assert!(drawn.iter().any(|t| t == expected), "{expected}: {drawn:?}");
+        }
     }
 
     #[test]
