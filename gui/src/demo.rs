@@ -21,7 +21,6 @@ pub const TITLE: Text = Text::DemoTitle;
 pub const NOT_STARTED: Text = Text::DemoNotStarted;
 pub const NOT_REVOKED: Text = Text::DemoNotRevoked;
 pub const NOT_STOPPED: Text = Text::DemoNotStopped;
-pub const IGNORED: Text = Text::DemoIgnored;
 pub const NOT_SAVED: Text = Text::DemoNotSaved;
 pub const NOT_OPENED: Text = Text::DemoNotOpened;
 pub const CONFIG_PATH: &str = r"%APPDATA%\Gateinto\gateinto.toml";
@@ -185,11 +184,12 @@ pub fn answer(request: Request, now: u64) -> Response {
     match request {
         Request::List => Response::Ok(sessions(now).iter().map(SessionInfo::to_line).collect()),
         Request::Log { after } => Response::Ok(log(after, now)),
-        Request::Credentials(_) => Response::Ok(Vec::new()),
-        Request::Launch(_) => Response::Error(NOT_STARTED.english().to_owned()),
-        Request::Close(_) => Response::Error(NOT_REVOKED.english().to_owned()),
-        Request::Stop => Response::Error(NOT_STOPPED.english().to_owned()),
-        Request::Approve(_) | Request::Deny(_) => Response::Error(IGNORED.english().to_owned()),
+        Request::Credentials(_)
+        | Request::Launch(_)
+        | Request::Close(_)
+        | Request::Stop
+        | Request::Approve(_)
+        | Request::Deny(_) => Response::Ok(Vec::new()),
     }
 }
 
@@ -299,13 +299,6 @@ mod tests {
         SessionInfo::parse_list(&lines).unwrap()
     }
 
-    fn refused(request: Request) -> String {
-        match answer(request, NOW) {
-            Response::Error(message) => message,
-            Response::Ok(lines) => panic!("the demo agent accepted a request: {lines:?}"),
-        }
-    }
-
     #[test]
     fn only_the_demo_flag_asks_for_the_demo() {
         assert!(requested(["gateinto-gui.exe", "--demo"]));
@@ -333,18 +326,27 @@ mod tests {
     }
 
     #[test]
-    fn actions_are_refused_with_a_demo_notice() {
+    fn the_sample_agent_changes_nothing_and_says_nothing_about_it() {
         let launch = LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
-        assert_eq!(refused(Request::Launch(launch)), NOT_STARTED.english());
-        assert_eq!(
-            refused(Request::Close(SessionId::from(3))),
-            NOT_REVOKED.english()
-        );
-        assert_eq!(refused(Request::Stop), NOT_STOPPED.english());
-        let token = "0123456789abcdef0123456789abcdef".parse().unwrap();
-        assert_eq!(refused(Request::Approve(token)), IGNORED.english());
-        let token = "0123456789abcdef0123456789abcdef".parse().unwrap();
-        assert_eq!(refused(Request::Deny(token)), IGNORED.english());
+        let token = || "0123456789abcdef0123456789abcdef".parse().unwrap();
+        for request in [
+            Request::Launch(launch),
+            Request::Close(SessionId::from(3)),
+            Request::Stop,
+            Request::Approve(token()),
+            Request::Deny(token()),
+        ] {
+            assert_eq!(answer(request, NOW), Response::Ok(Vec::new()));
+        }
+        assert_eq!(listed().len(), SESSIONS.len());
+    }
+
+    #[test]
+    fn the_window_refuses_every_action_before_it_reaches_the_sample_agent() {
+        let launch = Command::Launch("office".parse().unwrap());
+        assert_eq!(refusal(&launch), Some(NOT_STARTED));
+        assert_eq!(refusal(&Command::Close(3)), Some(NOT_REVOKED));
+        assert_eq!(refusal(&Command::Stop), Some(NOT_STOPPED));
     }
 
     #[test]
@@ -459,7 +461,6 @@ mod tests {
         assert_eq!(shown(Command::Stop), Some("示範：未停止代理程式"));
         assert_eq!(shown(Command::Probe), None);
         assert_eq!(shown(Command::Credentials(3, 1)), None);
-        assert_eq!(crate::i18n::tr(IGNORED), "示範：範例代理程式會忽略這個要求");
         assert_eq!(crate::i18n::tr(NOT_SAVED), "示範：未儲存任何項目");
         assert_eq!(crate::i18n::tr(NOT_OPENED), "示範：未開啟任何項目");
         assert_eq!(crate::i18n::tr(TITLE), "Gateinto 示範");
