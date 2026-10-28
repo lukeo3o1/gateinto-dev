@@ -1,8 +1,8 @@
 # Gateinto
 
-Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows 10/11 x64. Clients on
-the same machine use it as their HTTPS proxy at `127.0.0.1:18736`; Gateinto
-by default opens a TLS 1.3 connection to a remote HTTPS forward proxy that you run and
+Gateinto is a local HTTP/1.1 `CONNECT` proxy for Windows 10/11 x64. Each
+browser session it starts listens on its own ephemeral loopback port with its
+own credentials; Gateinto by default opens a TLS 1.3 connection to a remote HTTPS forward proxy that you run and
 issues the `CONNECT` there. ALPN selects HTTP/2, sharing one connection per
 session, or HTTP/1.1 with a separate connection per tunnel. It can authenticate
 the device to that proxy with
@@ -16,7 +16,7 @@ Pre-release proof of concept, not production ready, and not externally
 security reviewed. Implemented: the double `CONNECT` relay, the device key
 (`gateinto key`), mutual TLS with the device key, selectable key exchange
 modes, `gateinto check-upstream`, a TOML configuration file with named gateway
-profiles, the device session with per-session isolation, short-lived
+profiles, per-session isolation, short-lived
 self-signed client certificates issued with the device key, and browser
 sessions with random per-session local proxy credentials (`session_credentials`),
 started from the command line or from a `gateinto://` launch URI by a per-user
@@ -84,10 +84,9 @@ be uninstalled before a release MSI is installed.
 
 | Command | Purpose |
 | --- | --- |
-| `gateinto proxy` | Run the local `CONNECT` proxy. |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
 | `gateinto session browser` | Run one browser session with `session_credentials` local proxy authentication on an ephemeral loopback port and show its credentials. |
-| `gateinto agent` | Run the per-user agent: the device session if `[device_session] gateway` is set, and the endpoint that starts browser sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
+| `gateinto agent` | Run the per-user agent: the endpoint that starts browser sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped, its profile deleted and its credentials revoked). |
 | `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
@@ -97,7 +96,7 @@ be uninstalled before a release MSI is installed.
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
 | `gateinto setup` | First run as the key's user: refuse service accounts, check the config, create or reuse the device key, report the `gateinto://` handler. See [docs/install.md](docs/install.md#first-run-gateinto-setup). |
-| `gateinto status` | Show the key provider and SPKI, gateways, the device session, the agent's sessions and the handler, without changing anything. |
+| `gateinto status` | Show the key provider and SPKI, gateways, the agent's sessions and the handler, without changing anything. |
 | `gateinto reset --purge-device-identity` | Delete the device key after the SPKI is confirmed (and with `--purge-config` the config file and the gateways added from links). Does not revoke the device at any gateway. See [docs/install.md](docs/install.md#purge-gateinto-reset---purge-device-identity). |
 
 All commands that read the configuration accept `--config <file>`; flags
@@ -105,28 +104,18 @@ override the file key by key. Without `--config` they read
 `%APPDATA%\Gateinto\gateinto.toml` if that file exists.
 `gateinto <command> --help` lists every flag with its default.
 
-### Proxy
+### Upstream options
 
-```sh
-gateinto proxy --upstream-host proxy.example.com --upstream-port 443
-```
-
-The upstream endpoint has no default and must be given, on the command line or
-in a [configuration file](#configuration-file). The proxy shows its
-[session credentials](#local-proxy-authentication) when it starts. Clients then
-use `http://127.0.0.1:18736` as their HTTP proxy with these credentials, for
-example
-`curl --proxy http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com/`.
-There is no flag that turns the credentials off; only `[device_session] auth = "none"`
-in a configuration file does, so `gateinto proxy` with flags only always
-requires the credentials.
+`gateinto check-upstream` and `gateinto session browser` take the same
+upstream, TLS and client certificate options. The upstream endpoint has no
+default and must be given, on the command line or in a
+[configuration file](#configuration-file).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--config` | none | TOML configuration file. Flags given on the command line override its values. |
-| `--listen` | `127.0.0.1:18736` | Local listen address of the device session. Must be loopback. |
-| `--unsafe-allow-non-loopback-listen` | off | Allow a non-loopback listen address. This exposes the proxy, and the upstream identity behind it, to the network. |
-| `--upstream-host` | required (flag or config) | Upstream HTTPS proxy host name or IP address. This and the following upstream, TLS and client certificate flags override the device session's [gateway](#configuration-file). |
+| `--gateway` | the only configured gateway | Gateway from the configuration file. Required when several are configured. |
+| `--upstream-host` | required (flag or config) | Upstream HTTPS proxy host name or IP address. This and the following upstream, TLS and client certificate flags override the selected [gateway](#configuration-file). |
 | `--upstream-port` | required (flag or config) | Upstream HTTPS proxy port. |
 | `--upstream-server-name` | upstream host | Name verified against the upstream certificate. |
 | `--ca-file` | Mozilla roots | PEM bundle of CAs trusted for the upstream. Replaces the default roots. |
@@ -135,15 +124,25 @@ requires the credentials.
 | `--client-cert-file` | search `CurrentUser\My` | PEM file with the client certificate, optionally followed by intermediates. |
 | `--self-signed-client-cert` | off | Issue short-lived self-signed client certificates with the device key, one per session, instead of using a file or `CurrentUser\My`. Cannot be combined with `--client-cert-file`. See [Self-signed client certificate](#self-signed-client-certificate). |
 | `--key-name` | `gateinto-device-v1` | CNG device key that signs the client authentication. It is only opened, never created. |
-| `--max-tunnels` | 64 | Concurrent connections, at most 32767; further connections get `503`. |
-| `--max-header-bytes` | 16384 | Limit for the request and the upstream response header block. |
-| `--connect-timeout-secs` | 10 | Limit for reading the request, and a separate limit for connecting, the TLS handshake and the upstream `CONNECT` reply together. |
-| `--idle-timeout-secs` | 300 | Close a tunnel after this long without traffic in either direction. |
+
+The limits come only from the `[limits]` section of the configuration file:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_concurrent_tunnels` | 64 | Concurrent connections, at most 32767; further connections get `503`. |
+| `header_max_bytes` | 16384 | Limit for the request and the upstream response header block. |
+| `connect_timeout_seconds` | 10 | Limit for reading the request, and a separate limit for connecting, the TLS handshake and the upstream `CONNECT` reply together. |
+| `idle_timeout_seconds` | 300 | Close a tunnel after this long without traffic in either direction. |
+
+### Local proxy behaviour
+
+Every session listens on a loopback address only; there is no option to
+listen on any other address.
 
 Logging goes to stderr and is filtered with `RUST_LOG` (default `info`). Tunnel
 payload is never logged; target `host:port` is logged only at `debug`.
 
-When more than `--max-tunnels` connections are open, further connections get a
+When more than `max_concurrent_tunnels` connections are open, further connections get a
 `503`. At most 64 such rejections are handled at a time; beyond that, new
 connections are closed without a response.
 
@@ -188,8 +187,8 @@ gateinto check-upstream --config gateinto.toml --target example.com:443
 gateinto check-upstream --config gateinto.toml --gateway office
 ```
 
-`check-upstream` takes the same upstream, TLS and client certificate options as
-`proxy` (or `--config`), connects once, completes the TLS handshake and prints:
+`check-upstream` takes the [upstream options](#upstream-options), connects
+once, completes the TLS handshake and prints:
 
 ```text
 upstream: proxy.example.com:443
@@ -203,10 +202,10 @@ server-certificate-subject: CN=proxy.example.com
 client-certificate: not requested
 ```
 
-`--gateway <name>` checks that gateway from the configuration file instead
-of the device session's (by default the gateway named by `[device_session]
-gateway`, or the only one configured); the upstream, TLS and client
-certificate flags then override that gateway.
+`--gateway <name>` checks that gateway from the configuration file. Without
+it the only configured gateway is checked; with several gateways configured,
+`--gateway` is required. The upstream, TLS and client certificate flags then
+override that gateway.
 
 `client-certificate` is `not requested`, `requested by the upstream, none sent`
 or `sent`. With `--self-signed-client-cert` three more lines follow it:
@@ -313,26 +312,17 @@ configuration, its own client certificate, its own upstream connections and
 its own limits (`[limits]` applies to each session separately). Sessions
 share only the device key.
 
-- `gateinto proxy` runs one session, the device session, for background
-  programs. It listens on `[device_session] listen` (or `--listen`), relays
-  through `[device_session] gateway` (or the only configured gateway, or the
-  upstream flags alone) and uses the local proxy authentication set by
-  `[device_session] auth` (`session_credentials` by default; see
-  [Local proxy authentication](#local-proxy-authentication)). It runs until
-  the process is stopped. Its log lines carry
-  `session{id=1 kind=device gateway=<name>}`.
 - `gateinto session browser` runs one browser session: its own listener on
   an ephemeral port of `127.0.0.1`, its own client certificate and upstream
   connections, and `session_credentials` local proxy authentication. It relays
-  through `--gateway` (or the device session's gateway, or the only configured
-  gateway) and accepts the same upstream flags as `check-upstream`. It prints
+  through `--gateway` (or the only configured gateway) and accepts the same
+  [upstream options](#upstream-options) as `check-upstream`. It prints
   its id, kind, gateway, `listen` address and `realm` on stdout, never a
   credential, shows the credentials in a prompt (see
   [Local proxy authentication](#local-proxy-authentication)) and runs until
   Ctrl+C. If the credentials cannot be shown it closes the session and exits
   with an error. Each start is a new session with a new realm and
-  credentials, on a new ephemeral port. `gateinto proxy` shows its
-  credentials the same way, unless `[device_session] auth = "none"`.
+  credentials, on a new ephemeral port.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or
@@ -343,8 +333,8 @@ share only the device key.
   it: a browser that cached them gets connection errors on the closed port, and
   a later session on any port has other credentials. Other sessions keep
   running.
-  `gateinto proxy` and `gateinto session browser` close their session on
-  Ctrl+C (or SIGTERM on Unix) and then exit.
+  `gateinto session browser` closes its session on Ctrl+C (or SIGTERM on
+  Unix) and then exits.
 
 ### Launching a browser session from a link
 
@@ -450,45 +440,33 @@ See [docs/architecture.md](docs/architecture.md#sessions-and-gateway-profiles).
 ### Local proxy authentication
 
 Local proxy authentication controls which local programs may use a session.
-It is not authorization by the remote upstream. A session offers `none`, or
-one or more of these methods, and accepts a client that passes any one of
-them:
+It is not authorization by the remote upstream. A session offers one or more
+of these methods and accepts a client that passes any one of them. No session
+accepts every local client, and no setting turns local proxy authentication
+off:
 
-- `none`: every local client is accepted, including processes of other users
-  on the same machine, and each of them can use the device identity toward the
-  gateway. Only the device session can use it, and only when the configuration
-  sets `[device_session] auth = "none"` explicitly.
 - `session_credentials`: when the session starts, Gateinto generates a random
   password for it; the user name is always `gateinto`. A `CONNECT` without a
   `Proxy-Authorization` header gets `407 Proxy Authentication Required` with
   `Proxy-Authenticate: Basic realm="Gateinto session <16 hex digits>", charset="UTF-8"`,
   so a browser shows its own proxy sign-in dialog. Only the issued user name
   and password are accepted; any other credential gets `407` again and never
-  becomes valid. Browser sessions always offer it, and it is the device
-  session's default.
+  becomes valid. Every session offers it.
 - `os_user` (Windows only): the client sends no credentials. Gateinto looks
   up the process that owns the client's end of the connection and accepts the
   connection only when that process runs as the Windows account that runs
   Gateinto (the user SIDs of both process tokens are compared with
   `EqualSid`). In a browser session the process must also be inside the job
   object Gateinto started that session's browser in. Browser sessions on
-  Windows offer it together with `session_credentials`; the device session
-  offers it only when configured. On the device session it keeps out other
-  users of the machine, not other programs of the same user. In a browser
-  session it also keeps out programs of the same user that run outside the
+  Windows offer it together with `session_credentials`. It keeps out other
+  users of the machine and programs of the same user that run outside the
   browser's job, but it is not a boundary against code of the same user that
   is determined to get in (see
   [docs/threat-model.md](docs/threat-model.md)).
 
-`[device_session] auth` takes one method name or a list, such as
-`auth = ["os_user", "session_credentials"]`. A list must name each method
-once and cannot be empty; `none` cannot be combined with another method.
-`os_user` outside Windows is refused when the configuration is loaded, with
-an error saying that it is only available on Windows.
-
-The removed trust-on-first-use mode `basic_tofu` is refused wherever it
-appears (`auth = "basic_tofu"` in the configuration file, `auth=basic_tofu` in
-a link, the IPC request) with an error naming `session_credentials`.
+The removed trust-on-first-use mode `basic_tofu` is refused in a link
+(`auth=basic_tofu`) and in the IPC request with an error naming
+`session_credentials`.
 
 Details of `session_credentials`:
 
@@ -508,7 +486,7 @@ Details of `session_credentials`:
   received `user:password` under a random per-session key with the tag of the
   issued one, in constant time.
 - They are shown by the command that started the session, not by the agent:
-  `gateinto open`, `gateinto session browser` and `gateinto proxy`. On
+  `gateinto open` and `gateinto session browser`. On
   Windows, browser sessions started by the agent offer `os_user` and
   `gateinto open` shows nothing, unless the browser could not be put in a job
   object; that session then accepts only session credentials and `open`
@@ -518,14 +496,9 @@ Details of `session_credentials`:
   shows, and says to enter the credentials only there and never in a
   website's sign-in page or dialog.
   `gateinto session credentials <id>` asks the agent for them over its
-  per-user IPC endpoint and shows the same prompt again. The device session
-  that `gateinto agent` runs is started by the agent itself, so nothing shows
-  its credentials at start. Instead the agent logs one `info` line saying
-  which methods the device session accepts and naming
-  `gateinto session credentials <id>`, which shows them; the line never
-  contains the credentials. Without a desktop or terminal `gateinto open`
-  prints a warning naming that command instead, and `gateinto session
-  browser` and `gateinto proxy` close their session and exit with an error,
+  per-user IPC endpoint and shows the same prompt again. Without a desktop or
+  terminal `gateinto open` prints a warning naming that command instead, and
+  `gateinto session browser` closes its session and exits with an error,
   because nobody could use it.
 - Authentication runs right after the request head is parsed, before any DNS
   lookup, routing decision, upstream connection or certificate signing. An
@@ -571,27 +544,25 @@ Details of `os_user`:
   a browser session it then asks `IsProcessInJob` about the session's job.
 - Any failure denies the connection: no matching row, a process or token
   that cannot be opened, another Windows account, a process outside the
-  job, or an error from Windows. When `session_credentials` is offered too,
-  a denied connection is treated like one without credentials: `407` with
-  the `Basic` challenge, and the session credentials work as usual. When
-  `os_user` is the only method, a denied connection gets `403 Forbidden` and
-  is closed.
+  job, or an error from Windows. A denied connection is treated like one
+  without credentials: `407` with the `Basic` challenge, and the session
+  credentials work as usual.
 - Denials do not count toward the failure limit of `session_credentials`;
   wrong session credentials count as before. The first denial of a session
   logs a warning with its reason and the fallback (`gateinto session
-  credentials <session>`, or adding `session_credentials` to `auth`); later
+  credentials <session>`); later
   denials of that session are logged at debug level. No credentials are
   involved, and nothing secret is logged.
 - Not verified: a client running elevated while Gateinto is not, under a
   real UAC split token. Gateinto may then be unable to open the client's
-  process or token; the check fails closed, so such a client may get `403`,
-  or the `Basic` challenge when `session_credentials` is offered. See
+  process or token; the check fails closed, so such a client gets the
+  `Basic` challenge. See
   [docs/compatibility.md](docs/compatibility.md#local-proxy-authentication-os_user)
   and [docs/security-model.md](docs/security-model.md#local-proxy-authentication-os_user).
 
 ## Configuration file
 
-`gateinto proxy`, `gateinto check-upstream`, `gateinto session browser`,
+`gateinto check-upstream`, `gateinto session browser`,
 `gateinto agent`, `gateinto open`, `gateinto uri register`,
 `gateinto key init`, `gateinto key info`, `gateinto setup`, `gateinto status`
 and `gateinto reset` accept `--config <path>` with a TOML file. Without it they
@@ -600,11 +571,6 @@ on Linux) if it exists, which is where an installed Gateinto finds its gateways.
 See [config.example.toml](config.example.toml).
 
 ```toml
-[device_session]
-gateway = "default"              # optional when exactly one gateway is configured
-listen = "127.0.0.1:18736"
-auth = "session_credentials"     # session_credentials (default) | os_user (Windows) | a list of both | none
-
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
 port = 443                       # required, here or with --upstream-port
@@ -633,12 +599,9 @@ header_max_bytes = 16384
 
 A gateway profile (`[gateways.<name>]`) holds everything about one upstream
 HTTPS proxy: its address, the name and CAs its certificate is verified
-against, the TLS mode and the client certificate settings. The device session
-(`[device_session]`, see [Sessions](#sessions)) names the gateway it relays
-through, its listen address and its
-[local proxy authentication](#local-proxy-authentication). Without `[device_session] gateway`, the device
-session uses the only configured gateway; with several gateways it must be
-set.
+against, the TLS mode and the client certificate settings.
+`check-upstream` and `session browser` use the only configured gateway, or
+the one named by `--gateway`; with several gateways `--gateway` is required.
 
 Every key is optional except the gateway's `host` and `port`, which must come
 from the file or the command line; there is no default upstream. Missing keys
@@ -648,29 +611,29 @@ table, the flags alone describe the upstream, as an unnamed gateway
 
 | Key | Flag that overrides it |
 | --- | --- |
-| `[device_session] gateway` | `--gateway` (`check-upstream`; `session browser` selects its own gateway with it) |
-| `[device_session] auth` | none |
-| `[device_session] listen` | `--listen` (`proxy`) |
 | `[gateways.<name>] host`, `port`, `server_name`, `ca_file` | `--upstream-host`, `--upstream-port`, `--upstream-server-name`, `--ca-file` |
 | `[gateways.<name>] tls_mode`, `client_certificate`, `client_cert_file` | `--tls-mode`, `--client-certificate`, `--client-cert-file` |
 | `[gateways.<name>] self_signed_client_cert` | `--self-signed-client-cert` (can only turn it on) |
-| `[device_key] name` | `--key-name` (`proxy`, `check-upstream`), `--name` (`key init`, `key info`) |
+| `[device_key] name` | `--key-name` (`check-upstream`, `session browser`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
 | `[gateways.<name>] portal_url`, `[browser] executable` | none |
-| `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | `--max-tunnels`, `--connect-timeout-secs`, `--idle-timeout-secs`, `--max-header-bytes` (`proxy`) |
+| `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | none |
 
 Rules:
 
 - Command line flags override the file, key by key. Gateway flags apply only
-  to the gateway in use: the device session's for `proxy`, the one selected
-  with `--gateway` for `check-upstream`. Other gateways are not changed.
+  to the gateway in use, the one selected with `--gateway` or the only
+  configured one. Other gateways are not changed.
 - Unknown sections and keys are errors, as are values of the wrong type, zero
   limits, ports or timeouts, an empty key name and an invalid gateway name.
   The earlier `[listen]`, `[upstream]` and `[tls]` sections are unknown
   sections. Errors name the file and, where it applies, the gateway, line and
-  key; a `[device_session] gateway` or `--gateway` that names no configured
-  gateway is an error that lists the configured ones.
+  key; a `--gateway` that names no configured gateway is an error that lists
+  the configured ones.
+- The removed `[device_session]` section is refused with an error naming it
+  and saying to delete it and start browser sessions with `gateinto open` or
+  a `gateinto://` link.
 - `self_signed_client_cert = true` and a `client_cert_file` cannot be
   combined, wherever each comes from.
 - `portal_url` must be an `https://` URL with a host and no user information,
@@ -680,11 +643,10 @@ Rules:
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
-- A non-loopback `[device_session] listen` address still requires the
-  `--unsafe-allow-non-loopback-listen` command line flag. There is no key for
-  it, so a configuration file alone can never expose the proxy to the network.
+- Sessions always listen on a loopback address. There is no key or flag
+  that changes this.
 - `[device_key] preferred` and `software_fallback_on_first_create` only affect
-  `key init`; the proxy only opens the key named by `[device_key] name`.
+  `key init`; sessions only open the key named by `[device_key] name`.
 
 ## TLS modes
 
@@ -758,8 +720,8 @@ SHA-256).
 ### Self-signed client certificate
 
 With `--self-signed-client-cert` (or `[gateways.<name>] self_signed_client_cert = true`),
-`check-upstream` issues a new certificate at startup, and `proxy` issues a new
-one for each session when it starts (and one at startup to check the key):
+`check-upstream` issues a new certificate at startup, and every session
+issues a new one for itself when it starts:
 `CN=Gateinto device` as subject and issuer, a random 16-byte serial number,
 valid from 5 minutes before issuance until 24 hours after it, critical basic
 constraints without CA, critical key usage `digitalSignature`, extended key
@@ -830,17 +792,13 @@ and residual risks. [docs/security-boundaries.md](docs/security-boundaries.md)
 maps each security acceptance item to the code that enforces it and the tests
 that prove it.
 
-Every session, including the device session by default, accepts only the
-random credentials issued to it and shown to the user, which keeps out other
+Every session listens on loopback only and accepts only the random
+credentials issued to it and shown to the user, which keeps out other
 programs that do not know them but not malware running as the same user.
-On the device session `os_user` accepts every program of the Windows user
-running Gateinto and keeps out other users of the machine only; browser
-sessions also require the client to be inside the browser's job object. A
-device session with `[device_session] auth = "none"` has no authentication:
-any local process, including those of other users on the same machine, can
-connect to it and use the agent, including its device identity, to reach the
-remote proxy. Set it only on a machine where you accept that, and do not run
-Gateinto on shared hosts you do not trust.
+On Windows a browser session also accepts, without credentials, a program of
+the Windows user running Gateinto that is inside the browser's job object.
+There is no shared local proxy and no session without authentication. Do not
+run Gateinto on shared hosts you do not trust.
 
 Any website can open a `gateinto://` link. With the handler registered, such a
 link can at most make the agent start a browser session for a known gateway

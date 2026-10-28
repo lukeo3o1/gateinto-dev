@@ -21,20 +21,14 @@ meant to protect, against whom, and what it does not protect.
 
 ## Trust boundaries
 
-- **Local processes and the loopback listener.** Every session uses
-  `session_credentials` by default: it accepts only the user name `gateinto`
-  with the random password generated for it, so it excludes local processes
-  that do not know the password. On Windows browser sessions also offer
-  `os_user`, and a device session can be configured to: it accepts a
-  connection whose owning process runs as the Windows account running
-  Gateinto, and in a browser session only from inside the job object the
-  browser was started in. On the device session it excludes other users of
-  the machine but admits every program of the same user without a prompt.
-  A device session whose configuration sets
-  `[device_session] auth = "none"` explicitly has no authentication: any
-  process on the machine that can open a TCP connection to `127.0.0.1`,
-  including processes of other users, can use it and the device identity
-  behind it. The credentials are shown to the user, who types them into
+- **Local processes and the loopback listener.** Every session requires
+  `session_credentials`: it accepts only the user name `gateinto` with the
+  random password generated for it, so it excludes local processes that do
+  not know the password. On Windows browser sessions also offer `os_user`: it
+  accepts a connection whose owning process runs as the Windows account
+  running Gateinto and is inside the job object the browser was started in.
+  There is no shared session and no setting that removes authentication.
+  The credentials are shown to the user, who types them into
   the browser's proxy sign-in dialog; a program running as the user can get
   them from the agent or from memory.
 - **Websites and the launch URI.** Any web page, e-mail or document can open
@@ -72,7 +66,7 @@ meant to protect, against whom, and what it does not protect.
 
 | Threat | Mitigation |
 | --- | --- |
-| Other machines on the network use the proxy and the identity behind it. | The listen address must be loopback. A non-loopback address is refused unless `--unsafe-allow-non-loopback-listen` is given on the command line; the configuration file has no key that allows it. |
+| Other machines on the network use the proxy and the identity behind it. | The listen address must be loopback. A non-loopback address is always refused; no flag or configuration key allows one. |
 | A configuration file with a typo silently runs with defaults. | Unknown sections and keys are errors (`deny_unknown_fields`), and there is no default upstream. |
 | Gateinto reads or alters tunnel content. | No MITM: Gateinto never terminates the client's inner TLS and does not inspect tunnel bytes. |
 | Malformed or hostile requests cause request smuggling, desynchronisation or resource exhaustion. | Strict parser: only `CONNECT host:port HTTP/1.1` with exactly one `Host` header; rejects bare LF, CR inside lines, NUL, obs-fold, control characters, `Transfer-Encoding` and a non-zero `Content-Length`. Header block size limit, request and upstream timeouts, idle timeout, and a limit on concurrent connections. |
@@ -95,14 +89,10 @@ meant to protect, against whom, and what it does not protect.
 | An installer running as `SYSTEM` or another account creates a device key the user cannot use, or a second identity. | The MSI is per user and has no custom action that touches a key. `gateinto setup` refuses LocalSystem, LocalService and NetworkService and reuses an existing key. The agent and `open` never create a key. |
 | An uninstall, a silent uninstall or a script destroys the device identity. | Uninstall keeps the key and the config; they are not MSI components. `reset --purge-device-identity` requires the SPKI prefix, refuses without a terminal unless `--confirm-spki` matches, and deletes only the named Gateinto key after rechecking its SPKI. |
 | Uninstall cleanup deletes the user's own browser data. | The uninstaller only runs `gateinto stop --remove-stale-profiles`, which deletes Gateinto-marked profile directories under `%LOCALAPPDATA%\Gateinto\profiles`, never the user's Chrome or Edge profiles. |
-| The device identity is silently replaced, for example by an attacker or a bug that recreates the key. | `key init` reuses an existing key in either provider and creates one only when none exists; creating a key that already exists fails instead of overwriting it; the proxy and `key info` only open the key, never create it. |
+| The device identity is silently replaced, for example by an attacker or a bug that recreates the key. | `key init` reuses an existing key in either provider and creates one only when none exists; creating a key that already exists fails instead of overwriting it; sessions, `check-upstream` and `key info` only open the key, never create it. |
 
 ## Residual risks
 
-- With an explicit `[device_session] auth = "none"`, any local process,
-  including other users' processes, can use the device session's loopback
-  proxy and the device identity behind it. Do not set it, or run Gateinto, on
-  shared hosts you do not trust.
 - With `session_credentials`, a local process that does not know the
   credentials can still make the session answer `429` to everyone, the
   browser included, for up to a minute at a time by sending wrong ones.
@@ -111,8 +101,6 @@ meant to protect, against whom, and what it does not protect.
 - A website can draw a dialog or page that looks like the browser's proxy
   sign-in and ask for the session credentials. The prompt warns against it
   and names the proxy address, but nothing stops a user from typing them in.
-- `os_user` on the device session admits every program running as the same
-  user without a prompt.
 - The job check of browser sessions is not a boundary against code of the
   same user: such code can inject into the browser, or duplicate the job
   handle out of Gateinto's process and assign its own processes to the job,
@@ -142,9 +130,6 @@ meant to protect, against whom, and what it does not protect.
   rights. TPM storage reduces this to misuse while the attacker has access.
 - `--ca-file` replaces the default roots entirely; a wrong or compromised
   bundle makes Gateinto trust the wrong upstream.
-- `--unsafe-allow-non-loopback-listen` exposes the proxy to the network: with
-  `session_credentials` the Basic credentials cross it in cleartext, and with
-  `auth = "none"` it has no authentication at all.
 - The upstream proxy learns every target `host:port` and can block, log or
   redirect tunnels.
 - Traffic is linkable to the device by the upstream proxy when mutual TLS is
@@ -159,7 +144,7 @@ meant to protect, against whom, and what it does not protect.
   direct connections, which bypass gateway policy. DNS/IP matching is a
   heuristic: a service on another IP may go direct, and a shared gateway IP
   may send unrelated traffic through it. Only that new session is affected;
-  the stored gateway, device session and other browser sessions are unchanged.
+  the stored gateway and other browser sessions are unchanged.
 - A website can open up to 5 browser windows a minute (4 at a time) on
   configured gateways' portals, each with a proxy credential prompt that a
   user might mistake for a real login.

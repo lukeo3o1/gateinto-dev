@@ -5,7 +5,7 @@ machine, for example a VM without a TPM. It takes the shortest path; the
 [README](../README.md) has the full reference.
 
 ```text
-browser / curl.exe --CONNECT--> gateinto (127.0.0.1:18736) --TLS 1.3--> your HTTPS proxy --> target
+browser / curl.exe --CONNECT--> gateinto session (127.0.0.1:<ephemeral port>) --TLS 1.3--> your HTTPS proxy --> target
 ```
 
 You need:
@@ -237,58 +237,67 @@ handshake, certificate verification or `CONNECT` fails. The most common
 failure is a certificate the default roots do not trust (`invalid peer
 certificate`); see [Private CA certificates](troubleshooting.md#private-ca-certificates).
 
-## 5. Run the proxy
+## 5. Start a session
 
 ```powershell
-gateinto proxy --config C:\gateinto\gateinto.toml
+gateinto session browser --config C:\gateinto\gateinto.toml
 ```
 
-Logs go to stderr:
+It prints the session on stdout:
+
+```text
+session: 1
+kind: browser
+gateway: default
+listen: 127.0.0.1:50123
+realm: Gateinto session <16 hex digits>
+Press Ctrl-C to close the session.
+```
+
+`listen` is an ephemeral loopback port, new for every session. Warnings go to
+stderr, for example:
 
 ```text
 2026-10-17T02:36:36.630936Z  WARN gateinto::identity::client_cert: no client certificate for device key "gateinto-device-v1" (spki-sha256: ...): none was given with --client-cert-file and CurrentUser\My has no currently valid certificate for this key that allows client authentication; mTLS is not configured and upstream connections do not authenticate this device
-2026-10-17T02:36:36.631175Z  INFO session{id=1 kind=device gateway=default}: gateinto::proxy: listening local_addr=127.0.0.1:18736
 ```
 
 The warning is expected without a client certificate: the default
 `client_certificate = "optional"` mode continues without mTLS. Set
 `client_certificate = "off"` in the gateway table to silence it, or `"required"` once you have a
-certificate (step 7). Stop the proxy with Ctrl+C.
+certificate (step 7). Close the session with Ctrl+C.
 
-At start the proxy also shows its session credentials: the user name is always
-`gateinto` and the password is generated for this run. Clients must send them;
-a `CONNECT` without them gets `407`. See
+The session also shows its credentials: the user name is always `gateinto`
+and the password is generated for this session. Clients must send them; a
+`CONNECT` without them gets `407`. See
 [Local proxy authentication](../README.md#local-proxy-authentication). If the
-credentials cannot be shown, the proxy exits with an error that says they
+credentials cannot be shown, the command exits with an error that says they
 were not shown; start it from a terminal or a desktop.
 
 ## 6. Use the tunnel
 
-In a second PowerShell window:
+In a second PowerShell window, with the port from `listen`:
 
 ```powershell
-curl.exe -x http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com
+curl.exe -x http://127.0.0.1:50123 --proxy-user gateinto:<password> https://example.com
 ```
 
-This prints the HTML of `example.com`, and the proxy logs
-`INFO session{id=1 kind=device gateway=default}:connection{peer=127.0.0.1:<port>}: gateinto::proxy: tunnel established`.
-Use `curl.exe` (not the PowerShell `curl` alias). Add `-v` to see the proxy's
-`CONNECT` status; [troubleshooting.md](troubleshooting.md#status-codes)
-explains each status.
+This prints the HTML of `example.com`. Use `curl.exe` (not the PowerShell
+`curl` alias). Add `-v` to see the session's `CONNECT` status;
+[troubleshooting.md](troubleshooting.md#status-codes) explains each status.
+Run with `$env:RUST_LOG = "info"` to also see the `listening` and
+`tunnel established` log lines.
 
-To send a browser through it, configure `127.0.0.1` port `18736` as the HTTP
-proxy for HTTPS traffic, either in the browser's own proxy settings or in
-Windows under Settings, Network & Internet, Proxy, Manual proxy setup, and
-enter the credentials when the browser asks for proxy sign-in. Only
-`CONNECT` is supported: plain `http://` URLs sent to the proxy get `405`, so
-use HTTPS sites or exclude plain HTTP where the client allows it.
+For a browser, use `gateinto open` or a `gateinto://` link instead: the agent
+starts a session and opens Chrome or Edge with an isolated profile already
+pointed at it (see [Launching a browser session from a
+link](../README.md#launching-a-browser-session-from-a-link)). Only `CONNECT`
+is supported: plain `http://` URLs sent to a session get `405`.
 
 Security caveat: the credentials keep out local programs that do not know
-them, but not malware running as your user. `[device_session] auth = "none"`
-removes them: any local process, including processes of other users on the
-same machine, can then use the tunnel and the device identity behind it. Keep
-the default and the loopback address, and do not run Gateinto on shared
-machines you do not trust. See the [security model](security-model.md).
+them, but not malware running as your user. Every session listens on
+loopback only and always requires its credentials; there is no setting that
+removes them. Do not run Gateinto on shared machines you do not trust. See
+the [security model](security-model.md).
 
 ## 7. Optional: mutual TLS with the device key
 
