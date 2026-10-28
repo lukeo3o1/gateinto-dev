@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
 
-use crate::i18n::{Text, fill, localize, tr};
+use crate::i18n::{Choice as Language, Text, fill, localize, tr};
 use crate::sessions::browser_title;
 use crate::theme::Choice;
 
@@ -15,6 +15,8 @@ pub const OPEN_FAILED: Text = Text::OpenConfigFailed;
 pub const APP: Text = Text::App;
 pub const THEME: Text = Text::Theme;
 pub const THEME_FAILED: Text = Text::ThemeFailed;
+pub const LANGUAGE: Text = Text::LanguageRow;
+pub const LANGUAGE_FAILED: Text = Text::LanguageFailed;
 pub const SIGN_IN: Text = Text::SignIn;
 pub const SIGN_IN_NOTE: Text = Text::SignInNote;
 pub const SIGN_IN_UNREAD: Text = Text::SignInUnread;
@@ -30,6 +32,7 @@ pub struct Page {
     pub agent: Result<Vec<(&'static str, String)>, String>,
     pub sign_in: bool,
     pub theme: Choice,
+    pub language: Language,
 }
 
 pub fn page(
@@ -38,6 +41,7 @@ pub fn page(
     failure: Option<&str>,
     sign_in: bool,
     theme: Choice,
+    language: Language,
 ) -> Page {
     Page {
         line: failure.map_or(path.into(), localize).into_owned(),
@@ -48,6 +52,7 @@ pub fn page(
         },
         sign_in,
         theme,
+        language,
     }
 }
 
@@ -179,6 +184,7 @@ mod tests {
     use std::path::MAIN_SEPARATOR_STR;
 
     use super::*;
+    use crate::i18n::Choice as Language;
 
     #[test]
     fn the_sign_in_value_is_not_the_installer_agent_value() {
@@ -205,6 +211,7 @@ mod tests {
             None,
             true,
             Choice::Dark,
+            Language::Chinese,
         );
         assert_eq!(
             page,
@@ -214,6 +221,7 @@ mod tests {
                 agent: Ok(rows(&Agent::default())),
                 sign_in: true,
                 theme: Choice::Dark,
+                language: Language::Chinese,
             }
         );
     }
@@ -227,6 +235,7 @@ mod tests {
                 Some(OPEN_FAILED.english()),
                 false,
                 Choice::System,
+                Language::System,
             )
         };
         let page = failed();
@@ -241,7 +250,7 @@ mod tests {
     #[test]
     fn a_config_error_shows_its_first_line_instead_of_values() {
         let error = Err("config file c.toml: TOML parse error\n  |\n1 | x".to_owned());
-        let page = page("p", &error, None, false, Choice::System);
+        let page = page("p", &error, None, false, Choice::System, Language::System);
         assert_eq!(
             page.agent,
             Err("config file c.toml: TOML parse error".to_owned())

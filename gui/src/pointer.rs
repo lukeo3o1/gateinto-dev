@@ -21,6 +21,7 @@ pub enum Action {
     OpenConfig,
     ToggleSignIn,
     Theme(Choice),
+    Language(crate::i18n::Choice),
     CopyId,
     CopyLog,
     Filter(Filter),
@@ -68,6 +69,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::OpenConfig => Some(Action::OpenConfig),
         Zone::SignIn => Some(Action::ToggleSignIn),
         Zone::Theme(choice) => Some(Action::Theme(choice)),
+        Zone::Language(choice) => Some(Action::Language(choice)),
         Zone::CopyId => Some(Action::CopyId),
         Zone::CopyLog => Some(Action::CopyLog),
         Zone::LogFilter(filter) => Some(Action::Filter(filter)),
@@ -417,5 +419,17 @@ mod tests {
         assert!(p.moved(zone));
         assert!(p.down(zone));
         assert_eq!(p.up(zone), Some(Action::Theme(Choice::Dark)));
+    }
+
+    #[test]
+    fn a_language_part_chooses_its_language() {
+        let mut p = Pointer::default();
+        let zone = Zone::Language(crate::i18n::Choice::Chinese);
+        assert!(p.moved(zone));
+        assert!(p.down(zone));
+        assert_eq!(
+            p.up(zone),
+            Some(Action::Language(crate::i18n::Choice::Chinese))
+        );
     }
 }

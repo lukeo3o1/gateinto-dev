@@ -22,11 +22,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetCursorPos,
     GetWindowLongPtrW, HICON, HWND_TOPMOST, IDC_ARROW, IsWindowVisible, LoadCursorW, MF_STRING,
     MSGFLT_ALLOW, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE,
-    SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP,
-    WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NULL, WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WA_INACTIVE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NULL, WM_PAINT, WNDCLASSEXW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::d2d::Graphics;
@@ -106,6 +106,16 @@ impl Panel {
         }
         if let Ok(fonts) = Fonts::new(gfx.dwrite(), s) {
             self.s = s;
+            self.fonts = Some(fonts);
+        }
+    }
+
+    pub(super) fn reshape(&mut self, gfx: &Graphics) {
+        let title = super::wide(tr(tray::FLYOUT_TITLE));
+        unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
+        if self.fonts.is_some()
+            && let Ok(fonts) = Fonts::new(gfx.dwrite(), self.s)
+        {
             self.fonts = Some(fonts);
         }
     }

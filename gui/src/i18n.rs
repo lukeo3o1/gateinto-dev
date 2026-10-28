@@ -55,6 +55,13 @@ impl Choice {
     }
 }
 
+pub fn names(list: &[u16]) -> Vec<String> {
+    list.split(|&unit| unit == 0)
+        .take_while(|name| !name.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
 pub fn from_tags<S: AsRef<str>>(tags: &[S]) -> Option<Language> {
     let tag = tags.first()?.as_ref().to_ascii_lowercase();
     let mut parts = tag.split('-');
@@ -303,6 +310,8 @@ table! {
     NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";
     NoWindowClass => "Gateinto could not register its window class.", "Gateinto 無法登錄視窗類別。";
     NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
+    LanguageRow => "Language", "語言";
+    LanguageFailed => "Could not save the language setting", "無法儲存語言設定";
 }
 
 impl Text {
@@ -502,5 +511,14 @@ mod tests {
         for id in [0x0409, 0x0804, 0x1004, 0x0411, 0] {
             assert_eq!(from_langid(id), Language::English, "{id:#x}");
         }
+    }
+
+    #[test]
+    fn a_preferred_language_list_reads_up_to_its_first_empty_name() {
+        let list: Vec<u16> = "zh-TW\0en-US\0\0".encode_utf16().collect();
+        assert_eq!(names(&list), ["zh-TW", "en-US"]);
+        assert_eq!(from_tags(&names(&list)), Some(Language::Chinese));
+        assert!(names(&[0, 0]).is_empty());
+        assert_eq!(from_tags(&names(&[])), None);
     }
 }

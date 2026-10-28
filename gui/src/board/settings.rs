@@ -1,14 +1,16 @@
 use super::{Board, Painter};
 use crate::fonts::{Font, Measure};
 use crate::hit::Zone;
-use crate::i18n::tr;
+use crate::i18n::{Choice as Language, Text, tr};
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
 use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
-use crate::settings::{AGENT, APP, FROM_CONFIG, OPEN, Page, SIGN_IN, SIGN_IN_NOTE, THEME};
+use crate::settings::{
+    AGENT, APP, FROM_CONFIG, LANGUAGE, OPEN, Page, SIGN_IN, SIGN_IN_NOTE, THEME,
+};
 use crate::theme::{Choice, Theme};
 
 pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Measure) -> Board {
@@ -39,7 +41,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let top = line.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
     let rows = page.agent.as_ref().map_or(1, Vec::len) as i32;
-    let app_h = card_height(s, 2);
+    let app_h = card_height(s, 3);
     let agent_h = card_height(s, rows);
     let offset = p.scroll(view, app_h + gap + agent_h);
     let app = Rect::new(content.x, top - offset, content.w, app_h);
@@ -85,8 +87,12 @@ impl<M: Measure> Painter<'_, M> {
         let (s, t) = (self.s, self.t);
         let heading = self.section(card, APP);
         let row = self.line(heading, 0);
-        self.theme(row, page.theme);
+        let themes = Choice::ALL.map(|c| (c.label(), Zone::Theme(c), c == page.theme));
+        self.segments(row, THEME, &themes);
         let row = self.line(heading, 1);
+        let languages = Language::ALL.map(|c| (c.label(), Zone::Language(c), c == page.language));
+        self.segments(row, LANGUAGE, &languages);
+        let row = self.line(heading, 2);
         let (w, h) = (s.px(40.0), s.px(22.0));
         let switch = Rect::new(row.right() - w, row.y + (row.h - h) / 2, w, h);
         let x = switch.x - s.px(16.0);
@@ -99,26 +105,27 @@ impl<M: Measure> Painter<'_, M> {
         self.switch(switch, page.sign_in);
     }
 
-    fn theme(&mut self, row: Rect, chosen: Choice) {
+    fn segments(&mut self, row: Rect, title: Text, parts: &[(&'static str, Zone, bool)]) {
         let (s, t) = (self.s, self.t);
         let (inset, gap, pad, h) = (s.px(3.0), s.px(2.0), s.px(12.0), s.px(26.0));
-        let widths = Choice::ALL.map(|c| {
-            let label = c.label();
-            let w = self.m.width(Font::Small, label);
-            w.max(self.m.width(Font::SmallStrong, label)) + 2 * pad
-        });
+        let widths: Vec<i32> = parts
+            .iter()
+            .map(|&(label, ..)| {
+                let w = self.m.width(Font::Small, label);
+                w.max(self.m.width(Font::SmallStrong, label)) + 2 * pad
+            })
+            .collect();
         let inner: i32 = widths.iter().sum::<i32>() + gap * (widths.len() as i32 - 1);
         let (gw, gh) = (inner + 2 * inset, h + 2 * inset);
         let group = Rect::new(row.right() - gw, row.y + (row.h - gh) / 2, gw, gh);
         let label = Rect::new(row.x, row.y, group.x - s.px(16.0) - row.x, row.h);
-        self.text(Font::Body, THEME, label, t.text);
+        self.text(Font::Body, title, label, t.text);
         self.push(Op::Round(group, s.pxf(7.0), t.tile));
         let mut x = group.x + inset;
-        for (choice, w) in Choice::ALL.into_iter().zip(widths) {
+        for (&(name, zone, chosen), w) in parts.iter().zip(widths) {
             let part = Rect::new(x, group.y + inset, w, h);
             x = part.right() + gap;
-            let zone = Zone::Theme(choice);
-            let fill = match (choice == chosen, self.v.pointer.look(zone)) {
+            let fill = match (chosen, self.v.pointer.look(zone)) {
                 (true, _) => Some(t.card),
                 (false, Look::Rest) => None,
                 (false, Look::Hover) => Some(t.caption_pressed),
@@ -127,13 +134,13 @@ impl<M: Measure> Painter<'_, M> {
             if let Some(fill) = fill {
                 self.push(Op::Round(part, s.pxf(5.0), fill));
             }
-            let (font, ink) = if choice == chosen {
+            let (font, ink) = if chosen {
                 (Font::SmallStrong, t.text)
             } else {
                 (Font::Small, t.muted)
             };
             let text = Rect::new(part.x + pad, part.y, part.w - 2 * pad, part.h);
-            self.text(font, choice.label(), text, ink);
+            self.text(font, name, text, ink);
             self.target(part, zone);
         }
     }
@@ -201,22 +208,26 @@ mod tests {
     use crate::board::tests::{Chars, inside, layout, text};
     use crate::fonts::Font;
     use crate::hit::Zone;
+    use crate::i18n::Choice as Language;
     use crate::icons;
     use crate::layout::Rect;
     use crate::nav::{Nav, Page as NavPage};
     use crate::scene::{Op, stroke};
     use crate::scroll::Pane;
-    use crate::settings::{AGENT, APP, FROM_CONFIG, OPEN, SIGN_IN, SIGN_IN_NOTE, THEME};
+    use crate::settings::{AGENT, APP, FROM_CONFIG, LANGUAGE, OPEN, SIGN_IN, SIGN_IN_NOTE, THEME};
     use crate::theme::Choice;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
     const BUTTON: Rect = Rect::new(848, 66, 164, 32);
-    const SWITCH: Rect = Rect::new(952, 215, 40, 22);
-    const AGENT_Y: i32 = 270;
+    const SWITCH: Rect = Rect::new(952, 259, 40, 22);
+    const AGENT_Y: i32 = 314;
     const SYSTEM: Rect = Rect::new(808, 169, 66, 26);
     const LIGHT: Rect = Rect::new(876, 169, 59, 26);
     const DARK: Rect = Rect::new(937, 169, 52, 26);
+    const BY_SYSTEM: Rect = Rect::new(794, 213, 66, 26);
+    const ENGLISH: Rect = Rect::new(862, 213, 73, 26);
+    const CHINESE: Rect = Rect::new(937, 213, 52, 26);
 
     fn page(sign_in: bool) -> Page {
         Page {
@@ -231,6 +242,7 @@ mod tests {
             ]),
             sign_in,
             theme: Choice::System,
+            language: Language::System,
         }
     }
 
@@ -275,7 +287,7 @@ mod tests {
                     T.muted
                 ),
                 Op::Clip(Rect::new(248, 112, 764, 544)),
-                Op::Round(Rect::new(248, 112, 764, 144), 12.0, T.border),
+                Op::Round(Rect::new(248, 112, 764, 188), 12.0, T.border),
             ]
         );
     }
@@ -315,14 +327,14 @@ mod tests {
     }
 
     #[test]
-    fn the_app_card_has_the_theme_row_then_the_sign_in_switch_on() {
+    fn the_app_card_has_the_theme_and_language_rows_then_the_sign_in_switch_on() {
         let ops = draw(&page(true)).ops;
-        let card = inside(&ops, Rect::new(248, 112, 764, 144));
+        let card = inside(&ops, Rect::new(248, 112, 764, 188));
         assert_eq!(
             card[..5],
             [
-                Op::Round(Rect::new(248, 112, 764, 144), 12.0, T.border),
-                Op::Round(Rect::new(249, 113, 762, 142), 11.0, T.card),
+                Op::Round(Rect::new(248, 112, 764, 188), 12.0, T.border),
+                Op::Round(Rect::new(249, 113, 762, 186), 11.0, T.card),
                 text(Font::Heading, APP, Rect::new(268, 116, 724, 44), T.text),
                 Op::Fill(Rect::new(268, 160, 724, 1), T.border),
                 text(Font::Body, THEME, Rect::new(268, 160, 521, 44), T.text),
@@ -331,16 +343,16 @@ mod tests {
         assert_eq!(
             card[card.len() - 5..],
             [
-                Op::Fill(Rect::new(268, 204, 724, 1), T.border),
-                text(Font::Body, SIGN_IN, Rect::new(268, 208, 668, 18), T.text),
+                Op::Fill(Rect::new(268, 248, 724, 1), T.border),
+                text(Font::Body, SIGN_IN, Rect::new(268, 252, 668, 18), T.text),
                 text(
                     Font::Small,
                     SIGN_IN_NOTE,
-                    Rect::new(268, 228, 668, 16),
+                    Rect::new(268, 272, 668, 16),
                     T.muted
                 ),
                 Op::Round(SWITCH, 11.0, T.button),
-                Op::Round(Rect::new(973, 218, 16, 16), 8.0, T.button_glyph),
+                Op::Round(Rect::new(973, 262, 16, 16), 8.0, T.button_glyph),
             ]
         );
     }
@@ -394,6 +406,9 @@ mod tests {
             "系統",
             "淺色",
             "深色",
+            "語言",
+            "English",
+            "繁體中文",
             "登入時啟動",
             "登入時開啟 Gateinto",
             "代理程式",
@@ -421,7 +436,7 @@ mod tests {
             inside(&ops, SWITCH),
             [
                 Op::Round(SWITCH, 11.0, T.border),
-                Op::Round(Rect::new(955, 218, 16, 16), 8.0, T.knob),
+                Op::Round(Rect::new(955, 262, 16, 16), 8.0, T.knob),
             ]
         );
     }
@@ -435,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn the_button_the_theme_parts_and_the_switch_are_targets() {
+    fn the_button_the_theme_and_language_parts_and_the_switch_are_targets() {
         assert_eq!(
             draw(&page(false)).targets,
             [
@@ -443,6 +458,9 @@ mod tests {
                 (SYSTEM, Zone::Theme(Choice::System)),
                 (LIGHT, Zone::Theme(Choice::Light)),
                 (DARK, Zone::Theme(Choice::Dark)),
+                (BY_SYSTEM, Zone::Language(Language::System)),
+                (ENGLISH, Zone::Language(Language::English)),
+                (CHINESE, Zone::Language(Language::Chinese)),
                 (SWITCH, Zone::SignIn),
             ]
         );
@@ -539,7 +557,7 @@ mod tests {
             ]
         );
         assert!(ops.contains(&Op::Round(Rect::new(248, y, 764, 100), 12.0, T.border)));
-        assert_eq!(draw(&p).pane.map(|p| p.content), Some(258));
+        assert_eq!(draw(&p).pane.map(|p| p.content), Some(302));
     }
 
     #[test]
@@ -547,7 +565,7 @@ mod tests {
         let b = draw(&page(true));
         assert_eq!(
             b.pane,
-            Some(Pane::new(Rect::new(248, 112, 764, 544), 434, 0))
+            Some(Pane::new(Rect::new(248, 112, 764, 544), 478, 0))
         );
         let short = Layout::new(1040, 400, S, true);
         let mut v = view();
@@ -557,9 +575,37 @@ mod tests {
         assert_eq!(pane.offset, 50);
         assert!(
             b.ops
-                .contains(&Op::Round(Rect::new(248, 62, 764, 144), 12.0, T.border))
+                .contains(&Op::Round(Rect::new(248, 62, 764, 188), 12.0, T.border))
         );
         assert_eq!(b.targets[0], (BUTTON, Zone::OpenConfig));
-        assert_eq!(b.targets[4], (Rect::new(952, 165, 40, 22), Zone::SignIn));
+        assert_eq!(b.targets[7], (Rect::new(952, 209, 40, 22), Zone::SignIn));
+    }
+
+    #[test]
+    fn the_language_control_marks_the_chosen_part_and_keeps_its_names() {
+        let mut p = page(true);
+        p.language = Language::Chinese;
+        let ops = draw(&p).ops;
+        assert_eq!(
+            inside(&ops, Rect::new(791, 210, 201, 32)),
+            [
+                Op::Round(Rect::new(791, 210, 201, 32), 7.0, T.tile),
+                text(Font::Small, "System", Rect::new(806, 213, 42, 26), T.muted),
+                text(Font::Small, "English", Rect::new(874, 213, 49, 26), T.muted),
+                Op::Round(CHINESE, 5.0, T.card),
+                text(
+                    Font::SmallStrong,
+                    "繁體中文",
+                    Rect::new(949, 213, 28, 26),
+                    T.text
+                ),
+            ]
+        );
+        assert!(ops.contains(&text(
+            Font::Body,
+            LANGUAGE,
+            Rect::new(268, 204, 507, 44),
+            T.text
+        )));
     }
 }

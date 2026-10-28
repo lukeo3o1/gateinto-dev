@@ -51,6 +51,7 @@ fn group(zone: Zone) -> Option<u8> {
         Zone::LogFilter(_) => Some(1),
         Zone::Theme(_) => Some(2),
         Zone::Entry(_) => Some(3),
+        Zone::Language(_) => Some(4),
         _ => None,
     }
 }
@@ -487,5 +488,24 @@ mod tests {
         assert_eq!(outline(&at(Zone::CopyId, cut, false), s, &t), clipped(cut));
         let below = Rect::new(10, 201, 20, 20);
         assert_eq!(outline(&at(Zone::Revoke(1), below, true), s, &t), []);
+    }
+
+    #[test]
+    fn language_parts_are_their_own_arrow_group() {
+        use crate::i18n::Choice as Language;
+        let mut stops = page();
+        stops.extend(Language::ALL.map(|c| stop(Zone::Language(c))));
+        let mut f = Focus::default();
+        f.clicked(Zone::Language(Language::English), &stops);
+        assert_eq!(
+            f.arrow(&stops, true),
+            Some(Zone::Language(Language::Chinese))
+        );
+        assert_eq!(
+            f.arrow(&stops, true),
+            Some(Zone::Language(Language::System))
+        );
+        f.clicked(Zone::Theme(Choice::Dark), &stops);
+        assert_eq!(f.arrow(&stops, true), Some(Zone::Theme(Choice::System)));
     }
 }

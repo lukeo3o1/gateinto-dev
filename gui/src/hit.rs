@@ -25,6 +25,7 @@ pub enum Zone {
     OpenConfig,
     SignIn,
     Theme(Choice),
+    Language(crate::i18n::Choice),
     CopyId,
     CopyLog,
     LogFilter(Filter),

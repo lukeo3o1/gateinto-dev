@@ -33,8 +33,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_HIDE,
     SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED,
-    WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
     WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
@@ -55,7 +55,7 @@ use crate::focus::{self, Focus, Stop};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
-use crate::i18n::{Text, localize, tr};
+use crate::i18n::{self, Text, localize, tr};
 use crate::layout::{Layout, Rect};
 use crate::log::{self, Filter};
 use crate::logo;
@@ -145,6 +145,7 @@ struct App {
     config: String,
     sign_in: bool,
     theme: theme::Choice,
+    language: i18n::Choice,
     dark: bool,
     build: u32,
     copied: bool,
@@ -172,10 +173,10 @@ impl App {
         let fonts = Fonts::new(gfx.dwrite(), s).ok()?;
         let layout = measure(hwnd, s, frame);
         let demo = demo::requested(std::env::args_os());
-        let theme = if demo {
-            theme::Choice::default()
+        let (theme, language) = if demo {
+            (theme::Choice::default(), i18n::Choice::default())
         } else {
-            appearance::choice()
+            (appearance::choice(), appearance::language())
         };
         Some(Self {
             hwnd,
@@ -202,6 +203,7 @@ impl App {
             config: config_line(),
             sign_in: false,
             theme,
+            language,
             dark: theme.dark(appearance::light_apps()),
             build: sys::os_build(),
             copied: false,
@@ -246,6 +248,7 @@ impl App {
                     failure,
                     self.sign_in,
                     self.theme,
+                    self.language,
                 );
                 board::settings::board(l, s, t, v, &page, m)
             }
@@ -665,6 +668,23 @@ impl App {
         self.follow_system();
     }
 
+    fn choose_language(&mut self, choice: i18n::Choice) {
+        if !self.demo && appearance::save_language(choice).is_err() {
+            self.fail(settings::LANGUAGE_FAILED.english());
+        }
+        self.language = choice;
+        i18n::set(choice.language(appearance::system_language()));
+        if let Ok(fonts) = Fonts::new(self.gfx.dwrite(), self.s) {
+            self.fonts = fonts;
+        }
+        self.panel.reshape(&self.gfx);
+        self.config = config_line();
+        let title = wide(window_title(self.demo));
+        unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
+        self.relayout();
+        self.refresh_flyout();
+    }
+
     fn follow_system(&mut self) {
         self.dark = self.theme.dark(appearance::light_apps());
         self.retarget();
@@ -846,6 +866,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::OpenConfig
         | Zone::SignIn
         | Zone::Theme(_)
+        | Zone::Language(_)
         | Zone::CopyId
         | Zone::CopyLog
         | Zone::LogFilter(_)
@@ -967,6 +988,12 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         Some(Action::Theme(choice)) => {
             with_app(hwnd, |app| app.choose_theme(choice));
             apply_theme(hwnd);
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::Language(choice)) => {
+            with_app(hwnd, |app| app.choose_language(choice));
+            tray::refresh_icon(hwnd);
             rehover(hwnd);
             return;
         }
@@ -1604,6 +1631,13 @@ fn fail(message: Text) {
 
 pub fn run() {
     sys::enable_dpi_awareness();
+    let demo = demo::requested(std::env::args_os());
+    let choice = if demo {
+        i18n::Choice::default()
+    } else {
+        appearance::language()
+    };
+    i18n::set(choice.language(appearance::system_language()));
     let Ok(gfx) = Graphics::new() else {
         fail(Text::NoRendering);
         return;
@@ -1612,7 +1646,7 @@ pub fn run() {
     let instance = unsafe { GetModuleHandleW(null()) };
     let system_dpi = sys::window_dpi(null_mut());
     let class = wide("GateintoWindow");
-    let title = wide(window_title(demo::requested(std::env::args_os())));
+    let title = wide(window_title(demo));
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(window_proc),
