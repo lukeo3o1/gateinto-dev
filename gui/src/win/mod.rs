@@ -621,7 +621,7 @@ impl App {
             }
             unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) };
         } else {
-            self.fail(credentials::COPY_FAILED);
+            self.fail(credentials::COPY_FAILED.english());
         }
         self.retarget();
         self.invalidate();

@@ -6,6 +6,7 @@ use crate::credentials::{Field, HINT, Page, SUBTITLE};
 use crate::fonts::{Font, Measure};
 use crate::gateways::Details;
 use crate::hit::Zone;
+use crate::i18n::{Text, tr};
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
 use crate::pointer::Look;
@@ -14,11 +15,11 @@ use crate::scene::{Op, View};
 use crate::theme::{Rgb, Theme};
 
 pub const SHADE: f32 = 0.32;
-const TITLE: &str = "Session credentials";
-const REVOKE: &str = "Revoke session";
-const CLOSE: &str = "Close";
-const ADD: &str = "Add";
-const CANCEL: &str = "Cancel";
+const TITLE: Text = Text::CredentialsTitle;
+const REVOKE: Text = Text::RevokeSession;
+const CLOSE: Text = Text::Close;
+const ADD: Text = Text::Add;
+const CANCEL: Text = Text::Cancel;
 
 fn wide(c: char) -> bool {
     matches!(c, '\u{2E80}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF00}'..='\u{FFEF}')
@@ -155,7 +156,7 @@ pub fn credentials(
     m: &impl Measure,
 ) {
     let w = width(l, s);
-    let subtitle = wrap(m, Font::Body, SUBTITLE, w);
+    let subtitle = wrap(m, Font::Body, tr(SUBTITLE), w);
     let pad = s.px(10.0);
     let glyph = s.px(16.0);
     let warning = wrap(m, Font::Small, &page.warning, w - 3 * pad - glyph);
@@ -200,7 +201,7 @@ pub fn credentials(
 
     p.text(
         Font::BodyStrong,
-        "Username",
+        Text::Username,
         Rect::new(x, y, w, label),
         t.text,
     );
@@ -218,7 +219,7 @@ pub fn credentials(
 
     p.text(
         Font::BodyStrong,
-        "Password",
+        Text::Password,
         Rect::new(x, y, w, label),
         t.text,
     );
@@ -295,7 +296,7 @@ pub fn gateway(
     }
     modal.close(board, |p, footer| {
         let close = p.close_rect(footer);
-        p.primary(close, CLOSE, Zone::CloseDialog);
+        p.primary(close, tr(CLOSE), Zone::CloseDialog);
     });
 }
 
@@ -374,11 +375,11 @@ pub fn add(
         }
     }
     modal.close(board, |p, footer| {
-        let confirm = p.footer_rect(footer, footer.right() - s.px(24.0), ADD);
-        let cancel = p.footer_rect(footer, confirm.x - s.px(8.0), CANCEL);
-        p.plain(cancel, CANCEL, Zone::CloseDialog);
+        let confirm = p.footer_rect(footer, footer.right() - s.px(24.0), tr(ADD));
+        let cancel = p.footer_rect(footer, confirm.x - s.px(8.0), tr(CANCEL));
+        p.plain(cancel, tr(CANCEL), Zone::CloseDialog);
         if sheet.ready {
-            p.primary(confirm, ADD, Zone::ConfirmAdd);
+            p.primary(confirm, tr(ADD), Zone::ConfirmAdd);
         } else {
             p.push(Op::Round(confirm, s.pxf(6.0), t.tile));
             let text = Rect::new(
@@ -387,7 +388,7 @@ pub fn add(
                 confirm.w - s.px(28.0),
                 confirm.h,
             );
-            p.text(Font::BodyStrong, ADD, text, t.eyes_idle);
+            p.text(Font::BodyStrong, tr(ADD), text, t.eyes_idle);
         }
     });
 }
@@ -444,7 +445,7 @@ impl<M: Measure> Painter<'_, M> {
     }
 
     fn copy_button(&mut self, button: Rect, field: Field, copied: bool, enabled: bool) {
-        let label = if copied { "Copied" } else { "Copy" };
+        let label = tr(if copied { Text::Copied } else { Text::Copy });
         if enabled {
             self.outlined(button, icons::COPY, label, Zone::CopyCredential(field));
             return;
@@ -479,7 +480,7 @@ impl<M: Measure> Painter<'_, M> {
     }
 
     fn close_rect(&self, footer: Rect) -> Rect {
-        self.footer_rect(footer, footer.right() - self.s.px(24.0), CLOSE)
+        self.footer_rect(footer, footer.right() - self.s.px(24.0), tr(CLOSE))
     }
 
     fn plain(&mut self, button: Rect, label: &'static str, zone: Zone) {
@@ -529,10 +530,10 @@ impl<M: Measure> Painter<'_, M> {
     fn footer_buttons(&mut self, footer: Rect, revoke: Zone, close: Zone) {
         let s = self.s;
         let close_r = self.close_rect(footer);
-        let w = 2 * s.px(14.0) + s.px(24.0) + self.m.width(Font::BodyStrong, REVOKE);
+        let w = 2 * s.px(14.0) + s.px(24.0) + self.m.width(Font::BodyStrong, tr(REVOKE));
         let r = Rect::new(close_r.x - s.px(8.0) - w, close_r.y, w, close_r.h);
-        self.outlined(r, icons::POWER, REVOKE, revoke);
-        self.primary(close_r, CLOSE, close);
+        self.outlined(r, icons::POWER, tr(REVOKE), revoke);
+        self.primary(close_r, tr(CLOSE), close);
     }
 }
 
@@ -684,6 +685,27 @@ mod tests {
     }
 
     #[test]
+    fn the_credentials_dialog_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let mut copied = page(MASK, None);
+        copied.copied = Some(Field::Password);
+        let all = texts(&draw(&copied)).join("\n");
+        for part in [
+            "工作階段憑證",
+            "瀏覽器因此要求 Proxy 登入",
+            "使用者名稱",
+            "密碼",
+            "請完整輸入，包括連字號。",
+            "撤銷工作階段",
+            "關閉",
+            "複製",
+            "已複製",
+        ] {
+            assert!(all.contains(part), "{part}: {all}");
+        }
+    }
+
+    #[test]
     fn a_copied_field_says_so() {
         let mut copied = page(MASK, None);
         copied.copied = Some(Field::Password);
@@ -694,7 +716,7 @@ mod tests {
 
     #[test]
     fn without_credentials_only_the_note_and_the_footer_remain() {
-        for note in [WAITING, UNAVAILABLE] {
+        for note in [WAITING.english(), UNAVAILABLE.english()] {
             let board = draw(&page("", Some(note)));
             assert!(texts(&board).iter().any(|t| t == note));
             assert_eq!(

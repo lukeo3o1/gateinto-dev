@@ -245,6 +245,18 @@ table! {
     HeaderLimit => "Request header limit", "請求標頭上限";
     Light => "Light", "淺色";
     Dark => "Dark", "深色";
+    CredentialsTitle => "Session credentials", "工作階段憑證";
+    Close => "Close", "關閉";
+    Add => "Add", "新增";
+    Cancel => "Cancel", "取消";
+    Username => "Username", "使用者名稱";
+    AskingCredentials => "Asking the agent for this session's credentials…", "正在向代理程式索取此工作階段的憑證…";
+    CredentialsUnavailable => "The agent did not hand out this session's credentials. Close this and try again.", "代理程式未提供此工作階段的憑證。請關閉後再試一次。";
+    CredentialsSubtitle => "Shown when this PC cannot check the OS user, so the browser asks for a proxy sign-in.", "這台電腦無法確認作業系統使用者、瀏覽器因此要求 Proxy 登入時顯示。";
+    ClipboardFailed => "Could not copy to the clipboard", "無法複製到剪貼簿";
+    HyphenHint => "Type it exactly, including the hyphens.", "請完整輸入，包括連字號。";
+    DialogNames => "sign-in dialog names {0}", "登入對話框會顯示 {0}";
+    CredentialsWarning => "Enter these only in the browser's proxy sign-in dialog that names {0}. Never enter them in a website's sign-in page or dialog.", "只能在顯示 {0} 的瀏覽器 Proxy 登入對話框中輸入。切勿在網站的登入頁面或對話框中輸入。";
 }
 
 impl Text {

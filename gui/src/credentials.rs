@@ -5,16 +5,15 @@ use gateinto::proxy::SessionCredentials;
 use zeroize::Zeroize;
 
 use crate::agent::AgentState;
+use crate::i18n::{Text, fill, tr};
 use crate::sessions;
 
 pub const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}";
-pub const WAITING: &str = "Asking the agent for this session's credentials\u{2026}";
-pub const UNAVAILABLE: &str =
-    "The agent did not hand out this session's credentials. Close this and try again.";
-pub const SUBTITLE: &str =
-    "Shown when this PC cannot check the OS user, so the browser asks for a proxy sign-in.";
-pub const COPY_FAILED: &str = "Could not copy to the clipboard";
-pub const HINT: &str = "Type it exactly, including the hyphens.";
+pub const WAITING: Text = Text::AskingCredentials;
+pub const UNAVAILABLE: Text = Text::CredentialsUnavailable;
+pub const SUBTITLE: Text = Text::CredentialsSubtitle;
+pub const COPY_FAILED: Text = Text::ClipboardFailed;
+pub const HINT: Text = Text::HyphenHint;
 
 #[derive(Debug)]
 pub struct Reveal {
@@ -192,7 +191,7 @@ impl Dialog {
             }
             detail.push(row.address);
         }
-        detail.push(format!("sign-in dialog names {listen}"));
+        detail.push(fill(Text::DialogNames, &[&listen]));
         let (username, password, note) = match &self.secret {
             Secret::Shown(credentials) => (
                 credentials.username(),
@@ -203,8 +202,8 @@ impl Dialog {
                 },
                 None,
             ),
-            Secret::Waiting => ("", "", Some(WAITING)),
-            Secret::Failed => ("", "", Some(UNAVAILABLE)),
+            Secret::Waiting => ("", "", Some(tr(WAITING))),
+            Secret::Failed => ("", "", Some(tr(UNAVAILABLE))),
         };
         Page {
             session,
@@ -215,10 +214,7 @@ impl Dialog {
             ready: note.is_none(),
             copied: self.copied,
             note,
-            warning: format!(
-                "Enter these only in the browser's proxy sign-in dialog that names {listen}. \
-                 Never enter them in a website's sign-in page or dialog."
-            ),
+            warning: fill(Text::CredentialsWarning, &[&listen]),
         }
     }
 }
@@ -329,7 +325,7 @@ mod tests {
             page.detail,
             "office · proxy.example.com · sign-in dialog names 127.0.0.1:49210"
         );
-        assert_eq!(page.note, Some(WAITING));
+        assert_eq!(page.note, Some(WAITING.english()));
         assert!(!page.ready);
         assert_eq!(page.username, "");
         assert_eq!(page.password, "");
@@ -341,6 +337,26 @@ mod tests {
         assert_eq!(dialog.secret(Field::Password), None);
         dialog.toggle();
         assert!(!dialog.page(&running()).revealed);
+    }
+
+    #[test]
+    fn the_credentials_page_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let dialog = Dialog::open(&running(), 3, 1).unwrap();
+        let page = dialog.page(&running());
+        assert_eq!(
+            page.detail,
+            "office · proxy.example.com · 登入對話框會顯示 127.0.0.1:49210"
+        );
+        assert_eq!(
+            page.note,
+            Some("正在向代理程式索取此工作階段的憑證\u{2026}")
+        );
+        assert_eq!(
+            page.warning,
+            "只能在顯示 127.0.0.1:49210 的瀏覽器 Proxy 登入對話框中輸入。\
+             切勿在網站的登入頁面或對話框中輸入。"
+        );
     }
 
     #[test]
@@ -376,11 +392,11 @@ mod tests {
         let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
         dialog.receive(reveal(2, 1, Ok(issued())));
         assert_eq!(dialog.secret(Field::Password), None);
-        assert_eq!(dialog.page(&running()).note, Some(WAITING));
+        assert_eq!(dialog.page(&running()).note, Some(WAITING.english()));
         dialog.receive(reveal(3, 1, Err(RequestError::NotRunning)));
         dialog.receive(reveal(3, 1, Ok(issued())));
         assert_eq!(dialog.secret(Field::Password), None);
-        assert_eq!(dialog.page(&running()).note, Some(UNAVAILABLE));
+        assert_eq!(dialog.page(&running()).note, Some(UNAVAILABLE.english()));
     }
 
     #[test]
@@ -388,7 +404,7 @@ mod tests {
         let mut dialog = Dialog::open(&running(), 3, 2).unwrap();
         assert!(!deliver(Some(&mut dialog), reveal(3, 1, Ok(issued()))));
         assert_eq!(dialog.secret(Field::Password), None);
-        assert_eq!(dialog.page(&running()).note, Some(WAITING));
+        assert_eq!(dialog.page(&running()).note, Some(WAITING.english()));
         assert!(deliver(Some(&mut dialog), reveal(3, 2, Ok(issued()))));
         assert_eq!(dialog.secret(Field::Password), Some(PASSWORD));
     }
@@ -407,9 +423,9 @@ mod tests {
             Ok(Response::Error(format!("bad password: {PASSWORD}"))),
         ));
         let page = dialog.page(&running());
-        assert_eq!(page.note, Some(UNAVAILABLE));
+        assert_eq!(page.note, Some(UNAVAILABLE.english()));
         assert!(!page.ready);
-        assert!(!UNAVAILABLE.contains(PASSWORD));
+        assert!(!UNAVAILABLE.english().contains(PASSWORD));
     }
 
     #[test]
