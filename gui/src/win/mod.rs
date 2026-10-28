@@ -706,7 +706,7 @@ impl App {
         if device::copy(self.hwnd, &text) {
             self.copied = unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) } != 0;
         } else {
-            self.fail(log::COPY_FAILED);
+            self.fail(log::COPY_FAILED.english());
         }
         self.retarget();
         self.invalidate();

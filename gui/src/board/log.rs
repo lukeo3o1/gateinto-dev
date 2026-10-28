@@ -5,6 +5,7 @@ use gateinto::ipc::LogLevel;
 use super::{Board, Painter, inset};
 use crate::fonts::{Font, Measure};
 use crate::hit::Zone;
+use crate::i18n::{Text, tr};
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::log::{Body, Filter, Page, Row};
@@ -14,7 +15,7 @@ use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::theme::{Rgb, Theme};
 
-const FILTERS: [(Filter, &str); 2] = [(Filter::All, "All"), (Filter::Warnings, "Warnings")];
+const FILTERS: [(Filter, Text); 2] = [(Filter::All, Text::All), (Filter::Warnings, Text::Warnings)];
 const WIDEST_TIME: &str = "00:00:00";
 const WIDEST_LEVEL: &str = "ERROR";
 
@@ -118,6 +119,7 @@ impl<M: Measure> Painter<'_, M> {
         let pad = s.px(14.0);
         let mut x = tools.x;
         let parts = FILTERS.map(|(filter, label)| {
+            let label = tr(label);
             let w = self
                 .m
                 .width(Font::Body, label)
@@ -211,13 +213,31 @@ mod tests {
     }
 
     fn page(body: &Body) -> Page<'_> {
-        let copy = matches!(body, Body::Rows(_)).then_some(COPY);
+        let copy = matches!(body, Body::Rows(_)).then_some(COPY.english());
         Page {
-            subtitle: SUBTITLE.to_owned(),
+            subtitle: SUBTITLE.english().to_owned(),
             alert: false,
             filter: Filter::All,
             copy,
             body,
+        }
+    }
+
+    #[test]
+    fn the_filters_speak_chinese_and_agent_messages_stay_as_sent() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let body = Body::Rows(rows());
+        let b = draw_with(&page(&body), &view());
+        let texts: Vec<String> = b
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, s, ..) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in ["全部", "警告", "gateway refused the tunnel", "ERROR"] {
+            assert!(texts.iter().any(|t| t == want), "{want} in {texts:?}");
         }
     }
 
@@ -361,7 +381,7 @@ mod tests {
         );
         let body = Body::Rows(rows());
         let mut p = page(&body);
-        p.copy = Some(COPIED);
+        p.copy = Some(COPIED.english());
         let copied = draw(&p);
         assert_eq!(
             copied.targets.last(),
@@ -470,7 +490,7 @@ mod tests {
 
     #[test]
     fn without_lines_the_page_says_why_and_offers_nothing_to_copy() {
-        let b = draw(&page(&Body::Empty(STOPPED.to_owned())));
+        let b = draw(&page(&Body::Empty(STOPPED.english().to_owned())));
         let card = Rect::new(248, 158, 764, 56);
         assert_eq!(
             inside(&b.ops, card),

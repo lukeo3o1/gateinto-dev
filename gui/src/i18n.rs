@@ -211,6 +211,13 @@ table! {
     Algorithm => "Algorithm", "演算法";
     Agent => "Agent", "代理程式";
     SignedInAs => "Signed in as {0}", "登入身分：{0}";
+    AgentOlder => "The running agent is older than this version of Gateinto and cannot show its log. Restart it to see its messages here.", "執行中的代理程式比這個版本的 Gateinto 舊，無法顯示記錄。請重新啟動代理程式以在此查看訊息。";
+    NoMessages => "No messages yet", "尚無訊息";
+    NoWarnings => "No warnings", "沒有警告";
+    LogSubtitle => "Messages from the running agent. Passwords and page contents are never logged.", "來自執行中代理程式的訊息。密碼與網頁內容一律不會記錄。";
+    Copy => "Copy", "複製";
+    CopyLogFailed => "Could not copy the log", "無法複製記錄";
+    Warnings => "Warnings", "警告";
 }
 
 impl Text {

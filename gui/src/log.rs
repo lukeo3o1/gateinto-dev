@@ -3,17 +3,17 @@ use std::collections::VecDeque;
 use gateinto::ipc::{self, LogEvent, LogLevel, LogPage, Request, RequestError, Response};
 
 use crate::agent::AgentState;
+use crate::i18n::{Text, localize, tr};
 
 pub const KEPT: usize = 500;
-pub const STOPPED: &str = "The agent is not running";
-pub const OLDER: &str = "The running agent is older than this version of Gateinto and cannot show its log. Restart it to see its messages here.";
-pub const NOTHING: &str = "No messages yet";
-pub const NO_WARNINGS: &str = "No warnings";
-pub const SUBTITLE: &str =
-    "Messages from the running agent. Passwords and page contents are never logged.";
-pub const COPY: &str = "Copy";
-pub const COPIED: &str = "Copied";
-pub const COPY_FAILED: &str = "Could not copy the log";
+pub const STOPPED: Text = Text::AgentStopped;
+pub const OLDER: Text = Text::AgentOlder;
+pub const NOTHING: Text = Text::NoMessages;
+pub const NO_WARNINGS: Text = Text::NoWarnings;
+pub const SUBTITLE: Text = Text::LogSubtitle;
+pub const COPY: Text = Text::Copy;
+pub const COPIED: Text = Text::Copied;
+pub const COPY_FAILED: Text = Text::CopyLogFailed;
 
 const DAY: u64 = 86_400;
 
@@ -61,7 +61,7 @@ impl Journal {
             Ok(Response::Ok(lines)) => lines,
             Ok(Response::Error(message)) if message == ipc::INVALID_REQUEST => {
                 *self = Self {
-                    problem: Some(OLDER.to_owned()),
+                    problem: Some(OLDER.english().to_owned()),
                     older: true,
                     ..Self::default()
                 };
@@ -182,7 +182,7 @@ pub enum Body {
 
 pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) -> Body {
     match state {
-        AgentState::Stopped => return Body::Empty(STOPPED.to_owned()),
+        AgentState::Stopped => return Body::Empty(tr(STOPPED).to_owned()),
         AgentState::Unreachable(error) => return Body::Empty(error.clone()),
         AgentState::Running(_) => {}
     }
@@ -203,9 +203,9 @@ pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) 
         return Body::Rows(rows);
     }
     Body::Empty(match (journal.problem(), filter) {
-        (Some(problem), _) => problem.to_owned(),
-        (None, Filter::All) => NOTHING.to_owned(),
-        (None, Filter::Warnings) => NO_WARNINGS.to_owned(),
+        (Some(problem), _) => localize(problem).into_owned(),
+        (None, Filter::All) => tr(NOTHING).to_owned(),
+        (None, Filter::Warnings) => tr(NO_WARNINGS).to_owned(),
     })
 }
 
@@ -228,10 +228,10 @@ pub fn page<'a>(
     let rows = matches!(body, Body::Rows(_));
     let alert = failure.or(journal.problem().filter(|_| rows));
     Page {
-        subtitle: alert.unwrap_or(SUBTITLE).to_owned(),
+        subtitle: alert.map_or(tr(SUBTITLE).into(), localize).into_owned(),
         alert: alert.is_some(),
         filter,
-        copy: rows.then_some(if copied { COPIED } else { COPY }),
+        copy: rows.then(|| tr(if copied { COPIED } else { COPY })),
         body,
     }
 }
@@ -387,7 +387,7 @@ mod tests {
         assert!(!journal.absorb(Ok(Response::Error("invalid request".to_owned()))));
         assert_eq!(journal.request(), None);
         assert!(journal.events().is_empty());
-        assert_eq!(journal.problem(), Some(OLDER));
+        assert_eq!(journal.problem(), Some(OLDER.english()));
         journal.reopen();
         assert_eq!(journal.request(), Some(Request::Log { after: 0 }));
         assert_eq!(journal.problem(), None);
@@ -534,7 +534,10 @@ mod tests {
                 Body::Empty(text) => text,
                 Body::Rows(rows) => panic!("unexpected rows {rows:?}"),
             };
-        assert_eq!(empty(&AgentState::Stopped, &mixed(), Filter::All), STOPPED);
+        assert_eq!(
+            empty(&AgentState::Stopped, &mixed(), Filter::All),
+            tr(STOPPED)
+        );
         assert_eq!(
             empty(
                 &AgentState::Unreachable("no pipe".to_owned()),
@@ -545,11 +548,62 @@ mod tests {
         );
         let mut older = mixed();
         older.absorb(Ok(Response::Error("invalid request".to_owned())));
-        assert_eq!(empty(&running(), &older, Filter::All), OLDER);
-        assert_eq!(empty(&running(), &Journal::default(), Filter::All), NOTHING);
+        assert_eq!(empty(&running(), &older, Filter::All), tr(OLDER));
+        assert_eq!(
+            empty(&running(), &Journal::default(), Filter::All),
+            tr(NOTHING)
+        );
         let mut quiet = Journal::default();
         quiet.absorb(answer(7, 1, [1]));
-        assert_eq!(empty(&running(), &quiet, Filter::Warnings), NO_WARNINGS);
+        assert_eq!(empty(&running(), &quiet, Filter::Warnings), tr(NO_WARNINGS));
+    }
+
+    #[test]
+    fn the_log_page_speaks_chinese_but_agent_text_does_not() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let empty =
+            |state: &AgentState, journal: &Journal, filter| match body(state, journal, filter, 0) {
+                Body::Empty(text) => text,
+                Body::Rows(rows) => panic!("unexpected rows {rows:?}"),
+            };
+        assert_eq!(
+            empty(&AgentState::Stopped, &mixed(), Filter::All),
+            "代理程式未執行"
+        );
+        let mut older = mixed();
+        older.absorb(Ok(Response::Error("invalid request".to_owned())));
+        assert_eq!(
+            empty(&running(), &older, Filter::All),
+            "執行中的代理程式比這個版本的 Gateinto 舊，無法顯示記錄。請重新啟動代理程式以在此查看訊息。"
+        );
+        assert_eq!(
+            empty(&running(), &Journal::default(), Filter::All),
+            "尚無訊息"
+        );
+        let mut quiet = Journal::default();
+        quiet.absorb(answer(7, 1, [1]));
+        assert_eq!(empty(&running(), &quiet, Filter::Warnings), "沒有警告");
+        let shown_body = body(&running(), &mixed(), Filter::All, 0);
+        let shown = page(&mixed(), &shown_body, Filter::All, None, false);
+        assert_eq!(
+            shown.subtitle,
+            "來自執行中代理程式的訊息。密碼與網頁內容一律不會記錄。"
+        );
+        assert_eq!(shown.copy, Some("複製"));
+        assert_eq!(
+            page(&mixed(), &shown_body, Filter::All, None, true).copy,
+            Some("已複製")
+        );
+        let Body::Rows(rows) = shown_body else {
+            panic!("no rows")
+        };
+        let journal = mixed();
+        let original: Vec<&str> = journal
+            .shown(Filter::All)
+            .map(|e| e.message.as_str())
+            .collect();
+        let messages: Vec<&str> = rows.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(messages, original);
     }
 
     #[test]
@@ -566,14 +620,14 @@ mod tests {
     fn the_page_explains_what_is_logged_and_offers_to_copy_rows() {
         let shown_body = body(&running(), &mixed(), Filter::All, 0);
         let shown = page(&mixed(), &shown_body, Filter::All, None, false);
-        assert_eq!(shown.subtitle, SUBTITLE);
+        assert_eq!(shown.subtitle, tr(SUBTITLE));
         assert!(!shown.alert);
         assert_eq!(shown.filter, Filter::All);
-        assert_eq!(shown.copy, Some(COPY));
+        assert_eq!(shown.copy, Some(tr(COPY)));
         assert!(matches!(shown.body, Body::Rows(rows) if rows.len() == 3));
         let copied_body = body(&running(), &mixed(), Filter::Warnings, 0);
         let copied = page(&mixed(), &copied_body, Filter::Warnings, None, true);
-        assert_eq!(copied.copy, Some(COPIED));
+        assert_eq!(copied.copy, Some(tr(COPIED)));
         assert_eq!(copied.filter, Filter::Warnings);
     }
 
@@ -582,8 +636,8 @@ mod tests {
         let shown_body = body(&AgentState::Stopped, &mixed(), Filter::All, 0);
         let shown = page(&mixed(), &shown_body, Filter::All, None, true);
         assert_eq!(shown.copy, None);
-        assert_eq!(*shown.body, Body::Empty(STOPPED.to_owned()));
-        assert_eq!(shown.subtitle, SUBTITLE);
+        assert_eq!(*shown.body, Body::Empty(tr(STOPPED).to_owned()));
+        assert_eq!(shown.subtitle, tr(SUBTITLE));
     }
 
     #[test]
@@ -611,7 +665,7 @@ mod tests {
         };
         let shown_body = body(&running(), &older, Filter::All, 0);
         let shown = page(&older, &shown_body, Filter::All, None, false);
-        assert_eq!(shown.subtitle, SUBTITLE);
-        assert_eq!(*shown.body, Body::Empty(OLDER.to_owned()));
+        assert_eq!(shown.subtitle, tr(SUBTITLE));
+        assert_eq!(*shown.body, Body::Empty(tr(OLDER).to_owned()));
     }
 }

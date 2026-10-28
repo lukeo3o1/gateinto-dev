@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(asked, 1);
         assert_eq!(
             updates.last().unwrap().log.problem(),
-            Some(crate::log::OLDER)
+            Some(crate::log::OLDER.english())
         );
     }
 
