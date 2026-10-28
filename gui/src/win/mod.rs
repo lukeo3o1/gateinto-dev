@@ -20,7 +20,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
-    TrackMouseEvent, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
+    TrackMouseEvent, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_TAB,
+    VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GWLP_USERDATA,
@@ -54,7 +55,7 @@ use crate::hit::{Zone, hit};
 use crate::layout::{Layout, Rect};
 use crate::log::{self, Filter};
 use crate::menu::{self, Choice, Entry, Popup, Wheel};
-use crate::nav::Page as NavPage;
+use crate::nav::{self, Page as NavPage};
 use crate::pointer::{self, Action};
 use crate::scale::Scale;
 use crate::scene::{Op, View, scene};
@@ -1275,16 +1276,11 @@ fn on_key(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
     if let Some(forward) = forward {
         return with_app(hwnd, |app| app.arrow(forward))?.then_some(0);
     }
-    if held(VK_CONTROL) {
-        let page = key
-            .checked_sub(u16::from(b'1'))
-            .and_then(|i| NavPage::ALL.get(usize::from(i)).copied());
-        if let Some(page) = page {
-            if !with_app(hwnd, |app| app.modal())? {
-                perform(hwnd, Some(Action::Select(page)));
-            }
-            return Some(0);
+    if let Some(page) = nav::shortcut(key, held(VK_CONTROL), held(VK_MENU)) {
+        if !with_app(hwnd, |app| app.modal())? {
+            perform(hwnd, Some(Action::Select(page)));
         }
+        return Some(0);
     }
     if wp != WPARAM::from(VK_ESCAPE) {
         return None;

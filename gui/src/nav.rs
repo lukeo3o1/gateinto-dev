@@ -39,6 +39,15 @@ impl Page {
     }
 }
 
+// AltGr arrives as Ctrl+Alt, so a held Alt keeps AltGr digits out.
+pub fn shortcut(key: u16, ctrl: bool, alt: bool) -> Option<Page> {
+    if !ctrl || alt {
+        return None;
+    }
+    let i = key.checked_sub(u16::from(b'1'))?;
+    Page::ALL.get(usize::from(i)).copied()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Nav {
     selected: Page,
@@ -59,6 +68,16 @@ impl Nav {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_digits_pick_pages_but_altgr_digits_do_not() {
+        assert_eq!(shortcut(u16::from(b'1'), true, false), Some(Page::Sessions));
+        assert_eq!(shortcut(u16::from(b'5'), true, false), Some(Page::Settings));
+        assert_eq!(shortcut(u16::from(b'6'), true, false), None);
+        assert_eq!(shortcut(u16::from(b'0'), true, false), None);
+        assert_eq!(shortcut(u16::from(b'2'), false, false), None);
+        assert_eq!(shortcut(u16::from(b'2'), true, true), None);
+    }
 
     #[test]
     fn rail_order_matches_the_board() {
