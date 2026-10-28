@@ -23,7 +23,6 @@ pub struct Key {
     pub backend: Backend,
     pub name: KeyName,
     pub fingerprint: String,
-    pub duplicate: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,11 +39,10 @@ pub fn key<S: KeyStore>(store: Result<S, UnsupportedPlatform>, name: &KeyName) -
         Err(error) => return KeyState::Unsupported(error.to_string()),
     };
     match device_key::info(&store, name) {
-        Ok((key, duplicate)) => KeyState::Present(Key {
+        Ok((key, _)) => KeyState::Present(Key {
             backend: key.backend,
             name: name.clone(),
             fingerprint: key.fingerprint(),
-            duplicate: duplicate.is_some(),
         }),
         Err(KeyError::NotFound(name)) => KeyState::Missing(name),
         Err(error) => KeyState::Failed(error.to_string()),
@@ -69,7 +67,7 @@ pub struct Probe {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyCard {
     pub title: &'static str,
-    pub note: String,
+    pub note: Option<String>,
     pub alert: bool,
     pub rows: Vec<(&'static str, String)>,
     pub copy: Option<&'static str>,
@@ -98,10 +96,6 @@ pub struct Page {
     pub gateways: Result<Vec<Gateway>, String>,
 }
 
-const PROVIDER_NOTE_TPM: &str = "Kept in this PC's TPM; the private key is hardware-protected";
-const PROVIDER_NOTE_SOFTWARE: &str =
-    "Kept in software; not protected against copying by an administrator or malware";
-const DUPLICATE: &str = "A software key has the same name; gateways see the TPM key shown here";
 const MISSING: &str = "No device key yet. Run `gateinto setup` to create one.";
 const READING: &str = "Reading the device key\u{2026}";
 const HARDWARE_KEY: &str = "Hardware key";
@@ -186,7 +180,7 @@ fn storage(backend: Backend) -> String {
 fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
     let card = |note: String, alert, rows| KeyCard {
         title: DEVICE_KEY,
-        note,
+        note: Some(note),
         alert,
         rows,
         copy: None,
@@ -195,15 +189,10 @@ fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
         None => card(READING.to_owned(), false, Vec::new()),
         Some(KeyState::Present(key)) => {
             let tpm = key.backend == Backend::Tpm;
-            let note = match (tpm, key.duplicate) {
-                (_, true) => DUPLICATE,
-                (true, false) => PROVIDER_NOTE_TPM,
-                (false, false) => PROVIDER_NOTE_SOFTWARE,
-            };
             KeyCard {
                 title: if tpm { HARDWARE_KEY } else { DEVICE_KEY },
-                note: note.to_owned(),
-                alert: key.duplicate || !tpm,
+                note: None,
+                alert: false,
                 rows: vec![
                     (STORAGE, storage(key.backend)),
                     ("Algorithm", device_key::ALGORITHM.to_owned()),
@@ -364,12 +353,11 @@ mod tests {
         Ok(Store { tpm, software })
     }
 
-    fn present(backend: Backend, fingerprint: String, duplicate: bool) -> KeyState {
+    fn present(backend: Backend, fingerprint: String) -> KeyState {
         KeyState::Present(Key {
             backend,
             name: KeyName::default(),
             fingerprint,
-            duplicate,
         })
     }
 
@@ -379,20 +367,20 @@ mod tests {
             store(Ok(point(1)), Err(StoreError::NotFound)),
             &KeyName::default(),
         );
-        assert_eq!(state, present(Backend::Tpm, id(1), false));
+        assert_eq!(state, present(Backend::Tpm, id(1)));
     }
 
     #[test]
     fn a_software_key_is_reported_as_software() {
         let unavailable = Err(StoreError::ProviderUnavailable("no tpm".to_owned()));
         let state = key(store(unavailable, Ok(point(2))), &KeyName::default());
-        assert_eq!(state, present(Backend::Software, id(2), false));
+        assert_eq!(state, present(Backend::Software, id(2)));
     }
 
     #[test]
-    fn keys_in_both_providers_show_the_tpm_one_and_flag_the_duplicate() {
+    fn keys_in_both_providers_show_the_tpm_one() {
         let state = key(store(Ok(point(1)), Ok(point(2))), &KeyName::default());
-        assert_eq!(state, present(Backend::Tpm, id(1), true));
+        assert_eq!(state, present(Backend::Tpm, id(1)));
     }
 
     #[test]
@@ -566,7 +554,7 @@ mod tests {
     }
 
     fn tpm() -> KeyState {
-        present(Backend::Tpm, id(1), false)
+        present(Backend::Tpm, id(1))
     }
 
     fn known(gateways: Vec<KnownGateway>) -> Result<Known, String> {
@@ -598,7 +586,7 @@ mod tests {
             draw(Some(&probe)).key,
             KeyCard {
                 title: "Hardware key",
-                note: "Kept in this PC's TPM; the private key is hardware-protected".to_owned(),
+                note: None,
                 alert: false,
                 rows: vec![
                     (
@@ -617,14 +605,10 @@ mod tests {
 
     #[test]
     fn a_software_key_is_never_called_a_hardware_key() {
-        let probe = probed(present(Backend::Software, id(2), false));
+        let probe = probed(present(Backend::Software, id(2)));
         let card = draw(Some(&probe)).key;
         assert_eq!(card.title, "Device key");
-        assert_eq!(
-            card.note,
-            "Kept in software; not protected against copying by an administrator or malware"
-        );
-        assert!(card.alert);
+        assert_eq!(card.note, None);
         assert_eq!(
             card.rows[0],
             (
@@ -634,17 +618,6 @@ mod tests {
         );
         assert!(card.rows.iter().all(|(_, value)| !value.contains("TPM")));
         assert_eq!(card.rows[3], (DEVICE_ID, id(2)));
-    }
-
-    #[test]
-    fn a_duplicate_key_says_gateways_see_the_tpm_key() {
-        let probe = probed(present(Backend::Tpm, id(1), true));
-        let card = draw(Some(&probe)).key;
-        assert_eq!(
-            card.note,
-            "A software key has the same name; gateways see the TPM key shown here"
-        );
-        assert!(card.alert);
     }
 
     #[test]
@@ -669,7 +642,7 @@ mod tests {
             card,
             KeyCard {
                 title: "Device key",
-                note: "No device key yet. Run `gateinto setup` to create one.".to_owned(),
+                note: Some("No device key yet. Run `gateinto setup` to create one.".to_owned()),
                 alert: true,
                 rows: vec![("Key name", "work".to_owned())],
                 copy: None,
@@ -683,12 +656,15 @@ mod tests {
         let failed = probed(KeyState::Failed("opening failed: denied\nmore".to_owned()));
         let card = draw(Some(&failed)).key;
         assert_eq!(
-            (card.title, card.note.as_str(), card.alert, card.copy),
-            ("Device key", "opening failed: denied", true, None)
+            (card.title, card.note.as_deref(), card.alert, card.copy),
+            ("Device key", Some("opening failed: denied"), true, None)
         );
         assert!(card.rows.is_empty());
         let other = probed(KeyState::Unsupported("only on Windows".to_owned()));
-        assert_eq!(draw(Some(&other)).key.note, "only on Windows");
+        assert_eq!(
+            draw(Some(&other)).key.note.as_deref(),
+            Some("only on Windows")
+        );
     }
 
     #[test]
@@ -699,7 +675,7 @@ mod tests {
             page.key,
             KeyCard {
                 title: "Device key",
-                note: "Reading the device key\u{2026}".to_owned(),
+                note: Some("Reading the device key\u{2026}".to_owned()),
                 alert: false,
                 rows: Vec::new(),
                 copy: None,

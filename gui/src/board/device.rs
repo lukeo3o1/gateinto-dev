@@ -31,7 +31,8 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let top = line.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
     let note = s.px(20.0);
-    let key_h = card_height(s, page.key.rows.len() as i32) + note;
+    let key_note = if page.key.note.is_some() { note } else { 0 };
+    let key_h = card_height(s, page.key.rows.len() as i32) + key_note;
     let computer_h = page.computer.as_ref().map(|c| {
         let account = if c.account.is_some() { note } else { 0 };
         card_height(s, c.rows.len() as i32) + account
@@ -66,7 +67,10 @@ impl<M: Measure> Painter<'_, M> {
             let button = self.button(heading, heading.right(), label);
             self.outlined(button, icons::COPY, label, Zone::CopyId);
         }
-        let above = self.note(heading, key.note.clone(), key.alert);
+        let above = match &key.note {
+            Some(note) => self.note(heading, note.clone(), key.alert),
+            None => heading,
+        };
         for (i, (label, value)) in key.rows.iter().enumerate() {
             let row = self.line(above, i as i32);
             let font = if *label == crate::device::DEVICE_ID {
@@ -156,7 +160,7 @@ mod tests {
             failed: false,
             key: KeyCard {
                 title: "Hardware key",
-                note: "Kept in this PC's TPM".to_owned(),
+                note: Some("Kept in this PC's TPM".to_owned()),
                 alert: false,
                 rows: vec![
                     (
@@ -190,7 +194,7 @@ mod tests {
         Page {
             key: KeyCard {
                 title: "Device key",
-                note: "Reading the device key\u{2026}".to_owned(),
+                note: Some("Reading the device key\u{2026}".to_owned()),
                 alert: false,
                 rows: Vec::new(),
                 copy: None,
@@ -310,6 +314,23 @@ mod tests {
             ]
         );
         assert_eq!(card.len(), 8 + 4 * 3);
+    }
+
+    #[test]
+    fn a_key_without_a_note_lists_its_rows_under_the_heading() {
+        let mut p = page();
+        p.key.note = None;
+        let b = draw(&p);
+        let key = Rect::new(248, 112, 764, 232);
+        let card = inside(&b.ops, key);
+        assert_eq!(card[0], Op::Round(key, 12.0, T.border));
+        assert_eq!(card[7], Op::Fill(Rect::new(268, 160, 724, 1), T.border));
+        assert!(
+            !card
+                .iter()
+                .any(|op| matches!(op, Op::Text(Font::Small, ..)))
+        );
+        assert_eq!(b.pane.map(|p| p.content), Some(232 + 14 + 208 + 14 + 100));
     }
 
     #[test]
