@@ -100,7 +100,7 @@ impl Fonts {
                     if let (Some(fallback), Ok(format)) =
                         (&fallback, format.cast::<IDWriteTextFormat1>())
                     {
-                        format.SetFontFallback(fallback)?;
+                        let _ = format.SetFontFallback(fallback);
                     }
                     Ok(format)
                 }
