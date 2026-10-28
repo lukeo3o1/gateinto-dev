@@ -485,7 +485,7 @@ mod tests {
         let ops = draw(&p).ops;
         assert!(ops.contains(&text(
             Font::Body,
-            &"b".repeat(200),
+            "b".repeat(200),
             Rect::new(333, AGENT_Y + 48, 659, 44),
             T.muted
         )));

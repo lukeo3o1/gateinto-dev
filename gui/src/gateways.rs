@@ -8,12 +8,13 @@ use gateinto::link::{Known, KnownGateway, Source};
 use gateinto::tls::TlsMode;
 
 use crate::agent::AgentState;
+use crate::i18n::Text;
 use crate::sessions::gateway_label;
 
 pub const SUBTITLE: &str = "Remote HTTPS proxies this device can relay through";
 pub const EMPTY: &str = "No gateways. Open a gateinto:// link or add one to the config file.";
 pub const FOOTNOTE: &str = "From the config file, read-only here.";
-pub const START: &str = "Start browser";
+pub const START: Text = Text::StartBrowser;
 pub const ADD: &str = "Add gateway";
 pub const ROUTE_PER_START: &str = "Set per browser start; Start browser uses Gateway";
 
@@ -529,7 +530,7 @@ mod tests {
             "No gateways. Open a gateinto:// link or add one to the config file."
         );
         assert_eq!(FOOTNOTE, "From the config file, read-only here.");
-        assert_eq!(START, "Start browser");
+        assert_eq!(START.english(), "Start browser");
         assert_eq!(
             SUBTITLE,
             "Remote HTTPS proxies this device can relay through"

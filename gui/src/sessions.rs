@@ -1,6 +1,7 @@
 use gateinto::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
 
 use crate::agent::AgentState;
+use crate::i18n::{Text, fill, tr};
 use crate::logo::State;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,19 +46,24 @@ pub struct Page {
     pub rows: Option<Vec<Row>>,
 }
 
-pub const EMPTY: &str = "No sessions. Start one from a gateinto:// link.";
+pub const EMPTY: Text = Text::NoSessionsHint;
 
 pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> Page {
     let (status, rows) = match state {
         AgentState::Running(sessions) => {
             let active = sessions.iter().filter(|s| s.tunnels > 0).count();
-            let plural = if sessions.len() == 1 { "" } else { "s" };
+            let running = if sessions.len() == 1 {
+                Text::RunningOne
+            } else {
+                Text::RunningMany
+            };
             let status = Status {
-                title: if active > 0 { "Relaying" } else { "Idle" },
-                subtitle: format!(
-                    "Agent running on loopback only · {} session{plural} · {active} active",
-                    sessions.len()
-                ),
+                title: tr(if active > 0 {
+                    Text::Relaying
+                } else {
+                    Text::Idle
+                }),
+                subtitle: fill(running, &[&sessions.len(), &active]),
                 logo: if active > 0 {
                     State::Relaying
                 } else {
@@ -70,8 +76,8 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
         }
         AgentState::Stopped => (
             Status {
-                title: "Stopped",
-                subtitle: "The agent is not running".to_owned(),
+                title: tr(Text::Stopped),
+                subtitle: tr(Text::AgentStopped).to_owned(),
                 logo: State::Stopped,
                 stop: false,
                 launch: Launch::Hidden,
@@ -80,7 +86,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
         ),
         AgentState::Unreachable(error) => (
             Status {
-                title: "Agent unreachable",
+                title: tr(Text::AgentUnreachable),
                 subtitle: error.clone(),
                 logo: State::Attention,
                 stop: false,
@@ -104,33 +110,33 @@ pub fn browser_title(kind: Option<BrowserKind>) -> &'static str {
         Some(BrowserKind::Chrome) => "Chrome",
         Some(BrowserKind::Edge) => "Edge",
         Some(BrowserKind::Chromium) => "Chromium",
-        Some(BrowserKind::Unknown) | None => "Browser",
+        Some(BrowserKind::Unknown) | None => tr(Text::Browser),
     }
 }
 
 pub fn row(session: &SessionInfo, now: u64) -> Row {
     let (kind, title) = match session.kind {
         SessionKind::Browser => (Kind::Browser, browser_title(session.browser)),
-        SessionKind::Device => (Kind::Device, "Device proxy"),
-        SessionKind::Unknown => (Kind::Device, "Session"),
+        SessionKind::Device => (Kind::Device, tr(Text::DeviceProxy)),
+        SessionKind::Unknown => (Kind::Device, tr(Text::Session)),
     };
     Row {
         id: session.id,
         kind,
         title,
         number: format!(" #{}", session.id),
-        auth: match session.auth {
-            SessionAuth::OsUser => "OS user",
-            SessionAuth::Password => "Password",
-            SessionAuth::None => "No authentication",
-            SessionAuth::Unknown => "Unknown",
-        },
+        auth: tr(match session.auth {
+            SessionAuth::OsUser => Text::OsUser,
+            SessionAuth::Password => Text::Password,
+            SessionAuth::None => Text::NoAuthentication,
+            SessionAuth::Unknown => Text::Unknown,
+        }),
         gateway: gateway_label(&session.gateway, &session.upstream),
-        route: match session.route {
-            SessionRoute::All => "All",
-            SessionRoute::Mixed => "Mixed",
-            SessionRoute::Unknown => "Unknown",
-        },
+        route: tr(match session.route {
+            SessionRoute::All => Text::All,
+            SessionRoute::Mixed => Text::Mixed,
+            SessionRoute::Unknown => Text::Unknown,
+        }),
         address: address(&session.upstream),
         uptime: uptime(session.started, now),
         active: session.tunnels > 0,
@@ -139,10 +145,10 @@ pub fn row(session: &SessionInfo, now: u64) -> Row {
 
 pub fn uptime(started: u64, now: u64) -> String {
     match now.saturating_sub(started) {
-        ..60 => "<1 min".to_owned(),
-        seconds @ ..3_600 => format!("{} min", seconds / 60),
-        seconds @ ..86_400 => format!("{} h", seconds / 3_600),
-        seconds => format!("{} d", seconds / 86_400),
+        ..60 => tr(Text::UnderMinute).to_owned(),
+        seconds @ ..3_600 => fill(Text::Minutes, &[&(seconds / 60)]),
+        seconds @ ..86_400 => fill(Text::Hours, &[&(seconds / 3_600)]),
+        seconds => fill(Text::Days, &[&(seconds / 86_400)]),
     }
 }
 
@@ -220,6 +226,31 @@ mod tests {
         );
         let ids: Vec<u64> = page.rows.unwrap().iter().map(|r| r.id).collect();
         assert_eq!(ids, [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_status_and_rows_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let state = AgentState::Running(vec![session(1, 0), session(2, 3)]);
+        let page = page(&state, None, 1_000 + 7_200, false);
+        assert_eq!(page.status.title, "轉送中");
+        assert_eq!(
+            page.status.subtitle,
+            "代理程式僅在本機回送位址執行 · 2 個工作階段 · 1 個使用中"
+        );
+        let row = &page.rows.unwrap()[0];
+        assert_eq!(
+            (row.title, row.auth, row.route, row.uptime.as_str()),
+            ("Edge", "作業系統使用者", "全部", "2 小時")
+        );
+        assert_eq!(page_title(&AgentState::Stopped), "已停止");
+        assert_eq!(uptime(0, 30), "<1 分鐘");
+        assert_eq!(uptime(0, 300), "5 分鐘");
+        assert_eq!(uptime(0, 172_800), "2 天");
+    }
+
+    fn page_title(state: &AgentState) -> &'static str {
+        page(state, None, 0, false).status.title
     }
 
     #[test]

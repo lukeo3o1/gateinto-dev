@@ -310,7 +310,7 @@ mod tests {
             [
                 Op::Fill(Rect::new(268, 312, 724, 1), T.border),
                 text(Font::Body, "Device ID", Rect::new(268, 312, 63, 44), T.text),
-                text(Font::Mono, &id(), Rect::new(544, 312, 448, 44), T.muted),
+                text(Font::Mono, id(), Rect::new(544, 312, 448, 44), T.muted),
             ]
         );
         assert_eq!(card.len(), 8 + 4 * 3);

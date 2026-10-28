@@ -4,6 +4,7 @@ use crate::focus::Stop;
 use crate::fonts::{Font, Measure};
 use crate::gateways::START;
 use crate::hit::Zone;
+use crate::i18n::{Text, tr};
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
 use crate::menu::Popup;
@@ -33,9 +34,9 @@ pub struct Board {
     pub popup: Option<Pane>,
 }
 
-const STOP_LABEL: &str = "Stop agent";
-const REVOKE_TIP: &str = "Revoke session";
-const MORE_TIP: &str = "More";
+const STOP_LABEL: Text = Text::StopAgent;
+const REVOKE_TIP: Text = Text::RevokeSession;
+const MORE_TIP: Text = Text::More;
 
 pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
     if targets.iter().any(|&(_, zone)| zone == Zone::Menu) {
@@ -44,10 +45,10 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
     targets
         .iter()
         .filter_map(|&(r, zone)| match zone {
-            Zone::Revoke(_) => Some((r, REVOKE_TIP)),
-            Zone::More(_) => Some((r, MORE_TIP)),
-            Zone::TogglePassword(false) => Some((r, "Show password")),
-            Zone::TogglePassword(true) => Some((r, "Hide password")),
+            Zone::Revoke(_) => Some((r, tr(REVOKE_TIP))),
+            Zone::More(_) => Some((r, tr(MORE_TIP))),
+            Zone::TogglePassword(false) => Some((r, tr(Text::ShowPassword))),
+            Zone::TogglePassword(true) => Some((r, tr(Text::HidePassword))),
             _ => None,
         })
         .collect()
@@ -79,7 +80,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let card = p.status(l.content, page);
     if let Some(rows) = &page.rows {
         let heading = Rect::new(card.x, card.bottom() + s.px(18.0), card.w, s.px(20.0));
-        p.text(Font::Heading, "Sessions", heading, t.text);
+        p.text(Font::Heading, Text::Sessions, heading, t.text);
         p.table(
             Rect::new(card.x, heading.bottom() + s.px(18.0), card.w, 0),
             rows,
@@ -204,11 +205,13 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.push(Op::Logo(logo, status.logo));
         let x = logo.right() + s.px(16.0);
         let mut right = card.right() - s.px(20.0);
-        let button = status.stop.then(|| self.button(card, right, STOP_LABEL));
+        let button = status
+            .stop
+            .then(|| self.button(card, right, tr(STOP_LABEL)));
         if let Some(button) = button {
             right = button.x - s.px(16.0);
         }
-        let pick = (status.launch != Launch::Hidden).then(|| self.button(card, right, START));
+        let pick = (status.launch != Launch::Hidden).then(|| self.button(card, right, tr(START)));
         if let Some(pick) = pick {
             right = pick.x - s.px(16.0);
         }
@@ -225,7 +228,7 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.text(Font::Body, status.subtitle.clone(), subtitle, t.muted);
         if let Some(pick) = pick {
             let ready = status.launch == Launch::Ready;
-            self.start(pick, START, Zone::Picker, ready);
+            self.start(pick, tr(START), Zone::Picker, ready);
             if ready && self.v.popup == Some(Popup::Picker) {
                 self.board.anchor = Some(pick);
             }
@@ -264,7 +267,7 @@ impl<'a, M: Measure> Painter<'a, M> {
     }
 
     fn stop(&mut self, button: Rect) {
-        self.outlined(button, icons::STOP, STOP_LABEL, Zone::StopAgent);
+        self.outlined(button, icons::STOP, tr(STOP_LABEL), Zone::StopAgent);
     }
 
     fn outlined(&mut self, button: Rect, icon: Icon, label: &'static str, zone: Zone) {
@@ -320,10 +323,10 @@ impl<'a, M: Measure> Painter<'a, M> {
         let header = Rect::new(table.x, table.y, table.w, header_h);
         let c = self.columns(header);
         for (label, col) in [
-            ("Session", c.session),
-            ("Gateway", c.gateway),
-            ("Uptime", c.uptime),
-            ("Activity", c.activity),
+            (Text::Session, c.session),
+            (Text::Gateway, c.gateway),
+            (Text::Uptime, c.uptime),
+            (Text::Activity, c.activity),
         ] {
             self.text(Font::Small, label, col, t.muted);
         }
@@ -404,7 +407,7 @@ impl<'a, M: Measure> Painter<'a, M> {
             self.push(Op::Round(Rect::new(x, y, dot_w, dot_h), radius, dot));
         }
         let x = c.activity.x + 2 * dot_w + dot_gap + s.px(8.0);
-        let label = if row.active { "Active" } else { "Idle" };
+        let label = tr(if row.active { Text::Active } else { Text::Idle });
         let state = Rect::new(x, r.y, c.activity.right() - x, r.h);
         self.text(Font::Small, label, state, t.muted);
 
@@ -505,6 +508,49 @@ mod tests {
     }
 
     #[test]
+    fn the_sessions_page_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let mut idle = row(2);
+        idle.active = false;
+        let texts: Vec<String> = draw(&running(vec![row(1), idle]))
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, s, ..) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in [
+            "工作階段",
+            "閘道",
+            "運作時間",
+            "活動",
+            "使用中",
+            "閒置",
+            "停止代理程式",
+            "啟動瀏覽器",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want} in {texts:?}");
+        }
+        let r = Rect::new(1, 2, 3, 4);
+        let targets = [
+            (r, Zone::Revoke(1)),
+            (r, Zone::More(1)),
+            (r, Zone::TogglePassword(false)),
+            (r, Zone::TogglePassword(true)),
+        ];
+        assert_eq!(
+            tips(&targets),
+            [
+                (r, "撤銷工作階段"),
+                (r, "更多"),
+                (r, "顯示密碼"),
+                (r, "隱藏密碼")
+            ]
+        );
+    }
+
+    #[test]
     fn an_open_menu_hides_the_tips() {
         let r = Rect::new(1, 2, 3, 4);
         let targets = [(r, Zone::Entry(0)), (r, Zone::Menu), (r, Zone::Revoke(9))];
@@ -580,8 +626,8 @@ mod tests {
             .collect()
     }
 
-    pub(super) fn text(font: Font, s: &str, r: Rect, c: crate::theme::Rgb) -> Op {
-        Op::Text(font, s.to_owned().into(), r, c)
+    pub(super) fn text(font: Font, s: impl std::fmt::Display, r: Rect, c: crate::theme::Rgb) -> Op {
+        Op::Text(font, s.to_string().into(), r, c)
     }
 
     #[test]

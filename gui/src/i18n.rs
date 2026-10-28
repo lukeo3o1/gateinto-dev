@@ -130,6 +130,37 @@ table! {
     ThisDevice => "This device", "這部裝置";
     Demo => "Demo", "示範";
     DemoNote => "Sample data only", "僅為範例資料";
+    Relaying => "Relaying", "轉送中";
+    Idle => "Idle", "閒置";
+    RunningOne => "Agent running on loopback only · {0} session · {1} active", "代理程式僅在本機回送位址執行 · {0} 個工作階段 · {1} 個使用中";
+    RunningMany => "Agent running on loopback only · {0} sessions · {1} active", "代理程式僅在本機回送位址執行 · {0} 個工作階段 · {1} 個使用中";
+    Stopped => "Stopped", "已停止";
+    AgentStopped => "The agent is not running", "代理程式未執行";
+    AgentUnreachable => "Agent unreachable", "無法連線到代理程式";
+    Browser => "Browser", "瀏覽器";
+    DeviceProxy => "Device proxy", "裝置代理";
+    Session => "Session", "工作階段";
+    OsUser => "OS user", "作業系統使用者";
+    Password => "Password", "密碼";
+    NoAuthentication => "No authentication", "不驗證";
+    Unknown => "Unknown", "未知";
+    All => "All", "全部";
+    Mixed => "Mixed", "混合";
+    UnderMinute => "<1 min", "<1 分鐘";
+    Minutes => "{0} min", "{0} 分鐘";
+    Hours => "{0} h", "{0} 小時";
+    Days => "{0} d", "{0} 天";
+    NoSessionsHint => "No sessions. Start one from a gateinto:// link.", "沒有工作階段。請從 gateinto:// 連結啟動。";
+    StopAgent => "Stop agent", "停止代理程式";
+    StartBrowser => "Start browser", "啟動瀏覽器";
+    RevokeSession => "Revoke session", "撤銷工作階段";
+    More => "More", "更多";
+    ShowPassword => "Show password", "顯示密碼";
+    HidePassword => "Hide password", "隱藏密碼";
+    Gateway => "Gateway", "閘道";
+    Uptime => "Uptime", "運作時間";
+    Activity => "Activity", "活動";
+    Active => "Active", "使用中";
 }
 
 impl Text {

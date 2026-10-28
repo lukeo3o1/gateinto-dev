@@ -2,6 +2,7 @@ use super::{Board, Painter};
 use crate::fonts::{Font, Measure};
 use crate::gateways::{ADD, EMPTY, FOOTNOTE, Page, Row, START};
 use crate::hit::Zone;
+use crate::i18n::tr;
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
@@ -77,7 +78,7 @@ impl<M: Measure> Painter<'_, M> {
 
         let gap = s.px(16.0);
         let right = card.right() - pad;
-        let button = self.button(card, right, START);
+        let button = self.button(card, right, tr(START));
         let sessions = Rect::new(button.x - gap - s.px(120.0), card.y, s.px(120.0), card.h);
         let x = tile.right() + gap;
         let w = (sessions.x - gap - x).max(0);
@@ -102,7 +103,7 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Mono, row.address.clone(), address, t.muted);
 
         self.eyes(sessions, row);
-        self.start(button, START, Zone::StartBrowser(index), launch);
+        self.start(button, tr(START), Zone::StartBrowser(index), launch);
         self.target(card, Zone::GatewayCard(index));
     }
 
