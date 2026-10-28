@@ -278,6 +278,21 @@ table! {
     AlreadySetUp => "Already set up as \"{0}\".", "已設定為「{0}」。";
     NameUsed => "\"{0}\" is already used by another gateway.", "「{0}」已被其他閘道使用。";
     TooClose => "Too close to \"{0}\": names may not differ only in letter case.", "與「{0}」太相近：名稱不可只有大小寫不同。";
+    StartSession => "Start a browser session", "啟動瀏覽器工作階段";
+    NoGatewaysYet => "No gateways yet.", "尚無閘道。";
+    StartingSession => "Starting a browser session…", "正在啟動瀏覽器工作階段…";
+    SessionStarted => "Browser session started", "已啟動瀏覽器工作階段";
+    OpenApp => "Open Gateinto", "開啟 Gateinto";
+    AddGatewayMenu => "Add gateway…", "新增閘道…";
+    Exit => "Exit", "結束";
+    FlyoutTitle => "Gateinto status", "Gateinto 狀態";
+    OneSessionTraffic => "1 session · {0} with traffic", "1 個工作階段 · {0} 個有流量";
+    SessionsTraffic => "{0} sessions · {1} with traffic", "{0} 個工作階段 · {1} 個有流量";
+    Checking => "Checking", "檢查中";
+    WaitingStatus => "Waiting for the agent status", "正在等候代理程式狀態";
+    OpenCount => "{0} open", "{0} 個已開啟";
+    MoreInApp => "{0} more in Gateinto", "Gateinto 中還有 {0} 個";
+    TrayTip => "Gateinto: {0}\n{1}", "Gateinto：{0}\n{1}";
 }
 
 impl Text {

@@ -3,19 +3,20 @@ use gateinto::link::Known;
 
 use crate::agent::AgentState;
 use crate::gateways;
+use crate::i18n::{Text, fill, localize, tr};
 use crate::layout::Rect;
 use crate::logo::State;
 
 pub const TIP_UNITS: usize = 127;
-pub const LABEL: &str = "Start a browser session";
-pub const NO_GATEWAYS: &str = "No gateways yet.";
-pub const STARTING: &str = "Starting a browser session…";
-pub const STARTED: &str = "Browser session started";
-pub const OPEN: &str = "Open Gateinto";
-pub const ADD: &str = "Add gateway…";
-pub const STOP: &str = "Stop agent";
-pub const EXIT: &str = "Exit";
-pub const FLYOUT_TITLE: &str = "Gateinto status";
+pub const LABEL: Text = Text::StartSession;
+pub const NO_GATEWAYS: Text = Text::NoGatewaysYet;
+pub const STARTING: Text = Text::StartingSession;
+pub const STARTED: Text = Text::SessionStarted;
+pub const OPEN: Text = Text::OpenApp;
+pub const ADD: Text = Text::AddGatewayMenu;
+pub const STOP: Text = Text::StopAgent;
+pub const EXIT: Text = Text::Exit;
+pub const FLYOUT_TITLE: Text = Text::FlyoutTitle;
 const GRACE_MS: u64 = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,12 +52,16 @@ pub fn status(state: &AgentState) -> Status {
         AgentState::Running(sessions) => {
             let traffic = sessions.iter().filter(|s| s.tunnels > 0).count();
             let subtitle = match sessions.len() {
-                0 => "No sessions".to_owned(),
-                1 => format!("1 session · {traffic} with traffic"),
-                n => format!("{n} sessions · {traffic} with traffic"),
+                0 => tr(Text::NoSessions).to_owned(),
+                1 => fill(Text::OneSessionTraffic, &[&traffic]),
+                n => fill(Text::SessionsTraffic, &[&n, &traffic]),
             };
             Status {
-                title: if traffic > 0 { "Relaying" } else { "Idle" },
+                title: tr(if traffic > 0 {
+                    Text::Relaying
+                } else {
+                    Text::Idle
+                }),
                 subtitle,
                 logo: if traffic > 0 {
                     State::Relaying
@@ -67,13 +72,13 @@ pub fn status(state: &AgentState) -> Status {
             }
         }
         AgentState::Stopped => Status {
-            title: "Stopped",
-            subtitle: "The agent is not running".to_owned(),
+            title: tr(Text::Stopped),
+            subtitle: tr(Text::AgentStopped).to_owned(),
             logo: State::Stopped,
             stop: false,
         },
         AgentState::Unreachable(error) => Status {
-            title: "Agent unreachable",
+            title: tr(Text::AgentUnreachable),
             subtitle: error.clone(),
             logo: State::Attention,
             stop: false,
@@ -83,8 +88,8 @@ pub fn status(state: &AgentState) -> Status {
 
 pub fn pending() -> Status {
     Status {
-        title: "Checking",
-        subtitle: "Waiting for the agent status".to_owned(),
+        title: tr(Text::Checking),
+        subtitle: tr(Text::WaitingStatus).to_owned(),
         logo: State::Idle,
         stop: false,
     }
@@ -114,7 +119,7 @@ pub fn waiting() -> Flyout {
 }
 
 pub fn tooltip(status: &Status) -> String {
-    let full = format!("Gateinto: {}\n{}", status.title, status.subtitle);
+    let full = fill(Text::TrayTip, &[&status.title, &status.subtitle]);
     let mut units = 0;
     full.chars()
         .take_while(|c| {
@@ -149,7 +154,7 @@ pub fn flyout(
                 open: if open == 0 {
                     String::new()
                 } else {
-                    format!("{open} open")
+                    fill(Text::OpenCount, &[&open])
                 },
                 lit: row.lit,
             }
@@ -157,7 +162,7 @@ pub fn flyout(
         .collect();
     let empty = match listing {
         Err(error) => Some(error.clone()),
-        Ok(_) if page.empty => Some(NO_GATEWAYS.to_owned()),
+        Ok(_) if page.empty => Some(tr(NO_GATEWAYS).to_owned()),
         Ok(_) => None,
     };
     let Status {
@@ -174,7 +179,7 @@ pub fn flyout(
         launch: page.launch,
         rows,
         empty,
-        notice: notice.map(str::to_owned),
+        notice: notice.map(|n| localize(n).into_owned()),
     }
 }
 
@@ -196,7 +201,7 @@ impl Notice {
     pub fn text(&self) -> Option<&str> {
         match &self.0 {
             Stage::Quiet => None,
-            Stage::Waiting => Some(STARTING),
+            Stage::Waiting => Some(STARTING.english()),
             Stage::Settled { text, .. } => Some(text),
         }
     }
@@ -208,7 +213,7 @@ impl Notice {
     pub fn settle(&mut self, failure: Option<&str>, visible: bool) {
         if self.0 == Stage::Waiting {
             self.0 = Stage::Settled {
-                text: failure.unwrap_or(STARTED).to_owned(),
+                text: failure.unwrap_or(STARTED.english()).to_owned(),
                 seen: visible,
             };
         }
@@ -480,7 +485,7 @@ mod tests {
     #[test]
     fn an_empty_or_unreadable_list_says_so() {
         let empty = flyout(&known(Vec::new()), &AgentState::Stopped, false, None);
-        assert_eq!(empty.empty.as_deref(), Some(NO_GATEWAYS));
+        assert_eq!(empty.empty.as_deref(), Some(NO_GATEWAYS.english()));
         let broken = Err("config is broken".to_owned());
         let broken = flyout(&broken, &AgentState::Stopped, false, None);
         assert_eq!(broken.empty.as_deref(), Some("config is broken"));
@@ -499,9 +504,9 @@ mod tests {
         let mut notice = Notice::default();
         assert_eq!(notice.text(), None);
         notice.wait();
-        assert_eq!(notice.text(), Some(STARTING));
+        assert_eq!(notice.text(), Some(STARTING.english()));
         notice.settle(None, true);
-        assert_eq!(notice.text(), Some(STARTED));
+        assert_eq!(notice.text(), Some(STARTED.english()));
         notice.wait();
         notice.settle(Some("Gateway refused"), true);
         assert_eq!(notice.text(), Some("Gateway refused"));
@@ -528,12 +533,12 @@ mod tests {
         let mut notice = Notice::default();
         notice.wait();
         notice.hidden();
-        assert_eq!(notice.text(), Some(STARTING));
+        assert_eq!(notice.text(), Some(STARTING.english()));
         notice.settle(None, false);
         notice.hidden();
-        assert_eq!(notice.text(), Some(STARTED));
+        assert_eq!(notice.text(), Some(STARTED.english()));
         notice.shown();
-        assert_eq!(notice.text(), Some(STARTED));
+        assert_eq!(notice.text(), Some(STARTED.english()));
         notice.hidden();
         assert_eq!(notice.text(), None);
     }
@@ -621,5 +626,56 @@ mod tests {
         );
         assert!(!f.stop && !f.launch && f.rows.is_empty());
         assert_eq!((f.empty, f.notice), (None, None));
+    }
+
+    #[test]
+    fn the_tray_speaks_chinese_but_agent_errors_stay_as_worded() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let state = running(vec![session(1, "office", 2), session(2, "office", 0)]);
+        let busy = status(&state);
+        assert_eq!(busy.title, "轉送中");
+        assert_eq!(busy.subtitle, "2 個工作階段 · 1 個有流量");
+        assert_eq!(
+            tooltip(&busy),
+            "Gateinto：轉送中\n2 個工作階段 · 1 個有流量"
+        );
+        let one = status(&running(vec![session(1, "office", 0)]));
+        assert_eq!(
+            (one.title, one.subtitle.as_str()),
+            ("閒置", "1 個工作階段 · 0 個有流量")
+        );
+        let stopped = status(&AgentState::Stopped);
+        assert_eq!(
+            (stopped.title, stopped.subtitle.as_str()),
+            ("已停止", "代理程式未執行")
+        );
+        let lost = status(&AgentState::Unreachable("pipe busy".to_owned()));
+        assert_eq!(
+            (lost.title, lost.subtitle.as_str()),
+            ("無法連線到代理程式", "pipe busy")
+        );
+        let checking = pending();
+        assert_eq!(
+            (checking.title, checking.subtitle.as_str()),
+            ("檢查中", "正在等候代理程式狀態")
+        );
+
+        let listing = known(vec![gateway("office", "proxy.example.com")]);
+        let shown = flyout(&listing, &state, false, Some(STARTED.english()));
+        assert_eq!(shown.rows[0].open, "2 個已開啟");
+        assert_eq!(shown.notice.as_deref(), Some("已啟動瀏覽器工作階段"));
+        let refused = flyout(&listing, &state, false, Some("Gateway refused"));
+        assert_eq!(refused.notice.as_deref(), Some("Gateway refused"));
+        let empty = flyout(&known(Vec::new()), &AgentState::Stopped, false, None);
+        assert_eq!(empty.empty.as_deref(), Some("尚無閘道。"));
+
+        let mut notice = Notice::default();
+        notice.wait();
+        let waiting = flyout(&listing, &state, false, notice.text());
+        assert_eq!(waiting.notice.as_deref(), Some("正在啟動瀏覽器工作階段…"));
+        assert_eq!(
+            (tr(OPEN), tr(EXIT), tr(FLYOUT_TITLE)),
+            ("開啟 Gateinto", "結束", "Gateinto 狀態")
+        );
     }
 }

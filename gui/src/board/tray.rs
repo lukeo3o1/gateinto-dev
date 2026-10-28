@@ -1,6 +1,7 @@
 use super::{Board, Painter};
 use crate::fonts::{Font, Measure};
 use crate::hit::Zone;
+use crate::i18n::{Text, fill, tr};
 use crate::icons::{self, Icon};
 use crate::layout::Rect;
 use crate::pointer::Look;
@@ -41,15 +42,15 @@ pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl M
         y = r.bottom() + s.px(6.0);
     }
     let label = Rect::new(line.x, y, line.w, s.px(24.0));
-    p.text(Font::Small, LABEL, label, t.muted);
+    p.text(Font::Small, tr(LABEL), label, t.muted);
     y = label.bottom() + s.px(6.0);
 
     let mut actions = vec![
-        (icons::SESSIONS, OPEN, Zone::OpenMain),
-        (icons::GATEWAYS, ADD, Zone::AddGateway),
+        (icons::SESSIONS, tr(OPEN), Zone::OpenMain),
+        (icons::GATEWAYS, tr(ADD), Zone::AddGateway),
     ];
     if f.stop {
-        actions.push((icons::STOP, STOP, Zone::StopAgent));
+        actions.push((icons::STOP, tr(STOP), Zone::StopAgent));
     }
     let (item, inner) = (s.px(36.0), s.px(8.0));
     let area = frame.bottom() - (2 * inner + actions.len() as i32 * item);
@@ -71,7 +72,7 @@ pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl M
     }
     if more > 0 {
         let r = Rect::new(line.x, y + shown as i32 * (row_h + row_gap), line.w, row_h);
-        p.text(Font::Small, format!("{more} more in Gateinto"), r, t.muted);
+        p.text(Font::Small, fill(Text::MoreInApp, &[&more]), r, t.muted);
     }
 
     p.push(Op::Fill(Rect::new(frame.x, area, frame.w, edge), t.border));
@@ -317,9 +318,9 @@ mod tests {
                 "1 open",
                 "lab",
                 "proxy.example.com",
-                OPEN,
-                ADD,
-                STOP
+                OPEN.english(),
+                ADD.english(),
+                STOP.english()
             ]
         );
         assert!(
@@ -388,7 +389,7 @@ mod tests {
                 .ops
                 .contains(&Op::Round(Rect::new(304, 122, 30, 30), 6.0, T.tile))
         );
-        assert!(!texts(&board).contains(&STOP));
+        assert!(!texts(&board).contains(&STOP.english()));
     }
 
     #[test]
@@ -440,7 +441,7 @@ mod tests {
     #[test]
     fn an_empty_list_says_why() {
         let mut f = relaying(Vec::new());
-        f.empty = Some(NO_GATEWAYS.to_owned());
+        f.empty = Some(NO_GATEWAYS.english().to_owned());
         assert!(draw(&f).ops.contains(&text(
             Font::Body,
             NO_GATEWAYS,
@@ -464,5 +465,22 @@ mod tests {
             board.targets[0],
             (Rect::new(14, 134, 332, 55), Zone::StartBrowser(0))
         );
+    }
+
+    #[test]
+    fn the_flyout_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let rows = (0..10).map(|i| row(&format!("g{i}"), "", false)).collect();
+        let board = draw(&relaying(rows));
+        let texts = texts(&board);
+        for expected in [
+            "啟動瀏覽器工作階段",
+            "開啟 Gateinto",
+            "新增閘道…",
+            "停止代理程式",
+            "Gateinto 中還有 7 個",
+        ] {
+            assert!(texts.contains(&expected), "{expected} in {texts:?}");
+        }
     }
 }

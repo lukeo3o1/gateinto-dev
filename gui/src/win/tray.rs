@@ -36,6 +36,7 @@ use super::{App, Follow, client_size, coords, show_main, sys, track, with_app};
 use crate::board::{self, Board};
 use crate::focus::{self, Focus, Stop};
 use crate::hit::{Zone, find};
+use crate::i18n::tr;
 use crate::layout::Rect;
 use crate::logo;
 use crate::nav::Page as NavPage;
@@ -370,7 +371,7 @@ fn context_menu(main: HWND, anchor: Option<(i32, i32)>) {
     let Some(p) = point(anchor) else {
         return;
     };
-    let (open, exit) = (super::wide(tray::OPEN), super::wide(tray::EXIT));
+    let (open, exit) = (super::wide(tr(tray::OPEN)), super::wide(tr(tray::EXIT)));
     let choice = unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
@@ -634,7 +635,7 @@ pub fn install(main: HWND, instance: HINSTANCE) {
 
 fn create_flyout(main: HWND, instance: HINSTANCE) -> HWND {
     let class = super::wide("GateintoFlyout");
-    let title = super::wide(tray::FLYOUT_TITLE);
+    let title = super::wide(tr(tray::FLYOUT_TITLE));
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: CS_DROPSHADOW,
