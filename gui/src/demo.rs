@@ -24,6 +24,7 @@ pub const NOT_STOPPED: Text = Text::DemoNotStopped;
 pub const IGNORED: Text = Text::DemoIgnored;
 pub const NOT_SAVED: Text = Text::DemoNotSaved;
 pub const NOT_OPENED: Text = Text::DemoNotOpened;
+pub const CONFIG_PATH: &str = r"%APPDATA%\Gateinto\gateinto.toml";
 
 const PROFILE: &str = "g-4f0c2a9d7e1b83c56a0d9e2f4b7c1a3e5d8f0b2c4a6e8d1f3b5c7e9a0c2e4d";
 const PID: u32 = 4242;
@@ -311,6 +312,12 @@ mod tests {
         assert!(!requested(["gateinto-gui.exe"]));
         assert!(!requested(["--demo"]));
         assert!(!requested(["gateinto-gui.exe", "--demo=1"]));
+    }
+
+    #[test]
+    fn the_settings_page_shows_a_sample_config_path_whatever_the_machine() {
+        assert_eq!(CONFIG_PATH, r"%APPDATA%\Gateinto\gateinto.toml");
+        assert!(!CONFIG_PATH.contains(':'));
     }
 
     #[test]

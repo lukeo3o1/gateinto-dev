@@ -200,7 +200,7 @@ impl App {
                 Link::start(hwnd)
             },
             tips: Tips::new(hwnd),
-            config: config_line(),
+            config: config_line(demo),
             sign_in: false,
             theme,
             language,
@@ -677,7 +677,7 @@ impl App {
             self.fonts = fonts;
         }
         self.panel.reshape(&self.gfx);
-        self.config = config_line();
+        self.config = config_line(self.demo);
         let title = wide(window_title(self.demo));
         unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
         self.relayout();
@@ -797,7 +797,10 @@ impl App {
     }
 }
 
-fn config_line() -> String {
+fn config_line(demo: bool) -> String {
+    if demo {
+        return demo::CONFIG_PATH.to_owned();
+    }
     let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
     settings::shown(config::default_path().as_deref(), appdata.as_deref())
 }
