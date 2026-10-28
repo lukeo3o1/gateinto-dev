@@ -3,7 +3,7 @@ use gateinto::link::Known;
 
 use crate::agent::AgentState;
 use crate::gateways;
-use crate::i18n::{Text, fill, localize, tr};
+use crate::i18n::{Note, Text, fill, tr};
 use crate::layout::Rect;
 use crate::logo::State;
 
@@ -179,7 +179,7 @@ pub fn flyout(
         launch: page.launch,
         rows,
         empty,
-        notice: notice.map(|n| localize(n).into_owned()),
+        notice: notice.map(str::to_owned),
     }
 }
 
@@ -189,7 +189,7 @@ enum Stage {
     Quiet,
     Waiting,
     Settled {
-        text: String,
+        text: Note,
         seen: bool,
     },
 }
@@ -201,8 +201,8 @@ impl Notice {
     pub fn text(&self) -> Option<&str> {
         match &self.0 {
             Stage::Quiet => None,
-            Stage::Waiting => Some(STARTING.english()),
-            Stage::Settled { text, .. } => Some(text),
+            Stage::Waiting => Some(tr(STARTING)),
+            Stage::Settled { text, .. } => Some(text.shown()),
         }
     }
 
@@ -210,10 +210,10 @@ impl Notice {
         self.0 = Stage::Waiting;
     }
 
-    pub fn settle(&mut self, failure: Option<&str>, visible: bool) {
+    pub fn settle(&mut self, failure: Option<&Note>, visible: bool) {
         if self.0 == Stage::Waiting {
             self.0 = Stage::Settled {
-                text: failure.unwrap_or(STARTED.english()).to_owned(),
+                text: failure.cloned().unwrap_or(STARTED.into()),
                 seen: visible,
             };
         }
@@ -504,18 +504,23 @@ mod tests {
         let mut notice = Notice::default();
         assert_eq!(notice.text(), None);
         notice.wait();
+        {
+            let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+            assert_eq!(notice.text(), Some(tr(STARTING)));
+        }
         assert_eq!(notice.text(), Some(STARTING.english()));
         notice.settle(None, true);
         assert_eq!(notice.text(), Some(STARTED.english()));
         notice.wait();
-        notice.settle(Some("Gateway refused"), true);
-        assert_eq!(notice.text(), Some("Gateway refused"));
+        notice.settle(Some(&Note::Agent(STARTED.english().to_owned())), true);
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(notice.text(), Some(STARTED.english()));
     }
 
     #[test]
     fn settling_only_ends_a_wait() {
         let mut notice = Notice::default();
-        notice.settle(Some("Stop failed"), true);
+        notice.settle(Some(&Note::Agent("Stop failed".to_owned())), true);
         assert_eq!(notice.text(), None);
     }
 
@@ -661,11 +666,17 @@ mod tests {
         );
 
         let listing = known(vec![gateway("office", "proxy.example.com")]);
-        let shown = flyout(&listing, &state, false, Some(STARTED.english()));
+        let mut started = Notice::default();
+        started.wait();
+        started.settle(None, true);
+        let shown = flyout(&listing, &state, false, started.text());
         assert_eq!(shown.rows[0].open, "2 個已開啟");
         assert_eq!(shown.notice.as_deref(), Some("已啟動瀏覽器工作階段"));
-        let refused = flyout(&listing, &state, false, Some("Gateway refused"));
-        assert_eq!(refused.notice.as_deref(), Some("Gateway refused"));
+        let mut refused = Notice::default();
+        refused.wait();
+        refused.settle(Some(&Note::Agent(STARTED.english().to_owned())), true);
+        let refused = flyout(&listing, &state, false, refused.text());
+        assert_eq!(refused.notice.as_deref(), Some(STARTED.english()));
         let empty = flyout(&known(Vec::new()), &AgentState::Stopped, false, None);
         assert_eq!(empty.empty.as_deref(), Some("尚無閘道。"));
 

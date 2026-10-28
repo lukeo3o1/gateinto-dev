@@ -312,6 +312,7 @@ table! {
     NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
     LanguageRow => "Language", "語言";
     LanguageFailed => "Could not save the language setting", "無法儲存語言設定";
+    Confirmation => "the agent asked to confirm this gateway; open its gateinto:// link to confirm it", "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認";
 }
 
 impl Text {
@@ -364,10 +365,24 @@ fn fill_with(template: &str, args: &[&dyn fmt::Display]) -> String {
     out
 }
 
-pub fn localize(english: &str) -> Cow<'_, str> {
-    match Text::ENGLISH.iter().position(|&known| known == english) {
-        Some(i) if current() == Language::Chinese => Cow::Borrowed(Text::CHINESE[i]),
-        _ => Cow::Borrowed(english),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Note {
+    Gui(Text),
+    Agent(String),
+}
+
+impl Note {
+    pub fn shown(&self) -> &str {
+        match self {
+            Note::Gui(text) => tr(*text),
+            Note::Agent(message) => message,
+        }
+    }
+}
+
+impl From<Text> for Note {
+    fn from(text: Text) -> Self {
+        Note::Gui(text)
     }
 }
 
@@ -411,13 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn english_entries_are_unique_so_messages_map_back_to_one_key() {
-        for (i, a) in Text::ENGLISH.iter().enumerate() {
-            assert!(!Text::ENGLISH[i + 1..].contains(a), "{a}");
-        }
-    }
-
-    #[test]
     fn the_current_language_picks_the_entry() {
         assert_eq!(current(), Language::English);
         assert_eq!(tr(Text::Demo), "Demo");
@@ -438,15 +446,14 @@ mod tests {
     }
 
     #[test]
-    fn known_messages_are_translated_and_others_kept() {
+    fn gui_notes_follow_the_language_and_agent_notes_stay_as_worded() {
+        let gui = Note::from(Text::DemoNote);
+        let agent = Note::Agent("Sample data only".to_owned());
         set(Language::Chinese);
-        assert_eq!(localize("Sample data only"), "僅為範例資料");
-        assert_eq!(
-            localize("tunnel refused by gateway"),
-            "tunnel refused by gateway"
-        );
+        assert_eq!(gui.shown(), "僅為範例資料");
+        assert_eq!(agent.shown(), "Sample data only");
         set(Language::English);
-        assert_eq!(localize("Sample data only"), "Sample data only");
+        assert_eq!(gui.shown(), "Sample data only");
     }
 
     #[test]

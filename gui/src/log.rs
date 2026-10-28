@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use gateinto::ipc::{self, LogEvent, LogLevel, LogPage, Request, RequestError, Response};
 
 use crate::agent::AgentState;
-use crate::i18n::{Text, localize, tr};
+use crate::i18n::{Note, Text, tr};
 
 pub const KEPT: usize = 500;
 pub const STOPPED: Text = Text::AgentStopped;
@@ -22,7 +22,7 @@ pub struct Journal {
     pid: Option<u32>,
     after: u64,
     events: VecDeque<LogEvent>,
-    problem: Option<String>,
+    problem: Option<Note>,
     older: bool,
 }
 
@@ -39,7 +39,7 @@ impl Journal {
     }
 
     pub fn problem(&self) -> Option<&str> {
-        self.problem.as_deref()
+        self.problem.as_ref().map(Note::shown)
     }
 
     pub fn request(&self) -> Option<Request> {
@@ -61,7 +61,7 @@ impl Journal {
             Ok(Response::Ok(lines)) => lines,
             Ok(Response::Error(message)) if message == ipc::INVALID_REQUEST => {
                 *self = Self {
-                    problem: Some(OLDER.english().to_owned()),
+                    problem: Some(OLDER.into()),
                     older: true,
                     ..Self::default()
                 };
@@ -102,7 +102,7 @@ impl Journal {
     }
 
     fn failed(&mut self, problem: String) -> bool {
-        self.problem = Some(problem);
+        self.problem = Some(Note::Agent(problem));
         false
     }
 }
@@ -203,7 +203,7 @@ pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) 
         return Body::Rows(rows);
     }
     Body::Empty(match (journal.problem(), filter) {
-        (Some(problem), _) => localize(problem).into_owned(),
+        (Some(problem), _) => problem.to_owned(),
         (None, Filter::All) => tr(NOTHING).to_owned(),
         (None, Filter::Warnings) => tr(NO_WARNINGS).to_owned(),
     })
@@ -228,7 +228,7 @@ pub fn page<'a>(
     let rows = matches!(body, Body::Rows(_));
     let alert = failure.or(journal.problem().filter(|_| rows));
     Page {
-        subtitle: alert.map_or(tr(SUBTITLE).into(), localize).into_owned(),
+        subtitle: alert.unwrap_or(tr(SUBTITLE)).to_owned(),
         alert: alert.is_some(),
         filter,
         copy: rows.then(|| tr(if copied { COPIED } else { COPY })),
@@ -391,6 +391,17 @@ mod tests {
         journal.reopen();
         assert_eq!(journal.request(), Some(Request::Log { after: 0 }));
         assert_eq!(journal.problem(), None);
+    }
+
+    #[test]
+    fn only_the_gui_wording_of_a_problem_is_translated() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let mut older = Journal::default();
+        older.absorb(Ok(Response::Error("invalid request".to_owned())));
+        assert_eq!(older.problem(), Some(tr(OLDER)));
+        let mut echoed = Journal::default();
+        echoed.absorb(Ok(Response::Error(OLDER.english().to_owned())));
+        assert_eq!(echoed.problem(), Some(OLDER.english()));
     }
 
     #[test]

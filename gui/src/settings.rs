@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
 
-use crate::i18n::{Choice as Language, Text, fill, localize, tr};
+use crate::i18n::{Choice as Language, Text, fill, tr};
 use crate::sessions::browser_title;
 use crate::theme::Choice;
 
@@ -44,7 +44,7 @@ pub fn page(
     language: Language,
 ) -> Page {
     Page {
-        line: failure.map_or(path.into(), localize).into_owned(),
+        line: failure.unwrap_or(path).to_owned(),
         failed: failure.is_some(),
         agent: match agent {
             Ok(agent) => Ok(rows(agent)),
@@ -232,7 +232,7 @@ mod tests {
             page(
                 "p",
                 &Ok(Agent::default()),
-                Some(OPEN_FAILED.english()),
+                Some(crate::i18n::Note::from(OPEN_FAILED).shown()),
                 false,
                 Choice::System,
                 Language::System,

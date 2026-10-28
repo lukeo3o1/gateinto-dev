@@ -55,7 +55,7 @@ use crate::focus::{self, Focus, Stop};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
 use crate::hit::{Zone, hit};
-use crate::i18n::{self, Text, localize, tr};
+use crate::i18n::{self, Note, Text, tr};
 use crate::layout::{Layout, Rect};
 use crate::log::{self, Filter};
 use crate::logo;
@@ -238,8 +238,7 @@ impl App {
             &self.view,
             &self.fonts,
         );
-        let failure = update.failure.as_deref().map(localize);
-        let failure = failure.as_deref();
+        let failure = update.failure.as_ref().map(Note::shown);
         let mut board = match v.nav.selected() {
             NavPage::Settings => {
                 let page = settings::page(
@@ -443,7 +442,7 @@ impl App {
             if page == NavPage::Settings && !self.demo {
                 match run::enabled() {
                     Ok(on) => self.sign_in = on,
-                    Err(()) => self.fail(settings::SIGN_IN_UNREAD.english()),
+                    Err(()) => self.fail(settings::SIGN_IN_UNREAD),
                 }
             }
             if page == NavPage::Device {
@@ -584,7 +583,7 @@ impl App {
             let listing = listing.unwrap_or_else(|| Ok(Default::default()));
             if add::rehearse(form, &listing) {
                 self.adding = None;
-                self.fail(demo::NOT_SAVED.english());
+                self.fail(demo::NOT_SAVED);
             }
             self.retarget();
             self.invalidate();
@@ -626,7 +625,7 @@ impl App {
             }
             unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) };
         } else {
-            self.fail(credentials::COPY_FAILED.english());
+            self.fail(credentials::COPY_FAILED);
         }
         self.retarget();
         self.invalidate();
@@ -647,14 +646,14 @@ impl App {
         let on = !self.sign_in;
         if self.demo {
             self.sign_in = on;
-            self.fail(demo::NOT_SAVED.english());
+            self.fail(demo::NOT_SAVED);
             self.retarget();
             self.invalidate();
             return;
         }
         match run::set(on) {
             Ok(()) => self.sign_in = on,
-            Err(()) => self.fail(settings::SIGN_IN_FAILED.english()),
+            Err(()) => self.fail(settings::SIGN_IN_FAILED),
         }
         self.retarget();
         self.invalidate();
@@ -662,7 +661,7 @@ impl App {
 
     fn choose_theme(&mut self, choice: theme::Choice) {
         if !self.demo && appearance::save(choice).is_err() {
-            self.fail(settings::THEME_FAILED.english());
+            self.fail(settings::THEME_FAILED);
         }
         self.theme = choice;
         self.follow_system();
@@ -670,7 +669,7 @@ impl App {
 
     fn choose_language(&mut self, choice: i18n::Choice) {
         if !self.demo && appearance::save_language(choice).is_err() {
-            self.fail(settings::LANGUAGE_FAILED.english());
+            self.fail(settings::LANGUAGE_FAILED);
         }
         self.language = choice;
         i18n::set(choice.language(appearance::system_language()));
@@ -711,7 +710,7 @@ impl App {
         if device::copy(self.hwnd, id) {
             self.copied = unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) } != 0;
         } else {
-            self.fail(crate::device::COPY_FAILED.english());
+            self.fail(crate::device::COPY_FAILED);
         }
         self.retarget();
         self.invalidate();
@@ -728,7 +727,7 @@ impl App {
         if device::copy(self.hwnd, &text) {
             self.copied = unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) } != 0;
         } else {
-            self.fail(log::COPY_FAILED.english());
+            self.fail(log::COPY_FAILED);
         }
         self.retarget();
         self.invalidate();
@@ -766,9 +765,9 @@ impl App {
         self.invalidate();
     }
 
-    fn fail(&mut self, failure: &str) {
+    fn fail(&mut self, failure: Text) {
         if let Some(update) = &mut self.update {
-            update.failure = Some(failure.to_owned());
+            update.failure = Some(failure.into());
         }
     }
 
@@ -949,9 +948,9 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             {
                 with_app(hwnd, |app| {
                     app.fail(if demo {
-                        demo::NOT_OPENED.english()
+                        demo::NOT_OPENED
                     } else {
-                        menu::PORTAL_FAILED.english()
+                        menu::PORTAL_FAILED
                     });
                     app.retarget();
                     app.invalidate();
@@ -963,7 +962,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             let demo = with_app(hwnd, |app| app.demo).unwrap_or(true);
             if demo {
                 with_app(hwnd, |app| {
-                    app.fail(demo::NOT_OPENED.english());
+                    app.fail(demo::NOT_OPENED);
                     app.retarget();
                     app.invalidate();
                 });
@@ -974,7 +973,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 .is_some_and(|path| sys::open_file(hwnd, &path));
             if !opened {
                 with_app(hwnd, |app| {
-                    app.fail(settings::OPEN_FAILED.english());
+                    app.fail(settings::OPEN_FAILED);
                     app.retarget();
                     app.invalidate();
                 });
@@ -1134,7 +1133,7 @@ fn on_agent(hwnd: HWND) {
             log::evicted(&before.log, &update.log, app.filter)
         });
         app.launches.settle(update.launched);
-        app.launch_settled(update.failure.as_deref());
+        app.launch_settled(update.failure.as_ref());
         if app.dialog.as_ref().is_some_and(|d| !d.lasts(&update.state)) {
             app.close_dialog();
         }

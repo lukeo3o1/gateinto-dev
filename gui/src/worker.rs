@@ -12,13 +12,13 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::agent::AgentState;
 use crate::credentials::{self, Reveal};
 use crate::device::{KeyState, Probe, System};
+use crate::i18n::{Note, Text};
 use crate::log::Journal;
 use crate::settings::Agent;
 
 pub const POLL: Duration = Duration::from_secs(2);
 const LOG_PAGES: usize = 16;
-pub const CONFIRMATION: &str =
-    "the agent asked to confirm this gateway; open its gateinto:// link to confirm it";
+pub const CONFIRMATION: Text = Text::Confirmation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -65,7 +65,7 @@ pub struct Update {
     pub sections: Gateways,
     pub agent: Result<Agent, String>,
     pub listen: Result<SocketAddr, String>,
-    pub failure: Option<String>,
+    pub failure: Option<Note>,
     pub launched: u64,
     pub device: Option<Probe>,
     pub log: Journal,
@@ -129,35 +129,50 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
     }
 }
 
-pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Option<String> {
+pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Option<Note> {
     match reply {
         Ok(Response::Ok(_)) => None,
-        Ok(Response::Error(message)) => Some(message),
+        Ok(Response::Error(message)) => Some(Note::Agent(message)),
         Err(RequestError::NotRunning) if matches!(command, Command::Stop) => None,
-        Err(error) => Some(error.to_string()),
+        Err(error) => Some(Note::Agent(error.to_string())),
     }
 }
 
-async fn run<F, R>(command: Command, send: &F) -> Option<String>
+async fn run<F, R>(command: Command, send: &F) -> Option<Note>
 where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
     let request = match command.request() {
         Ok(request) => request,
-        Err(error) => return Some(error),
+        Err(error) => return Some(Note::Agent(error)),
     };
     let reply = send(request).await;
     if let Ok(Response::Ok(lines)) = &reply
         && let Some(token) = ipc::confirm_token(lines)
     {
         let _ = send(Request::Deny(token)).await;
-        return Some(CONFIRMATION.to_owned());
+        return Some(CONFIRMATION.into());
     }
     failure(command, reply)
 }
 
 pub async fn serve<F, R>(
+    commands: UnboundedReceiver<Command>,
+    send: F,
+    load: impl FnMut() -> Loaded,
+    probe: impl FnMut() -> Probe,
+    deliver: impl FnMut(Update),
+    reveal: impl FnMut(Reveal),
+) where
+    F: Fn(Request) -> R,
+    R: Future<Output = Result<Response, RequestError>>,
+{
+    serve_with(|_| None, commands, send, load, probe, deliver, reveal).await;
+}
+
+pub async fn serve_with<F, R>(
+    refuse: impl Fn(&Command) -> Option<Text>,
     mut commands: UnboundedReceiver<Command>,
     send: F,
     mut load: impl FnMut() -> Loaded,
@@ -229,7 +244,10 @@ pub async fn serve<F, R>(
                     Command::Close(_) | Command::Stop | Command::Launch(_) => {}
                 }
                 let launch = matches!(command, Command::Launch(_));
-                failure = run(command, &send).await;
+                failure = match refuse(&command) {
+                    Some(text) => Some(text.into()),
+                    None => run(command, &send).await,
+                };
                 launched += u64::from(launch);
             }
             () = tokio::time::sleep(POLL) => {}
@@ -265,14 +283,18 @@ mod tests {
         }
     }
 
-    fn polled(failure: Option<&str>) -> Update {
+    fn said(message: &str) -> Option<Note> {
+        Some(Note::Agent(message.to_owned()))
+    }
+
+    fn polled(failure: Option<Note>) -> Update {
         Update {
             state: AgentState::Running(Vec::new()),
             gateways: Ok(Known::default()),
             sections: Gateways::default(),
             agent: Ok(Agent::default()),
             listen: Ok(DEFAULT_LISTEN),
-            failure: failure.map(str::to_owned),
+            failure,
             launched: 0,
             device: None,
             log: Journal::default(),
@@ -429,7 +451,7 @@ mod tests {
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert_eq!(
             updates,
-            [polled(None), polled(Some("no session 5")), polled(None)]
+            [polled(None), polled(said("no session 5")), polled(None)]
         );
         assert_eq!(
             *log.borrow(),
@@ -556,7 +578,7 @@ mod tests {
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
             updates,
-            [polled(None), launched(polled(Some(CONFIRMATION)))]
+            [polled(None), launched(polled(Some(CONFIRMATION.into())))]
         );
         assert_eq!(
             *log.borrow(),
@@ -760,8 +782,8 @@ mod tests {
     fn a_mailbox_asks_for_a_notice_only_when_it_was_empty() {
         let mut mailbox = Mailbox::default();
         assert!(mailbox.put(polled(None)));
-        assert!(!mailbox.put(polled(Some("busy"))));
-        assert_eq!(mailbox.take(), Some(polled(Some("busy"))));
+        assert!(!mailbox.put(polled(said("busy"))));
+        assert_eq!(mailbox.take(), Some(polled(said("busy"))));
         assert_eq!(mailbox.take(), None);
         assert!(mailbox.put(polled(None)));
     }
@@ -818,15 +840,15 @@ mod tests {
                 Command::Close(1),
                 Ok(Response::Error("no session 1".to_owned()))
             ),
-            Some("no session 1".to_owned())
+            said("no session 1")
         );
         assert_eq!(
             failure(Command::Close(1), Err(RequestError::NotRunning)),
-            Some("no agent is running".to_owned())
+            said("no agent is running")
         );
         assert_eq!(
             failure(Command::Stop, Err(RequestError::Closed)),
-            Some("the agent closed the connection without an answer".to_owned())
+            said("the agent closed the connection without an answer")
         );
     }
 
@@ -836,7 +858,16 @@ mod tests {
         let office = || Command::Launch("office".parse().unwrap());
         assert_eq!(
             failure(office(), Err(RequestError::NotRunning)),
-            Some("no agent is running".to_owned())
+            said("no agent is running")
+        );
+    }
+
+    #[test]
+    fn the_confirmation_notice_is_worded_by_the_gui() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(
+            Note::from(CONFIRMATION).shown(),
+            "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認"
         );
     }
 }

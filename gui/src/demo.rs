@@ -14,7 +14,7 @@ use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
 use crate::i18n::Text;
 use crate::settings;
-use crate::worker::Loaded;
+use crate::worker::{Command, Loaded};
 
 pub const FLAG: &str = "--demo";
 pub const TITLE: Text = Text::DemoTitle;
@@ -192,6 +192,15 @@ pub fn answer(request: Request, now: u64) -> Response {
     }
 }
 
+pub fn refusal(command: &Command) -> Option<Text> {
+    match command {
+        Command::Launch(_) => Some(NOT_STARTED),
+        Command::Close(_) => Some(NOT_REVOKED),
+        Command::Stop => Some(NOT_STOPPED),
+        Command::Probe | Command::Watch(_) | Command::Credentials(..) => None,
+    }
+}
+
 pub fn send(request: Request) -> std::future::Ready<Result<Response, RequestError>> {
     std::future::ready(Ok(answer(request, gateinto::clock::unix_now())))
 }
@@ -278,7 +287,7 @@ mod tests {
     use crate::device::KeyState;
     use crate::gateways;
     use crate::sessions;
-    use crate::worker::{Command, Update, serve};
+    use crate::worker::{Update, serve_with};
 
     const NOW: u64 = 1_800_000_000;
 
@@ -399,7 +408,8 @@ mod tests {
         tx.send(Command::Launch("office".parse().unwrap())).unwrap();
         let updates = RefCell::new(Vec::<Update>::new());
         let reveals = RefCell::new(Vec::new());
-        let run = serve(
+        let run = serve_with(
+            refusal,
             rx,
             agent,
             loaded,
@@ -416,7 +426,7 @@ mod tests {
         assert!(
             updates
                 .iter()
-                .any(|u| u.failure.as_deref() == Some(NOT_STARTED.english()))
+                .any(|u| u.failure == Some(NOT_STARTED.into()))
         );
         let reveals = reveals.borrow();
         let issued = reveals[0].credentials.as_ref().unwrap();
@@ -435,19 +445,14 @@ mod tests {
     #[test]
     fn demo_refusals_and_the_title_read_in_chinese_when_shown() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
-        let shown = |request| crate::i18n::localize(&refused(request)).into_owned();
-        let launch = LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
-        assert_eq!(shown(Request::Launch(launch)), "示範：未啟動任何項目");
-        assert_eq!(
-            shown(Request::Close(SessionId::from(3))),
-            "示範：未撤銷任何項目"
-        );
-        assert_eq!(shown(Request::Stop), "示範：未停止代理程式");
-        let token = "0123456789abcdef0123456789abcdef".parse().unwrap();
-        assert_eq!(
-            shown(Request::Approve(token)),
-            "示範：範例代理程式會忽略這個要求"
-        );
+        let shown = |command| refusal(&command).map(crate::i18n::tr);
+        let launch = Command::Launch("office".parse().unwrap());
+        assert_eq!(shown(launch), Some("示範：未啟動任何項目"));
+        assert_eq!(shown(Command::Close(3)), Some("示範：未撤銷任何項目"));
+        assert_eq!(shown(Command::Stop), Some("示範：未停止代理程式"));
+        assert_eq!(shown(Command::Probe), None);
+        assert_eq!(shown(Command::Credentials(3, 1)), None);
+        assert_eq!(crate::i18n::tr(IGNORED), "示範：範例代理程式會忽略這個要求");
         assert_eq!(crate::i18n::tr(NOT_SAVED), "示範：未儲存任何項目");
         assert_eq!(crate::i18n::tr(NOT_OPENED), "示範：未開啟任何項目");
         assert_eq!(crate::i18n::tr(TITLE), "Gateinto 示範");

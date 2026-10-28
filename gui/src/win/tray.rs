@@ -193,7 +193,7 @@ impl App {
         self.panel.invalidate();
     }
 
-    pub(super) fn launch_settled(&mut self, failure: Option<&str>) {
+    pub(super) fn launch_settled(&mut self, failure: Option<&crate::i18n::Note>) {
         if !self.launches.busy() {
             self.panel.notice.settle(failure, self.panel.visible);
         }

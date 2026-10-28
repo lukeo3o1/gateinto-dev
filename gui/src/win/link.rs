@@ -16,7 +16,7 @@ use crate::demo;
 use crate::device::{self, Probe};
 use crate::gateways;
 use crate::settings;
-use crate::worker::{Command, Loaded, Mailbox, Update, serve, stalled};
+use crate::worker::{Command, Loaded, Mailbox, Update, serve, serve_with, stalled};
 
 pub const WM_AGENT: u32 = WM_APP;
 
@@ -92,7 +92,8 @@ impl Link {
                 };
                 if demo {
                     let reveal = move |r| reveal(demo::reveal(r));
-                    runtime.block_on(serve(
+                    runtime.block_on(serve_with(
+                        demo::refusal,
                         inbox,
                         demo::send,
                         demo::loaded,
