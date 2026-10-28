@@ -1,3 +1,5 @@
+use crate::i18n::{Text, tr};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -18,18 +20,18 @@ impl Page {
     ];
 
     pub fn label(self) -> &'static str {
-        match self {
-            Page::Sessions => "Sessions",
-            Page::Gateways => "Gateways",
-            Page::Device => "Device",
-            Page::Log => "Log",
-            Page::Settings => "Settings",
-        }
+        tr(match self {
+            Page::Sessions => Text::Sessions,
+            Page::Gateways => Text::Gateways,
+            Page::Device => Text::Device,
+            Page::Log => Text::Log,
+            Page::Settings => Text::Settings,
+        })
     }
 
     pub fn title(self) -> &'static str {
         match self {
-            Page::Device => "This device",
+            Page::Device => tr(Text::ThisDevice),
             other => other.label(),
         }
     }

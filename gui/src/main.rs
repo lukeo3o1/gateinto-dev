@@ -12,6 +12,7 @@ mod fonts;
 mod frame;
 mod gateways;
 mod hit;
+mod i18n;
 mod icons;
 mod layout;
 mod log;

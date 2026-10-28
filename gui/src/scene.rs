@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use crate::fonts::Font;
 use crate::hit::Zone;
+use crate::i18n::Text;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
 use crate::logo::State;
@@ -37,8 +38,8 @@ pub struct View {
     pub demo: bool,
 }
 
-pub const BANNER: &str = "Demo";
-pub const BANNER_NOTE: &str = "Sample data only";
+pub const BANNER: Text = Text::Demo;
+pub const BANNER_NOTE: Text = Text::DemoNote;
 
 const RAIL_ICON: f32 = 20.0;
 const CAPTION_GLYPH: f32 = 10.0;
@@ -208,6 +209,39 @@ mod tests {
             assert_eq!(draw(&v)[3], Op::Logo(l.logo, logo));
         }
         assert_eq!(draw(&View::default())[3], Op::Logo(l.logo, State::Idle));
+    }
+
+    #[test]
+    fn the_rail_title_and_banner_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let l = layout(true);
+        let demo = View {
+            demo: true,
+            ..at(Page::Device)
+        };
+        let ops = draw(&demo);
+        let texts: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, text, ..) => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Gateinto",
+                "工作階段",
+                "閘道",
+                "裝置",
+                "記錄",
+                "設定",
+                "示範",
+                "僅為範例資料",
+                "這部裝置"
+            ]
+        );
+        assert!(l.banner.card.h > 0);
     }
 
     #[test]
