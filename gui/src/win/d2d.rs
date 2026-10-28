@@ -247,7 +247,7 @@ impl Canvas<'_> {
                     };
                 }
             }
-            Op::Logo(r, eyes) => self.logo(r, eyes),
+            Op::Logo(r, state) => self.logo(r, state),
             Op::Ring(r, radius, width, c) => unsafe {
                 let half = width / 2.0;
                 let mut box_ = rect(r);
@@ -337,7 +337,7 @@ impl Canvas<'_> {
         self.path(begin, (a.left, a.foot), &segs, closed)
     }
 
-    fn logo(&self, r: Rect, eyes: Option<Rgb>) {
+    fn logo(&self, r: Rect, state: logo::State) {
         let m = logo::mark(r);
         let (x, y, w, h) = m.tile;
         unsafe {
@@ -352,17 +352,42 @@ impl Canvas<'_> {
                 self.rt
                     .DrawGeometry(&arch, self.paint(logo::ARCH), m.stroke, self.round);
             }
-            if let Some(c) = eyes {
-                for eye in m.eyes {
-                    self.rt.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2::new(eye.cx, eye.cy),
-                            radiusX: eye.rx,
-                            radiusY: eye.ry,
-                        },
-                        self.paint(c),
-                    );
+            match state.eyes() {
+                Some(c) => {
+                    for eye in m.eyes {
+                        self.rt
+                            .FillEllipse(&ellipse((eye.cx, eye.cy), eye.rx, eye.ry), self.paint(c));
+                    }
                 }
+                None => {
+                    for (a, b) in m.lids {
+                        self.rt.DrawLine(
+                            Vector2::new(a.0, a.1),
+                            Vector2::new(b.0, b.1),
+                            self.paint(logo::DASH),
+                            m.lid,
+                            self.round,
+                        );
+                    }
+                }
+            }
+            if state.badge() {
+                let b = m.badge;
+                let disc = ellipse((b.cx, b.cy), b.r, b.r);
+                self.rt.FillEllipse(&disc, self.paint(logo::BADGE));
+                self.rt
+                    .DrawEllipse(&disc, self.paint(logo::BADGE_INK), b.ring, self.round);
+                self.rt.DrawLine(
+                    Vector2::new(b.bar.0.0, b.bar.0.1),
+                    Vector2::new(b.bar.1.0, b.bar.1.1),
+                    self.paint(logo::BADGE_INK),
+                    b.bar_w,
+                    self.round,
+                );
+                self.rt.FillEllipse(
+                    &ellipse(b.dot, b.dot_r, b.dot_r),
+                    self.paint(logo::BADGE_INK),
+                );
             }
         }
     }
@@ -400,5 +425,13 @@ impl Canvas<'_> {
                 }
             }
         }
+    }
+}
+
+fn ellipse(center: (f32, f32), rx: f32, ry: f32) -> D2D1_ELLIPSE {
+    D2D1_ELLIPSE {
+        point: Vector2::new(center.0, center.1),
+        radiusX: rx,
+        radiusY: ry,
     }
 }

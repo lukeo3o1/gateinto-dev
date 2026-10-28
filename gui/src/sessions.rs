@@ -1,19 +1,13 @@
 use gateinto::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
 
 use crate::agent::AgentState;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Eyes {
-    Lit,
-    Dim,
-    Closed,
-}
+use crate::logo::State;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub title: &'static str,
     pub subtitle: String,
-    pub eyes: Eyes,
+    pub logo: State,
     pub stop: bool,
     pub launch: Launch,
 }
@@ -64,7 +58,11 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
                     "Agent running on loopback only · {} session{plural} · {active} active",
                     sessions.len()
                 ),
-                eyes: if active > 0 { Eyes::Lit } else { Eyes::Dim },
+                logo: if active > 0 {
+                    State::Relaying
+                } else {
+                    State::Idle
+                },
                 stop: true,
                 launch: if busy { Launch::Busy } else { Launch::Ready },
             };
@@ -74,7 +72,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
             Status {
                 title: "Stopped",
                 subtitle: "The agent is not running".to_owned(),
-                eyes: Eyes::Closed,
+                logo: State::Stopped,
                 stop: false,
                 launch: Launch::Hidden,
             },
@@ -84,7 +82,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
             Status {
                 title: "Agent unreachable",
                 subtitle: error.clone(),
-                eyes: Eyes::Dim,
+                logo: State::Attention,
                 stop: false,
                 launch: Launch::Hidden,
             },
@@ -215,7 +213,7 @@ mod tests {
             Status {
                 title: "Relaying",
                 subtitle: "Agent running on loopback only · 3 sessions · 2 active".to_owned(),
-                eyes: Eyes::Lit,
+                logo: State::Relaying,
                 stop: true,
                 launch: Launch::Ready,
             }
@@ -246,7 +244,7 @@ mod tests {
             page.status.subtitle,
             "Agent running on loopback only · 1 session · 0 active"
         );
-        assert_eq!(page.status.eyes, Eyes::Dim);
+        assert_eq!(page.status.logo, State::Idle);
         assert!(page.status.stop);
     }
 
@@ -262,14 +260,14 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_agent_has_no_table_eyes_or_stop_button() {
+    fn a_stopped_agent_has_no_table_open_eyes_or_stop_button() {
         assert_eq!(
             page(&AgentState::Stopped, None, 0, false),
             Page {
                 status: Status {
                     title: "Stopped",
                     subtitle: "The agent is not running".to_owned(),
-                    eyes: Eyes::Closed,
+                    logo: State::Stopped,
                     stop: false,
                     launch: Launch::Hidden,
                 },
@@ -287,7 +285,7 @@ mod tests {
                 status: Status {
                     title: "Agent unreachable",
                     subtitle: "the agent did not answer".to_owned(),
-                    eyes: Eyes::Dim,
+                    logo: State::Attention,
                     stop: false,
                     launch: Launch::Hidden,
                 },

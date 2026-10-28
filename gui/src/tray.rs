@@ -4,7 +4,7 @@ use gateinto::link::Known;
 use crate::agent::AgentState;
 use crate::gateways;
 use crate::layout::Rect;
-use crate::sessions::Eyes;
+use crate::logo::State;
 
 pub const TIP_UNITS: usize = 127;
 pub const LABEL: &str = "Start a browser session";
@@ -22,7 +22,7 @@ const GRACE_MS: u64 = 500;
 pub struct Status {
     pub title: &'static str,
     pub subtitle: String,
-    pub eyes: Eyes,
+    pub logo: State,
     pub stop: bool,
 }
 
@@ -38,7 +38,7 @@ pub struct Row {
 pub struct Flyout {
     pub title: &'static str,
     pub subtitle: String,
-    pub eyes: Eyes,
+    pub logo: State,
     pub stop: bool,
     pub launch: bool,
     pub rows: Vec<Row>,
@@ -58,20 +58,24 @@ pub fn status(state: &AgentState) -> Status {
             Status {
                 title: if traffic > 0 { "Relaying" } else { "Idle" },
                 subtitle,
-                eyes: if traffic > 0 { Eyes::Lit } else { Eyes::Dim },
+                logo: if traffic > 0 {
+                    State::Relaying
+                } else {
+                    State::Idle
+                },
                 stop: true,
             }
         }
         AgentState::Stopped => Status {
             title: "Stopped",
             subtitle: "The agent is not running".to_owned(),
-            eyes: Eyes::Closed,
+            logo: State::Stopped,
             stop: false,
         },
         AgentState::Unreachable(error) => Status {
             title: "Agent unreachable",
             subtitle: error.clone(),
-            eyes: Eyes::Dim,
+            logo: State::Attention,
             stop: false,
         },
     }
@@ -81,7 +85,7 @@ pub fn pending() -> Status {
     Status {
         title: "Checking",
         subtitle: "Waiting for the agent status".to_owned(),
-        eyes: Eyes::Dim,
+        logo: State::Idle,
         stop: false,
     }
 }
@@ -90,13 +94,13 @@ pub fn waiting() -> Flyout {
     let Status {
         title,
         subtitle,
-        eyes,
+        logo,
         stop,
     } = pending();
     Flyout {
         title,
         subtitle,
-        eyes,
+        logo,
         stop,
         launch: false,
         rows: Vec::new(),
@@ -155,13 +159,13 @@ pub fn flyout(
     let Status {
         title,
         subtitle,
-        eyes,
+        logo,
         stop,
     } = status(state);
     Flyout {
         title,
         subtitle,
-        eyes,
+        logo,
         stop,
         launch: page.launch,
         rows,
@@ -362,7 +366,7 @@ mod tests {
             Status {
                 title: "Relaying",
                 subtitle: "2 sessions · 1 with traffic".to_owned(),
-                eyes: Eyes::Lit,
+                logo: State::Relaying,
                 stop: true,
             }
         );
@@ -375,7 +379,7 @@ mod tests {
             (one.title, one.subtitle.as_str()),
             ("Idle", "1 session · 0 with traffic")
         );
-        assert_eq!(one.eyes, Eyes::Dim);
+        assert_eq!(one.logo, State::Idle);
         let none = status(&running(Vec::new()));
         assert_eq!(
             (none.title, none.subtitle.as_str()),
@@ -391,7 +395,7 @@ mod tests {
             Status {
                 title: "Stopped",
                 subtitle: "The agent is not running".to_owned(),
-                eyes: Eyes::Closed,
+                logo: State::Stopped,
                 stop: false,
             }
         );
@@ -400,7 +404,7 @@ mod tests {
             (lost.title, lost.subtitle.as_str()),
             ("Agent unreachable", "pipe busy")
         );
-        assert_eq!((lost.eyes, lost.stop), (Eyes::Dim, false));
+        assert_eq!((lost.logo, lost.stop), (State::Attention, false));
     }
 
     #[test]
@@ -591,7 +595,7 @@ mod tests {
         let status = pending();
         assert_eq!(status.title, "Checking");
         assert_eq!(status.subtitle, "Waiting for the agent status");
-        assert_eq!(status.eyes, Eyes::Dim);
+        assert_eq!(status.logo, State::Idle);
         assert!(!status.stop);
         assert_eq!(
             tooltip(&status),

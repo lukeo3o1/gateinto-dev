@@ -4,6 +4,7 @@ use crate::fonts::Font;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
+use crate::logo::State;
 use crate::menu::Popup;
 use crate::nav::Nav;
 use crate::pointer::{Look, Pointer};
@@ -18,7 +19,7 @@ pub enum Op {
     Round(Rect, f32, Rgb),
     Icon(Icon, Rect, f32, Rgb),
     Text(Font, Cow<'static, str>, Rect, Rgb),
-    Logo(Rect, Option<Rgb>),
+    Logo(Rect, State),
     Ring(Rect, f32, f32, Rgb),
     Clip(Rect),
     Unclip,
@@ -46,7 +47,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         Op::Fill(Rect::new(0, 0, l.caption_row.right(), l.rail.h), t.bg),
         Op::Fill(l.rail, t.rail),
         Op::Fill(l.rail_edge, t.rail_edge),
-        Op::Logo(l.logo, Some(t.accent)),
+        Op::Logo(l.logo, State::App),
         Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, t.rail_on),
     ];
     for item in l.nav {
@@ -169,7 +170,7 @@ mod tests {
                 Op::Fill(Rect::new(0, 0, 1040, 680), T.bg),
                 Op::Fill(l.rail, T.rail),
                 Op::Fill(l.rail_edge, T.rail_edge),
-                Op::Logo(l.logo, Some(T.accent)),
+                Op::Logo(l.logo, State::App),
                 Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, T.rail_on),
             ]
         );

@@ -12,7 +12,7 @@ use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View, stroke};
 use crate::scroll::{self, Pane};
-use crate::sessions::{EMPTY, Eyes, Kind, Launch, Page, Row};
+use crate::sessions::{EMPTY, Kind, Launch, Page, Row};
 use crate::theme::{Rgb, Theme};
 
 pub mod device;
@@ -200,13 +200,8 @@ impl<'a, M: Measure> Painter<'a, M> {
         let card = Rect::new(content.x, content.y, content.w, s.px(92.0));
         self.framed(card, 12.0, t.card);
         let logo = s.px(56.0);
-        let eyes = match status.eyes {
-            Eyes::Lit => Some(t.accent),
-            Eyes::Dim => Some(t.eyes_idle),
-            Eyes::Closed => None,
-        };
         let logo = Rect::new(card.x + s.px(20.0), card.y + s.px(18.0), logo, logo);
-        self.push(Op::Logo(logo, eyes));
+        self.push(Op::Logo(logo, status.logo));
         let x = logo.right() + s.px(16.0);
         let mut right = card.right() - s.px(20.0);
         let button = status.stop.then(|| self.button(card, right, STOP_LABEL));
@@ -459,10 +454,11 @@ mod tests {
     use super::*;
     use crate::fonts::Font;
     use crate::icons;
+    use crate::logo::State;
     use crate::menu::Popup;
     use crate::nav::{Nav, Page as NavPage};
     use crate::scroll::Pane;
-    use crate::sessions::{EMPTY, Eyes, Kind, Launch, Row, Status};
+    use crate::sessions::{EMPTY, Kind, Launch, Row, Status};
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
@@ -521,7 +517,7 @@ mod tests {
             status: Status {
                 title: if active { "Relaying" } else { "Idle" },
                 subtitle: "Agent running on loopback only · 1 session · 1 active".to_owned(),
-                eyes: if active { Eyes::Lit } else { Eyes::Dim },
+                logo: if active { State::Relaying } else { State::Idle },
                 stop: true,
                 launch: Launch::Ready,
             },
@@ -534,7 +530,7 @@ mod tests {
             status: Status {
                 title: "Stopped",
                 subtitle: "The agent is not running".to_owned(),
-                eyes: Eyes::Closed,
+                logo: State::Stopped,
                 stop: false,
                 launch: Launch::Hidden,
             },
@@ -610,7 +606,7 @@ mod tests {
             [
                 Op::Round(Rect::new(248, 80, 764, 92), 12.0, T.border),
                 Op::Round(Rect::new(249, 81, 762, 90), 11.0, T.card),
-                Op::Logo(Rect::new(268, 98, 56, 56), Some(T.accent)),
+                Op::Logo(Rect::new(268, 98, 56, 56), State::Relaying),
                 text(
                     Font::Status,
                     "Relaying",
@@ -628,22 +624,22 @@ mod tests {
     }
 
     #[test]
-    fn the_logo_eyes_follow_the_status() {
+    fn the_logo_follows_the_status() {
         let logo = |page: &Page| {
             draw(page)
                 .ops
                 .into_iter()
                 .find_map(|op| match op {
-                    Op::Logo(_, eyes) => Some(eyes),
+                    Op::Logo(_, state) => Some(state),
                     _ => None,
                 })
                 .unwrap()
         };
-        assert_eq!(logo(&running(vec![row(1)])), Some(T.accent));
+        assert_eq!(logo(&running(vec![row(1)])), State::Relaying);
         let mut idle = row(1);
         idle.active = false;
-        assert_eq!(logo(&running(vec![idle])), Some(T.eyes_idle));
-        assert_eq!(logo(&stopped()), None);
+        assert_eq!(logo(&running(vec![idle])), State::Idle);
+        assert_eq!(logo(&stopped()), State::Stopped);
     }
 
     #[test]
@@ -1127,7 +1123,7 @@ mod tests {
         );
         assert_eq!(
             b.ops[3],
-            Op::Logo(Rect::new(536, 196, 112, 112), Some(T.accent))
+            Op::Logo(Rect::new(536, 196, 112, 112), State::Relaying)
         );
         assert_eq!(b.targets[2].0.w, 64);
     }

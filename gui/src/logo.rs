@@ -1,5 +1,4 @@
 use crate::layout::Rect;
-use crate::sessions::Eyes;
 use crate::theme::Rgb;
 
 pub const TILE: Rgb = Rgb(0x262b36);
@@ -8,6 +7,31 @@ pub const ARCH: Rgb = Rgb(0xffffff);
 pub const LIT: Rgb = Rgb(0xffc94a);
 pub const DIM: Rgb = Rgb(0x9aa1b1);
 pub const DASH: Rgb = Rgb(0x8a90a0);
+pub const BADGE: Rgb = Rgb(0xc42b1c);
+pub const BADGE_INK: Rgb = Rgb(0xffffff);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    App,
+    Stopped,
+    Idle,
+    Relaying,
+    Attention,
+}
+
+impl State {
+    pub fn eyes(self) -> Option<Rgb> {
+        match self {
+            State::App | State::Relaying => Some(LIT),
+            State::Idle | State::Attention => Some(DIM),
+            State::Stopped => None,
+        }
+    }
+
+    pub fn badge(self) -> bool {
+        self == State::Attention
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arch {
@@ -25,6 +49,20 @@ pub struct Eye {
     pub ry: f32,
 }
 
+type Point = (f32, f32);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Badge {
+    pub cx: f32,
+    pub cy: f32,
+    pub r: f32,
+    pub ring: f32,
+    pub bar: (Point, Point),
+    pub bar_w: f32,
+    pub dot: Point,
+    pub dot_r: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mark {
     pub tile: (f32, f32, f32, f32),
@@ -33,6 +71,9 @@ pub struct Mark {
     pub arch: Arch,
     pub stroke: f32,
     pub eyes: [Eye; 2],
+    pub lids: [(Point, Point); 2],
+    pub lid: f32,
+    pub badge: Badge,
 }
 
 pub fn mark(r: Rect) -> Mark {
@@ -45,6 +86,7 @@ pub fn mark(r: Rect) -> Mark {
         crown: y(23.0),
         foot: y(40.0),
     };
+    let lid = |left: f32| ((x(left), y(28.0)), (x(left + 4.0), y(28.0)));
     let eye = |cx| Eye {
         cx: x(cx),
         cy: y(27.0),
@@ -58,14 +100,25 @@ pub fn mark(r: Rect) -> Mark {
         arch: arch(13.0, 35.0),
         stroke: 4.5 * k,
         eyes: [eye(20.3), eye(27.7)],
+        lids: [lid(18.3), lid(25.7)],
+        lid: 2.2 * k,
+        badge: Badge {
+            cx: x(38.0),
+            cy: y(38.0),
+            r: 8.0 * k,
+            ring: 2.0 * k,
+            bar: ((x(38.0), y(34.0)), (x(38.0), y(38.5))),
+            bar_w: 2.4 * k,
+            dot: (x(38.0), y(41.6)),
+            dot_r: 1.3 * k,
+        },
     }
 }
 
 const SAMPLES: i32 = 4;
 
-pub fn pixels(size: i32, eyes: Eyes) -> Vec<u32> {
+pub fn pixels(size: i32, state: State) -> Vec<u32> {
     let m = mark(Rect::new(0, 0, size, size));
-    let k = size as f32 / 48.0;
     let mut out = Vec::with_capacity((size * size).max(0) as usize);
     for py in 0..size {
         for px in 0..size {
@@ -74,7 +127,7 @@ pub fn pixels(size: i32, eyes: Eyes) -> Vec<u32> {
                 for sx in 0..SAMPLES {
                     let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
                     let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
-                    if let Some(c) = sample(&m, k, eyes, x, y) {
+                    if let Some(c) = sample(&m, state, x, y) {
                         hits += 1;
                         for (i, shift) in [16, 8, 0].into_iter().enumerate() {
                             sum[i] += (c.0 >> shift) & 0xff;
@@ -95,7 +148,12 @@ pub fn pixels(size: i32, eyes: Eyes) -> Vec<u32> {
     out
 }
 
-fn sample(m: &Mark, k: f32, eyes: Eyes, x: f32, y: f32) -> Option<Rgb> {
+fn sample(m: &Mark, state: State, x: f32, y: f32) -> Option<Rgb> {
+    if state.badge()
+        && let Some(c) = badge(&m.badge, x, y)
+    {
+        return Some(c);
+    }
     let (tx, ty, tw, th) = m.tile;
     let dx = (tx + m.radius - x).max(x - (tx + tw - m.radius)).max(0.0);
     let dy = (ty + m.radius - y).max(y - (ty + th - m.radius)).max(0.0);
@@ -103,25 +161,34 @@ fn sample(m: &Mark, k: f32, eyes: Eyes, x: f32, y: f32) -> Option<Rgb> {
     if !inside || dx * dx + dy * dy > m.radius * m.radius {
         return None;
     }
-    let eye = match eyes {
-        Eyes::Lit => Some(LIT),
-        Eyes::Dim => Some(DIM),
-        Eyes::Closed => None,
-    };
     let on_eye = m.eyes.iter().any(|e| {
         let (u, v) = ((x - e.cx) / e.rx, (y - e.cy) / e.ry);
         u * u + v * v <= 1.0
     });
-    let on_dash = [18.3, 25.7].iter().any(|&left| {
-        let (x0, x1, cy) = (left * k, (left + 4.0) * k, 28.0 * k);
-        segment(x, y, (x0, cy), (x1, cy)) <= 1.1 * k
-    });
-    Some(match eye {
+    let on_lid = m
+        .lids
+        .iter()
+        .any(|&(a, b)| segment(x, y, a, b) <= m.lid / 2.0);
+    Some(match state.eyes() {
         Some(c) if on_eye => c,
-        None if on_dash => DASH,
+        None if on_lid => DASH,
         _ if arch_distance(m.arch, x, y) <= m.stroke / 2.0 => ARCH,
         _ if in_door(m.door, x, y) => DOOR,
         _ => TILE,
+    })
+}
+
+fn badge(b: &Badge, x: f32, y: f32) -> Option<Rgb> {
+    let d = (x - b.cx).hypot(y - b.cy);
+    if d > b.r + b.ring / 2.0 {
+        return None;
+    }
+    let mark = segment(x, y, b.bar.0, b.bar.1) <= b.bar_w / 2.0
+        || (x - b.dot.0).hypot(y - b.dot.1) <= b.dot_r;
+    Some(if mark || d >= b.r - b.ring / 2.0 {
+        BADGE_INK
+    } else {
+        BADGE
     })
 }
 
@@ -159,7 +226,6 @@ fn segment(x: f32, y: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::Eyes;
 
     #[test]
     fn follows_the_svg_at_its_own_size() {
@@ -184,44 +250,95 @@ mod tests {
                 arch: arch(13.0, 35.0),
                 stroke: 4.5,
                 eyes: [eye(20.3), eye(27.7)],
+                lids: [((18.3, 28.0), (22.3, 28.0)), ((25.7, 28.0), (29.7, 28.0))],
+                lid: 2.2,
+                badge: Badge {
+                    cx: 38.0,
+                    cy: 38.0,
+                    r: 8.0,
+                    ring: 2.0,
+                    bar: ((38.0, 34.0), (38.0, 38.5)),
+                    bar_w: 2.4,
+                    dot: (38.0, 41.6),
+                    dot_r: 1.3,
+                },
             }
         );
     }
 
-    fn at(size: i32, eyes: Eyes, x: i32, y: i32) -> u32 {
-        let image = pixels(size, eyes);
+    fn at(size: i32, state: State, x: i32, y: i32) -> u32 {
+        let image = pixels(size, state);
         assert_eq!(image.len(), (size * size) as usize);
         image[(y * size + x) as usize]
     }
 
     #[test]
     fn leaves_the_corners_transparent() {
-        assert_eq!(at(48, Eyes::Lit, 0, 0) >> 24, 0);
-        assert_eq!(at(48, Eyes::Lit, 47, 47) >> 24, 0);
+        assert_eq!(at(48, State::Relaying, 0, 0) >> 24, 0);
+        assert_eq!(at(48, State::Relaying, 47, 47) >> 24, 0);
     }
 
     #[test]
     fn paints_the_tile_door_and_arch_opaque() {
-        assert_eq!(at(48, Eyes::Dim, 24, 5), 0xff262b36);
-        assert_eq!(at(48, Eyes::Dim, 24, 35), 0xff0c0e13);
-        assert_eq!(at(48, Eyes::Dim, 12, 35), 0xffffffff);
+        assert_eq!(at(48, State::Idle, 24, 5), 0xff262b36);
+        assert_eq!(at(48, State::Idle, 24, 35), 0xff0c0e13);
+        assert_eq!(at(48, State::Idle, 12, 35), 0xffffffff);
     }
 
     #[test]
     fn colors_the_eyes_by_traffic() {
-        assert_eq!(at(48, Eyes::Lit, 20, 27), 0xffffc94a);
-        assert_eq!(at(48, Eyes::Dim, 20, 27), 0xff9aa1b1);
+        assert_eq!(at(48, State::Relaying, 20, 27), 0xffffc94a);
+        assert_eq!(at(48, State::Idle, 20, 27), 0xff9aa1b1);
     }
 
     #[test]
     fn closes_the_eyes_into_dashes_when_stopped() {
-        assert_eq!(at(48, Eyes::Closed, 20, 27), 0xff8a90a0);
-        assert_eq!(at(48, Eyes::Closed, 20, 25), 0xff0c0e13);
+        assert_eq!(at(48, State::Stopped, 20, 27), 0xff8a90a0);
+        assert_eq!(at(48, State::Stopped, 20, 25), 0xff0c0e13);
+    }
+
+    #[test]
+    fn the_app_icon_has_amber_eyes_like_relaying() {
+        assert_eq!(at(48, State::App, 20, 27), 0xffffc94a);
+        assert_eq!(at(48, State::App, 46, 38) >> 24, 0);
+    }
+
+    #[test]
+    fn attention_keeps_grey_eyes_and_adds_a_red_badge() {
+        assert_eq!(at(48, State::Attention, 20, 27), 0xff9aa1b1);
+        assert_eq!(at(48, State::Attention, 34, 38), 0xffc42b1c);
+        assert_eq!(at(48, State::Attention, 38, 36), 0xffffffff);
+        assert_eq!(at(48, State::Attention, 38, 41), 0xffffffff);
+        assert_eq!(at(48, State::Attention, 46, 38), 0xffffffff);
+        assert_eq!(at(48, State::Idle, 46, 38) >> 24, 0);
+        assert_eq!(at(48, State::Attention, 41, 42), 0xffc42b1c);
+        assert_eq!(at(48, State::Idle, 41, 42), 0xff262b36);
+    }
+
+    #[test]
+    fn only_attention_has_a_badge_and_only_stopped_closes_its_eyes() {
+        let states = [
+            State::App,
+            State::Stopped,
+            State::Idle,
+            State::Relaying,
+            State::Attention,
+        ];
+        assert_eq!(
+            states.map(|s| (s.eyes(), s.badge())),
+            [
+                (Some(LIT), false),
+                (None, false),
+                (Some(DIM), false),
+                (Some(LIT), false),
+                (Some(DIM), true),
+            ]
+        );
     }
 
     #[test]
     fn blends_edges_with_partial_alpha() {
-        let edge = (0..16).map(|x| at(16, Eyes::Lit, x, 0) >> 24);
+        let edge = (0..16).map(|x| at(16, State::Relaying, x, 0) >> 24);
         assert!(edge.clone().any(|a| a > 0 && a < 255));
         assert!(edge.clone().any(|a| a == 0));
     }

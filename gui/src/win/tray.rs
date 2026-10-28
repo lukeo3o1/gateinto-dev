@@ -42,7 +42,6 @@ use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
-use crate::sessions::Eyes;
 use crate::theme::Theme;
 use crate::tray::{self, Event, Notice};
 use crate::worker::Command;
@@ -69,7 +68,7 @@ impl Drop for TrayIcon {
 pub struct Notify {
     added: bool,
     version4: bool,
-    shown: Option<(Eyes, String, i32)>,
+    shown: Option<(logo::State, String, i32)>,
     icon: Option<TrayIcon>,
 }
 
@@ -217,12 +216,12 @@ pub fn taskbar_created(msg: u32) -> bool {
     id != 0 && msg == id
 }
 
-fn current(app: &App) -> (Eyes, String, i32) {
+fn current(app: &App) -> (logo::State, String, i32) {
     let status = app
         .update
         .as_ref()
         .map_or_else(tray::pending, |u| tray::status(&u.state));
-    (status.eyes, tray::tooltip(&status), icon_size())
+    (status.logo, tray::tooltip(&status), icon_size())
 }
 
 fn icon_size() -> i32 {
@@ -250,8 +249,8 @@ fn notify_data(main: HWND, icon: HICON, tip: &str) -> NOTIFYICONDATAW {
     }
 }
 
-fn make_icon(eyes: Eyes, size: i32) -> Option<TrayIcon> {
-    let pixels = logo::pixels(size, eyes);
+fn make_icon(state: logo::State, size: i32) -> Option<TrayIcon> {
+    let pixels = logo::pixels(size, state);
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,

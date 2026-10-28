@@ -6,7 +6,6 @@ use crate::layout::Rect;
 use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
-use crate::sessions::Eyes;
 use crate::theme::Theme;
 use crate::tray::{ADD, Flyout, LABEL, OPEN, Row, STOP};
 
@@ -25,12 +24,7 @@ pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl M
     ));
     let pad = s.px(18.0);
     let logo = Rect::new(frame.x + pad, frame.y + pad, s.px(48.0), s.px(48.0));
-    let eyes = match f.eyes {
-        Eyes::Lit => Some(t.accent),
-        Eyes::Dim => Some(t.eyes_idle),
-        Eyes::Closed => None,
-    };
-    p.push(Op::Logo(logo, eyes));
+    p.push(Op::Logo(logo, f.logo));
     let x = logo.right() + s.px(14.0);
     let w = frame.right() - pad - x;
     let (title, sub, gap) = (s.px(23.0), s.px(16.0), s.px(3.0));
@@ -197,7 +191,7 @@ impl<M: Measure> Painter<'_, M> {
 mod tests {
     use super::*;
     use crate::board::tests::{Chars, text};
-    use crate::sessions::Eyes;
+    use crate::logo::State;
     use crate::tray::{ADD, LABEL, NO_GATEWAYS, OPEN, Row, STOP};
 
     const T: Theme = Theme::DARK;
@@ -217,7 +211,7 @@ mod tests {
         Flyout {
             title: "Relaying",
             subtitle: "2 sessions · 1 with traffic".to_owned(),
-            eyes: Eyes::Lit,
+            logo: State::Relaying,
             stop: true,
             launch: true,
             rows,
@@ -250,7 +244,7 @@ mod tests {
                 Op::Clip(SIZE),
                 Op::Fill(SIZE, T.border),
                 Op::Fill(Rect::new(1, 1, 358, 518), T.bg),
-                Op::Logo(Rect::new(18, 18, 48, 48), Some(T.accent)),
+                Op::Logo(Rect::new(18, 18, 48, 48), State::Relaying),
                 text(Font::Lead, "Relaying", Rect::new(80, 21, 262, 23), T.text),
                 text(
                     Font::Small,
@@ -290,20 +284,13 @@ mod tests {
     }
 
     #[test]
-    fn the_logo_eyes_follow_the_status() {
+    fn the_logo_follows_the_status() {
         let mut f = relaying(Vec::new());
-        f.eyes = Eyes::Dim;
-        assert!(
-            draw(&f)
-                .ops
-                .contains(&Op::Logo(Rect::new(18, 18, 48, 48), Some(T.eyes_idle)))
-        );
-        f.eyes = Eyes::Closed;
-        assert!(
-            draw(&f)
-                .ops
-                .contains(&Op::Logo(Rect::new(18, 18, 48, 48), None))
-        );
+        for state in [State::Idle, State::Stopped, State::Attention] {
+            f.logo = state;
+            let logo = Op::Logo(Rect::new(18, 18, 48, 48), state);
+            assert!(draw(&f).ops.contains(&logo));
+        }
     }
 
     #[test]
