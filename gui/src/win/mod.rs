@@ -173,11 +173,7 @@ impl App {
         let fonts = Fonts::new(gfx.dwrite(), s).ok()?;
         let layout = measure(hwnd, s, frame);
         let demo = demo::requested(std::env::args_os());
-        let (theme, language) = if demo {
-            (theme::Choice::default(), i18n::Choice::default())
-        } else {
-            (appearance::choice(), appearance::language())
-        };
+        let (theme, language) = (appearance::choice(), appearance::language());
         Some(Self {
             hwnd,
             s,
@@ -1634,12 +1630,7 @@ fn fail(message: Text) {
 pub fn run() {
     sys::enable_dpi_awareness();
     let demo = demo::requested(std::env::args_os());
-    let choice = if demo {
-        i18n::Choice::default()
-    } else {
-        appearance::language()
-    };
-    i18n::set(choice.language(appearance::system_language()));
+    i18n::set(appearance::language().language(appearance::system_language()));
     let Ok(gfx) = Graphics::new() else {
         fail(Text::NoRendering);
         return;

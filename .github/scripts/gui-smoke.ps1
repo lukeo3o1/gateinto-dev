@@ -112,7 +112,11 @@ $configDir = Join-Path $env:APPDATA 'Gateinto'
 $config = Join-Path $configDir 'gateinto.toml'
 $themeKey = 'HKCU:\Software\Gateinto\App'
 $pages = 'sessions', 'gateways', 'device', 'log', 'settings'
-$flyoutTitles = @{ 'English' = 'Gateinto status'; 'zh-TW' = "Gateinto $([char] 0x72c0)$([char] 0x614b)" }
+$statusWord = "$([char] 0x72c0)$([char] 0x614b)"
+$demoWord = "$([char] 0x793a)$([char] 0x7bc4)"
+$demoTitles = @{ 'English' = 'Gateinto Demo'; 'zh-TW' = "Gateinto $demoWord" }
+$flyoutTitles = @{ 'English' = 'Gateinto status'; 'zh-TW' = "Gateinto $statusWord" }
+$demoFlyoutTitles = @{ 'English' = 'Gateinto Demo status'; 'zh-TW' = "Gateinto $demoWord$statusWord" }
 $VK_CONTROL = 0x11
 $VK_TAB = 0x09
 $VK_ESCAPE = 0x1b
@@ -191,7 +195,7 @@ function Find-Window($Process, [string] $Class, [string] $Title) {
 
 function Start-Gui([string] $Theme, [string] $Language = 'English', [switch] $Demo) {
   Set-Appearance $Theme $Language
-  $title = if ($Demo) { 'Gateinto Demo' } else { 'Gateinto' }
+  $title = if ($Demo) { $demoTitles[$Language] } else { 'Gateinto' }
   $gui = if ($Demo) { Start-Process -FilePath $guiExe -ArgumentList '--demo' -PassThru } else { Start-Process -FilePath $guiExe -PassThru }
   $null = $gui.Handle
   $deadline = (Get-Date).AddSeconds(60)
@@ -201,7 +205,7 @@ function Start-Gui([string] $Theme, [string] $Language = 'English', [switch] $De
     if ($hwnd -ne [IntPtr]::Zero) {
       Start-Sleep -Seconds 3
       Assert-Gui $gui
-      return [pscustomobject] @{ Process = $gui; Hwnd = $hwnd; Theme = $Theme; Language = $Language }
+      return [pscustomobject] @{ Process = $gui; Hwnd = $hwnd; Theme = $Theme; Language = $Language; Demo = [bool] $Demo }
     }
     Start-Sleep -Milliseconds 250
   }
@@ -308,11 +312,12 @@ function Save-Flyout($Gui, [string] $Name) {
   $x = $screen.Right - 40
   $y = $screen.Bottom - 20
   $anchor = [UIntPtr]::new([uint64] ((($y -band 0xffff) -shl 16) -bor ($x -band 0xffff)))
+  $title = if ($Gui.Demo) { $demoFlyoutTitles[$Gui.Language] } else { $flyoutTitles[$Gui.Language] }
   foreach ($message in $NIN_SELECT, $WM_LBUTTONUP) {
     $null = [GuiSmoke]::PostMessage($Gui.Hwnd, $WM_TRAY, $anchor, [IntPtr] $message)
     $deadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $deadline) {
-      $flyout = Find-Window $Gui.Process 'GateintoFlyout' $flyoutTitles[$Gui.Language]
+      $flyout = Find-Window $Gui.Process 'GateintoFlyout' $title
       if ($flyout -ne [IntPtr]::Zero) {
         Start-Sleep -Milliseconds 800
         $shot = Save-Window $Gui $flyout $Name
@@ -455,7 +460,7 @@ ca_file = '$ca'
       $shots += Save-Window $gui $gui.Hwnd "demo-$($i + 1)-$($pages[$i])"
     }
     Assert-Distinct @($shots | Select-Object -Skip 1) 'the demo page screenshots after Ctrl+1..Ctrl+5'
-    $null = Save-Flyout ([pscustomobject] @{ Process = $gui.Process; Hwnd = $gui.Hwnd; Language = 'English' }) 'demo-tray-flyout'
+    $null = Save-Flyout $gui 'demo-tray-flyout'
     $ids = Get-GateintoIds
     if ($ids) { throw "gateinto.exe runs although only the demo was started: $ids" }
     Stop-Gui $gui
