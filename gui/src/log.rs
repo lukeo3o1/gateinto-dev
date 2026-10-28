@@ -67,16 +67,16 @@ impl Journal {
                 };
                 return false;
             }
-            Ok(Response::Error(message)) => return self.failed(message),
+            Ok(Response::Error(message)) => return self.failed(Note::Agent(message)),
             Err(RequestError::NotRunning) => {
                 self.stopped();
                 return false;
             }
-            Err(error) => return self.failed(error.to_string()),
+            Err(error) => return self.failed(crate::agent::note(error)),
         };
         let page = match LogPage::parse(&lines) {
             Ok(page) => page,
-            Err(error) => return self.failed(error.to_string()),
+            Err(error) => return self.failed(Note::Agent(error.to_string())),
         };
         let pid = ipc::agent_pid(&lines);
         if (self.pid.is_some() && pid != self.pid) || page.last < self.after {
@@ -101,8 +101,8 @@ impl Journal {
         before < self.after && self.after < page.last
     }
 
-    fn failed(&mut self, problem: String) -> bool {
-        self.problem = Some(Note::Agent(problem));
+    fn failed(&mut self, problem: Note) -> bool {
+        self.problem = Some(problem);
         false
     }
 }
@@ -183,7 +183,7 @@ pub enum Body {
 pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) -> Body {
     match state {
         AgentState::Stopped => return Body::Empty(tr(STOPPED).to_owned()),
-        AgentState::Unreachable(error) => return Body::Empty(error.clone()),
+        AgentState::Unreachable(error) => return Body::Empty(error.shown().to_owned()),
         AgentState::Running(_) => {}
     }
     let rows: Vec<Row> = journal
@@ -411,7 +411,7 @@ mod tests {
         assert!(!journal.absorb(Err(RequestError::TimedOut)));
         assert_eq!(
             journal.problem(),
-            Some(RequestError::TimedOut.to_string().as_str())
+            Some(crate::i18n::tr(crate::i18n::Text::AgentTimedOut))
         );
         assert_eq!(seqs(&journal), [1]);
         assert!(!journal.absorb(Ok(Response::Ok(vec!["agent-pid: 7".to_owned()]))));
@@ -551,7 +551,7 @@ mod tests {
         );
         assert_eq!(
             empty(
-                &AgentState::Unreachable("no pipe".to_owned()),
+                &AgentState::Unreachable(crate::i18n::Note::Agent("no pipe".to_owned())),
                 &mixed(),
                 Filter::All
             ),
@@ -657,7 +657,10 @@ mod tests {
         journal.absorb(Err(RequestError::TimedOut));
         let shown_body = body(&running(), &journal, Filter::All, 0);
         let shown = page(&journal, &shown_body, Filter::All, None, false);
-        assert_eq!(shown.subtitle, RequestError::TimedOut.to_string());
+        assert_eq!(
+            shown.subtitle,
+            crate::i18n::tr(crate::i18n::Text::AgentTimedOut)
+        );
         assert!(shown.alert);
         let failed_body = body(&running(), &journal, Filter::All, 0);
         let failed = page(

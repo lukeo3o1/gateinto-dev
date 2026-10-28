@@ -314,6 +314,9 @@ table! {
     NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
     LanguageRow => "Language", "語言";
     LanguageFailed => "Could not save the language setting", "無法儲存語言設定";
+    AgentNotRunning => "no agent is running", "沒有正在執行的代理程式";
+    AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
+    AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
     Confirmation => "the agent asked to confirm this gateway; open its gateinto:// link to confirm it", "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認";
 }
 

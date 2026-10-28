@@ -433,7 +433,11 @@ mod tests {
         let dialog = shown();
         assert!(dialog.lasts(&running()));
         assert!(!dialog.lasts(&AgentState::Stopped));
-        assert!(!dialog.lasts(&AgentState::Unreachable("gone".to_owned())));
+        assert!(
+            !dialog.lasts(&AgentState::Unreachable(crate::i18n::Note::Agent(
+                "gone".to_owned()
+            )))
+        );
         assert!(!dialog.lasts(&AgentState::Running(vec![session(2, SessionAuth::OsUser)])));
         let mut restarted = session(3, SessionAuth::Password);
         restarted.started = 2_000;

@@ -114,7 +114,7 @@ impl Mailbox {
 
 pub fn stalled(error: String, loaded: Loaded) -> Update {
     Update {
-        state: AgentState::Unreachable(error.clone()),
+        state: AgentState::Unreachable(Note::Agent(error.clone())),
         gateways: loaded.gateways,
         sections: loaded.sections,
         agent: loaded.agent,
@@ -134,7 +134,7 @@ pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Optio
         Ok(Response::Ok(_)) => None,
         Ok(Response::Error(message)) => Some(Note::Agent(message)),
         Err(RequestError::NotRunning) if matches!(command, Command::Stop) => None,
-        Err(error) => Some(Note::Agent(error.to_string())),
+        Err(error) => Some(crate::agent::note(error)),
     }
 }
 
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(
             update,
             Update {
-                state: AgentState::Unreachable("no timer".to_owned()),
+                state: AgentState::Unreachable(crate::i18n::Note::Agent("no timer".to_owned())),
                 device: Some(Probe {
                     key: KeyState::Failed("no timer".to_owned()),
                     system: System::default(),
@@ -844,11 +844,11 @@ mod tests {
         );
         assert_eq!(
             failure(Command::Close(1), Err(RequestError::NotRunning)),
-            said("no agent is running")
+            Some(Text::AgentNotRunning.into())
         );
         assert_eq!(
             failure(Command::Stop, Err(RequestError::Closed)),
-            said("the agent closed the connection without an answer")
+            Some(Text::AgentClosed.into())
         );
     }
 
@@ -858,7 +858,7 @@ mod tests {
         let office = || Command::Launch("office".parse().unwrap());
         assert_eq!(
             failure(office(), Err(RequestError::NotRunning)),
-            said("no agent is running")
+            Some(Text::AgentNotRunning.into())
         );
     }
 

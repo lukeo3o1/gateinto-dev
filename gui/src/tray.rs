@@ -79,7 +79,7 @@ pub fn status(state: &AgentState) -> Status {
         },
         AgentState::Unreachable(error) => Status {
             title: tr(Text::AgentUnreachable),
-            subtitle: error.clone(),
+            subtitle: error.shown().to_owned(),
             logo: State::Attention,
             stop: false,
         },
@@ -320,7 +320,7 @@ mod tests {
     fn the_window_logo_waits_idle_and_flags_an_unreachable_agent() {
         assert_eq!(logo(None), State::Idle);
         assert_eq!(logo(Some(&AgentState::Stopped)), State::Stopped);
-        let lost = AgentState::Unreachable("pipe busy".to_owned());
+        let lost = AgentState::Unreachable(crate::i18n::Note::Agent("pipe busy".to_owned()));
         assert_eq!(logo(Some(&lost)), State::Attention);
         assert_eq!(logo(Some(&AgentState::Running(Vec::new()))), State::Idle);
     }
@@ -430,7 +430,9 @@ mod tests {
                 stop: false,
             }
         );
-        let lost = status(&AgentState::Unreachable("pipe busy".to_owned()));
+        let lost = status(&AgentState::Unreachable(crate::i18n::Note::Agent(
+            "pipe busy".to_owned(),
+        )));
         assert_eq!(
             (lost.title, lost.subtitle.as_str()),
             ("Agent unreachable", "pipe busy")
@@ -464,11 +466,17 @@ mod tests {
     #[test]
     fn the_tooltip_fits_the_notify_icon_buffer() {
         let long = "é".repeat(300);
-        let tip = tooltip(&status(&AgentState::Unreachable(long)), false);
+        let tip = tooltip(
+            &status(&AgentState::Unreachable(crate::i18n::Note::Agent(long))),
+            false,
+        );
         assert!(tip.encode_utf16().count() <= TIP_UNITS);
         assert!(tip.starts_with("Gateinto: Agent unreachable\né"));
         let wide = "😀".repeat(100);
-        let tip = tooltip(&status(&AgentState::Unreachable(wide)), false);
+        let tip = tooltip(
+            &status(&AgentState::Unreachable(crate::i18n::Note::Agent(wide))),
+            false,
+        );
         assert!(tip.encode_utf16().count() <= TIP_UNITS);
     }
 
@@ -684,7 +692,9 @@ mod tests {
             (stopped.title, stopped.subtitle.as_str()),
             ("已停止", "代理程式未執行")
         );
-        let lost = status(&AgentState::Unreachable("pipe busy".to_owned()));
+        let lost = status(&AgentState::Unreachable(crate::i18n::Note::Agent(
+            "pipe busy".to_owned(),
+        )));
         assert_eq!(
             (lost.title, lost.subtitle.as_str()),
             ("無法連線到代理程式", "pipe busy")

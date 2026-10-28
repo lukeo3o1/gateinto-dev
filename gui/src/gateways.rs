@@ -547,7 +547,7 @@ mod tests {
         let listing = known(vec![office()]);
         assert!(page(&listing, &AgentState::Running(Vec::new()), None, false).launch);
         assert!(!page(&listing, &AgentState::Stopped, None, false).launch);
-        let unreachable = AgentState::Unreachable("busy".to_owned());
+        let unreachable = AgentState::Unreachable(crate::i18n::Note::Agent("busy".to_owned()));
         assert!(!page(&listing, &unreachable, None, false).launch);
         assert_eq!(
             page(&listing, &AgentState::Stopped, None, false).rows[0].sessions,

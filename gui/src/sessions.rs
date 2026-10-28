@@ -87,7 +87,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
         AgentState::Unreachable(error) => (
             Status {
                 title: tr(Text::AgentUnreachable),
-                subtitle: error.clone(),
+                subtitle: error.shown().to_owned(),
                 logo: State::Attention,
                 stop: false,
                 launch: Launch::Hidden,
@@ -309,7 +309,9 @@ mod tests {
 
     #[test]
     fn an_unreachable_agent_shows_the_error() {
-        let state = AgentState::Unreachable("the agent did not answer".to_owned());
+        let state = AgentState::Unreachable(crate::i18n::Note::Agent(
+            "the agent did not answer".to_owned(),
+        ));
         assert_eq!(
             page(&state, None, 0, false),
             Page {
