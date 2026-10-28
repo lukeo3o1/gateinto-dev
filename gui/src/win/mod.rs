@@ -529,10 +529,14 @@ impl App {
         let Some(c) = self.units.push(unit) else {
             return true;
         };
+        let field = match self.focus.zone() {
+            Some(Zone::AddField(input)) => Some(input),
+            _ => None,
+        };
         let Some(form) = &mut self.adding else {
             return false;
         };
-        match add::keyed(form, c) {
+        match add::keyed(form, field, c) {
             Keyed::Changed => {}
             Keyed::Submit => return self.confirm_add(),
             Keyed::Paste => {

@@ -109,13 +109,19 @@ pub enum Keyed {
     Ignored,
 }
 
-pub fn keyed(form: &mut Form, c: char) -> Keyed {
+pub fn keyed(form: &mut Form, field: Option<Input>, c: char) -> Keyed {
+    if c == '\r' {
+        return Keyed::Submit;
+    }
+    let Some(field) = field else {
+        return Keyed::Ignored;
+    };
+    form.select(field);
     match c {
         '\u{8}' => {
             form.erase();
             Keyed::Changed
         }
-        '\r' => Keyed::Submit,
         '\u{16}' => Keyed::Paste,
         c if c.is_control() => Keyed::Ignored,
         c => {
@@ -881,16 +887,38 @@ mod tests {
     #[test]
     fn keys_edit_the_form_and_ask_for_submit_or_paste() {
         let mut typed = Form::default();
-        assert_eq!(keyed(&mut typed, 'a'), Keyed::Changed);
-        assert_eq!(keyed(&mut typed, 'b'), Keyed::Changed);
-        assert_eq!(keyed(&mut typed, '\u{8}'), Keyed::Changed);
+        assert_eq!(keyed(&mut typed, Some(Input::Address), 'a'), Keyed::Changed);
+        assert_eq!(keyed(&mut typed, Some(Input::Address), 'b'), Keyed::Changed);
+        assert_eq!(
+            keyed(&mut typed, Some(Input::Address), '\u{8}'),
+            Keyed::Changed
+        );
         assert_eq!(typed.value(Input::Address), "a");
-        assert_eq!(keyed(&mut typed, '\r'), Keyed::Submit);
-        assert_eq!(keyed(&mut typed, '\u{16}'), Keyed::Paste);
+        assert_eq!(keyed(&mut typed, Some(Input::Address), '\r'), Keyed::Submit);
+        assert_eq!(
+            keyed(&mut typed, Some(Input::Address), '\u{16}'),
+            Keyed::Paste
+        );
         for ignored in ['\t', '\u{1b}', '\u{7f}', '\n'] {
-            assert_eq!(keyed(&mut typed, ignored), Keyed::Ignored);
+            assert_eq!(
+                keyed(&mut typed, Some(Input::Address), ignored),
+                Keyed::Ignored
+            );
         }
         assert_eq!(typed.value(Input::Address), "a");
+    }
+
+    #[test]
+    fn keys_edit_only_the_field_that_holds_the_focus() {
+        let mut form = Form::default();
+        assert_eq!(keyed(&mut form, Some(Input::Name), 'n'), Keyed::Changed);
+        assert_eq!(form.selected(), Input::Name);
+        assert_eq!(keyed(&mut form, None, 'x'), Keyed::Ignored);
+        assert_eq!(keyed(&mut form, None, '\u{8}'), Keyed::Ignored);
+        assert_eq!(keyed(&mut form, None, '\u{16}'), Keyed::Ignored);
+        assert_eq!(keyed(&mut form, None, '\r'), Keyed::Submit);
+        assert_eq!(form.value(Input::Name), "n");
+        assert_eq!(form.value(Input::Address), "");
     }
 
     #[test]
