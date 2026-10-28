@@ -309,41 +309,6 @@ mod tests {
             .expect("the lookup finished")
     }
 
-    #[derive(Clone, Default)]
-    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl io::Write for Logs {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Logs {
-        fn capture(&self) -> tracing::subscriber::DefaultGuard {
-            let logs = self.clone();
-            tracing::subscriber::set_default(
-                tracing_subscriber::fmt()
-                    .with_max_level(tracing::Level::DEBUG)
-                    .with_writer(move || logs.clone())
-                    .finish(),
-            )
-        }
-
-        fn lines(&self, level: &str) -> Vec<String> {
-            String::from_utf8(self.0.lock().unwrap().clone())
-                .unwrap()
-                .lines()
-                .filter(|line| line.contains(level))
-                .map(str::to_owned)
-                .collect()
-        }
-    }
-
     fn status(response: &str) -> u16 {
         response[9..12].parse().unwrap()
     }
@@ -391,8 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_first_denial_of_a_session_is_a_warning() {
-        let logs = Logs::default();
-        let _guard = logs.capture();
+        let logs = crate::test_logs::capture();
         let setup = setup(BOTH, Err(Denial::OtherUser));
         for _ in 0..3 {
             assert!(!os_user(&setup).await);
@@ -414,8 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_lookup_past_the_deadline_is_a_logged_denial() {
-        let logs = Logs::default();
-        let _guard = logs.capture();
+        let logs = crate::test_logs::capture();
         let fake = super::super::os_user::tests::slow(Ok(()), Duration::from_secs(1));
         let auth = Authenticator::new(None, Some(fake as Arc<dyn Owners>));
         let (peer, local) = addrs();

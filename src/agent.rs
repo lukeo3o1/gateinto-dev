@@ -823,31 +823,6 @@ mod tests {
             }
         }
 
-        #[derive(Clone, Default)]
-        struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-        impl io::Write for Logs {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        impl Logs {
-            fn warnings(&self) -> Vec<String> {
-                String::from_utf8(self.0.lock().unwrap().clone())
-                    .unwrap()
-                    .lines()
-                    .filter(|line| line.contains("WARN"))
-                    .map(str::to_owned)
-                    .collect()
-            }
-        }
-
         fn proxy_config() -> proxy::Config {
             proxy::Config {
                 listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
@@ -880,12 +855,7 @@ mod tests {
                 Plan(proxy_config()),
                 launcher.clone(),
             );
-            let logs = Logs::default();
-            let writer = logs.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .finish();
-            let guard = tracing::subscriber::set_default(subscriber);
+            let logs = crate::test_logs::capture();
 
             let lines = agent
                 .start(Launch {
@@ -896,10 +866,10 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            drop(guard);
+            let warnings = logs.lines(" WARN ");
+            drop(logs);
 
             assert_eq!(*launcher.jobs.lock().unwrap(), [true, false]);
-            let warnings = logs.warnings();
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert!(warnings[0].contains("putting the browser in a job object failed"));
             {
