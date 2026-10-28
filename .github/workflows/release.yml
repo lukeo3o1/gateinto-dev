@@ -144,16 +144,13 @@ jobs:
           if-no-files-found: error
 
   win7:
-    name: Build ${{ matrix.target }} (experimental)
+    name: Build i686-win7-windows-msvc (experimental)
     needs: resolve
     if: needs.resolve.outputs.stale == 'false' && needs.resolve.outputs.channel != 'latest'
     runs-on: windows-latest
     timeout-minutes: 60
-    strategy:
-      matrix:
-        target: [x86_64-win7-windows-msvc, i686-win7-windows-msvc]
     env:
-      WIN7_TARGET: ${{ matrix.target }}
+      WIN7_TARGET: i686-win7-windows-msvc
       SHORT_SHA: ${{ needs.resolve.outputs.short }}
       GATEINTO_BUILD_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
@@ -164,11 +161,11 @@ jobs:
         id: build
         uses: ./.github/actions/win7-build
         with:
-          target: ${{ matrix.target }}
+          target: ${{ env.WIN7_TARGET }}
           nasm-version: ${{ env.NASM_VERSION }}
       - uses: ./.github/actions/win7-audit
         with:
-          target: ${{ matrix.target }}
+          target: ${{ env.WIN7_TARGET }}
       - name: Check that gateinto.exe prints the build version
         shell: pwsh
         env:
@@ -185,7 +182,7 @@ jobs:
           .github/scripts/write-sha256.ps1 -Path $exe
       - uses: actions/upload-artifact@v7
         with:
-          name: release-${{ matrix.target }}
+          name: release-${{ env.WIN7_TARGET }}
           path: dist/
           if-no-files-found: error
 

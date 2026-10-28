@@ -4,14 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '41 3 * * 2'
-  push:
-    branches: [master]
-    paths:
-      - src/**
-      - Cargo.*
-      - packaging/**
-      - .github/scripts/**
-      - .github/workflows/compat.yml
 
 permissions:
   contents: read
@@ -32,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["windows-2022"]' || '["windows-2022", "windows-2025"]') }}
+        os: [windows-2022, windows-2025]
     defaults:
       run:
         shell: pwsh
@@ -54,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["windows-2022"]' || '["windows-2022", "windows-2025"]') }}
+        os: [windows-2022, windows-2025]
     defaults:
       run:
         shell: pwsh
@@ -84,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["windows-2022"]' || '["windows-2022", "windows-2025"]') }}
+        os: [windows-2022, windows-2025]
     defaults:
       run:
         shell: pwsh

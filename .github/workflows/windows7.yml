@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-win7-windows-msvc, i686-win7-windows-msvc]
+        target: [i686-win7-windows-msvc]
     steps:
       - uses: actions/checkout@v7
       - name: Build
