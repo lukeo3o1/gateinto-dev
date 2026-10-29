@@ -181,15 +181,20 @@ mod tests {
     }
 
     #[test]
-    fn the_pressed_button_is_kept_until_release() {
+    fn a_press_is_reported_until_any_release() {
         let mut dialog = Dialog::open(1, ms(0));
         dialog.press(Some(Button::Deny), ms(100));
         assert_eq!(dialog.pressed(), Some(Button::Deny));
 
         dialog.release(None, ms(200));
         assert_eq!(dialog.pressed(), None);
+    }
 
+    #[test]
+    fn a_disarmed_allow_is_never_reported_as_pressed() {
+        let mut dialog = Dialog::open(1, ms(0));
         dialog.press(Some(Button::Allow), ms(300));
+
         assert_eq!(dialog.pressed(), None);
     }
 
@@ -246,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dialog_expires_after_the_timeout() {
+    fn the_dialog_expires_after_the_timeout_even_when_rearmed() {
         let mut dialog = Dialog::open(1, ms(1_000));
         dialog.rearm(ms(90_000));
 
