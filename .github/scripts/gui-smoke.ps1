@@ -192,6 +192,10 @@ function Find-Window($Process, [string] $Class, [string] $Title) {
   [IntPtr]::Zero
 }
 
+function Get-GuiClass([bool] $Demo) {
+  if ($Demo) { 'GateintoDemoWindow' } else { 'GateintoWindow' }
+}
+
 function Start-Gui([string] $Theme, [string] $Language = 'English', [switch] $Demo) {
   Set-Appearance $Theme $Language
   $title = if ($Demo) { $demoTitles[$Language] } else { 'Gateinto' }
@@ -200,7 +204,7 @@ function Start-Gui([string] $Theme, [string] $Language = 'English', [switch] $De
   $deadline = (Get-Date).AddSeconds(60)
   while ((Get-Date) -lt $deadline) {
     Assert-Gui $gui
-    $hwnd = Find-Window $gui 'GateintoWindow' $title
+    $hwnd = Find-Window $gui (Get-GuiClass $Demo) $title
     if ($hwnd -ne [IntPtr]::Zero) {
       Start-Sleep -Seconds 3
       Assert-Gui $gui
@@ -223,6 +227,31 @@ function Stop-Gui($Gui) {
   if ($language -ne $Gui.Language) { throw "gateinto-gui.exe changed the Language value from $($Gui.Language) to $language" }
   Stop-Process -Id $Gui.Process.Id -Force
   $Gui.Process.WaitForExit()
+}
+
+function Assert-SingleInstance($Gui) {
+  $class = Get-GuiClass $Gui.Demo
+  $null = [GuiSmoke]::ShowWindow($Gui.Hwnd, 0)
+  Start-Sleep -Milliseconds 500
+  if ([GuiSmoke]::IsWindowVisible($Gui.Hwnd)) { throw 'the main window is still visible after SW_HIDE' }
+  $second = if ($Gui.Demo) { Start-Process -FilePath $guiExe -ArgumentList '--demo' -PassThru } else { Start-Process -FilePath $guiExe -PassThru }
+  $null = $second.Handle
+  if (-not $second.WaitForExit(5000)) {
+    Stop-Process -Id $second.Id -Force
+    throw 'a second gateinto-gui.exe did not exit within 5 seconds'
+  }
+  if ($second.ExitCode -ne 0) { throw "a second gateinto-gui.exe exited with $($second.ExitCode)" }
+  $ids = @(Get-Process -Name gateinto-gui -ErrorAction SilentlyContinue | ForEach-Object Id)
+  if ($ids.Count -ne 1 -or $ids[0] -ne $Gui.Process.Id) { throw "expected only gateinto-gui.exe $($Gui.Process.Id), found [$($ids -join ',')]" }
+  $windows = @([GuiSmoke]::Windows($Gui.Process.Id) | Where-Object { [GuiSmoke]::Class($_) -eq $class })
+  if ($windows.Count -ne 1) { throw "gateinto-gui.exe has $($windows.Count) $class windows" }
+  $deadline = (Get-Date).AddSeconds(5)
+  while (-not [GuiSmoke]::IsWindowVisible($Gui.Hwnd)) {
+    if ((Get-Date) -gt $deadline) { throw 'the second gateinto-gui.exe did not bring back the hidden main window within 5 seconds' }
+    Start-Sleep -Milliseconds 200
+  }
+  if ([GuiSmoke]::GetForegroundWindow() -ne $Gui.Hwnd) { Write-Host '::warning::the main window is visible again but not in the foreground' }
+  Assert-Gui $Gui.Process
 }
 
 function Set-Foreground($Gui, [IntPtr] $Hwnd) {
@@ -438,6 +467,7 @@ ca_file = '$ca'
     $ids = Get-GateintoIds
     if ($ids) { throw "gateinto.exe runs although the agent was stopped: $ids" }
     if ((Get-AgentStatus).Running) { throw 'an agent is running although only gateinto-gui.exe was started' }
+    Assert-SingleInstance $gui
     Stop-Gui $gui
   }
 
@@ -452,6 +482,7 @@ ca_file = '$ca'
     $null = Save-Flyout $gui 'demo-tray-flyout'
     $ids = Get-GateintoIds
     if ($ids) { throw "gateinto.exe runs although only the demo was started: $ids" }
+    Assert-SingleInstance $gui
     Stop-Gui $gui
   }
 
