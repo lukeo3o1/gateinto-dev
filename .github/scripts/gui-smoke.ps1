@@ -452,16 +452,31 @@ ca_file = '$ca'
       -ArgumentList 'open', '--', 'gateinto://connect?profile=local' `
       -RedirectStandardOutput $logs.open[0] -RedirectStandardError $logs.open[1]
     $null = $open.Handle
+    $handed = $false
     if (-not $open.WaitForExit(60000)) {
       Stop-Process -Id $open.Id -Force
       "::warning::gateinto open did not return within 60 seconds (a credentials dialog may have appeared); continuing without a browser session"
     } elseif ($open.ExitCode -ne 0) {
       "::warning::gateinto open exited with $($open.ExitCode); continuing without a browser session"
+    } else {
+      $handed = Test-Path -LiteralPath $guiExe
     }
     Get-Content $logs.open
+    $guis = @(Get-CimInstance Win32_Process -Filter "Name = 'gateinto-gui.exe'")
+    if ($handed) {
+      $opened = @($guis | Where-Object { [string] $_.CommandLine -like '*--open*' })
+      if ($guis.Count -ne 1 -or $opened.Count -ne 1) {
+        throw "expected one gateinto-gui.exe --open started by gateinto open, found [$(($guis | ForEach-Object { "$($_.ProcessId): $($_.CommandLine)" }) -join '; ')]"
+      }
+      "gateinto open handed the link to gateinto-gui.exe $($opened[0].ProcessId): $($opened[0].CommandLine)"
+    }
     Start-Sleep -Seconds 5
     & $gateinto session list
     (Get-AgentStatus).Text
+    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'gateinto-gui.exe'")) {
+      Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+      Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue | Wait-Process -Timeout 30
+    }
   }
 
   $hash = Get-ConfigHash
