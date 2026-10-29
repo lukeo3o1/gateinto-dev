@@ -8,6 +8,7 @@ use crate::http::{self, Authority, Host};
 use crate::proxy::Route;
 use crate::uri::LaunchRequest;
 
+pub mod approval;
 pub mod store;
 
 pub const DEFAULT_PORT: u16 = 443;
