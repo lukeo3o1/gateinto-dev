@@ -14,6 +14,7 @@ mod gateways;
 mod hit;
 mod i18n;
 mod icons;
+mod instance;
 mod layout;
 mod log;
 mod logo;

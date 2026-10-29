@@ -1,0 +1,71 @@
+use std::time::Duration;
+
+pub const ATTEMPTS: u32 = 10;
+pub const PAUSE: Duration = Duration::from_millis(100);
+
+pub fn mutex_name(sid: &str, demo: bool) -> String {
+    let suffix = if demo { ".Demo" } else { "" };
+    format!(r"Local\Gateinto.App.{sid}{suffix}")
+}
+
+pub fn descriptor(sid: &str) -> String {
+    format!("O:{sid}D:P(A;;GA;;;{sid})")
+}
+
+pub fn class(demo: bool) -> &'static str {
+    if demo {
+        "GateintoDemoWindow"
+    } else {
+        "GateintoWindow"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SID: &str = "S-1-5-21-1004336348-1177238915-682003330-1001";
+
+    #[test]
+    fn the_mutex_is_named_per_user_in_the_session_namespace() {
+        assert_eq!(
+            mutex_name(SID, false),
+            r"Local\Gateinto.App.S-1-5-21-1004336348-1177238915-682003330-1001"
+        );
+        assert_ne!(
+            mutex_name(SID, false),
+            mutex_name("S-1-5-21-1-2-3-1002", false)
+        );
+    }
+
+    #[test]
+    fn the_demo_has_its_own_mutex() {
+        assert_eq!(
+            mutex_name(SID, true),
+            r"Local\Gateinto.App.S-1-5-21-1004336348-1177238915-682003330-1001.Demo"
+        );
+    }
+
+    #[test]
+    fn the_mutex_name_has_no_further_namespace() {
+        for demo in [false, true] {
+            assert_eq!(mutex_name(SID, demo).matches('\\').count(), 1);
+        }
+    }
+
+    #[test]
+    fn the_mutex_is_owned_by_and_only_granted_to_the_user() {
+        assert_eq!(descriptor(SID), format!("O:{SID}D:P(A;;GA;;;{SID})"));
+    }
+
+    #[test]
+    fn the_demo_window_has_its_own_class() {
+        assert_eq!(class(false), "GateintoWindow");
+        assert_eq!(class(true), "GateintoDemoWindow");
+    }
+
+    #[test]
+    fn looking_for_the_running_window_gives_up_within_a_second() {
+        assert!(PAUSE * ATTEMPTS <= Duration::from_secs(1));
+    }
+}

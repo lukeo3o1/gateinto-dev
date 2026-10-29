@@ -490,20 +490,21 @@ fn act(main: HWND, action: Option<Action>) {
             with_app(main, |app| app.link.send(Command::Stop));
         }
         Some(Action::AddGateway) => {
-            hide_flyout(main);
-            show_main(main);
+            open_main(main);
             with_app(main, |app| {
                 app.dismiss();
                 app.select(NavPage::Gateways);
                 app.open_add();
             });
         }
-        Some(Action::OpenMain) => {
-            hide_flyout(main);
-            show_main(main);
-        }
+        Some(Action::OpenMain) => open_main(main),
         _ => {}
     }
+}
+
+pub fn open_main(main: HWND) {
+    hide_flyout(main);
+    show_main(main);
 }
 
 fn paint(hwnd: HWND, main: HWND) {

@@ -2,6 +2,7 @@ mod appearance;
 mod d2d;
 mod device;
 mod icon;
+mod instance;
 mod link;
 mod run;
 mod sys;
@@ -70,6 +71,7 @@ use crate::settings;
 use crate::theme::{self, Theme};
 use crate::worker::{Command, Update};
 use d2d::Graphics;
+use instance::{Start, WM_REVEAL};
 use link::{Link, WM_AGENT};
 use sys::wide;
 use text::Fonts;
@@ -1557,6 +1559,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             tray::on_tray(hwnd, wp, lp);
             Some(0)
         }
+        WM_REVEAL => {
+            tray::open_main(hwnd);
+            Some(0)
+        }
         _ if tray::taskbar_created(msg) => {
             tray::on_taskbar_created(hwnd);
             Some(0)
@@ -1625,8 +1631,15 @@ fn fail(message: Text) {
 }
 
 pub fn run() {
-    sys::enable_dpi_awareness();
     let demo = demo::requested(std::env::args_os());
+    let _guard = match instance::start(demo) {
+        Start::Alone(guard) => guard,
+        Start::Second(sid) => {
+            instance::activate(demo, &sid);
+            return;
+        }
+    };
+    sys::enable_dpi_awareness();
     i18n::set(appearance::language().language(appearance::system_language()));
     let Ok(gfx) = Graphics::new() else {
         fail(Text::NoRendering);
@@ -1635,7 +1648,7 @@ pub fn run() {
     let mut gfx = Some(gfx);
     let instance = unsafe { GetModuleHandleW(null()) };
     let system_dpi = sys::window_dpi(null_mut());
-    let class = wide("GateintoWindow");
+    let class = wide(crate::instance::class(demo));
     let title = wide(window_title(demo));
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
