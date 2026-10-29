@@ -62,6 +62,10 @@ impl Dialog {
         now >= self.opened + TIMEOUT
     }
 
+    pub fn pressed(&self) -> Option<Button> {
+        self.pressed
+    }
+
     pub fn press(&mut self, button: Option<Button>, now: Duration) {
         self.pressed = button.filter(|button| *button == Button::Deny || self.armed(now));
     }
@@ -167,6 +171,19 @@ mod tests {
             dialog.release(Some(Button::Allow), ms(1_100)),
             Some(Answer::Allow)
         );
+    }
+
+    #[test]
+    fn the_pressed_button_is_kept_until_release() {
+        let mut dialog = Dialog::open(1, ms(0));
+        dialog.press(Some(Button::Deny), ms(100));
+        assert_eq!(dialog.pressed(), Some(Button::Deny));
+
+        dialog.release(None, ms(200));
+        assert_eq!(dialog.pressed(), None);
+
+        dialog.press(Some(Button::Allow), ms(300));
+        assert_eq!(dialog.pressed(), None);
     }
 
     #[test]

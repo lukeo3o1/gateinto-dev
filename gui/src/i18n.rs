@@ -316,6 +316,10 @@ table! {
     LinkAgentNotRunning => "the agent is not running; start it, then open the link again", "代理程式未在執行；請先啟動它，再重新開啟連結";
     LinkUnnamed => "the link names no gateway to confirm", "連結未指定要確認的閘道";
     LinkNotEchoed => "the agent asked to confirm another gateway than the link names; nothing was stored", "代理程式要求確認的閘道與連結指定的不同；未儲存任何項目";
+    ApprovalTitle => "Confirm gateway", "確認閘道";
+    Allow => "Allow", "允許";
+    Deny => "Deny", "拒絕";
+    AllowIn => "Allow ({0})", "允許（{0}）";
     AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
     AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
     Confirmation => "the agent asked to confirm this gateway; open its gateinto:// link to confirm it", "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認";
