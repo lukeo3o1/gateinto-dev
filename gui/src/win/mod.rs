@@ -1711,8 +1711,7 @@ pub fn run() {
         Start::Alone(guard) => guard,
         Start::Second(sid) => {
             match &link {
-                Some(link) if instance::forward(&sid, link) => answer(reply::HANDED),
-                Some(_) => answer(reply::REFUSED),
+                Some(link) => answer(instance::forward(&sid, link)),
                 None => instance::activate(demo, &sid),
             }
             return;

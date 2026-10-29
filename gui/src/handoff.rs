@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use gateinto::link::handoff::FLAG;
+use gateinto::link::handoff::{self as reply, FLAG};
 use gateinto::uri::{self, LaunchRequest};
 
 use crate::demo;
@@ -64,6 +64,14 @@ pub fn decode(id: usize, data: &[u8]) -> Option<LaunchRequest> {
     std::str::from_utf8(data).ok()?.parse().ok()
 }
 
+pub fn forwarded(sent: bool, answer: isize, timed_out: bool) -> &'static str {
+    match (sent, answer) {
+        (true, 1) => reply::HANDED,
+        (false, _) if timed_out => reply::PENDING,
+        _ => reply::REFUSED,
+    }
+}
+
 pub fn same_image(a: &str, b: &str) -> bool {
     !a.is_empty() && normalized(a).eq(normalized(b))
 }
@@ -94,6 +102,8 @@ fn simple_uppercase(c: char) -> char {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+
+    use gateinto::link::handoff::{HANDED, PENDING, REFUSED as REFUSED_LINE};
 
     use super::*;
 
@@ -227,6 +237,19 @@ mod tests {
     #[test]
     fn the_cap_is_the_longest_link_the_command_accepts() {
         assert_eq!(CAP, gateinto::uri::MAX_LEN);
+    }
+
+    #[test]
+    fn only_a_window_that_took_the_link_has_it() {
+        assert_eq!(forwarded(true, 1, false), HANDED);
+        assert_eq!(forwarded(true, 0, false), REFUSED_LINE);
+        assert_eq!(forwarded(true, 2, false), REFUSED_LINE);
+        assert_eq!(forwarded(false, 0, false), REFUSED_LINE);
+    }
+
+    #[test]
+    fn a_window_that_did_not_answer_in_time_may_still_take_the_link() {
+        assert_eq!(forwarded(false, 0, true), PENDING);
     }
 
     #[test]

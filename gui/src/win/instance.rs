@@ -2,8 +2,8 @@ use std::ptr::{null, null_mut};
 use std::thread;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LocalFree,
-    SetLastError,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, HANDLE, HWND,
+    LocalFree, SetLastError,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
@@ -23,6 +23,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_COPYDATA,
 };
 use windows_sys::core::PWSTR;
+
+use gateinto::link::handoff as reply;
 
 use super::sys::wide;
 use crate::handoff::{self, Link};
@@ -157,7 +159,7 @@ fn sid_string(sid: PSID) -> Option<String> {
 pub fn activate(demo: bool, sid: &str) {
     let class = wide(instance::class(demo));
     let same_user = |process| process_sid(process).as_deref() == Some(sid);
-    if let Some((hwnd, pid)) = wait_for(&class, same_user) {
+    if let Some((hwnd, pid, _process)) = wait_for(&class, same_user) {
         unsafe {
             AllowSetForegroundWindow(pid);
             PostMessageW(hwnd, WM_REVEAL, 0, 0);
@@ -165,41 +167,58 @@ pub fn activate(demo: bool, sid: &str) {
     }
 }
 
-pub fn forward(sid: &str, link: &Link) -> bool {
+pub fn forward(sid: &str, link: &Link) -> &'static str {
     let Some(image) = image_of(unsafe { GetCurrentProcess() }) else {
-        return false;
+        return reply::REFUSED;
     };
     let class = wide(instance::class(false));
     let same_app = |process| {
         process_sid(process).as_deref() == Some(sid)
             && image_of(process).is_some_and(|other| handoff::same_image(&image, &other))
     };
-    let Some((hwnd, pid)) = wait_for(&class, same_app) else {
-        return false;
+    let Some((hwnd, pid, _process)) = wait_for(&class, same_app) else {
+        return reply::REFUSED;
     };
+    if window_process(hwnd) != pid {
+        return reply::REFUSED;
+    }
     let payload = link.payload();
     let data = COPYDATASTRUCT {
         dwData: handoff::COPYDATA,
         cbData: payload.len() as u32,
         lpData: payload.as_ptr().cast_mut().cast(),
     };
-    let mut result = 0;
-    let sent = unsafe {
+    let mut answer = 0;
+    let (sent, error) = unsafe {
         AllowSetForegroundWindow(pid);
-        SendMessageTimeoutW(
+        SetLastError(ERROR_SUCCESS);
+        let sent = SendMessageTimeoutW(
             hwnd,
             WM_COPYDATA,
             0,
             &raw const data as isize,
             SMTO_ABORTIFHUNG | SMTO_BLOCK,
             FORWARD_TIMEOUT_MS,
-            &mut result,
-        )
+            &mut answer,
+        );
+        (sent, GetLastError())
     };
-    sent != 0 && result == 1
+    handoff::forwarded(
+        sent != 0,
+        answer as isize,
+        sent == 0 && error == ERROR_TIMEOUT,
+    )
 }
 
-fn wait_for(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32)> {
+struct Process(HANDLE);
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn wait_for(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32, Process)> {
     for attempt in 0..instance::ATTEMPTS {
         if attempt > 0 {
             thread::sleep(instance::PAUSE);
@@ -211,7 +230,8 @@ fn wait_for(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32
     None
 }
 
-fn find(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32)> {
+// The open handle keeps the process id from being reused until it is dropped.
+fn find(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32, Process)> {
     let mut hwnd = null_mut();
     loop {
         hwnd = unsafe { FindWindowExW(null_mut(), hwnd, class.as_ptr(), null()) };
@@ -219,12 +239,16 @@ fn find(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32)> {
             return None;
         }
         let pid = window_process(hwnd);
-        if pid != 0
-            && with_process(pid, |process| {
-                accept(process) && window_process(hwnd) == pid
-            })
-        {
-            return Some((hwnd, pid));
+        if pid == 0 {
+            continue;
+        }
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            continue;
+        }
+        let process = Process(process);
+        if accept(process.0) && window_process(hwnd) == pid {
+            return Some((hwnd, pid, process));
         }
     }
 }
@@ -233,17 +257,6 @@ fn window_process(hwnd: HWND) -> u32 {
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
     pid
-}
-
-// The handle keeps the process id from being reused while the window is checked.
-fn with_process(pid: u32, check: impl FnOnce(HANDLE) -> bool) -> bool {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process.is_null() {
-        return false;
-    }
-    let accepted = check(process);
-    unsafe { CloseHandle(process) };
-    accepted
 }
 
 fn image_of(process: HANDLE) -> Option<String> {
