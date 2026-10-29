@@ -21,7 +21,10 @@ use gateinto::identity::device_key::{
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
-use gateinto::link::{Known, KnownGateway, LinkedGateway, Source, approval, handoff};
+use gateinto::link::{
+    Known, KnownGateway, LinkedGateway, Source, approval,
+    handoff::{self, Handoff},
+};
 use gateinto::logbook::Logbook;
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
@@ -878,8 +881,10 @@ async fn open(args: OpenArgs) -> Result {
         stop_inheriting_standard_handles();
         handoff::hand(gui, &args.uri, handoff::TIMEOUT).await
     };
-    if handoff::offer(gui.as_deref(), ensure_agent, hand).await? {
-        return Ok(());
+    match handoff::offer(gui.as_deref(), ensure_agent, hand).await? {
+        Handoff::Handed => return Ok(()),
+        Handoff::Pending => return Err(handoff::PENDING_HELP.into()),
+        Handoff::Kept => {}
     }
     let request = Request::Launch(launch.clone());
     let response = match ipc::send(&endpoint, &request).await {
