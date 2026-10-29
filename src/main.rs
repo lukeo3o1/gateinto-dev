@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -51,8 +51,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the local CONNECT proxy
-    Proxy(ProxyArgs),
     /// Connect to the upstream once and print the negotiated TLS parameters
     CheckUpstream(CheckUpstreamArgs),
     /// Manage the device key held by Windows CNG
@@ -61,8 +59,7 @@ enum Command {
     /// Run or manage sessions
     #[command(subcommand)]
     Session(SessionCommand),
-    /// Run the agent: the device session named by [device_session] gateway, if any, and the
-    /// per-user endpoint that starts browser sessions for `gateinto open`
+    /// Run the agent: the per-user endpoint that starts browser sessions for `gateinto open`
     Agent(AgentArgs),
     /// Ask the agent to start a browser session for a gateinto:// launch URI, starting the agent
     /// first if none is running
@@ -207,7 +204,7 @@ struct BrowserSessionArgs {
     #[command(flatten)]
     upstream: UpstreamArgs,
 
-    /// Gateway from --config to relay through [default: the device session's gateway, or the only gateway]
+    /// Gateway from --config to relay through [default: the only gateway]
     #[arg(long)]
     gateway: Option<GatewayName>,
 }
@@ -349,41 +346,11 @@ impl From<BackendArg> for Backend {
 }
 
 #[derive(Args)]
-struct ProxyArgs {
-    /// Local address to listen on [default: 127.0.0.1:18736]
-    #[arg(long)]
-    listen: Option<SocketAddr>,
-
-    /// Allow listening on a non-loopback address, exposing the proxy to the network
-    #[arg(long)]
-    unsafe_allow_non_loopback_listen: bool,
-
-    #[command(flatten)]
-    upstream: UpstreamArgs,
-
-    /// Maximum number of concurrent connections [default: 64]
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    max_tunnels: Option<u32>,
-
-    /// Maximum size of a CONNECT request or response header block [default: 16384]
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-    max_header_bytes: Option<u32>,
-
-    /// Timeout for reading the request and opening the upstream tunnel [default: 10]
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    connect_timeout_secs: Option<u64>,
-
-    /// Close a tunnel after this many seconds without traffic [default: 300]
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    idle_timeout_secs: Option<u64>,
-}
-
-#[derive(Args)]
 struct CheckUpstreamArgs {
     #[command(flatten)]
     upstream: UpstreamArgs,
 
-    /// Gateway from --config to check [default: the device session's gateway, or the only gateway]
+    /// Gateway from --config to check [default: the only gateway]
     #[arg(long)]
     gateway: Option<GatewayName>,
 
@@ -497,7 +464,6 @@ async fn run() -> ExitCode {
     };
     let opening = matches!(&cli.command, Command::Open(_));
     let result = match cli.command {
-        Command::Proxy(args) => proxy(args).await,
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
@@ -662,43 +628,6 @@ async fn check_upstream(args: CheckUpstreamArgs) -> Result {
     }
 }
 
-async fn proxy(args: ProxyArgs) -> Result {
-    let shutdown = shutdown_signal();
-    let settings = args.upstream.settings(|overrides| {
-        overrides.listen = args.listen;
-        let limits = &mut overrides.limits;
-        limits.max_concurrent_tunnels = args.max_tunnels.and_then(NonZeroU32::new);
-        limits.header_max_bytes = args.max_header_bytes.and_then(NonZeroU32::new);
-        limits.connect_timeout_seconds = args.connect_timeout_secs.and_then(NonZeroU64::new);
-        limits.idle_timeout_seconds = args.idle_timeout_secs.and_then(NonZeroU64::new);
-    })?;
-    init_logging("info");
-    args.upstream.config.log_default();
-    let config = Config {
-        listen: settings.listen,
-        allow_non_loopback: args.unsafe_allow_non_loopback_listen,
-        local_auth: settings.device_session_auth,
-        ..proxy_config(&settings)?
-    };
-    let mut sessions = SessionManager::new();
-    let id = sessions
-        .start(SessionConfig {
-            kind: SessionKind::Device,
-            gateway: settings.gateway.name,
-            proxy: config,
-        })
-        .await?;
-    let session = sessions.session(id).expect("the session just started");
-    let shown = serve_showing(
-        session.local_addr(),
-        session.credentials().cloned(),
-        shutdown,
-    );
-    let result = shown.await;
-    sessions.close_all().await;
-    result
-}
-
 async fn serve_showing(
     listen: SocketAddr,
     credentials: Option<SessionCredentials>,
@@ -720,9 +649,8 @@ async fn serve_showing(
 fn proxy_config(settings: &Settings) -> Result<Config> {
     let limits = &settings.limits;
     Ok(Config {
-        listen: settings.listen,
-        allow_non_loopback: false,
-        local_auth: LocalAuth::NONE,
+        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        local_auth: LocalAuth::SESSION_CREDENTIALS,
         route: gateinto::proxy::Route::Gateway,
         upstream: upstream(settings)?,
         tls_mode: settings.gateway.tls_mode,
@@ -745,11 +673,7 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     })?;
     init_logging("warn");
     args.upstream.config.log_default();
-    let config = Config {
-        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        local_auth: LocalAuth::SESSION_CREDENTIALS,
-        ..proxy_config(&settings)?
-    };
+    let config = proxy_config(&settings)?;
     let mut sessions = SessionManager::new();
     let id = sessions
         .start(SessionConfig {
@@ -891,41 +815,14 @@ async fn agent(args: ConfigArg) -> Result {
         limits: AgentLimits::default(),
         logbook,
     };
-    let device_session = file.device_session.gateway.is_some();
     let profiles = ConfigProfiles {
         file: file.clone(),
         linked: linked_store(),
     };
     let agent = Agent::new(options, profiles);
-    if device_session {
-        let settings = file.settings(&Overrides::default())?;
-        let config = Config {
-            listen: settings.listen,
-            local_auth: settings.device_session_auth,
-            ..proxy_config(&settings)?
-        };
-        let id = agent
-            .start_session(SessionConfig {
-                kind: SessionKind::Device,
-                gateway: settings.gateway.name,
-                proxy: config,
-            })
-            .await?;
-        if let Some(hint) = device_session_hint(id, settings.device_session_auth) {
-            tracing::info!("{hint}");
-        }
-    }
     tracing::info!(%endpoint, "agent ready");
     agent.serve(server, shutdown).await;
     Ok(())
-}
-
-fn device_session_hint(id: SessionId, local_auth: LocalAuth) -> Option<String> {
-    local_auth.session_credentials.then(|| {
-        format!(
-            "device session {id} accepts {local_auth}; run `gateinto session credentials {id}` for the credentials"
-        )
-    })
 }
 
 async fn agent_detach(config: Option<&Path>) -> Result {
@@ -1423,7 +1320,6 @@ async fn status(args: StatusArgs) -> Result {
         },
     }
     print_config(&args.config, &file);
-    println!("device-session: {}", lifecycle::device_session_line(&file));
     let agent = match Endpoint::for_current_user() {
         Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
         Err(error) => Err(RequestError::Io(error)),
@@ -1592,32 +1488,33 @@ mod tests {
     }
 
     #[test]
-    fn the_session_table_shows_an_unknown_browser() {
-        let table = session_list_lines(&[NEWER_SESSION.to_owned()], false, 1_700_000_045).unwrap();
-        assert!(table[1].ends_with("45s     unknown"), "{table:?}");
+    fn a_session_proxy_requires_its_session_credentials_unless_told_otherwise() {
+        let cli = Cli::try_parse_from([
+            "gateinto",
+            "session",
+            "browser",
+            "--upstream-host",
+            "127.0.0.1",
+            "--upstream-port",
+            "9",
+            "--client-certificate",
+            "off",
+        ])
+        .unwrap();
+        let Command::Session(SessionCommand::Browser(args)) = cli.command else {
+            unreachable!()
+        };
+        let settings = args.upstream.settings(|_| {}).unwrap();
+        assert_eq!(
+            proxy_config(&settings).unwrap().local_auth,
+            LocalAuth::SESSION_CREDENTIALS
+        );
     }
 
     #[test]
-    fn the_device_session_hint_names_the_accepted_methods() {
-        let id: SessionId = "3".parse().unwrap();
-        assert_eq!(
-            device_session_hint(id, LocalAuth::SESSION_CREDENTIALS).as_deref(),
-            Some(
-                "device session 3 accepts session_credentials; run `gateinto session credentials 3` for the credentials"
-            )
-        );
-        let both = LocalAuth {
-            os_user: true,
-            session_credentials: true,
-        };
-        assert_eq!(
-            device_session_hint(id, both).as_deref(),
-            Some(
-                "device session 3 accepts os_user, session_credentials; run `gateinto session credentials 3` for the credentials"
-            )
-        );
-        assert_eq!(device_session_hint(id, LocalAuth::OS_USER), None);
-        assert_eq!(device_session_hint(id, LocalAuth::NONE), None);
+    fn the_session_table_shows_an_unknown_browser() {
+        let table = session_list_lines(&[NEWER_SESSION.to_owned()], false, 1_700_000_045).unwrap();
+        assert!(table[1].ends_with("45s     unknown"), "{table:?}");
     }
 
     fn key_init_temp_path() -> std::path::PathBuf {

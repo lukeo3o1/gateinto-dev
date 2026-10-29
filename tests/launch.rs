@@ -161,6 +161,7 @@ impl Launcher {
         }
     }
 
+    #[cfg(feature = "test-hooks")]
     fn credentials_prompt(&self) -> PathBuf {
         self.dir.join(CREDENTIALS_PROMPT)
     }
@@ -761,7 +762,7 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
         "{after:?}"
     );
     assert!(
-        after.contains(&"device-session: none".to_owned()),
+        !after.iter().any(|line| line.starts_with("device-session")),
         "{after:?}"
     );
     assert!(after.contains(&"agent: running".to_owned()), "{after:?}");
@@ -954,91 +955,11 @@ async fn concurrent_opens_without_an_agent_start_exactly_one() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_agent_runs_the_configured_device_session_with_session_credentials() {
-    let launcher =
-        Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
-
-    let (lines, _) = launcher.opened("main").await;
-
-    let device = device_session_listen(&launcher).await;
-    let target = echo_server().await.to_string();
-    let (_, challenge) = send(device, &connect_with(&target, None)).await;
-    assert_eq!(challenge.status, 407, "{}", challenge.head);
-    launcher.tunnel_echoes(device).await;
-    assert_ne!(field(&lines, "session"), "1");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_agent_logs_how_to_show_the_device_session_credentials_but_not_them() {
-    let launcher =
-        Launcher::new("[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\n").await;
-    let config = launcher.config.to_str().unwrap().to_owned();
-    let log = launcher.dir.join("agent.err");
-    let mut agent = launcher
-        .command(&["agent", "--config", &config])
-        .stdout(Stdio::null())
-        .stderr(std::fs::File::create(&log).unwrap())
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + WAIT;
-    while !launcher.run(&["session", "list"]).await.status.success() {
-        assert!(agent.try_wait().unwrap().is_none(), "agent exited");
-        assert!(std::time::Instant::now() < deadline, "no agent");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let device = device_session_listen(&launcher).await;
-    let credentials = launcher.shown_credentials(device).await;
-
-    assert!(launcher.run(&["stop"]).await.status.success());
-    tokio::task::block_in_place(|| agent.wait().unwrap());
-
-    let text = std::fs::read_to_string(&log).unwrap();
-    let line = text
-        .lines()
-        .find(|line| line.contains("device session 1 accepts session_credentials"))
-        .unwrap_or_else(|| panic!("{text}"));
-    assert!(line.contains(" INFO "), "{line}");
-    assert!(
-        line.contains("run `gateinto session credentials 1`"),
-        "{line}"
-    );
-    let password = field(&credentials, "password");
-    assert!(!password.is_empty());
-    assert!(!text.contains(password), "{text}");
-    assert!(!text.contains(&format!("gateinto:{password}")), "{text}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_agent_device_session_with_auth_none_accepts_any_local_client() {
-    let launcher = Launcher::new(
-        "[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n",
-    )
-    .await;
-
-    launcher.opened("main").await;
-
-    let device = device_session_listen(&launcher).await;
-    let mut stream = open_tunnel(device, echo_server().await).await;
-    stream.write_all(b"device").await.unwrap();
-    stream.shutdown().await.unwrap();
-    assert_eq!(read_to_end_within(&mut stream, WAIT).await, b"device");
-}
-
-async fn device_session_listen(launcher: &Launcher) -> SocketAddr {
-    let list = launcher.list().await;
-    list.iter()
-        .find(|session| {
-            session.id == 1 && session.kind == SessionKind::Device && session.gateway == "main"
-        })
-        .unwrap_or_else(|| panic!("{list:?}"))
-        .listen
-}
-
 #[cfg(unix)]
 mod interrupt {
     use super::*;
 
+    #[cfg(feature = "test-hooks")]
     async fn interrupt(child: &mut std::process::Child) -> ExitStatus {
         signal(child, "-INT").await
     }
@@ -1087,39 +1008,31 @@ mod interrupt {
         }
     }
 
+    #[cfg(feature = "test-hooks")]
     #[tokio::test(flavor = "multi_thread")]
-    async fn ctrl_c_stops_proxy_and_session_browser_cleanly() {
-        let launcher = Launcher::new(
-            "[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n",
-        )
-        .await;
+    async fn ctrl_c_stops_session_browser_cleanly() {
+        let launcher = Launcher::new("").await;
         let config = launcher.config.to_str().unwrap().to_owned();
-        #[allow(unused_mut)]
-        let mut commands = vec![vec!["proxy", "--config", &config]];
-        #[cfg(feature = "test-hooks")]
-        commands.push(vec!["session", "browser", "--config", &config]);
-        for args in commands {
-            let mut child = launcher
-                .command(&args)
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let stderr = std::io::BufReader::new(child.stderr.take().unwrap());
-            tokio::task::block_in_place(|| {
-                let mut lines = std::io::BufRead::lines(stderr);
-                let listening = lines
-                    .by_ref()
-                    .map_while(Result::ok)
-                    .any(|line| line.contains("local_addr="));
-                assert!(listening, "{args:?} exited before listening");
-                std::thread::spawn(move || lines.for_each(drop));
-            });
+        let mut child = launcher
+            .command(&["session", "browser", "--config", &config])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        tokio::task::block_in_place(|| {
+            let mut lines = std::io::BufRead::lines(stderr);
+            let listening = lines
+                .by_ref()
+                .map_while(Result::ok)
+                .any(|line| line.contains("local_addr="));
+            assert!(listening, "exited before listening");
+            std::thread::spawn(move || lines.for_each(drop));
+        });
 
-            let status = interrupt(&mut child).await;
+        let status = interrupt(&mut child).await;
 
-            assert!(status.success(), "{args:?}: {status}");
-        }
+        assert!(status.success(), "{status}");
     }
 }
 

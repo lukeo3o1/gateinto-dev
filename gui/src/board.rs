@@ -358,7 +358,7 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.push(Op::Round(tile, s.pxf(10.0), t.tile));
         let icon = match row.kind {
             Kind::Browser => icons::GLOBE,
-            Kind::Device => icons::DEVICE,
+            Kind::Other => icons::DEVICE,
         };
         self.icon(icon, tile, 20.0, t.text);
 
@@ -910,11 +910,11 @@ mod tests {
     }
 
     #[test]
-    fn device_rows_use_the_device_icon_and_idle_rows_grey_pills() {
-        let mut device = row(3);
-        device.kind = Kind::Device;
-        device.active = false;
-        let ops = draw(&running(vec![device])).ops;
+    fn other_rows_use_the_device_icon_and_idle_rows_grey_pills() {
+        let mut other = row(3);
+        other.kind = Kind::Other;
+        other.active = false;
+        let ops = draw(&running(vec![other])).ops;
         let row = inside(&ops, Rect::new(248, FIRST_ROW, 764, 60));
         assert!(matches!(row[1], Op::Icon(icon, ..) if icon == icons::DEVICE));
         assert_eq!(

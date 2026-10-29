@@ -30,7 +30,6 @@ macro_rules! named {
 }
 
 named!(SessionKind {
-    Device => "device",
     Browser => "browser",
 });
 
@@ -252,6 +251,17 @@ mod tests {
     }
 
     #[test]
+    fn the_removed_device_kind_reads_as_unknown() {
+        let line = info(None)
+            .to_line()
+            .replace(r#""kind":"browser""#, r#""kind":"device""#);
+        assert_eq!(
+            SessionInfo::parse_list(&[line]).unwrap()[0].kind,
+            SessionKind::Unknown
+        );
+    }
+
+    #[test]
     fn an_unknown_value_is_written_as_unknown() {
         let line = SessionInfo {
             kind: SessionKind::Unknown,
@@ -282,7 +292,7 @@ mod tests {
 
     #[test]
     fn the_names_shown_to_people_match_the_json_values() {
-        assert_eq!(SessionKind::Device.to_string(), "device");
+        assert_eq!(SessionKind::Browser.to_string(), "browser");
         assert_eq!(SessionRoute::All.to_string(), "all");
         assert_eq!(SessionAuth::OsUser.to_string(), "os_user");
         assert_eq!(BrowserKind::Edge.to_string(), "edge");

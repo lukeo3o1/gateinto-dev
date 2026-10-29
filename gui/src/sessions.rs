@@ -23,7 +23,7 @@ pub enum Launch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Browser,
-    Device,
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,8 +117,7 @@ pub fn browser_title(kind: Option<BrowserKind>) -> &'static str {
 pub fn row(session: &SessionInfo, now: u64) -> Row {
     let (kind, title) = match session.kind {
         SessionKind::Browser => (Kind::Browser, browser_title(session.browser)),
-        SessionKind::Device => (Kind::Device, tr(Text::DeviceProxy)),
-        SessionKind::Unknown => (Kind::Device, tr(Text::Session)),
+        SessionKind::Unknown => (Kind::Other, tr(Text::Session)),
     };
     Row {
         id: session.id,
@@ -381,8 +380,7 @@ mod tests {
             ("Browser", Kind::Browser)
         );
         assert_eq!(titled(S::Browser, None), ("Browser", Kind::Browser));
-        assert_eq!(titled(S::Device, None), ("Device proxy", Kind::Device));
-        assert_eq!(titled(S::Unknown, None), ("Session", Kind::Device));
+        assert_eq!(titled(S::Unknown, None), ("Session", Kind::Other));
     }
 
     #[test]

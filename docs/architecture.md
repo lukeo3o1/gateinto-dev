@@ -9,7 +9,7 @@ The default `gateway` route follows this path:
 
 ```text
  client (browser, curl, ...)
-   |  TCP to 127.0.0.1:18736
+   |  TCP to the session's 127.0.0.1:<ephemeral port>
    |  CONNECT target:443 HTTP/1.1
    v
 +------------------------------- gateinto ---------------------------------+
@@ -67,10 +67,10 @@ still delay process shutdown. See [DNS work budget](protocol/http-connect.md#dns
                      |
      +---------------+-------------------+
      |                                   |
- session 1 (device)                  session 2 (browser)
-   listener 127.0.0.1:18736            listener 127.0.0.1:<ephemeral>
+ session 1 (browser)                 session 2 (browser)
+   listener 127.0.0.1:<ephemeral>      listener 127.0.0.1:<ephemeral>
    local auth: session_credentials     local auth: session_credentials
-     (default; none only if set)         (and os_user on Windows)
+     (and os_user on Windows)            (and os_user on Windows)
    own TLS client config + resolver    own TLS client config + resolver
    own client certificate              own client certificate
    own connection limits, tunnels      own connection limits, tunnels
@@ -99,9 +99,8 @@ certificate with the device key for every session (and each session renews
 only its own), so two sessions never present the same self-signed
 certificate; a file or `CurrentUser\My` certificate is the same certificate in
 every session, because only one exists for the key. Each session also has a
-local authentication policy (`proxy::LocalAuth`): `None` accepts every local
-client and is used only when `[device_session] auth = "none"` sets it;
-`SessionCredentials`, the default, makes `Proxy::bind` generate the session's own
+local authentication policy (`proxy::LocalAuth`). Every session that a
+command or the agent starts has `SessionCredentials`, which makes `Proxy::bind` generate the session's own
 `proxy::SessionCredentials` and a `Verifier` for them, owned by that session
 only (see below).
 
@@ -116,17 +115,14 @@ The session's TLS configuration, resolver and self-signed certificates are
 dropped with it; no other session holds them, so no later `CONNECT` can use
 that certificate. Other sessions are not affected.
 
-Kinds: `SessionKind::Device` is the long-running session for background
-programs, configured by `[device_session]` (or the command line); its local
-authentication is `[device_session] auth`, `session_credentials` by default,
-or `os_user` (Windows), or a list of both, or `none`.
-`gateinto proxy` starts exactly one device session and runs until Ctrl+C (or
-SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
-`SessionKind::Browser` is a session for one browser: `gateinto session
+Kind: `SessionKind::Browser` is a session for one browser; it is the only
+kind. There is no shared session for background programs. `gateinto session
 browser` starts one on `127.0.0.1:0` with `SessionCredentials`, prints its
-port and realm, shows the credentials (see below) and runs until Ctrl+C, then
-closes it the same way. The agent (below)
-starts browser sessions for launch URIs and runs the device session too.
+port and realm, shows the credentials (see below) and runs until Ctrl+C (or
+SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
+The agent (below) starts browser sessions for launch URIs. A session kind
+that this build does not know, such as `device` from an older agent, is
+listed as `unknown`.
 
 ### Local proxy authentication (`session_credentials`)
 
@@ -316,7 +312,7 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`proxy`, `check-upstream`, `session browser`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting the device session or a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
@@ -326,7 +322,7 @@ The full protocol, limits and guarantees are in
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the device session's gateway, listen address and local authentication, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
 | `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
@@ -379,25 +375,26 @@ side.
 
 ## Limits
 
-| Limit | Flag | Default |
+| Limit | Configuration key | Default |
 | --- | --- | --- |
-| Concurrent connections per session, including those still sending their request | `--max-tunnels` / `max_concurrent_tunnels` | 64 |
-| Request and upstream response header block | `--max-header-bytes` / `header_max_bytes` | 16384 bytes |
-| The `os_user` check and reading the local request together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s |
-| Upstream TCP connect, TLS handshake and `CONNECT` reply together | `--connect-timeout-secs` / `connect_timeout_seconds` | 10 s (separate budget) |
-| Tunnel without traffic in either direction | `--idle-timeout-secs` / `idle_timeout_seconds` | 300 s |
+| Concurrent connections per session, including those still sending their request | `[limits] max_concurrent_tunnels` | 64 |
+| Request and upstream response header block | `[limits] header_max_bytes` | 16384 bytes |
+| The `os_user` check and reading the local request together | `[limits] connect_timeout_seconds` | 10 s |
+| Upstream TCP connect, TLS handshake and `CONNECT` reply together | `[limits] connect_timeout_seconds` | 10 s (separate budget) |
+| Tunnel without traffic in either direction | `[limits] idle_timeout_seconds` | 300 s |
 | `session_credentials` failures before `429` (`Limits::local_auth_failures`); `os_user` denials are not counted | none | 10 within 60 s |
 | `Proxy-Authorization` Basic token | none | 1024 base64 characters |
 
-Limits apply to each session separately. The listen address must be loopback
-unless `--unsafe-allow-non-loopback-listen` is given on the command line. The
-configuration file has no key for it.
+Limits apply to each session separately and come only from the configuration
+file. `Proxy::bind` refuses every listen address that is not loopback; no flag
+or configuration key changes that.
 
 ## Configuration
 
 Settings come from command line flags, then the `--config` TOML file, then
 built-in defaults, resolved key by key. Gateway flags apply to the gateway in
-use (the device session's, or `check-upstream --gateway`). The upstream host
+use: the one named by `--gateway`, or the only configured one; with several
+configured, `--gateway` is required. The upstream host
 and port have no default. See the README for the schema.
 
 ## TLS

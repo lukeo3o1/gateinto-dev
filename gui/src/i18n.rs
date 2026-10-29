@@ -145,7 +145,6 @@ table! {
     AgentStopped => "The agent is not running", "代理程式未執行";
     AgentUnreachable => "Agent unreachable", "無法連線到代理程式";
     Browser => "Browser", "瀏覽器";
-    DeviceProxy => "Device proxy", "裝置代理";
     Session => "Session", "工作階段";
     OsUser => "OS user", "作業系統使用者";
     Password => "Password", "密碼";
@@ -211,9 +210,6 @@ table! {
     CopyDeviceId => "Copy device ID", "複製裝置識別碼";
     Copied => "Copied", "已複製";
     ThisPc => "This PC", "這部電腦";
-    LoopbackOnly => "Loopback only", "僅限本機回送";
-    UnknownReason => "Unknown: {0}", "未知：{0}";
-    OpenToNetwork => "Open to the network on {0}", "在 {0} 對網路開放";
     Software => "Software", "軟體";
     Algorithm => "Algorithm", "演算法";
     Agent => "Agent", "代理程式";

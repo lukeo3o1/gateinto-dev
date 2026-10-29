@@ -250,8 +250,7 @@ impl App {
             NavPage::Device => {
                 let device = update.device.as_ref();
                 let gateways = &update.gateways;
-                let (listen, state, copied) = (&update.listen, &update.state, self.copied);
-                let page = crate::device::page(device, listen, state, gateways, failure, copied);
+                let page = crate::device::page(device, gateways, failure, self.copied);
                 board::device::board(l, s, t, v, &page, m)
             }
             NavPage::Log => {

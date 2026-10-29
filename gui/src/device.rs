@@ -1,12 +1,8 @@
-use std::net::SocketAddr;
-
 use gateinto::config::ConfigFile;
 use gateinto::identity::UnsupportedPlatform;
 use gateinto::identity::device_key::{self, Backend, KeyError, KeyName, KeyStore};
 use gateinto::link::{Known, Source};
-use gateinto::proxy::DEFAULT_LISTEN;
 
-use crate::agent::AgentState;
 use crate::i18n::{Text, fill, tr};
 
 pub const SUBTITLE: Text = Text::DeviceSubtitle;
@@ -105,7 +101,6 @@ const KEY_NAME: Text = Text::KeyName;
 const COPY: Text = Text::CopyDeviceId;
 const COPIED: Text = Text::Copied;
 const THIS_PC: Text = Text::ThisPc;
-const LOOPBACK: Text = Text::LoopbackOnly;
 const FIRST_WINDOWS_11_BUILD: u32 = 22000;
 
 fn first_line(text: &str) -> String {
@@ -143,24 +138,6 @@ pub fn os(system: &System) -> Option<String> {
     .flatten()
     .collect();
     (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
-}
-
-pub fn exposure(listen: &Result<SocketAddr, String>, state: &AgentState) -> String {
-    let listen = match listen {
-        Ok(listen) => *listen,
-        Err(error) => return fill(Text::UnknownReason, &[&first_line(error)]),
-    };
-    let sessions = match state {
-        AgentState::Running(sessions) => sessions.as_slice(),
-        AgentState::Stopped | AgentState::Unreachable(_) => &[],
-    };
-    std::iter::once(listen)
-        .chain(sessions.iter().map(|session| session.listen))
-        .find(|addr| !addr.ip().to_canonical().is_loopback())
-        .map_or_else(
-            || tr(LOOPBACK).to_owned(),
-            |addr| fill(Text::OpenToNetwork, &[&addr]),
-        )
 }
 
 pub fn device_id(probe: Option<&Probe>) -> Option<&str> {
@@ -214,15 +191,12 @@ fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
     }
 }
 
-fn computer(probe: &Probe, listen: &Result<SocketAddr, String>, state: &AgentState) -> Computer {
+fn computer(probe: &Probe) -> Computer {
     let system = &probe.system;
     let rows = os(system)
         .map(|os| (tr(Text::System), os))
         .into_iter()
-        .chain([
-            ("Gateinto", VERSION.to_owned()),
-            (tr(Text::Agent), exposure(listen, state)),
-        ])
+        .chain([("Gateinto", VERSION.to_owned())])
         .collect();
     Computer {
         name: system
@@ -265,16 +239,8 @@ pub fn probe<S: KeyStore>(
     Probe { key, system }
 }
 
-pub fn configured_listen(file: &Result<ConfigFile, String>) -> Result<SocketAddr, String> {
-    file.as_ref()
-        .map(|file| file.device_session.listen.unwrap_or(DEFAULT_LISTEN))
-        .map_err(Clone::clone)
-}
-
 pub fn page(
     probe: Option<&Probe>,
-    listen: &Result<SocketAddr, String>,
-    state: &AgentState,
     listing: &Result<Known, String>,
     failure: Option<&str>,
     copied: bool,
@@ -283,7 +249,7 @@ pub fn page(
         subtitle: failure.unwrap_or(tr(SUBTITLE)).to_owned(),
         failed: failure.is_some(),
         key: key_card(probe.map(|probe| &probe.key), copied),
-        computer: probe.map(|probe| computer(probe, listen, state)),
+        computer: probe.map(computer),
         gateways: gateways(listing),
     }
 }
@@ -293,7 +259,6 @@ mod tests {
     use gateinto::config::GatewayName;
     use gateinto::identity::device_key::StoreError;
     use gateinto::identity::encoding::{P256Point, p256_spki_der, sha256_fingerprint};
-    use gateinto::ipc::{SessionAuth, SessionInfo, SessionKind, SessionRoute};
     use gateinto::link::KnownGateway;
 
     use super::*;
@@ -475,80 +440,6 @@ mod tests {
         assert_eq!(os(&System::default()), None);
     }
 
-    fn session(listen: &str) -> SessionInfo {
-        SessionInfo {
-            id: 1,
-            kind: SessionKind::Browser,
-            gateway: "office".to_owned(),
-            upstream: "proxy.example.com:443".to_owned(),
-            listen: listen.parse().unwrap(),
-            route: SessionRoute::All,
-            auth: SessionAuth::OsUser,
-            started: 0,
-            tunnels: 0,
-            browser: None,
-        }
-    }
-
-    fn listen(addr: &str) -> Result<SocketAddr, String> {
-        Ok(addr.parse().unwrap())
-    }
-
-    #[test]
-    fn a_loopback_listen_and_loopback_sessions_are_loopback_only() {
-        let running = AgentState::Running(vec![session("127.0.0.1:50100"), session("[::1]:9")]);
-        assert_eq!(
-            exposure(&listen("127.0.0.1:18736"), &running),
-            "Loopback only"
-        );
-        assert_eq!(
-            exposure(&listen("[::1]:18736"), &AgentState::Stopped),
-            "Loopback only"
-        );
-    }
-
-    #[test]
-    fn a_network_listen_in_the_config_or_a_session_is_called_out() {
-        assert_eq!(
-            exposure(&listen("0.0.0.0:18736"), &AgentState::Stopped),
-            "Open to the network on 0.0.0.0:18736"
-        );
-        let running = AgentState::Running(vec![session("192.168.1.5:8080")]);
-        assert_eq!(
-            exposure(&listen("127.0.0.1:18736"), &running),
-            "Open to the network on 192.168.1.5:8080"
-        );
-    }
-
-    #[test]
-    fn an_ipv6_wildcard_listen_is_open_to_the_network() {
-        assert_eq!(
-            exposure(&listen("[::]:18736"), &AgentState::Stopped),
-            "Open to the network on [::]:18736"
-        );
-    }
-
-    #[test]
-    fn an_ipv4_mapped_loopback_listen_is_loopback_only() {
-        assert_eq!(
-            exposure(&listen("[::ffff:127.0.0.1]:18736"), &AgentState::Stopped),
-            "Loopback only"
-        );
-        assert_eq!(
-            exposure(&listen("[::ffff:10.0.0.2]:18736"), &AgentState::Stopped),
-            "Open to the network on [::ffff:10.0.0.2]:18736"
-        );
-    }
-
-    #[test]
-    fn an_unreadable_listen_setting_is_not_reported_as_loopback() {
-        let broken = Err("config file c.toml: expected `=`\n  |".to_owned());
-        assert_eq!(
-            exposure(&broken, &AgentState::Stopped),
-            "Unknown: config file c.toml: expected `=`"
-        );
-    }
-
     fn probed(key: KeyState) -> Probe {
         Probe {
             key,
@@ -568,18 +459,7 @@ mod tests {
     }
 
     fn draw(probe: Option<&Probe>) -> Page {
-        page(
-            probe,
-            &loopback(),
-            &AgentState::Stopped,
-            &known(Vec::new()),
-            None,
-            false,
-        )
-    }
-
-    fn loopback() -> Result<SocketAddr, String> {
-        listen("127.0.0.1:18736")
+        page(probe, &known(Vec::new()), None, false)
     }
 
     #[test]
@@ -588,8 +468,6 @@ mod tests {
         let probe = probed(present(Backend::Software, id(2)));
         let page = page(
             Some(&probe),
-            &listen("0.0.0.0:18736"),
-            &AgentState::Stopped,
             &known(vec![KnownGateway {
                 name: "office".parse::<GatewayName>().unwrap(),
                 host: Some("proxy.example.com".to_owned()),
@@ -617,7 +495,6 @@ mod tests {
             [
                 ("系統", "Windows 11 Pro \u{b7} x64".to_owned()),
                 ("Gateinto", VERSION.to_owned()),
-                ("代理程式", "在 0.0.0.0:18736 對網路開放".to_owned()),
             ]
         );
         assert_eq!(page.gateways.unwrap()[0].source, "在這部裝置上新增");
@@ -634,14 +511,6 @@ mod tests {
             system: System::default(),
         };
         assert_eq!(draw(Some(&nameless)).computer.unwrap().name, "這部電腦");
-        assert_eq!(
-            exposure(&listen("127.0.0.1:1"), &AgentState::Stopped),
-            "僅限本機回送"
-        );
-        assert_eq!(
-            exposure(&Err("bad".to_owned()), &AgentState::Stopped),
-            "未知：bad"
-        );
     }
 
     #[test]
@@ -688,14 +557,7 @@ mod tests {
     #[test]
     fn copying_turns_the_button_into_a_confirmation() {
         let probe = probed(tpm());
-        let page = page(
-            Some(&probe),
-            &loopback(),
-            &AgentState::Stopped,
-            &known(Vec::new()),
-            None,
-            true,
-        );
+        let page = page(Some(&probe), &known(Vec::new()), None, true);
         assert_eq!(page.key.copy, Some("Copied"));
     }
 
@@ -751,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn the_computer_card_shows_who_is_signed_in_and_how_the_agent_listens() {
+    fn the_computer_card_shows_who_is_signed_in_and_the_gateinto_version() {
         let probe = probed(tpm());
         assert_eq!(
             draw(Some(&probe)).computer,
@@ -761,7 +623,6 @@ mod tests {
                 rows: vec![
                     ("System", "Windows 11 Pro \u{b7} x64".to_owned()),
                     ("Gateinto", VERSION.to_owned()),
-                    ("Agent", "Loopback only".to_owned()),
                 ],
             })
         );
@@ -776,44 +637,7 @@ mod tests {
         let computer = draw(Some(&probe)).computer.unwrap();
         assert_eq!(computer.name, "This PC");
         assert_eq!(computer.account, None);
-        assert_eq!(computer.rows[0], ("Gateinto", VERSION.to_owned()));
-        assert_eq!(computer.rows.len(), 2);
-    }
-
-    #[test]
-    fn the_agent_row_follows_the_running_sessions() {
-        let probe = probed(tpm());
-        let running = AgentState::Running(vec![session("0.0.0.0:8080")]);
-        let page = page(
-            Some(&probe),
-            &loopback(),
-            &running,
-            &known(Vec::new()),
-            None,
-            false,
-        );
-        assert_eq!(
-            page.computer.unwrap().rows[2],
-            ("Agent", "Open to the network on 0.0.0.0:8080".to_owned())
-        );
-    }
-
-    #[test]
-    fn the_agent_row_follows_the_listen_setting_read_with_each_poll() {
-        let probe = probed(tpm());
-        let open = listen("0.0.0.0:9000");
-        let page = page(
-            Some(&probe),
-            &open,
-            &AgentState::Stopped,
-            &known(Vec::new()),
-            None,
-            false,
-        );
-        assert_eq!(
-            page.computer.unwrap().rows[2],
-            ("Agent", "Open to the network on 0.0.0.0:9000".to_owned())
-        );
+        assert_eq!(computer.rows, [("Gateinto", VERSION.to_owned())]);
     }
 
     fn gateway(name: &str, host: &str, port: u16, source: Source) -> KnownGateway {
@@ -832,14 +656,7 @@ mod tests {
             gateway("office", "proxy.example.com", 443, Source::Config),
             gateway("lab", "lab.example", 8443, Source::Linked),
         ]);
-        let page = page(
-            None,
-            &loopback(),
-            &AgentState::Stopped,
-            &listing,
-            None,
-            false,
-        );
+        let page = page(None, &listing, None, false);
         assert_eq!(
             page.gateways,
             Ok(vec![
@@ -860,14 +677,7 @@ mod tests {
     #[test]
     fn a_broken_gateway_listing_shows_its_first_line() {
         let listing = Err("config file c.toml: bad\n  |".to_owned());
-        let page = page(
-            None,
-            &loopback(),
-            &AgentState::Stopped,
-            &listing,
-            None,
-            false,
-        );
+        let page = page(None, &listing, None, false);
         assert_eq!(page.gateways, Err("config file c.toml: bad".to_owned()));
     }
 
@@ -875,8 +685,6 @@ mod tests {
     fn a_failure_replaces_the_subtitle() {
         let page = page(
             None,
-            &loopback(),
-            &AgentState::Stopped,
             &known(Vec::new()),
             Some("Could not copy the device ID"),
             false,
@@ -890,10 +698,8 @@ mod tests {
 
     #[test]
     fn a_probe_reads_the_configured_key_name() {
-        let file = ConfigFile::parse(
-            "[device_key]\nname = \"work\"\n[device_session]\nlisten = \"0.0.0.0:9000\"\n",
-        )
-        .map_err(|error| error.to_string());
+        let file =
+            ConfigFile::parse("[device_key]\nname = \"work\"\n").map_err(|error| error.to_string());
         let found = probe(
             &file,
             || store(Err(StoreError::NotFound), Err(StoreError::NotFound)),
@@ -906,21 +712,16 @@ mod tests {
                 system: system(),
             }
         );
-        assert_eq!(configured_listen(&file), listen("0.0.0.0:9000"));
     }
 
     #[test]
-    fn a_probe_without_settings_uses_the_default_key_and_listen_address() {
+    fn a_probe_without_settings_uses_the_default_key() {
         let found = probe(
             &Ok(ConfigFile::default()),
             || store(Ok(point(1)), Err(StoreError::NotFound)),
             System::default(),
         );
         assert_eq!(found.key, tpm());
-        assert_eq!(
-            configured_listen(&Ok(ConfigFile::default())),
-            Ok(DEFAULT_LISTEN)
-        );
     }
 
     #[test]
@@ -930,10 +731,6 @@ mod tests {
         assert_eq!(
             found.key,
             KeyState::Failed("config file c.toml: bad".to_owned())
-        );
-        assert_eq!(
-            configured_listen(&broken),
-            Err("config file c.toml: bad".to_owned())
         );
     }
 }

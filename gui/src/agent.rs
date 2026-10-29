@@ -47,7 +47,7 @@ mod tests {
     fn session(id: u64) -> SessionInfo {
         SessionInfo {
             id,
-            kind: SessionKind::Device,
+            kind: SessionKind::Browser,
             gateway: "office".to_owned(),
             upstream: "proxy.example:443".to_owned(),
             listen: "127.0.0.1:8080".parse().unwrap(),

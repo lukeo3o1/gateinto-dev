@@ -276,9 +276,10 @@ To reach `working`:
    [windows7.yml](../.github/workflows/windows7.yml) run made after the fixes
    above. Older artifacts import `Tbsi_GetDeviceInfo` and do not load. Check
    that it starts: `gateinto --help`.
-3. Run `gateinto proxy --upstream-host <host> --upstream-port <port>` against a
-   controlled upstream proxy. It shows its session credentials at start; send
-   `curl --proxy http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com/`
+3. Run `gateinto session browser --upstream-host <host> --upstream-port <port>`
+   against a controlled upstream proxy. It prints its `listen` address and
+   shows its session credentials at start; send
+   `curl --proxy http://127.0.0.1:<listen-port> --proxy-user gateinto:<password> https://example.com/`
    through it with that password. The
    TLS 1.3 handshake to the upstream proxy exercises AWS-LC's `BCryptGenRandom`
    entropy path at runtime. Confirm in the upstream proxy's TLS log that

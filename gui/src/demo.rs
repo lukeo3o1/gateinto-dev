@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use gateinto::config::{ConfigFile, GatewayName};
@@ -8,7 +9,6 @@ use gateinto::ipc::{
     SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, Source};
-use gateinto::proxy::DEFAULT_LISTEN;
 
 use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
@@ -56,15 +56,15 @@ struct Sample {
 const SESSIONS: [Sample; 3] = [
     Sample {
         id: 3,
-        kind: SessionKind::Device,
+        kind: SessionKind::Browser,
         gateway: "office",
         upstream: "proxy.example.com:8443",
-        port: 8080,
+        port: 49_702,
         route: SessionRoute::All,
         auth: SessionAuth::Password,
         age: 7_380,
         tunnels: 4,
-        browser: None,
+        browser: Some(BrowserKind::Chromium),
     },
     Sample {
         id: 5,
@@ -93,17 +93,12 @@ const SESSIONS: [Sample; 3] = [
 ];
 
 const LOG: [(u64, LogLevel, &str, &str); 8] = [
-    (
-        7_400,
-        LogLevel::Info,
-        "agent",
-        "agent started, listening on 127.0.0.1:8080",
-    ),
+    (7_400, LogLevel::Info, "agent", "agent ready"),
     (
         7_380,
         LogLevel::Info,
         "session 3",
-        "device proxy opened to proxy.example.com:8443",
+        "browser session opened to proxy.example.com",
     ),
     (
         5_200,
@@ -150,7 +145,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             kind: s.kind,
             gateway: s.gateway.to_owned(),
             upstream: s.upstream.to_owned(),
-            listen: (DEFAULT_LISTEN.ip(), s.port).into(),
+            listen: (Ipv4Addr::LOCALHOST, s.port).into(),
             route: s.route,
             auth: s.auth,
             started: now - s.age,
@@ -244,7 +239,6 @@ pub fn loaded() -> Loaded {
         }),
         agent: Ok(settings::agent(&file, || Some(browser))),
         sections: file.gateways,
-        listen: Ok(DEFAULT_LISTEN),
     }
 }
 
@@ -319,10 +313,16 @@ mod tests {
     }
 
     #[test]
-    fn the_sample_sessions_cover_each_kind_and_some_relay_traffic() {
+    fn the_sample_sessions_cover_each_browser_and_some_relay_traffic() {
         let sessions = listed();
-        assert!(sessions.iter().any(|s| s.kind == SessionKind::Device));
-        assert!(sessions.iter().any(|s| s.kind == SessionKind::Browser));
+        assert!(sessions.iter().all(|s| s.kind == SessionKind::Browser));
+        for browser in [
+            BrowserKind::Chrome,
+            BrowserKind::Edge,
+            BrowserKind::Chromium,
+        ] {
+            assert!(sessions.iter().any(|s| s.browser == Some(browser)));
+        }
         assert!(sessions.iter().any(|s| s.auth == SessionAuth::Password));
         assert!(sessions.iter().any(|s| s.tunnels > 0));
         assert!(sessions.iter().any(|s| s.tunnels == 0));
@@ -393,7 +393,6 @@ mod tests {
             assert!(!sessions::row(&session, NOW).gateway.starts_with("g-"));
         }
         assert!(loaded.agent.is_ok());
-        assert!(loaded.listen.is_ok());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -45,9 +45,6 @@ pub use session_credentials::{FailureLimit, SessionCredentials};
 use session_credentials::{Verdict, Verifier};
 
 pub const MAX_TUNNELS: u32 = h2::MAX_STREAMS;
-
-pub const DEFAULT_LISTEN: SocketAddr =
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 18736));
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -117,7 +114,6 @@ impl Drop for OpenTunnel {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
-    pub allow_non_loopback: bool,
     pub local_auth: LocalAuth,
     pub route: Route,
     pub upstream: Upstream,
@@ -140,10 +136,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NonLoopbackListen(addr) => write!(
-                f,
-                "refusing to listen on non-loopback address {addr}; pass --unsafe-allow-non-loopback-listen to override"
-            ),
+            Self::NonLoopbackListen(addr) => {
+                write!(f, "refusing to listen on non-loopback address {addr}")
+            }
             Self::TunnelLimit(limit) => write!(
                 f,
                 "the tunnel limit is {limit}; the maximum is {MAX_TUNNELS}"
@@ -271,7 +266,7 @@ impl Proxy {
         config: Config,
         time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
     ) -> Result<Self, Error> {
-        if !config.listen.ip().is_loopback() && !config.allow_non_loopback {
+        if !config.listen.ip().is_loopback() {
             return Err(Error::NonLoopbackListen(config.listen));
         }
         if config.limits.max_tunnels > MAX_TUNNELS as usize {
@@ -677,6 +672,8 @@ async fn reject_with(mut stream: TcpStream, response: &str, linger: Duration) {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use rustls::NamedGroup;
 
     use super::os_user::tests::{Fake, fake, slow};
@@ -692,7 +689,6 @@ mod tests {
         let upstream = closed_port().await;
         Config {
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-            allow_non_loopback: false,
             local_auth,
             route: Route::Gateway,
             upstream: Upstream {

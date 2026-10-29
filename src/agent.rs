@@ -18,7 +18,7 @@ use crate::job::{Job, SpawnError};
 use crate::link::{self, Decision, Known, Launch, LinkedGateway, Resolution};
 use crate::logbook::Logbook;
 use crate::proxy::{self, LocalAuth};
-use crate::sessions::{SessionConfig, SessionError, SessionId, SessionKind, SessionManager};
+use crate::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use crate::uri::LaunchRequest;
 
 const MAX_CONNECTIONS: usize = 8;
@@ -209,10 +209,6 @@ impl Agent {
                 stop: Notify::new(),
             }),
         }
-    }
-
-    pub async fn start_session(&self, config: SessionConfig) -> Result<SessionId, SessionError> {
-        self.inner.sessions.lock().await.start(config).await
     }
 
     pub async fn serve(&self, mut server: Server, shutdown: impl Future<Output = ()>) {
@@ -432,7 +428,6 @@ impl Agent {
             .map_err(|e| e.to_string())?;
         let mut proxy = plan.proxy;
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        proxy.allow_non_loopback = false;
         proxy.route = launch.route;
         let mut job = self.inner.launcher.job();
         let mut sessions = self.inner.sessions.lock().await;
@@ -829,7 +824,6 @@ mod tests {
         fn proxy_config() -> proxy::Config {
             proxy::Config {
                 listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                allow_non_loopback: false,
                 local_auth: LocalAuth::SESSION_CREDENTIALS,
                 route: proxy::Route::Gateway,
                 upstream: proxy::Upstream {

@@ -78,8 +78,8 @@ mod tests {
 
     #[test]
     fn columns_are_aligned_to_their_widest_cell() {
-        let device = SessionInfo {
-            kind: SessionKind::Device,
+        let other = SessionInfo {
+            kind: SessionKind::Unknown,
             listen: "[::1]:8080".parse().unwrap(),
             route: SessionRoute::Mixed,
             auth: SessionAuth::OsUser,
@@ -88,7 +88,7 @@ mod tests {
             ..session(10, "office", None)
         };
         let table = session_table(
-            &[session(1, "corporate", Some(BrowserKind::Chrome)), device],
+            &[session(1, "corporate", Some(BrowserKind::Chrome)), other],
             4_065,
         );
         assert_eq!(
@@ -96,7 +96,7 @@ mod tests {
             [
                 "ID  KIND     GATEWAY    LISTEN           ROUTE  AUTH      TUNNELS  UPTIME  BROWSER",
                 "1   browser  corporate  127.0.0.1:49152  all    password  3        51m05s  chrome",
-                "10  device   office     [::1]:8080       mixed  os_user   12       1m05s   -",
+                "10  unknown  office     [::1]:8080       mixed  os_user   12       1m05s   -",
             ]
         );
     }

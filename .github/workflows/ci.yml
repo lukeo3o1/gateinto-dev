@@ -175,7 +175,7 @@ jobs:
           if ($init -match '(?m)^spki-sha256: ([0-9a-f]{64})\r?$') { $fingerprint = $Matches[1] } else { throw "key init output has no spki-sha256 line" }
           if ($out -notmatch "(?m)^spki-sha256: $fingerprint\r?$") { throw "key info did not report the fingerprint from key init ($fingerprint)" }
           if ($out -notmatch '(?m)^client-certificate: none\r?$') { throw "key info did not report client-certificate: none" }
-      - name: Tunnel through the local test upstream
+      - name: Check the local test upstream with the example config
         run: |
           function Wait-Port([int] $Port, $Process, [string] $Name) {
             $deadline = (Get-Date).AddSeconds(60)
@@ -194,19 +194,10 @@ jobs:
             throw "$Name did not listen on port $Port within 60 seconds"
           }
 
-          function Invoke-Curl([string] $Url) {
-            $status = curl.exe -sS -o NUL -w "%{http_code}" -x http://127.0.0.1:18736 $Url
-            if ($LASTEXITCODE -ne 0) { throw "curl.exe $Url through the proxy exited with $LASTEXITCODE" }
-            $status
-          }
-
           $work = Join-Path $env:RUNNER_TEMP 'quickstart'
           New-Item -ItemType Directory -Path $work | Out-Null
           $config = Join-Path $work 'gateinto.toml'
-          $logs = @{}
-          foreach ($name in 'upstream', 'proxy') {
-            $logs[$name] = @((Join-Path $work "$name.out"), (Join-Path $work "$name.err"))
-          }
+          $logs = @{ upstream = @((Join-Path $work 'upstream.out'), (Join-Path $work 'upstream.err')) }
           $processes = @()
           try {
             $upstream = Start-Process -FilePath (Resolve-Path 'target\release\examples\test_upstream.exe').Path -PassThru -NoNewWindow `
@@ -222,7 +213,6 @@ jobs:
               '(?m)^port = 443' = "port = $env:UPSTREAM_PORT"
               '(?m)^# server_name = "proxy\.example\.invalid"' = 'server_name = "localhost"'
               '(?m)^# ca_file = "upstream-ca\.pem"' = 'ca_file = "upstream-ca.pem"'
-              '(?m)^auth = "session_credentials"' = 'auth = "none"'
             }
             foreach ($pattern in $replacements.Keys) {
               $found = [regex]::Matches($text, $pattern).Count
@@ -239,20 +229,6 @@ jobs:
             foreach ($line in 'tls-version: TLSv1_3', 'key-exchange-group: X25519MLKEM768', 'connect-status: HTTP/1.1 200 Connection established') {
               if ($check -notmatch "(?m)^$([regex]::Escape($line))\r?$") { throw "check-upstream did not print '$line'" }
             }
-
-            $proxy = Start-Process -FilePath (Get-Command gateinto).Source -PassThru -NoNewWindow `
-              -ArgumentList 'proxy', '--config', "`"$config`"" `
-              -RedirectStandardOutput $logs.proxy[0] -RedirectStandardError $logs.proxy[1]
-            $null = $proxy.Handle
-            $processes += $proxy
-            Wait-Port 18736 $proxy 'gateinto proxy'
-
-            $status = Invoke-Curl 'https://example.com/'
-            if ($status -ne '200') { throw "HTTPS through the proxy returned $status, expected 200" }
-            "HTTPS through the proxy: $status"
-            $status = Invoke-Curl 'http://example.com/'
-            if ($status -ne '405') { throw "plain HTTP through the proxy returned $status, expected 405" }
-            "plain HTTP through the proxy: $status"
           } finally {
             foreach ($process in $processes) {
               if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }

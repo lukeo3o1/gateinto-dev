@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use gateinto::config::{GatewayName, Gateways};
@@ -55,7 +54,6 @@ pub struct Loaded {
     pub gateways: Result<Known, String>,
     pub sections: Gateways,
     pub agent: Result<Agent, String>,
-    pub listen: Result<SocketAddr, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +62,6 @@ pub struct Update {
     pub gateways: Result<Known, String>,
     pub sections: Gateways,
     pub agent: Result<Agent, String>,
-    pub listen: Result<SocketAddr, String>,
     pub failure: Option<Note>,
     pub launched: u64,
     pub device: Option<Probe>,
@@ -118,7 +115,6 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
         gateways: loaded.gateways,
         sections: loaded.sections,
         agent: loaded.agent,
-        listen: loaded.listen,
         failure: None,
         launched: 0,
         device: Some(Probe {
@@ -208,14 +204,12 @@ pub async fn serve_with<F, R>(
             gateways,
             sections,
             agent,
-            listen,
         } = load();
         deliver(Update {
             state,
             gateways,
             sections,
             agent,
-            listen,
             failure: failure.take(),
             launched,
             device: device.clone(),
@@ -266,7 +260,7 @@ mod tests {
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
     use gateinto::ipc::{LogEvent, LogLevel, LogPage};
-    use gateinto::proxy::{DEFAULT_LISTEN, SessionCredentials};
+    use gateinto::proxy::SessionCredentials;
 
     use super::*;
     use crate::credentials::Issued;
@@ -293,7 +287,6 @@ mod tests {
             gateways: Ok(Known::default()),
             sections: Gateways::default(),
             agent: Ok(Agent::default()),
-            listen: Ok(DEFAULT_LISTEN),
             failure,
             launched: 0,
             device: None,
@@ -306,7 +299,6 @@ mod tests {
             gateways: Ok(Known::default()),
             sections: Gateways::default(),
             agent: Ok(Agent::default()),
-            listen: Ok(DEFAULT_LISTEN),
         }
     }
 
@@ -483,7 +475,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn every_poll_rereads_the_gateways_agent_and_listen_settings() {
+    async fn every_poll_rereads_the_gateways_and_agent_settings() {
         let log = RefCell::new(Vec::new());
         let (_tx, rx) = unbounded_channel();
         let reads = RefCell::new(0);
@@ -493,7 +485,6 @@ mod tests {
                 .unwrap()
                 .gateways,
             agent: Err(format!("agent {n}")),
-            listen: Err(format!("listen {n}")),
         };
         let load = || {
             *reads.borrow_mut() += 1;
@@ -510,7 +501,6 @@ mod tests {
                     gateways: u.gateways,
                     sections: u.sections,
                     agent: u.agent,
-                    listen: u.listen,
                 })
             },
             unrevealed,

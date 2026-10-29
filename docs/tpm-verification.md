@@ -94,16 +94,16 @@ that requires client certificates from a test CA you control.
     Expect `client-certificate-source: file client.pem` and the certificate's
     thumbprint. Repeat with a certificate issued for another key and expect an
     error saying it "does not belong to the device key".
-12. Run the proxy with the file and open a tunnel:
+12. Start a browser session with the file and open a tunnel:
 
     ```powershell
-    gateinto proxy --upstream-host <host> --upstream-port <port> --ca-file <upstream-ca.pem> `
+    gateinto session browser --upstream-host <host> --upstream-port <port> --ca-file <upstream-ca.pem> `
       --key-name gateinto-tpm-mtls --client-certificate required --client-cert-file client.pem
-    curl.exe --proxy http://127.0.0.1:18736 --proxy-user gateinto:<password> https://example.com/
+    curl.exe --proxy http://127.0.0.1:<listen-port> --proxy-user gateinto:<password> https://example.com/
     ```
 
-    The proxy shows its session credentials in a box at start; use the
-    password from it. Without `--proxy-user` the request gets `407`.
+    The session prints its `listen` address on stdout and shows its
+    credentials in a box at start; use that port and the password from it. Without `--proxy-user` the request gets `407`.
     Expect the log line `client certificate authentication enabled` with
     `backend=tpm`, a successful request, and the upstream logging the client
     certificate. Record whether Windows showed any PIN or consent prompt; the

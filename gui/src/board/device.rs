@@ -147,8 +147,8 @@ mod tests {
     const S: Scale = Scale { dpi: 96 };
     const COPY_BUTTON: Rect = Rect::new(842, 122, 150, 32);
     const KEY: Rect = Rect::new(248, 112, 764, 252);
-    const COMPUTER: Rect = Rect::new(248, 378, 764, 208);
-    const GATEWAYS: Rect = Rect::new(248, 600, 764, 100);
+    const COMPUTER: Rect = Rect::new(248, 378, 764, 164);
+    const GATEWAYS: Rect = Rect::new(248, 556, 764, 100);
 
     fn id() -> String {
         "ab".repeat(32)
@@ -179,7 +179,6 @@ mod tests {
                 rows: vec![
                     ("System", "Windows 11 Pro \u{b7} x64".to_owned()),
                     ("Gateinto", "0.1.0".to_owned()),
-                    ("Agent", "Loopback only".to_owned()),
                 ],
             }),
             gateways: Ok(vec![Gateway {
@@ -239,7 +238,7 @@ mod tests {
         );
         assert_eq!(
             b.pane,
-            Some(Pane::new(Rect::new(248, 112, 764, 544), 588, 0))
+            Some(Pane::new(Rect::new(248, 112, 764, 544), 544, 0))
         );
     }
 
@@ -330,7 +329,7 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, Op::Text(Font::Small, ..)))
         );
-        assert_eq!(b.pane.map(|p| p.content), Some(232 + 14 + 208 + 14 + 100));
+        assert_eq!(b.pane.map(|p| p.content), Some(232 + 14 + 164 + 14 + 100));
     }
 
     #[test]
@@ -405,7 +404,7 @@ mod tests {
             card[..7],
             [
                 Op::Round(COMPUTER, 12.0, T.border),
-                Op::Round(Rect::new(249, 379, 762, 206), 11.0, T.card),
+                Op::Round(Rect::new(249, 379, 762, 162), 11.0, T.card),
                 text(
                     Font::Heading,
                     "DESK-7",
@@ -431,13 +430,8 @@ mod tests {
         assert_eq!(
             card[card.len() - 2..],
             [
-                text(Font::Body, "Agent", Rect::new(268, 534, 35, 44), T.text),
-                text(
-                    Font::Body,
-                    "Loopback only",
-                    Rect::new(901, 534, 91, 44),
-                    T.muted
-                ),
+                text(Font::Body, "Gateinto", Rect::new(268, 490, 56, 44), T.text),
+                text(Font::Body, "0.1.0", Rect::new(957, 490, 35, 44), T.muted),
             ]
         );
     }
@@ -449,9 +443,9 @@ mod tests {
             c.account = None;
         }
         let b = draw(&p);
-        let card = inside(&b.ops, Rect::new(248, 378, 764, 188));
+        let card = inside(&b.ops, Rect::new(248, 378, 764, 144));
         assert_eq!(card[3], Op::Fill(Rect::new(268, 426, 724, 1), T.border));
-        assert_eq!(b.pane.map(|p| p.content), Some(252 + 14 + 188 + 14 + 100));
+        assert_eq!(b.pane.map(|p| p.content), Some(252 + 14 + 144 + 14 + 100));
     }
 
     #[test]
@@ -461,25 +455,25 @@ mod tests {
             inside(&ops, GATEWAYS),
             [
                 Op::Round(GATEWAYS, 12.0, T.border),
-                Op::Round(Rect::new(249, 601, 762, 98), 11.0, T.card),
+                Op::Round(Rect::new(249, 557, 762, 98), 11.0, T.card),
                 text(
                     Font::Heading,
                     USED_WITH,
-                    Rect::new(268, 604, 724, 44),
+                    Rect::new(268, 560, 724, 44),
                     T.text
                 ),
-                Op::Fill(Rect::new(268, 648, 724, 1), T.border),
-                text(Font::Body, "Office", Rect::new(268, 652, 561, 18), T.text),
+                Op::Fill(Rect::new(268, 604, 724, 1), T.border),
+                text(Font::Body, "Office", Rect::new(268, 608, 561, 18), T.text),
                 text(
                     Font::Small,
                     "Config file",
-                    Rect::new(268, 672, 561, 16),
+                    Rect::new(268, 628, 561, 16),
                     T.muted
                 ),
                 text(
                     Font::Mono,
                     "proxy.example.com:443",
-                    Rect::new(845, 648, 147, 44),
+                    Rect::new(845, 604, 147, 44),
                     T.muted
                 ),
             ]
@@ -493,14 +487,14 @@ mod tests {
         assert!(draw(&p).ops.contains(&text(
             Font::Body,
             EMPTY,
-            Rect::new(268, 648, 724, 44),
+            Rect::new(268, 604, 724, 44),
             T.muted
         )));
         p.gateways = Err("config file c.toml: broken".to_owned());
         assert!(draw(&p).ops.contains(&text(
             Font::Body,
             "config file c.toml: broken",
-            Rect::new(268, 648, 724, 44),
+            Rect::new(268, 604, 724, 44),
             T.warning
         )));
     }

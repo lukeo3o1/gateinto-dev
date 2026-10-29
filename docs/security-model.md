@@ -106,8 +106,7 @@ certificate or Gateinto outer TLS/key-exchange policy.
   established, including every current or draining HTTP/2 connection driver.
   The session's certificate is dropped with it and is not
   reachable from another session, so no new `CONNECT` can use it.
-  `gateinto proxy` and `gateinto session browser` run one session each and
-  close it on Ctrl+C; the agent closes a browser session when its browser
+  `gateinto session browser` runs one session and closes it on Ctrl+C; the agent closes a browser session when its browser
   exits or on request, and all sessions when it stops.
 - **Gateway profiles are local or approved.** An upstream (host, port, server
   name, CA file, TLS mode, client certificate settings) comes from the local
@@ -275,10 +274,9 @@ style and answer handling and by integration tests of the agent's side.
 
 ### Local proxy authentication (`session_credentials`)
 
-Browser sessions, and the device session unless the configuration sets
-`[device_session] auth = "none"` or leaves `session_credentials` out of its
-`auth` list, accept the user name and password generated for them when they
-start. On Windows browser sessions in a job object also offer `os_user`
+Every session accepts the user name and password generated for it when it
+starts; no setting removes them, and there is no shared session for
+background programs. On Windows browser sessions in a job object also offer `os_user`
 ([below](#local-proxy-authentication-os_user)), and passing either method is
 enough. This is local proxy access
 control, not authorization by the upstream, and it does not identify a user.
@@ -309,8 +307,8 @@ Guarantees:
   the issued `user:password` under a random per-session key and compares the
   tag of each received credential with it in constant time.
 - **Memory only, shown on request.** The credentials live in the memory of
-  the process that runs the session (the agent, `gateinto session browser`
-  or `gateinto proxy`) and of the command that shows them. They are never
+  the process that runs the session (the agent or `gateinto session
+  browser`) and of the command that shows them. They are never
   written to disk, never logged at any level (a test captures `trace` logs
   and checks that neither the password nor the base64 form appear), never
   part of an IPC error message, never shown by `gateinto status` or
@@ -356,8 +354,7 @@ Non-guarantees:
   against this and names the proxy address, but nothing technical stops a
   user from typing them into a page. Credentials entered there are useful to
   the site's operator only from this machine and only while the session runs,
-  because the port listens on loopback (unless
-  `--unsafe-allow-non-loopback-listen` was given) and closes with the session.
+  because the port listens on loopback only and closes with the session.
 - **The clipboard.** The prompt does not copy anything, but a user who copies
   the password puts it where every program of the user, and clipboard history
   or sync if enabled, can read it.
@@ -385,10 +382,8 @@ Non-guarantees:
 
 ### Local proxy authentication (`os_user`)
 
-`os_user` is available on Windows only; elsewhere a configuration that names
-it fails to load and the proxy refuses to start with it. It is offered by
-browser sessions on Windows, next to `session_credentials`, and by the device
-session when `[device_session] auth` names it. The client sends nothing for
+`os_user` is available on Windows only. It is offered by browser sessions on
+Windows, next to `session_credentials`. The client sends nothing for
 it: Gateinto identifies the process at the other end of the connection.
 
 Guarantees:
@@ -444,24 +439,22 @@ Guarantees:
   the blocking thread pool, not on the async runtime, and shares the connect
   timeout with reading the request; a check that does not finish in time
   gets `408` and is logged with its reason.
-- **Clear fallback.** When `session_credentials` is offered too, a denied
-  connection is handled exactly like a request without credentials (`407`
-  with the `Basic` challenge), and the session credentials keep working.
-  When `os_user` is the only method, a denied connection gets `403` and is
-  closed. Denials do not count toward the `session_credentials` failure
+- **Clear fallback.** `session_credentials` is always offered too, so a
+  denied connection is handled exactly like a request without credentials
+  (`407` with the `Basic` challenge), and the session credentials keep
+  working. Denials do not count toward the `session_credentials` failure
   limit, because they involve no guess; that limit is unchanged.
 - **Nothing secret in logs.** No credentials are involved. The first denial
   of a session logs a warning with its reason (no owner found, another user,
   outside the browser's job, a lookup past the deadline, or the Windows
-  error) and the fallback: the command that shows the session credentials,
-  or the advice to add `session_credentials`. Later denials of the same
+  error) and the fallback: the command that shows the session credentials.
+  Later denials of the same
   session are logged at debug level.
 
 Non-guarantees:
 
-- **Not a boundary against code of the same user.** On the device session
-  every program of the user is accepted. In a browser session a program of
-  the same user can still get in, for example by injecting code into the
+- **Not a boundary against code of the same user.** A program of the same
+  user can still get in, for example by injecting code into the
   browser or by duplicating the job handle out of Gateinto's process, both
   of which the user's own account allows, or by creating a process with
   `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` set to the browser, which then
@@ -474,8 +467,8 @@ Non-guarantees:
   connection is checked again, but an open tunnel is not re-checked.
 - **Elevation is not verified.** With a real UAC split token, a Gateinto that
   is not elevated may be unable to open the process or token of an elevated
-  client. The check then fails closed, so such a client may get `403`, or the
-  `Basic` challenge when `session_credentials` is offered. See
+  client. The check then fails closed, so such a client gets the `Basic`
+  challenge. See
   [verification.md](verification.md#local-proxy-authentication-os_user).
 - **Not verified:** domain-joined machines, Chrome inside the job,
   browsers launched by Gateinto itself rather than by a test probe, a run on
@@ -521,12 +514,12 @@ Non-guarantees:
     provider, and creates one only when none exists anywhere. Creating a key
     that already exists fails instead of overwriting it.
   - Keys with the same name in both providers stop `key init` with an error
-    naming both fingerprints; `key info` and the proxy warn and use the `tpm`
+    naming both fingerprints; `key info` and the sessions warn and use the `tpm`
     key.
   - A TPM that is present but not usable right now stops `key init` without
     creating anything, because an existing TPM key cannot be ruled out. Only a
     TPM that is reported absent leads to a software key.
-  - `proxy`, `check-upstream`, `key info`, `status`, `agent` and `open` only
+  - `session browser`, `check-upstream`, `key info`, `status`, `agent` and `open` only
     open the key, never create it. Only `key init` and `gateinto setup` create
     one.
 - **Installer separate from the key.** The MSI is per user, so it runs as the
@@ -546,15 +539,10 @@ Non-guarantees:
 
 ### Exposure and logs
 
-- **Loopback-only by default.** The device session's listener defaults to
-  `127.0.0.1:18736`; a browser session always listens on an ephemeral port of
-  `127.0.0.1`. A
-  non-loopback address is refused unless `--unsafe-allow-non-loopback-listen`
-  is given on the command line; the configuration file has no key for it.
-  With the default `[device_session] auth = "session_credentials"` that flag
-  sends the Basic credentials in cleartext over the network, where anything on
-  the path can read them; with `auth = "none"` anyone who can reach the
-  address can use the tunnel and the device identity behind it.
+- **Loopback-only.** Every session listens on an ephemeral port of
+  `127.0.0.1`. A non-loopback address is always refused; there is no flag or
+  configuration key that allows one, so the Basic credentials never cross the
+  network and no other machine can reach a session.
 - **No secrets or payload in logs.** Tunnel payload, private keys and local
   proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
   listen address, the client's local address and port for each tunnel, tunnel
@@ -570,13 +558,10 @@ Non-guarantees:
 
 ## What it does not protect
 
-- **Local users and processes.** `session_credentials`, the default for every
+- **Local users and processes.** `session_credentials`, required by every
   session, keeps out programs that do not know the issued credentials, not
   programs of the same user, which can ask the agent for them or read them
-  from the prompt. A device session with an explicit
-  `[device_session] auth = "none"` has no authentication: any local process,
-  including other users' processes, can use the tunnel and the device
-  identity behind it. `os_user` keeps out other users and, in browser
+  from the prompt. `os_user` keeps out other users and, in browser
   sessions, programs outside the browser's job, but not code of the same user
   that injects into the browser or takes the job handle. See
   [above](#local-proxy-authentication-session_credentials) and
