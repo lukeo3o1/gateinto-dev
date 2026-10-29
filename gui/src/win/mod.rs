@@ -34,7 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_HIDE,
     SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE,
+    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP,
     WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
@@ -86,6 +86,7 @@ const COPIED_TIMER: usize = 1;
 const IMMERSIVE: &str = "ImmersiveColorSet";
 const COPIED_MS: u32 = 1500;
 const PASTE_UNITS: usize = 4096;
+const _: () = assert!(crate::message::APP == WM_APP);
 
 fn load_icon(instance: HINSTANCE, size: i32) -> HICON {
     unsafe { LoadImageW(instance, APP_ICON as *const u16, IMAGE_ICON, size, size, 0) }

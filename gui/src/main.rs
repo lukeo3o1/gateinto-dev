@@ -19,6 +19,7 @@ mod layout;
 mod log;
 mod logo;
 mod menu;
+mod message;
 mod nav;
 mod pointer;
 #[cfg(test)]

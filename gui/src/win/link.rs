@@ -8,17 +8,18 @@ use gateinto::link::store;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use super::device::system;
 use crate::credentials::Reveal;
 use crate::demo;
 use crate::device::{self, Probe};
 use crate::gateways;
+use crate::message;
 use crate::settings;
 use crate::worker::{Command, Loaded, Mailbox, Update, serve, serve_with, stalled};
 
-pub const WM_AGENT: u32 = WM_APP;
+pub const WM_AGENT: u32 = message::AGENT;
 
 pub struct Link {
     commands: UnboundedSender<Command>,

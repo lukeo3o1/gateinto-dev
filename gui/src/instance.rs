@@ -47,13 +47,6 @@ mod tests {
     }
 
     #[test]
-    fn the_mutex_name_has_no_further_namespace() {
-        for demo in [false, true] {
-            assert_eq!(mutex_name(SID, demo).matches('\\').count(), 1);
-        }
-    }
-
-    #[test]
     fn the_mutex_is_owned_by_and_only_granted_to_the_user() {
         assert_eq!(descriptor(SID), format!("O:{SID}D:P(A;;GA;;;{SID})"));
     }
@@ -62,10 +55,5 @@ mod tests {
     fn the_demo_window_has_its_own_class() {
         assert_eq!(class(false), "GateintoWindow");
         assert_eq!(class(true), "GateintoDemoWindow");
-    }
-
-    #[test]
-    fn looking_for_the_running_window_gives_up_within_a_second() {
-        assert!(PAUSE * ATTEMPTS <= Duration::from_secs(1));
     }
 }

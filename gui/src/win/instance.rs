@@ -17,14 +17,14 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FindWindowExW, GetWindowThreadProcessId, PostMessageW, WM_APP,
+    AllowSetForegroundWindow, FindWindowExW, GetWindowThreadProcessId, PostMessageW,
 };
 use windows_sys::core::PWSTR;
 
 use super::sys::wide;
-use crate::instance;
+use crate::{instance, message};
 
-pub const WM_REVEAL: u32 = WM_APP + 2;
+pub const WM_REVEAL: u32 = message::REVEAL;
 
 pub struct Guard(HANDLE);
 
