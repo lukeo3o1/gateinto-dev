@@ -1,4 +1,5 @@
 mod appearance;
+mod approval;
 mod d2d;
 mod device;
 mod icon;
@@ -47,6 +48,7 @@ use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
 use gateinto::link::store;
 
+use self::approval::Approval;
 use self::icon::Owned;
 use crate::add::{self, Form, Keyed, Units};
 use crate::board::{self, Board, board, tips};
@@ -162,6 +164,7 @@ struct App {
     secret: Option<u32>,
     notify: Notify,
     panel: Panel,
+    approval: Approval,
     demo: bool,
 }
 
@@ -216,6 +219,7 @@ impl App {
             secret: None,
             notify: Notify::default(),
             panel: Panel::new(s),
+            approval: Approval::new(s),
             demo,
         })
     }
@@ -675,6 +679,7 @@ impl App {
             self.fonts = fonts;
         }
         self.panel.reshape(&self.gfx, self.demo);
+        self.approval.reshape(&self.gfx);
         self.config = config_line(self.demo);
         let title = wide(window_title(self.demo));
         unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
@@ -687,6 +692,7 @@ impl App {
         self.retarget();
         self.invalidate();
         self.refresh_flyout();
+        self.approval.invalidate();
     }
 
     pub(super) fn palette(&self) -> &'static Theme {
@@ -878,6 +884,8 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::AddField(_)
         | Zone::ConfirmAdd
         | Zone::OpenMain
+        | Zone::DenyLink
+        | Zone::AllowLink
         | Zone::Client => HTCLIENT,
     }
 }
@@ -1105,6 +1113,9 @@ fn on_paint(hwnd: HWND) {
 }
 
 fn on_agent(hwnd: HWND) {
+    if let Some(Some(prompt)) = with_app(hwnd, |app| app.link.take_prompt()) {
+        approval::prompt(hwnd, prompt);
+    }
     let delivered = with_app(hwnd, |app| {
         let reveal = app.link.take_reveal();
         let revealed = reveal.is_some();
@@ -1438,12 +1449,19 @@ fn on_composition_changed(hwnd: HWND) {
 }
 
 fn apply_theme(hwnd: HWND) {
-    let Some((dark, choice, build, tips)) = with_app(hwnd, |app| {
-        (app.dark, app.theme, app.build, app.tips.window())
+    let Some((dark, choice, build, tips, asking)) = with_app(hwnd, |app| {
+        (
+            app.dark,
+            app.theme,
+            app.build,
+            app.tips.window(),
+            app.approval.window(),
+        )
     }) else {
         return;
     };
     sys::dark_title_bar(hwnd, dark, build);
+    sys::dark_title_bar(asking, dark, build);
     sys::dark_controls(tips, dark, build);
     sys::menu_mode(choice, build);
 }
@@ -1569,6 +1587,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             Some(0)
         }
         WM_DESTROY => {
+            approval::destroy(hwnd);
             tray::destroy(hwnd);
             with_app(hwnd, App::forget_secret);
             unsafe { PostQuitMessage(0) };
@@ -1689,6 +1708,7 @@ pub fn run() {
     center_on_monitor(hwnd);
     unsafe { ShowWindow(hwnd, SW_SHOW) };
     tray::install(hwnd, instance, demo);
+    approval::install(hwnd, instance, demo);
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {

@@ -408,10 +408,6 @@ impl fmt::Display for Text {
     }
 }
 
-#[cfg_attr(
-    all(windows, not(test)),
-    expect(dead_code, reason = "the link approval dialog is not built yet")
-)]
 pub fn confirmation_notice(confirmation: &Confirmation) -> String {
     match current() {
         Language::English => confirmation.message(),

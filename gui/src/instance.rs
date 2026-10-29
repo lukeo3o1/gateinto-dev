@@ -24,6 +24,14 @@ pub fn class(demo: bool) -> &'static str {
     }
 }
 
+pub fn approval_class(demo: bool) -> &'static str {
+    if demo {
+        "GateintoDemoApprovalWindow"
+    } else {
+        "GateintoApprovalWindow"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +74,16 @@ mod tests {
     fn the_demo_window_has_its_own_class() {
         assert_eq!(class(false), "GateintoWindow");
         assert_eq!(class(true), "GateintoDemoWindow");
+    }
+
+    #[test]
+    fn the_approval_window_has_its_own_class_apart_from_the_main_window() {
+        assert_eq!(approval_class(false), "GateintoApprovalWindow");
+        assert_eq!(approval_class(true), "GateintoDemoApprovalWindow");
+        for demo in [false, true] {
+            for other in [false, true] {
+                assert_ne!(approval_class(demo), class(other));
+            }
+        }
     }
 }

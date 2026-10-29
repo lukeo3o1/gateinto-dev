@@ -406,7 +406,7 @@ fn context_menu(main: HWND, anchor: Option<(i32, i32)>) {
     }
 }
 
-fn work_area(cursor: POINT) -> Option<(Rect, Rect, u32)> {
+pub(super) fn work_area(cursor: POINT) -> Option<(Rect, Rect, u32)> {
     let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,

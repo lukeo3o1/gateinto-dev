@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::layout::Rect;
+
 pub const ARMING: Duration = Duration::from_secs(1);
 pub const TIMEOUT: Duration = Duration::from_secs(100);
 
@@ -85,6 +87,11 @@ impl Dialog {
             Key::Enter | Key::Space | Key::Escape => Answer::Deny,
         }
     }
+}
+
+pub fn centred(work: Rect, w: i32, h: i32) -> Rect {
+    let (w, h) = (w.min(work.w), h.min(work.h));
+    Rect::new(work.x + (work.w - w) / 2, work.y + (work.h - h) / 2, w, h)
 }
 
 #[derive(Debug)]
@@ -250,6 +257,14 @@ mod tests {
     #[test]
     fn the_timeout_is_shorter_than_the_agent_confirm_expiry() {
         assert!(TIMEOUT < Duration::from_secs(120));
+    }
+
+    #[test]
+    fn the_dialog_is_centred_and_kept_inside_the_work_area() {
+        let work = Rect::new(100, 50, 1000, 700);
+
+        assert_eq!(centred(work, 400, 300), Rect::new(400, 250, 400, 300));
+        assert_eq!(centred(work, 1200, 900), work);
     }
 
     #[test]
