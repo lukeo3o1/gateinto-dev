@@ -230,6 +230,62 @@ function Stop-Gui($Gui) {
   $Gui.Process.WaitForExit()
 }
 
+function Get-SessionBrowsers {
+  Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe' OR Name = 'msedge.exe'" | Where-Object { [string] $_.CommandLine -like '*\Gateinto\profiles\*' }
+}
+
+function Get-SessionBrowserWindows {
+  foreach ($browser in Get-SessionBrowsers) {
+    [GuiSmoke]::Windows($browser.ProcessId) | Where-Object {
+      [GuiSmoke]::IsWindowVisible($_) -and [GuiSmoke]::Class($_) -eq 'Chrome_WidgetWin_1' -and [GuiSmoke]::Title($_) -ne ''
+    }
+  }
+}
+
+function Minimize-SessionBrowser {
+  foreach ($hwnd in @(Get-SessionBrowserWindows | Where-Object { -not [GuiSmoke]::IsIconic($_) })) {
+    $null = [GuiSmoke]::ShowWindow($hwnd, 6)
+    $hwnd
+  }
+}
+
+function Hide-SessionBrowser {
+  $deadline = (Get-Date).AddSeconds(30)
+  while (@(Get-SessionBrowsers).Count -eq 0) {
+    if ((Get-Date) -gt $deadline) {
+      "::warning::no session browser process started within 30 seconds; continuing without minimizing it"
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  $deadline = (Get-Date).AddSeconds(60)
+  $calm = $null
+  while ((Get-Date) -lt $deadline) {
+    $windows = @(Get-SessionBrowserWindows)
+    if ($windows.Count -eq 0) {
+      $calm = $null
+      Start-Sleep -Milliseconds 250
+    } elseif (@(Minimize-SessionBrowser).Count -gt 0) {
+      $calm = $null
+      Start-Sleep -Seconds 1
+    } elseif ($null -eq $calm) {
+      $calm = (Get-Date).AddSeconds(3)
+    } elseif ((Get-Date) -ge $calm) {
+      "minimized $($windows.Count) session browser window(s)"
+      return
+    } else {
+      Start-Sleep -Milliseconds 250
+    }
+  }
+  $restored = @(Get-SessionBrowserWindows | Where-Object { -not [GuiSmoke]::IsIconic($_) })
+  if ($restored.Count -gt 0) {
+    throw "the session browser windows [$(($restored | ForEach-Object { "$([GuiSmoke]::Class($_)) '$([GuiSmoke]::Title($_))'" }) -join '; ')] are not minimized after SW_MINIMIZE"
+  }
+  if (@(Get-SessionBrowserWindows).Count -eq 0) {
+    "::warning::the session browser showed no visible main window within 60 seconds; its window may cover gateinto-gui.exe later"
+  }
+}
+
 function Assert-SingleInstance($Gui) {
   $class = Get-GuiClass $Gui.Demo
   foreach ($pass in @(@{ Name = 'hidden'; Show = 0 }, @{ Name = 'minimized'; Show = 6 })) {
@@ -379,6 +435,7 @@ function Save-Flyout($Gui, [string] $Name) {
 
 function Invoke-Theme([string] $Theme, [string] $Language = 'English') {
   $before = Get-GateintoIds
+  try { $null = Minimize-SessionBrowser } catch { Write-Host "::warning::could not minimize the session browser: $_" }
   $gui = Start-Gui $Theme $Language
   $prefix = $Theme.ToLowerInvariant()
   if ($Language -ne 'English') { $prefix = "$prefix-$($Language.ToLowerInvariant())" }
@@ -453,12 +510,14 @@ ca_file = '$ca'
       -RedirectStandardOutput $logs.open[0] -RedirectStandardError $logs.open[1]
     $null = $open.Handle
     $handed = $false
+    $started = $false
     if (-not $open.WaitForExit(60000)) {
       Stop-Process -Id $open.Id -Force
       "::warning::gateinto open did not return within 60 seconds (a credentials dialog may have appeared); continuing without a browser session"
     } elseif ($open.ExitCode -ne 0) {
       "::warning::gateinto open exited with $($open.ExitCode); continuing without a browser session"
     } else {
+      $started = $true
       $handed = Test-Path -LiteralPath $guiExe
     }
     Get-Content $logs.open
@@ -477,6 +536,7 @@ ca_file = '$ca'
     Start-Sleep -Seconds 5
     & $gateinto session list
     (Get-AgentStatus).Text
+    if ($started) { Hide-SessionBrowser }
     foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'gateinto-gui.exe'")) {
       Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
       Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue | Wait-Process -Timeout 30
