@@ -3,6 +3,7 @@
 
 mod add;
 mod agent;
+mod approval;
 mod board;
 mod credentials;
 mod demo;
