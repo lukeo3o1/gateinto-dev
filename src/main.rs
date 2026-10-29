@@ -21,7 +21,7 @@ use gateinto::identity::device_key::{
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
-use gateinto::link::{Known, KnownGateway, LinkedGateway, Source, approval};
+use gateinto::link::{Known, KnownGateway, LinkedGateway, Source, approval, handoff};
 use gateinto::logbook::Logbook;
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
@@ -855,11 +855,36 @@ fn agent_start_help(config: Option<&Path>) -> String {
 
 async fn open(args: OpenArgs) -> Result {
     let launch = args.uri.parse::<LaunchRequest>()?;
-    let request = Request::Launch(launch.clone());
     let endpoint = Endpoint::for_current_user()?;
+    let config = args.config.config.as_deref();
+    let gui = if cfg!(windows) {
+        handoff::installed(&std::env::current_exe()?)
+    } else {
+        None
+    };
+    let ensure_agent = async || -> Result {
+        match ipc::send(&endpoint, &Request::List).await {
+            Err(RequestError::NotRunning | RequestError::Closed) => {
+                start_agent_and_send(&endpoint, &Request::List, config).await?;
+            }
+            result => {
+                result?;
+            }
+        }
+        Ok(())
+    };
+    let hand = async |gui: &Path| {
+        #[cfg(windows)]
+        stop_inheriting_standard_handles();
+        handoff::hand(gui, &args.uri, handoff::TIMEOUT).await
+    };
+    if handoff::offer(gui.as_deref(), ensure_agent, hand).await? {
+        return Ok(());
+    }
+    let request = Request::Launch(launch.clone());
     let response = match ipc::send(&endpoint, &request).await {
         Err(RequestError::NotRunning | RequestError::Closed) => {
-            start_agent_and_send(&endpoint, &request, args.config.config.as_deref()).await?
+            start_agent_and_send(&endpoint, &request, config).await?
         }
         result => result?,
     };
