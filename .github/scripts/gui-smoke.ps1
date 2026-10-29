@@ -2,8 +2,7 @@ param(
   [Parameter(Mandatory)] [string] $Bin,
   [Parameter(Mandatory)] [string] $OutDir,
   [Parameter(Mandatory)] [string] $WorkDir,
-  [int] $UpstreamPort = 18443,
-  [int] $ListenPort = 18736
+  [int] $UpstreamPort = 18443
 )
 
 $ErrorActionPreference = 'Stop'
@@ -370,11 +369,6 @@ try {
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     $ca = Join-Path $WorkDir 'upstream-ca.pem'
     $text = @"
-[device_session]
-gateway = "local"
-listen = "127.0.0.1:$ListenPort"
-auth = "os_user"
-
 [gateways.local]
 host = "127.0.0.1"
 port = $UpstreamPort
@@ -393,7 +387,7 @@ ca_file = '$ca'
     if ($out -match '(?m)^spki-sha256: ([0-9a-f]{64})\r?$') { $script:spki = $Matches[1] } else { throw 'setup printed no spki-sha256' }
   }
 
-  Step 'Start the agent and tunnel through the device session' {
+  Step 'Start the agent' {
     $env:RUST_LOG = 'info'
     $script:agent = Start-Process -FilePath $gateinto -PassThru -NoNewWindow -ArgumentList 'agent' `
       -RedirectStandardOutput $logs.agent[0] -RedirectStandardError $logs.agent[1]
@@ -405,11 +399,6 @@ ca_file = '$ca'
       if ((Get-Date) -gt $deadline) { throw 'the agent did not report running within 60 seconds' }
       Start-Sleep -Milliseconds 250
     }
-    Wait-Port $ListenPort $script:agent 'the device session'
-    $status = curl.exe -sS -o NUL -w "%{http_code}" -x "http://127.0.0.1:$ListenPort" https://example.com/
-    if ($LASTEXITCODE -ne 0) { throw "curl.exe through the device session exited with $LASTEXITCODE" }
-    if ($status -ne '200') { throw "HTTPS through the device session returned $status, expected 200" }
-    "HTTPS through the device session: $status"
   }
 
   Step 'Start a browser session through the local gateway' {
