@@ -12,6 +12,7 @@ mod focus;
 mod fonts;
 mod frame;
 mod gateways;
+mod handoff;
 mod hit;
 mod i18n;
 mod icons;

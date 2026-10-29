@@ -310,6 +310,7 @@ table! {
     NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";
     NoWindowClass => "Gateinto could not register its window class.", "Gateinto 無法登錄視窗類別。";
     NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
+    OpenRefused => "Gateinto could not open this link.", "Gateinto 無法開啟此連結。";
     LanguageRow => "Language", "語言";
     LanguageFailed => "Could not save the language setting", "無法儲存語言設定";
     AgentNotRunning => "no agent is running", "沒有正在執行的代理程式";
