@@ -2,13 +2,11 @@ use std::fmt;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use crate::config::ConfigFile;
 use crate::identity::device_key::{
     self, Backend, KeyName, KeyStore, PurgeError, PurgedKey, SpkiConfirmation,
 };
 use crate::link::store::LinkedStore;
 use crate::link::{KnownGateway, Origin};
-use crate::proxy::DEFAULT_LISTEN;
 use crate::registration::{self, RegistrationError};
 
 pub const ELEVATED_NOTE: &str = "note: running elevated. The device key is still created for \
@@ -231,16 +229,6 @@ pub fn files_to_purge(config: Option<&Path>, store: Option<&LinkedStore>) -> Res
     })
 }
 
-pub fn device_session_line(file: &ConfigFile) -> String {
-    match &file.device_session.gateway {
-        Some(gateway) => format!(
-            "gateway {gateway}, listen {}",
-            file.device_session.listen.unwrap_or(DEFAULT_LISTEN)
-        ),
-        None => "none".to_owned(),
-    }
-}
-
 pub fn purge_warning(name: &KeyName, backend: Backend, fingerprint: &str, files: &Purge) -> String {
     let config = files.describe();
     format!(
@@ -305,6 +293,7 @@ pub async fn purge_device_identity<S: KeyStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigFile;
     use crate::link::store::{self, LinkedStore};
     use crate::link::{self, LinkedGateway};
 
@@ -361,8 +350,7 @@ mod tests {
 
     fn known_gateways() -> Vec<KnownGateway> {
         let file = ConfigFile::parse(
-            "[device_session]\ngateway = \"office\"\n\
-             [gateways.office]\nhost = \"proxy.example.com\"\nport = 443\nca_file = \"ca.pem\"\n\
+            "[gateways.office]\nhost = \"proxy.example.com\"\nport = 443\nca_file = \"ca.pem\"\n\
              [gateways.lab]\nhost = \"10.0.0.1\"\nport = 8443\n\
              portal_url = \"https://portal.example.com/?token=secret\"\n\
              [gateways.broken]\nhost = \"x.example.com\"\n\
@@ -456,26 +444,6 @@ mod tests {
         let error = files_to_purge(Some(store.dir()), None).unwrap_err();
         assert!(error.contains("not a regular file"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_device_session_line_names_the_gateway_and_listen_address() {
-        let none = ConfigFile::default();
-        assert_eq!(device_session_line(&none), "none");
-        let file = ConfigFile::parse(
-            "[device_session]\ngateway = \"office\"\nlisten = \"127.0.0.1:9000\"\n\
-             [gateways.office]\nhost = \"proxy.example.com\"\nport = 443\n",
-        )
-        .unwrap();
-        assert_eq!(
-            device_session_line(&file),
-            "gateway office, listen 127.0.0.1:9000"
-        );
-        let default_listen = ConfigFile::parse("[device_session]\ngateway = \"office\"\n").unwrap();
-        assert_eq!(
-            device_session_line(&default_listen),
-            "gateway office, listen 127.0.0.1:18736"
-        );
     }
 
     #[test]

@@ -76,8 +76,8 @@ TLS stays with the browser. Gateinto's upstream TLS mode and device client
 certificate apply only to connections through the gateway.
 
 The choice is not stored in the gateway configuration or linked gateway file;
-a subsequent link without `route` uses `gateway`. Other browser sessions and
-the device session are unchanged. A known gateway requires no new prompt for
+a subsequent link without `route` uses `gateway`. Other browser sessions are
+unchanged. A known gateway requires no new prompt for
 mixed mode. Its existing first-time gateway confirmation discloses mixed
 routing when selected and binds the confirmation token to that request.
 
@@ -416,8 +416,8 @@ test without it checks that a linked gateway signed by the test CA is refused.
 
 ## Agent and IPC
 
-`gateinto agent [--config FILE]` runs the agent: the device session if
-`[device_session] gateway` is set, and the IPC endpoint. Only one agent per
+`gateinto agent [--config FILE]` runs the agent and its IPC endpoint,
+which starts browser sessions. Only one agent per
 user (and per `GATEINTO_INSTANCE`, see below) can listen; a second one exits
 with `an agent is already running`.
 

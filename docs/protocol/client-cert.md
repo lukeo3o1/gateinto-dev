@@ -13,10 +13,9 @@ Gateinto cannot make an upstream trust it.
 ## When a certificate is issued
 
 - `gateinto check-upstream` issues a certificate once at startup, before the
-  check connects. `gateinto proxy` issues one at startup to check the device
-  key, and then each session issues its own when it starts, before it listens
-  (see [Sessions](../../README.md#sessions)); the device session uses its own,
-  and two sessions never share one. Nothing is read from a file or from
+  check connects. Each session issues its own when it starts, before it
+  listens (see [Sessions](../../README.md#sessions)), and two sessions never
+  share one. Nothing is read from a file or from
   `CurrentUser\My`, and the certificate is never written to disk or to a
   certificate store; it exists only in memory.
 - `--client-certificate` (the gateway's `client_certificate`) applies as for the other

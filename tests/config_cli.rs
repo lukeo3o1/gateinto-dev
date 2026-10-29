@@ -2,12 +2,15 @@
 mod fixture;
 mod isolated;
 
+#[cfg(feature = "test-hooks")]
 use std::io::BufRead;
+#[cfg(feature = "test-hooks")]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use fixture::*;
+#[cfg(feature = "test-hooks")]
 use tokio::io::AsyncWriteExt;
 
 fn temp_dir() -> PathBuf {
@@ -138,8 +141,8 @@ async fn command_line_flags_override_the_config_file() {
 fn missing_upstream_is_a_clear_error() {
     let dir = temp_dir();
     let config = write_config(&dir, "[gateways.main]\ntls_mode = \"hybrid_required\"\n");
-    for command in ["proxy", "check-upstream"] {
-        let output = gateinto(&[command], &config);
+    for command in [&["session", "browser"][..], &["check-upstream"]] {
+        let output = gateinto(command, &config);
         assert!(!output.status.success());
         let stderr = stderr(&output);
         assert!(
@@ -162,7 +165,7 @@ fn unknown_keys_and_unreadable_files_name_the_file() {
     );
     let missing = dir.join("missing.toml");
     for command in [
-        &["proxy"][..],
+        &["session", "browser"][..],
         &["check-upstream"],
         &["key", "init"],
         &["key", "info"],
@@ -212,8 +215,10 @@ fn key_commands_read_the_device_key_section() {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 struct Child(std::process::Child);
 
+#[cfg(feature = "test-hooks")]
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -231,6 +236,7 @@ fn without_a_credentials_prompt(mut command: Command) -> Command {
     command
 }
 
+#[cfg(feature = "test-hooks")]
 fn credentials_prompt(command: &Command) -> PathBuf {
     command
         .get_envs()
@@ -240,94 +246,25 @@ fn credentials_prompt(command: &Command) -> PathBuf {
         .expect("no credentials prompt hook")
 }
 
-async fn spawn_proxy(config: PathBuf, extra: &[&str]) -> (Child, SocketAddr) {
-    spawn_proxy_showing(config, extra, None).await
-}
-
-async fn spawn_proxy_showing(
-    config: PathBuf,
-    extra: &[&str],
-    prompt: Option<&Path>,
-) -> (Child, SocketAddr) {
-    let mut command = isolated::gateinto();
-    if let Some(prompt) = prompt {
-        command.env("GATEINTO_TEST_CREDENTIALS_FILE", prompt);
-    }
-    spawn_proxy_from(command, config, extra).await
-}
-
-async fn spawn_proxy_from(
-    mut command: Command,
-    config: PathBuf,
-    extra: &[&str],
-) -> (Child, SocketAddr) {
-    let extra = args(extra);
-    tokio::task::spawn_blocking(move || {
-        command
-            .arg("proxy")
-            .arg("--config")
-            .arg(&config)
-            .args(&extra)
-            .env("RUST_LOG", "info")
-            .stderr(Stdio::piped());
-        let mut child = Child(command.spawn().unwrap());
-        let mut lines = std::io::BufReader::new(child.0.stderr.take().unwrap()).lines();
-        loop {
-            let line = lines
-                .next()
-                .expect("proxy exited before listening")
-                .unwrap();
-            if let Some((_, addr)) = line.split_once("local_addr=") {
-                let addr = addr.split_whitespace().next().unwrap().parse().unwrap();
-                std::thread::spawn(move || lines.for_each(drop));
-                return (child, addr);
-            }
-        }
-    })
-    .await
-    .unwrap()
-}
-
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn proxy_reads_listen_tls_and_limits_from_the_config_file() {
+async fn session_browser_reads_the_limits_from_the_config_file() {
     let fixture = Fixture::new().await;
     let target = echo_server().await;
-    let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n[limits]\nmax_concurrent_tunnels = 1\n",
-    );
+    let config =
+        fixture.config("client_certificate = \"off\"\n[limits]\nmax_concurrent_tunnels = 1\n");
+    let prompt = temp_dir().join("prompt");
 
-    let (_child, agent) = spawn_proxy(config.clone(), &[]).await;
-    let mut first = open_tunnel(agent, target).await;
-    let (_, second) = send(agent, &connect_request(&target.to_string())).await;
+    let session = spawn_browser_session(config, &[], &prompt).await;
+    let (username, password) = shown_credentials(&prompt);
+    let issued = basic(&username, &password);
+    let request = connect_with(&target.to_string(), Some(&issued));
+    let (mut first, response) = send(session.agent, &request).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    let (_, second) = send(session.agent, &request).await;
     assert_eq!(second.status, 503, "{}", second.head);
     first.shutdown().await.unwrap();
-
-    let (_child, agent) = spawn_proxy(config, &["--max-tunnels", "2"]).await;
-    let _first = open_tunnel(agent, target).await;
-    let _second = open_tunnel(agent, target).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn non_loopback_listen_from_the_config_file_still_needs_the_flag() {
-    let fixture = Fixture::new().await;
-    let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"0.0.0.0:0\"\nauth = \"none\"\n",
-    );
-
-    let output = run(args(&["proxy"]), config.clone()).await;
-    assert!(!output.status.success());
-    let error = stderr(&output);
-    assert!(
-        error.contains("refusing to listen on non-loopback address 0.0.0.0:0"),
-        "{error}"
-    );
-    assert!(
-        error.contains("--unsafe-allow-non-loopback-listen"),
-        "{error}"
-    );
-
-    let (_child, agent) = spawn_proxy(config, &["--unsafe-allow-non-loopback-listen"]).await;
-    assert!(agent.ip().is_unspecified(), "{agent}");
+    session.stop();
 }
 
 #[tokio::test]
@@ -375,11 +312,25 @@ async fn check_upstream_selects_a_gateway_by_name() {
     let closed = unused_port().await.port();
     let config = fixture.config(&format!(
         "tls_mode = \"classical_only\"\nclient_certificate = \"off\"\n\
-         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n\
-         [device_session]\ngateway = \"closed\"\n"
+         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n"
     ));
 
     let output = run(args(&["check-upstream"]), config.clone()).await;
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "config file {}: 2 gateways are configured (closed, main); pass --gateway to choose one",
+            config.display()
+        )),
+        "{error}"
+    );
+
+    let output = run(
+        args(&["check-upstream", "--gateway", "closed"]),
+        config.clone(),
+    )
+    .await;
     assert!(!output.status.success());
     assert!(
         stderr(&output).contains("connect failed"),
@@ -446,75 +397,69 @@ async fn check_upstream_selects_a_gateway_by_name() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn proxy_uses_the_device_session_gateway() {
-    let fixture = Fixture::new().await;
-    let target = echo_server().await;
-    let closed = unused_port().await.port();
-    let config = fixture.config(&format!(
-        "client_certificate = \"off\"\n\
-         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\n\
-         [device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:0\"\nauth = \"none\"\n"
-    ));
-
-    let (_child, agent) = spawn_proxy(config, &[]).await;
-    let mut stream = open_tunnel(agent, target).await;
-    stream.write_all(b"gateway").await.unwrap();
-    stream.shutdown().await.unwrap();
-    assert_eq!(
-        read_to_end_within(&mut stream, std::time::Duration::from_secs(5)).await,
-        b"gateway"
-    );
-    assert_eq!(fixture.upstream.requests().len(), 1);
-}
-
 #[test]
-fn proxy_refuses_several_gateways_without_a_device_session_gateway() {
+fn upstream_commands_refuse_several_gateways_without_a_gateway_flag() {
     let dir = temp_dir();
     let config = write_config(
         &dir,
         "[gateways.a]\nhost = \"127.0.0.1\"\nport = 9\n[gateways.b]\nhost = \"127.0.0.1\"\nport = 9\n",
     );
-    let output = gateinto(&["proxy"], &config);
-    assert!(!output.status.success());
-    let error = stderr(&output);
-    assert!(
-        error.contains(&format!(
-            "config file {}: 2 gateways are configured (a, b)",
-            config.display()
-        )),
-        "{error}"
-    );
+    for command in [&["session", "browser"][..], &["check-upstream"]] {
+        let output = gateinto(command, &config);
+        assert!(!output.status.success(), "{command:?}");
+        let error = stderr(&output);
+        assert!(
+            error.contains(&format!(
+                "config file {}: 2 gateways are configured (a, b); pass --gateway to choose one",
+                config.display()
+            )),
+            "{error}"
+        );
+    }
 }
 
 #[test]
-fn proxy_refuses_tunnel_limits_beyond_the_http2_window_bound() {
+fn an_old_config_with_a_device_session_section_is_refused_naming_it() {
     let dir = temp_dir();
-    let gateway = "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\n";
-    let in_file = write_config(
+    let config = write_config(
         &dir,
-        &format!("{gateway}[limits]\nmax_concurrent_tunnels = 32768\n"),
+        "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\n\n[device_session]\ngateway = \"main\"\nlisten = \"127.0.0.1:18736\"\nauth = \"os_user\"\n",
     );
-    let output = gateinto(&["proxy"], &in_file);
-    assert!(!output.status.success());
-    let error = stderr(&output);
-    assert!(
-        error.contains(&format!(
-            "config file {}: max_concurrent_tunnels (--max-tunnels) is 32768; the maximum is 32767",
-            in_file.display()
-        )),
-        "{error}"
-    );
+    for command in [&["session", "browser"][..], &["check-upstream"]] {
+        let output = gateinto(command, &config);
+        assert!(!output.status.success(), "{command:?}");
+        let error = stderr(&output);
+        assert!(error.contains(&config.display().to_string()), "{error}");
+        assert!(
+            error.contains(
+                "[device_session] was removed: Gateinto no longer runs a shared local proxy; \
+                 delete the section and start browser sessions with `gateinto open` or a \
+                 gateinto:// link"
+            ),
+            "{error}"
+        );
+    }
+}
 
-    let config = write_config(&dir, gateway);
-    let output = gateinto(&["proxy", "--max-tunnels", "32768"], &config);
-    assert!(!output.status.success());
-    let error = stderr(&output);
-    assert!(
-        error.contains("max_concurrent_tunnels (--max-tunnels) is 32768; the maximum is 32767"),
-        "{error}"
+#[test]
+fn upstream_commands_refuse_tunnel_limits_beyond_the_http2_window_bound() {
+    let dir = temp_dir();
+    let config = write_config(
+        &dir,
+        "[gateways.main]\nhost = \"127.0.0.1\"\nport = 9\n[limits]\nmax_concurrent_tunnels = 32768\n",
     );
-    assert!(!error.contains("config file"), "{error}");
+    for command in [&["session", "browser"][..], &["check-upstream"]] {
+        let output = gateinto(command, &config);
+        assert!(!output.status.success(), "{command:?}");
+        let error = stderr(&output);
+        assert!(
+            error.contains(&format!(
+                "config file {}: max_concurrent_tunnels is 32768; the maximum is 32767",
+                config.display()
+            )),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(feature = "test-hooks")]
@@ -548,16 +493,25 @@ fn read_all(mut reader: impl std::io::Read + Send + 'static) -> std::thread::Joi
 
 #[cfg(feature = "test-hooks")]
 async fn spawn_browser_session(config: PathBuf, extra: &[&str], prompt: &Path) -> BrowserSession {
+    let mut command = isolated::gateinto();
+    command.env("GATEINTO_TEST_CREDENTIALS_FILE", prompt);
+    spawn_browser_session_from(command, config, extra).await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn spawn_browser_session_from(
+    mut command: Command,
+    config: PathBuf,
+    extra: &[&str],
+) -> BrowserSession {
     let extra = args(extra);
-    let prompt = prompt.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut child = Child(
-            isolated::gateinto()
+            command
                 .args(["session", "browser", "--config"])
                 .arg(&config)
                 .args(&extra)
                 .env("RUST_LOG", "trace")
-                .env("GATEINTO_TEST_CREDENTIALS_FILE", &prompt)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -624,8 +578,7 @@ async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_por
     let closed = unused_port().await.port();
     let config = fixture.config(&format!(
         "client_certificate = \"off\"\n\
-         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n\
-         [device_session]\ngateway = \"closed\"\nlisten = \"127.0.0.1:18736\"\n"
+         [gateways.closed]\nhost = \"127.0.0.1\"\nport = {closed}\nclient_certificate = \"off\"\n"
     ));
     let dir = temp_dir();
     let prompts = [dir.join("first-prompt"), dir.join("second-prompt")];
@@ -637,7 +590,6 @@ async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_por
 
     for session in [&first, &second] {
         assert!(session.agent.ip().is_loopback(), "{}", session.agent);
-        assert_ne!(session.agent.port(), 18736);
         assert!(session.realm.starts_with("Gateinto "), "{}", session.realm);
         assert!(
             session.stdout.iter().any(|line| line == "gateway: main"),
@@ -704,31 +656,26 @@ async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_por
 #[tokio::test(flavor = "multi_thread")]
 async fn foreground_sessions_refuse_to_serve_credentials_nobody_can_see() {
     let fixture = Fixture::new().await;
-    let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
+    let config = fixture.config("client_certificate = \"off\"\n");
+    let output = without_a_credentials_prompt(isolated::gateinto())
+        .args(["session", "browser", "--config"])
+        .arg(&config)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(error.contains("were not shown"), "{error}");
+    assert!(
+        error.contains("start the session from a terminal"),
+        "{error}"
     );
-    for args in [&["session", "browser"][..], &["proxy"]] {
-        let output = without_a_credentials_prompt(isolated::gateinto())
-            .args(args)
-            .arg("--config")
-            .arg(&config)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{args:?}");
-        let error = stderr(&output);
-        assert!(error.contains("were not shown"), "{error}");
-        assert!(
-            error.contains("start the session from a terminal"),
-            "{error}"
-        );
-        for text in [
-            &error,
-            &String::from_utf8_lossy(&output.stdout).into_owned(),
-        ] {
-            assert!(!text.contains("Username"), "{text}");
-            assert!(!text.contains("Password"), "{text}");
-        }
+    for text in [
+        &error,
+        &String::from_utf8_lossy(&output.stdout).into_owned(),
+    ] {
+        assert!(!text.contains("Username"), "{text}");
+        assert!(!text.contains("Password"), "{text}");
     }
 }
 
@@ -736,9 +683,7 @@ async fn foreground_sessions_refuse_to_serve_credentials_nobody_can_see() {
 #[tokio::test(flavor = "multi_thread")]
 async fn every_isolated_run_routes_the_credentials_prompt_to_the_test_hook() {
     let fixture = Fixture::new().await;
-    let config = fixture.config(
-        "client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\nauth = \"session_credentials\"\n",
-    );
+    let config = fixture.config("client_certificate = \"off\"\n");
 
     let command = isolated::gateinto();
     let prompt = credentials_prompt(&command);
@@ -749,10 +694,10 @@ async fn every_isolated_run_routes_the_credentials_prompt_to_the_test_hook() {
     );
     assert_ne!(credentials_prompt(&isolated::gateinto()), prompt);
 
-    let (_child, agent) = spawn_proxy_from(command, config, &[]).await;
+    let session = spawn_browser_session_from(command, config, &[]).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let proxy = format!("Proxy: {agent}");
+    let proxy = format!("Proxy: {}", session.agent);
     while !std::fs::read_to_string(&prompt)
         .unwrap_or_default()
         .contains(&proxy)
@@ -761,27 +706,7 @@ async fn every_isolated_run_routes_the_credentials_prompt_to_the_test_hook() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     std::fs::remove_file(&prompt).unwrap();
-}
-
-#[cfg(feature = "test-hooks")]
-#[tokio::test(flavor = "multi_thread")]
-async fn proxy_requires_session_credentials_by_default() {
-    let fixture = Fixture::new().await;
-    let target = echo_server().await.to_string();
-    let config = fixture
-        .config("client_certificate = \"off\"\n[device_session]\nlisten = \"127.0.0.1:0\"\n");
-    let prompt = temp_dir().join("prompt");
-
-    let (_child, agent) = spawn_proxy_showing(config, &[], Some(&prompt)).await;
-    let (username, password) = shown_credentials(&prompt);
-
-    let (_, challenge) = send(agent, &connect_with(&target, None)).await;
-    assert_eq!(challenge.status, 407, "{}", challenge.head);
-    let (_, guess) = send(agent, &connect_with(&target, Some(&basic("d", "pw")))).await;
-    assert_eq!(guess.status, 407, "{}", guess.head);
-    let issued = basic(&username, &password);
-    let (_, response) = send(agent, &connect_with(&target, Some(&issued))).await;
-    assert_eq!(response.status, 200, "{}", response.head);
+    session.stop();
 }
 
 #[cfg(all(unix, feature = "test-hooks"))]

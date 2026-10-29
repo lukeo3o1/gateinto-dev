@@ -1,27 +1,8 @@
 # Example Gateinto configuration. Use it with:
-#   gateinto proxy --config config.example.toml
+#   gateinto check-upstream --config config.example.toml
+#   gateinto session browser --config config.example.toml
 # Command line flags override values from this file. Unknown keys are errors.
 # Relative paths are resolved against the directory of this file.
-
-[device_session]
-# The gateway the device session relays through. May be left out when exactly
-# one gateway is configured.
-gateway = "default"
-# Must be a loopback address. A non-loopback address additionally requires the
-# --unsafe-allow-non-loopback-listen command line flag; it cannot be allowed here.
-listen = "127.0.0.1:18736"
-# Local proxy authentication for programs using the device session.
-# "session_credentials" (the default) generates a random password (the user
-# name is always "gateinto"), shows the credentials when `gateinto proxy`
-# starts, and accepts only them. "none" accepts every local client, including
-# processes of other users on this machine, and lets each of them use this
-# device's identity toward the gateway; set it only if you accept that.
-# "os_user" (Windows only) accepts a connection, without credentials, when the
-# process that opened it runs as the same Windows user that runs Gateinto. It
-# keeps out other users of this machine, not other programs of the same user.
-# A list such as ["os_user", "session_credentials"] accepts a client that
-# passes any one of them; "none" cannot be combined.
-auth = "session_credentials"
 
 # One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,
 # a-z, 0-9, _ and -.

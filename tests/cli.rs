@@ -26,66 +26,51 @@ fn gateinto(args: &[&str]) -> (bool, String) {
 }
 
 #[test]
-fn proxy_requires_an_upstream_endpoint() {
+fn the_removed_proxy_command_is_rejected() {
     let (success, stderr) = gateinto(&["proxy"]);
     assert!(!success);
-    assert!(stderr.contains("--upstream-host"), "{stderr}");
-    assert!(stderr.contains("--upstream-port"), "{stderr}");
-}
-
-#[test]
-fn proxy_refuses_non_loopback_listen_address() {
-    let (success, stderr) = gateinto(&[
-        "proxy",
-        "--listen",
-        "0.0.0.0:0",
-        "--upstream-host",
-        "127.0.0.1",
-        "--upstream-port",
-        "9",
-    ]);
-    assert!(!success);
     assert!(
-        stderr.contains("--unsafe-allow-non-loopback-listen"),
+        stderr.contains("unrecognized subcommand 'proxy'"),
         "{stderr}"
     );
+    let output = gateinto_command().arg("--help").output().unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !help
+            .lines()
+            .any(|line| line.trim_start().starts_with("proxy ")),
+        "{help}"
+    );
+    assert!(!help.contains("device session"), "{help}");
+}
+
+const UPSTREAM_COMMANDS: [&[&str]; 2] = [&["check-upstream"], &["session", "browser"]];
+
+fn upstream_args<'a>(command: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = command.to_vec();
+    args.extend(["--upstream-host", "127.0.0.1", "--upstream-port", "9"]);
+    args.extend_from_slice(extra);
+    args
 }
 
 #[test]
-fn proxy_reports_unreadable_ca_file() {
-    let (success, stderr) = gateinto(&[
-        "proxy",
-        "--upstream-host",
-        "127.0.0.1",
-        "--upstream-port",
-        "9",
-        "--ca-file",
-        "/nonexistent/gateinto-ca.pem",
-    ]);
-    assert!(!success);
-    assert!(stderr.contains("/nonexistent/gateinto-ca.pem"), "{stderr}");
+fn upstream_commands_report_an_unreadable_ca_file() {
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(
+            command,
+            &["--ca-file", "/nonexistent/gateinto-ca.pem"],
+        ));
+        assert!(!success, "{command:?}");
+        assert!(stderr.contains("/nonexistent/gateinto-ca.pem"), "{stderr}");
+    }
 }
 
 #[test]
-fn proxy_rejects_zero_limits_and_ports() {
-    for (flag, value) in [
-        ("--upstream-port", "0"),
-        ("--max-tunnels", "0"),
-        ("--max-header-bytes", "0"),
-        ("--connect-timeout-secs", "0"),
-        ("--idle-timeout-secs", "0"),
-    ] {
-        let mut args = vec![
-            "proxy",
-            "--upstream-host",
-            "127.0.0.1",
-            "--upstream-port",
-            "9",
-        ];
-        args.extend([flag, value]);
-        let (success, stderr) = gateinto(&args);
-        assert!(!success, "{flag}");
-        assert!(stderr.contains(flag), "{stderr}");
+fn upstream_commands_reject_a_zero_port() {
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(command, &["--upstream-port", "0"]));
+        assert!(!success, "{command:?}");
+        assert!(stderr.contains("--upstream-port"), "{stderr}");
     }
 }
 
@@ -124,51 +109,42 @@ fn key_commands_reject_an_empty_name() {
     }
 }
 
-fn proxy_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
-    let mut args = vec![
-        "proxy",
-        "--upstream-host",
-        "127.0.0.1",
-        "--upstream-port",
-        "9",
-        "--listen",
-        "127.0.0.1:0",
-    ];
-    args.extend_from_slice(extra);
-    args
-}
-
 #[test]
-fn proxy_rejects_an_unknown_client_certificate_mode() {
-    let (success, stderr) = gateinto(&proxy_args(&["--client-certificate", "sometimes"]));
-    assert!(!success);
-    assert!(stderr.contains("--client-certificate"), "{stderr}");
-    for mode in ["optional", "required", "off"] {
-        assert!(stderr.contains(mode), "{stderr}");
+fn upstream_commands_reject_an_unknown_client_certificate_mode() {
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(
+            command,
+            &["--client-certificate", "sometimes"],
+        ));
+        assert!(!success, "{command:?}");
+        assert!(stderr.contains("--client-certificate"), "{stderr}");
+        for mode in ["optional", "required", "off"] {
+            assert!(stderr.contains(mode), "{stderr}");
+        }
     }
 }
 
 #[test]
-fn proxy_rejects_an_empty_key_name() {
-    let (success, stderr) = gateinto(&proxy_args(&["--key-name", ""]));
-    assert!(!success);
-    assert!(stderr.contains("key name must not be empty"), "{stderr}");
+fn upstream_commands_reject_an_empty_key_name() {
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(command, &["--key-name", ""]));
+        assert!(!success, "{command:?}");
+        assert!(stderr.contains("key name must not be empty"), "{stderr}");
+    }
 }
 
 #[test]
 fn self_signed_client_cert_and_client_cert_file_are_exclusive_flags() {
-    for command in ["proxy", "check-upstream"] {
-        let (success, stderr) = gateinto(&[
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(
             command,
-            "--upstream-host",
-            "127.0.0.1",
-            "--upstream-port",
-            "9",
-            "--self-signed-client-cert",
-            "--client-cert-file",
-            "client.pem",
-        ]);
-        assert!(!success, "{command}");
+            &[
+                "--self-signed-client-cert",
+                "--client-cert-file",
+                "client.pem",
+            ],
+        ));
+        assert!(!success, "{command:?}");
         assert!(stderr.contains("cannot be used with"), "{stderr}");
         assert!(stderr.contains("--self-signed-client-cert"), "{stderr}");
         assert!(stderr.contains("--client-cert-file"), "{stderr}");
@@ -177,53 +153,62 @@ fn self_signed_client_cert_and_client_cert_file_are_exclusive_flags() {
 
 #[cfg(not(windows))]
 #[test]
-fn proxy_requiring_a_client_certificate_fails_off_windows() {
-    for extra in [
-        &["--client-certificate", "required"][..],
-        &[
-            "--client-certificate",
-            "required",
-            "--self-signed-client-cert",
-        ],
-        &[
-            "--client-certificate",
-            "required",
-            "--client-cert-file",
-            "/nonexistent/gateinto-client.pem",
-        ],
-    ] {
-        let (success, stderr) = gateinto(&proxy_args(extra));
-        assert!(!success, "{extra:?}");
-        assert!(
-            stderr.contains("error: device keys are only supported on Windows"),
-            "{stderr}"
-        );
+fn requiring_a_client_certificate_fails_off_windows() {
+    for command in UPSTREAM_COMMANDS {
+        for extra in [
+            &["--client-certificate", "required"][..],
+            &[
+                "--client-certificate",
+                "required",
+                "--self-signed-client-cert",
+            ],
+            &[
+                "--client-certificate",
+                "required",
+                "--client-cert-file",
+                "/nonexistent/gateinto-client.pem",
+            ],
+        ] {
+            let (success, stderr) = gateinto(&upstream_args(command, extra));
+            assert!(!success, "{command:?} {extra:?}");
+            assert!(
+                stderr.contains("error: device keys are only supported on Windows"),
+                "{stderr}"
+            );
+        }
     }
 }
 
 #[cfg(windows)]
 #[test]
-fn proxy_requiring_a_client_certificate_fails_without_the_device_key() {
-    let (success, stderr) = gateinto(&proxy_args(&[
-        "--client-certificate",
-        "required",
-        "--key-name",
-        "gateinto-test-missing-device-key",
-    ]));
-    assert!(!success);
-    assert!(
-        stderr.contains("no device key named \"gateinto-test-missing-device-key\""),
-        "{stderr}"
-    );
+fn requiring_a_client_certificate_fails_without_the_device_key() {
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(
+            command,
+            &[
+                "--client-certificate",
+                "required",
+                "--key-name",
+                "gateinto-test-missing-device-key",
+            ],
+        ));
+        assert!(!success, "{command:?}");
+        assert!(
+            stderr.contains("no device key named \"gateinto-test-missing-device-key\""),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]
-fn proxy_rejects_an_unknown_tls_mode() {
-    let (success, stderr) = gateinto(&proxy_args(&["--tls-mode", "hybrid"]));
-    assert!(!success);
-    assert!(stderr.contains("--tls-mode"), "{stderr}");
-    for mode in ["hybrid_preferred", "hybrid_required", "classical_only"] {
-        assert!(stderr.contains(mode), "{stderr}");
+fn upstream_commands_reject_an_unknown_tls_mode() {
+    for command in UPSTREAM_COMMANDS {
+        let (success, stderr) = gateinto(&upstream_args(command, &["--tls-mode", "hybrid"]));
+        assert!(!success, "{command:?}");
+        assert!(stderr.contains("--tls-mode"), "{stderr}");
+        for mode in ["hybrid_preferred", "hybrid_required", "classical_only"] {
+            assert!(stderr.contains(mode), "{stderr}");
+        }
     }
 }
 
@@ -257,27 +242,16 @@ fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) 
 
 #[test]
 fn help_defaults_match_the_real_defaults() {
-    use gateinto::config::{DeviceKeySettings, LimitSettings};
+    use gateinto::config::DeviceKeySettings;
     use gateinto::identity::client_cert::ClientCertificateMode;
     use gateinto::identity::device_key::DEFAULT_KEY_NAME;
-    use gateinto::proxy::DEFAULT_LISTEN;
     use gateinto::tls::TlsMode;
 
-    let limits = LimitSettings::default();
     let device_key = DeviceKeySettings::default();
     let client_certificate = format!("{:?}", ClientCertificateMode::default()).to_lowercase();
 
-    let proxy = help(&["proxy"]);
-    assert_flag_default(&proxy, "--listen", DEFAULT_LISTEN);
-    assert_flag_default(&proxy, "--max-tunnels", limits.max_concurrent_tunnels);
-    assert_flag_default(&proxy, "--max-header-bytes", limits.header_max_bytes);
-    assert_flag_default(
-        &proxy,
-        "--connect-timeout-secs",
-        limits.connect_timeout_seconds,
-    );
-    assert_flag_default(&proxy, "--idle-timeout-secs", limits.idle_timeout_seconds);
-    for upstream in [proxy, help(&["check-upstream"])] {
+    for command in UPSTREAM_COMMANDS {
+        let upstream = help(command);
         assert_flag_default(&upstream, "--tls-mode", TlsMode::default());
         assert_flag_default(&upstream, "--client-certificate", &client_certificate);
         assert_flag_default(&upstream, "--key-name", DEFAULT_KEY_NAME);
@@ -443,7 +417,6 @@ fn status_is_read_only_and_reports_what_it_can() {
              device-key: unavailable: device keys are only supported on Windows\n\
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
-             device-session: none\n\
              agent: not running\n\
              uri-handler: not supported on this platform\n",
             default_config(&no_config_home()).display(),
@@ -793,7 +766,7 @@ fn status_reports_a_damaged_gateway_file_and_continues() {
         )),
         "{stdout}"
     );
-    assert!(stdout.contains("\ndevice-session: none\n"), "{stdout}");
+    assert!(stdout.contains("\nagent: "), "{stdout}");
 }
 
 #[test]

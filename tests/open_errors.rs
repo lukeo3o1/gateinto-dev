@@ -102,7 +102,7 @@ fn help_version_and_other_commands_do_not_notify() {
         vec!["--help"],
         vec!["--version"],
         vec!["open", "--help"],
-        vec!["proxy"],
+        vec!["check-upstream"],
         vec!["agent", "--not-an-option"],
     ] {
         let launch = Launch::new();

@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod fixture;
+#[cfg(feature = "test-hooks")]
 mod isolated;
 
 use std::net::SocketAddr;
@@ -460,13 +461,19 @@ async fn download_only_traffic_keeps_the_tunnel_open() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn refuses_non_loopback_listen_address_by_default() {
+async fn refuses_any_non_loopback_listen_address() {
     let setup = Setup::new(Behavior::Tunnel).await;
     for listen in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0"] {
         let mut config = setup.config();
         config.listen = listen.parse().unwrap();
         match Proxy::bind(config).await {
-            Err(Error::NonLoopbackListen(addr)) => assert_eq!(addr, listen.parse().unwrap()),
+            Err(error @ Error::NonLoopbackListen(addr)) => {
+                assert_eq!(addr, listen.parse().unwrap());
+                assert_eq!(
+                    error.to_string(),
+                    format!("refusing to listen on non-loopback address {addr}")
+                );
+            }
             other => panic!("{listen}: {:?}", other.map(|proxy| proxy.local_addr())),
         }
     }
@@ -486,16 +493,6 @@ async fn refuses_tunnel_limits_beyond_the_http2_window_bound() {
         }
         other => panic!("{:?}", other.map(|proxy| proxy.local_addr())),
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn binds_non_loopback_address_with_explicit_opt_in() {
-    let setup = Setup::new(Behavior::Tunnel).await;
-    let mut config = setup.config();
-    config.listen = "0.0.0.0:0".parse().unwrap();
-    config.allow_non_loopback = true;
-    let proxy = Proxy::bind(config).await.unwrap();
-    assert!(proxy.local_addr().ip().is_unspecified());
 }
 
 fn write_temp(name: &str, contents: &[u8]) -> std::path::PathBuf {
@@ -532,8 +529,10 @@ fn default_roots_are_not_empty() {
     assert!(!gateinto::tls::webpki_roots().is_empty());
 }
 
+#[cfg(feature = "test-hooks")]
 struct Child(std::process::Child);
 
+#[cfg(feature = "test-hooks")]
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -541,41 +540,35 @@ impl Drop for Child {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 struct Agent {
     child: Child,
     addr: SocketAddr,
+    authorization: String,
     startup: Vec<String>,
     stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
 }
 
+#[cfg(feature = "test-hooks")]
 impl Agent {
     async fn spawn(setup: &Setup, log_filter: &str) -> Self {
         Self::spawn_with(setup, log_filter, &[]).await
     }
 
     async fn spawn_with(setup: &Setup, log_filter: &str, extra: &[&str]) -> Self {
-        let config = write_temp("auth-none.toml", b"[device_session]\nauth = \"none\"\n");
-        let config = ["--config", config.to_str().unwrap()];
-        Self::spawn_from_flags(setup, log_filter, &[&config[..], extra].concat()).await
-    }
-
-    async fn spawn_from_flags(setup: &Setup, log_filter: &str, extra: &[&str]) -> Self {
         let ca_file = write_temp("cli-ca.pem", setup.ca.pem().as_bytes());
+        let prompt = write_temp("credentials-prompt.txt", b"");
         let mut child = Child(
             isolated::gateinto()
-                .args([
-                    "proxy",
-                    "--listen",
-                    "127.0.0.1:0",
-                    "--upstream-host",
-                    "127.0.0.1",
-                ])
+                .args(["session", "browser", "--upstream-host", "127.0.0.1"])
                 .args(["--upstream-port", &setup.upstream.addr.port().to_string()])
                 .args(["--upstream-server-name", PROXY_NAME])
                 .arg("--ca-file")
                 .arg(&ca_file)
                 .args(extra)
                 .env("RUST_LOG", log_filter)
+                .env("GATEINTO_TEST_CREDENTIALS_FILE", &prompt)
+                .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap(),
@@ -588,7 +581,7 @@ impl Agent {
             loop {
                 let line = lines
                     .next()
-                    .unwrap_or_else(|| panic!("proxy exited before listening: {startup:?}"))
+                    .unwrap_or_else(|| panic!("session exited before listening: {startup:?}"))
                     .unwrap();
                 if let Some((_, addr)) = line.split_once("local_addr=") {
                     let addr = addr.split_whitespace().next().unwrap().parse().unwrap();
@@ -599,9 +592,13 @@ impl Agent {
         })
         .await
         .unwrap();
+        let (username, password) = tokio::task::spawn_blocking(move || shown_credentials(&prompt))
+            .await
+            .unwrap();
         Self {
             child,
             addr,
+            authorization: basic(&username, &password),
             startup,
             stderr,
         }
@@ -622,8 +619,33 @@ impl Agent {
     }
 }
 
-async fn echo_through(agent: SocketAddr, target: SocketAddr) {
-    let mut stream = open_tunnel(agent, target).await;
+#[cfg(feature = "test-hooks")]
+fn shown_credentials(prompt: &std::path::Path) -> (String, String) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(prompt).unwrap_or_default();
+        let value = |name: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(name))
+                .map(str::to_owned)
+        };
+        if let (Some(username), Some(password)) = (value("Username: "), value("Password: ")) {
+            return (username, password);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no credentials were shown: {text:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn echo_through(agent: &Agent, target: SocketAddr) {
+    let request = connect_with(&target.to_string(), Some(&agent.authorization));
+    let (mut stream, response) = send(agent.addr, &request).await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    assert!(response.rest.is_empty());
     stream.write_all(b"through the binary").await.unwrap();
     stream.shutdown().await.unwrap();
     assert_eq!(
@@ -632,45 +654,50 @@ async fn echo_through(agent: SocketAddr, target: SocketAddr) {
     );
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn proxy_command_relays_through_the_upstream() {
+async fn session_browser_relays_through_the_upstream() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let agent = Agent::spawn(&setup, "info").await;
-    echo_through(agent.addr, echo_server().await).await;
+    echo_through(&agent, echo_server().await).await;
     agent.stop().await;
 }
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn proxy_command_without_a_config_file_requires_session_credentials() {
+async fn session_browser_requires_its_session_credentials() {
     let setup = Setup::new(Behavior::Tunnel).await;
-    let agent = Agent::spawn_from_flags(&setup, "info", &[]).await;
+    let agent = Agent::spawn(&setup, "info").await;
     let target = echo_server().await.to_string();
     let (_, response) = send(agent.addr, &connect_with(&target, None)).await;
     assert_eq!(response.status, 407, "{}", response.head);
     agent.stop().await;
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn tunnel_target_is_logged_only_at_debug() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let target = echo_server().await;
 
     let agent = Agent::spawn(&setup, "info").await;
-    echo_through(agent.addr, target).await;
+    echo_through(&agent, target).await;
     let info = agent.stop().await;
     assert!(!info.contains(&target.to_string()), "{info}");
 
     let agent = Agent::spawn(&setup, "debug").await;
-    echo_through(agent.addr, target).await;
+    echo_through(&agent, target).await;
     let debug = agent.stop().await;
     assert!(debug.contains(&target.to_string()), "{debug}");
 }
 
+#[cfg(feature = "test-hooks")]
 const NOT_CONFIGURED: &str =
     "mTLS is not configured and upstream connections do not authenticate this device";
+#[cfg(feature = "test-hooks")]
 const MISSING_KEY: &str = "gateinto-test-missing-device-key";
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn optional_client_certificate_without_a_device_identity_warns_once_and_relays() {
     let setup = Setup::new(Behavior::Tunnel).await;
@@ -686,14 +713,15 @@ async fn optional_client_certificate_without_a_device_identity_warns_once_and_re
         ],
     ] {
         let agent = Agent::spawn_with(&setup, "info", extra).await;
-        echo_through(agent.addr, target).await;
-        echo_through(agent.addr, target).await;
+        echo_through(&agent, target).await;
+        echo_through(&agent, target).await;
         let log = agent.stop().await;
         assert_eq!(log.matches(NOT_CONFIGURED).count(), 1, "{log}");
         assert!(log.contains("WARN"), "{log}");
     }
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn disabled_client_certificate_relays_without_the_warning() {
     let setup = Setup::new(Behavior::Tunnel).await;
@@ -703,11 +731,12 @@ async fn disabled_client_certificate_relays_without_the_warning() {
         &["--key-name", MISSING_KEY, "--client-certificate", "off"],
     )
     .await;
-    echo_through(agent.addr, echo_server().await).await;
+    echo_through(&agent, echo_server().await).await;
     let log = agent.stop().await;
     assert!(!log.contains(NOT_CONFIGURED), "{log}");
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn negotiated_key_exchange_group_is_logged_per_tunnel_at_debug() {
     let setup = Setup::new(Behavior::Tunnel).await;
@@ -728,15 +757,15 @@ async fn negotiated_key_exchange_group_is_logged_per_tunnel_at_debug() {
         ),
     ] {
         let agent = Agent::spawn_with(&setup, "debug", extra).await;
-        echo_through(agent.addr, target).await;
-        echo_through(agent.addr, target).await;
+        echo_through(&agent, target).await;
+        echo_through(&agent, target).await;
         let log = agent.stop().await;
         assert_eq!(log.matches(group).count(), 2, "{extra:?}: {log}");
         assert_eq!(log.matches("version=Some(TLSv1_3)").count(), 2, "{log}");
     }
 
     let agent = Agent::spawn(&setup, "info").await;
-    echo_through(agent.addr, target).await;
+    echo_through(&agent, target).await;
     let info = agent.stop().await;
     assert!(!info.contains("key_exchange_group"), "{info}");
 }

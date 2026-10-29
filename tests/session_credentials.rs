@@ -331,7 +331,7 @@ async fn sessions_issue_distinct_credentials_that_work_only_on_their_own_proxy()
     let mut sessions = SessionManager::new();
     let device = sessions
         .start(SessionConfig {
-            kind: SessionKind::Device,
+            kind: SessionKind::Browser,
             gateway: "office".parse().unwrap(),
             proxy: config(LocalAuth::NONE),
         })

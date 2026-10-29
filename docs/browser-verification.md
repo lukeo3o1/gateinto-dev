@@ -208,8 +208,7 @@ portal_url = "https://example.com/"
     `407`. Run `gateinto status`
     and `gateinto session list`: neither shows the credentials.
 
-15. Run `gateinto session list`. Expected: the device session (if
-    `[device_session] gateway` is set) and one `browser` line with the port
+15. Run `gateinto session list`. Expected: one `browser` line with the port
     from step 13.
 
 16. Close the browser window normally (the last window of that browser

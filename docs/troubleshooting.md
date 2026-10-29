@@ -13,22 +13,22 @@ proxy's status line.
 | --- | --- | --- |
 | `200` | The upstream proxy accepted the tunnel with a `2xx` status. | If the request still fails, the problem is between the client and the target, inside the tunnel. |
 | `400` | The request was malformed, or the client closed the connection before finishing it. Only `CONNECT host:port HTTP/1.1` with exactly one `Host` header and at most one `Proxy-Authorization` header is accepted; with `session_credentials`, a malformed Basic credential (bad base64, no `:`, empty password, control characters, over 1024 characters) is also `400`. | Configure the client to use Gateinto as an HTTP proxy for HTTPS, not as a SOCKS proxy or an HTTPS proxy. |
-| `407` | `session_credentials` only (browser sessions, and the device session unless `[device_session] auth = "none"`): the request had no credential, another scheme than Basic, or a credential other than the user name and password issued to this session. Browsers show their proxy sign-in dialog. | Enter the issued credentials exactly, including the hyphens. To see them again run `gateinto session credentials <id>` (`gateinto session list` shows the id); for `gateinto session browser` or `gateinto proxy` they are in the prompt shown at start. Credentials of a closed or another session never work: a browser that keeps sending old cached ones needs the new ones, or a new session. Gateinto never logs credentials; a `warn` line says when different credentials were refused. |
+| `407` | Every session: the request had no credential, another scheme than Basic, or a credential other than the user name and password issued to this session. Browsers show their proxy sign-in dialog. | Enter the issued credentials exactly, including the hyphens. To see them again run `gateinto session credentials <id>` (`gateinto session list` shows the id); for `gateinto session browser` they are in the prompt shown at start. Credentials of a closed or another session never work: a browser that keeps sending old cached ones needs the new ones, or a new session. Gateinto never logs credentials; a `warn` line says when different credentials were refused. |
 | `429` | `session_credentials` only: 10 wrong or malformed Basic credentials, or requests with another scheme such as `Bearer`, `Negotiate` or `NTLM`, within 60 seconds. Every request gets `429` until `Retry-After` seconds have passed, even one with the issued credentials. | Which local program is sending wrong credentials (`warn` lines name the client's local port). A browser that cached a mistyped password and replays it on parallel tunnels reaches the limit within seconds: wait for `Retry-After`, then enter the issued credentials. If the session stays locked, close it and start a new one. |
 | `403` | The upstream proxy answered `403`. | The upstream proxy's access policy for this target or this device. |
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
-| `408` | The request head was not complete within `--connect-timeout-secs`. | A client that opens the connection but does not send a request, or a very slow client. |
-| `431` | The request header block was larger than `--max-header-bytes`. | Clients that send many or large headers with `CONNECT`. |
+| `408` | The request head was not complete within `[limits] connect_timeout_seconds`. | A client that opens the connection but does not send a request, or a very slow client. |
+| `431` | The request header block was larger than `[limits] header_max_bytes`. | Clients that send many or large headers with `CONNECT`. |
 | `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
-| `503` | `--max-tunnels` connections are already open. | Raise `--max-tunnels`, or find the client holding connections open. |
-| `504` | The upstream TCP connect, TLS handshake and `CONNECT` reply did not finish within `--connect-timeout-secs`. | Network reachability of the upstream proxy, firewalls that drop instead of reject, or a slow upstream. |
+| `503` | `[limits] max_concurrent_tunnels` connections are already open in this session. | Raise `max_concurrent_tunnels` in the configuration file, or find the client holding connections open. |
+| `504` | The upstream TCP connect, TLS handshake and `CONNECT` reply did not finish within `[limits] connect_timeout_seconds`. | Network reachability of the upstream proxy, firewalls that drop instead of reject, or a slow upstream. |
 
 The upstream's own headers and body are never forwarded, so a `407` from the
 upstream appears as a `502` locally. An upstream that requires a client
 certificate rejects Gateinto when no client certificate is configured (see the
 "mTLS is not configured" warning at startup), and Gateinto returns `502`.
 
-`gateinto check-upstream` (same options as `proxy`, or `--config`) connects
+`gateinto check-upstream` (same options as `session browser`, or `--config`) connects
 once and prints the negotiated TLS version, key exchange group, cipher suite,
 server certificate subject and whether a client certificate was sent. With
 `--target host:port` it also prints the upstream's `CONNECT` status line. It
@@ -45,7 +45,7 @@ issued by a private CA, every tunnel fails with `502` and the log contains
 Pass the CA in PEM format:
 
 ```sh
-gateinto proxy --upstream-host proxy.example.com --upstream-port 443 --ca-file corp-ca.pem
+gateinto check-upstream --upstream-host proxy.example.com --upstream-port 443 --ca-file corp-ca.pem
 ```
 
 - `--ca-file` replaces the default roots. Include every CA the upstream may
@@ -102,45 +102,39 @@ gateway "default": unknown field `hostname`, expected one of `host`, `port`, `se
   any gateway table, `no upstream configured; pass --upstream-host and
   --upstream-port, ...`): there is no default upstream. Both host and port are
   needed.
-- `[device_session] gateway names the unknown gateway "<name>"` (or
-  `--gateway names ...`): the name must match a `[gateways.<name>]` table; the
-  message lists the configured ones. With several gateways and no
-  `[device_session] gateway`, the device session cannot pick one and you must
-  set it.
+- `--gateway names the unknown gateway "<name>"`: the name must match a
+  `[gateways.<name>]` table; the message lists the configured ones.
+- `<n> gateways are configured (<names>); pass --gateway to choose one`:
+  with several gateways, `check-upstream` and `session browser` cannot pick
+  one. Pass `--gateway <name>`.
+- `[device_session] was removed: Gateinto no longer runs a shared local
+  proxy; ...`: the configuration file still has the `[device_session]`
+  section of an earlier build. Delete the whole section; start browser
+  sessions with `gateinto open` or a `gateinto://` link, or with
+  `gateinto session browser`.
 - The `[listen]`, `[upstream]` and `[tls]` sections of earlier development builds are
-  unknown sections: move their keys to `[device_session] listen` and a
-  `[gateways.<name>]` table (`[tls] mode` becomes `tls_mode`).
+  unknown sections: move their keys to a `[gateways.<name>]` table
+  (`[tls] mode` becomes `tls_mode`) and drop `[listen]`.
 - Zero limits, ports or timeouts, an empty `[device_key] name`, and unknown
   values for `tls_mode`, `client_certificate` or `preferred` are rejected, as
   are gateway names other than 1 to 64 characters from `A-Z`, `a-z`, `0-9`,
   `_` and `-`.
-- `auth = "basic_tofu" was removed; use "session_credentials"`: the
-  trust-on-first-use local proxy authentication no longer exists. Set
-  `[device_session] auth = "session_credentials"` (or leave `auth` out, or
-  set `"none"`); a browser
-  session needs no setting.
 - Relative `ca_file` and `client_cert_file` paths are relative to the
   configuration file, not to the current directory.
 - Command line flags override the file. If a value seems ignored, check that
   the same flag is not also given.
-- A non-loopback `[device_session] listen` address is refused unless
-  `--unsafe-allow-non-loopback-listen` is passed on the command line; see below.
 
-## Non-loopback listen address refused
+## The `proxy` command is gone
 
 ```text
-error: refusing to listen on non-loopback address 0.0.0.0:18736; pass --unsafe-allow-non-loopback-listen to override
+error: unrecognized subcommand 'proxy'
 ```
 
-The same error appears for a non-loopback `[device_session] listen` in a
-configuration file; the opt-in exists only as a command line flag.
-
-On a non-loopback address anyone on the network could reach the listener: with
-`[device_session] auth = "none"` they could use it and the identity behind it,
-and otherwise they could try credentials against it. Keep the default
-`127.0.0.1:18736`, or another loopback address. Pass
-`--unsafe-allow-non-loopback-listen` only if you control who can reach the
-address. See [threat-model.md](threat-model.md).
+Gateinto no longer runs a shared local proxy on a fixed port. Use
+`gateinto open` or a `gateinto://` link to start a browser session, or
+`gateinto session browser` for one session with its own loopback port and
+credentials. Sessions always listen on loopback; there is no option to listen
+on another address. See [threat-model.md](threat-model.md).
 
 ## Launch links and the agent
 
@@ -171,8 +165,8 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   were not shown: ...`: `gateinto open` had neither an interactive desktop
   nor a terminal. The session runs; run `gateinto session credentials <id>`
   in a terminal to see its user name and password. `gateinto session browser`
-  and `gateinto proxy` (unless `[device_session] auth = "none"`) instead close their session
-  and fail with this error; start them from a terminal or a desktop.
+  instead closes its session and fails with this error; start it from a
+  terminal or a desktop.
 - `no session <id>` from `gateinto session credentials`: the session was
   closed (its browser exited, or `session close` or `stop` ran), and its
   credentials no longer exist. Sessions of `gateinto session browser` are not
@@ -230,8 +224,7 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
 - `an agent is already running for this user at ...`: only one agent per user
   (and per `GATEINTO_INSTANCE`) can run. Use `gateinto stop` to replace it.
 - `the agent exited (...) before accepting requests`: the agent started by
-  `open` could not start, usually because of the configuration file or a
-  device session that cannot listen. Run `gateinto agent --config <file>` in
+  `open` could not start, usually because of the configuration file. Run `gateinto agent --config <file>` in
   a console to see the error.
 - `neither Chrome nor Edge was found`, or `browser executable ... not found`:
   set `[browser] executable` to the browser's full path.

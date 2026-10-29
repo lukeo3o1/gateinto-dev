@@ -28,9 +28,9 @@ fn gateway(name: &str) -> GatewayName {
     name.parse().unwrap()
 }
 
-fn device_session(name: &str, proxy: Config) -> SessionConfig {
+fn browser_session(name: &str, proxy: Config) -> SessionConfig {
     SessionConfig {
-        kind: SessionKind::Device,
+        kind: SessionKind::Browser,
         gateway: gateway(name),
         proxy,
     }
@@ -121,11 +121,11 @@ async fn sessions_on_one_gateway_present_their_own_self_signed_certificates() {
     let target = echo_server().await;
     let mut sessions = SessionManager::new();
     let first = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap();
     let second = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap();
     assert_ne!(first, second);
@@ -169,11 +169,11 @@ async fn sessions_on_two_gateways_reach_only_their_own_upstream() {
     let target = echo_server().await;
     let mut sessions = SessionManager::new();
     let to_office = sessions
-        .start(device_session("office", office.config(&source)))
+        .start(browser_session("office", office.config(&source)))
         .await
         .unwrap();
     let to_home = sessions
-        .start(device_session("home", home.config(&source)))
+        .start(browser_session("home", home.config(&source)))
         .await
         .unwrap();
     assert_eq!(
@@ -186,7 +186,7 @@ async fn sessions_on_two_gateways_reach_only_their_own_upstream() {
     );
     assert_eq!(
         sessions.session(to_home).unwrap().kind(),
-        SessionKind::Device
+        SessionKind::Browser
     );
 
     for _ in 0..ROUNDS {
@@ -214,11 +214,11 @@ async fn closing_a_session_refuses_its_port_while_the_other_keeps_working() {
     let target = echo_server().await;
     let mut sessions = SessionManager::new();
     let closing = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap();
     let staying = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap();
     let closing_addr = local_addr(&sessions, closing);
@@ -247,11 +247,11 @@ async fn closing_a_session_aborts_its_established_tunnels() {
     let target = echo_server().await;
     let mut sessions = SessionManager::new();
     let closing = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap();
     let staying = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap();
     let mut doomed = open_tunnel(local_addr(&sessions, closing), target).await;
@@ -274,7 +274,7 @@ async fn closing_every_session_refuses_every_port() {
     for _ in 0..2 {
         let config = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
         let id = sessions
-            .start(device_session("office", config))
+            .start(browser_session("office", config))
             .await
             .unwrap();
         addrs.push(local_addr(&sessions, id));
@@ -298,7 +298,7 @@ async fn a_required_self_signed_certificate_that_cannot_be_issued_stops_the_sess
     };
 
     let error = sessions
-        .start(device_session("office", setup.config(&source)))
+        .start(browser_session("office", setup.config(&source)))
         .await
         .unwrap_err();
 
@@ -329,7 +329,7 @@ async fn an_optional_self_signed_certificate_that_cannot_be_issued_starts_withou
     let mut sessions = SessionManager::new();
 
     let id = sessions
-        .start(device_session("office", config))
+        .start(browser_session("office", config))
         .await
         .unwrap();
     echo_once(
@@ -351,7 +351,7 @@ async fn a_session_refuses_a_non_loopback_listen_address() {
     let mut sessions = SessionManager::new();
 
     let error = sessions
-        .start(device_session("office", config))
+        .start(browser_session("office", config))
         .await
         .unwrap_err();
 
@@ -359,7 +359,7 @@ async fn a_session_refuses_a_non_loopback_listen_address() {
     assert!(
         error
             .to_string()
-            .contains("--unsafe-allow-non-loopback-listen"),
+            .contains("refusing to listen on non-loopback address 0.0.0.0:0"),
         "{error}"
     );
 }
@@ -372,7 +372,7 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
     let before = unix_now();
     let mut sessions = SessionManager::new();
     let id = sessions
-        .start(device_session(
+        .start(browser_session(
             "office",
             agent_config(upstream.addr, ca.roots(), PROXY_NAME),
         ))
@@ -386,7 +386,7 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
         info,
         SessionInfo {
             id: id.into(),
-            kind: SessionKind::Device,
+            kind: SessionKind::Browser,
             gateway: "office".to_owned(),
             upstream: upstream.addr.to_string(),
             listen: session.local_addr(),

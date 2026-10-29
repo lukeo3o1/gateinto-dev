@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -15,7 +14,6 @@ use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
 use crate::link::LinkedGateway;
-use crate::proxy::{DEFAULT_LISTEN, LocalAuth};
 use crate::tls::TlsMode;
 
 pub const FILE_NAME: &str = "gateinto.toml";
@@ -45,8 +43,12 @@ pub fn default_path_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathB
 pub struct ConfigFile {
     #[serde(skip)]
     path: Option<PathBuf>,
-    #[serde(default)]
-    pub device_session: DeviceSessionSection,
+    #[serde(
+        default,
+        rename = "device_session",
+        deserialize_with = "removed_device_session"
+    )]
+    _device_session: (),
     #[serde(default)]
     pub gateways: Gateways,
     #[serde(default)]
@@ -231,12 +233,11 @@ impl<'de> Deserialize<'de> for Gateways {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceSessionSection {
-    pub gateway: Option<GatewayName>,
-    pub listen: Option<SocketAddr>,
-    pub auth: Option<LocalAuth>,
+fn removed_device_session<'de, D: Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(de::Error::custom(
+        "[device_session] was removed: Gateinto no longer runs a shared local proxy; delete the \
+         section and start browser sessions with `gateinto open` or a gateinto:// link",
+    ))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -322,15 +323,11 @@ pub struct BrowserSection {
 pub struct Overrides {
     pub gateway: Option<GatewayName>,
     pub gateway_settings: GatewaySection,
-    pub listen: Option<SocketAddr>,
     pub device_key: DeviceKey,
-    pub limits: LimitsSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    pub listen: SocketAddr,
-    pub device_session_auth: LocalAuth,
     pub gateway: GatewayProfile,
     pub device_key: DeviceKeySettings,
     pub limits: LimitSettings,
@@ -444,7 +441,7 @@ impl ConfigFile {
         let section = self.gateways.0.get(name).ok_or_else(|| {
             self.error(ErrorKind::UnknownGateway {
                 name: name.clone(),
-                reference: None,
+                from_flag: false,
                 configured: self.gateways.names(),
             })
         })?;
@@ -455,39 +452,26 @@ impl ConfigFile {
         let (name, section) = self.select_gateway(overrides.gateway.as_ref())?;
         let gateway = self.profile(name, section.merge(&overrides.gateway_settings))?;
         let defaults = LimitSettings::default();
-        let (file, cli) = (&self.limits, &overrides.limits);
-        let max_concurrent_tunnels = cli
+        let file = &self.limits;
+        let max_concurrent_tunnels = file
             .max_concurrent_tunnels
-            .or(file.max_concurrent_tunnels)
             .map_or(defaults.max_concurrent_tunnels, NonZeroU32::get);
         if max_concurrent_tunnels > crate::proxy::MAX_TUNNELS {
-            let kind = ErrorKind::TunnelLimit(max_concurrent_tunnels);
-            return Err(match cli.max_concurrent_tunnels {
-                Some(_) => ConfigError::new(kind),
-                None => self.error(kind),
-            });
+            return Err(self.error(ErrorKind::TunnelLimit(max_concurrent_tunnels)));
         }
         Ok(Settings {
-            listen: overrides
-                .listen
-                .or(self.device_session.listen)
-                .unwrap_or(DEFAULT_LISTEN),
-            device_session_auth: self.device_session.auth.unwrap_or_default(),
             gateway,
             device_key: self.device_key.merge(&overrides.device_key).settings(),
             limits: LimitSettings {
                 max_concurrent_tunnels,
-                connect_timeout_seconds: cli
+                connect_timeout_seconds: file
                     .connect_timeout_seconds
-                    .or(file.connect_timeout_seconds)
                     .map_or(defaults.connect_timeout_seconds, NonZeroU64::get),
-                idle_timeout_seconds: cli
+                idle_timeout_seconds: file
                     .idle_timeout_seconds
-                    .or(file.idle_timeout_seconds)
                     .map_or(defaults.idle_timeout_seconds, NonZeroU64::get),
-                header_max_bytes: cli
+                header_max_bytes: file
                     .header_max_bytes
-                    .or(file.header_max_bytes)
                     .map_or(defaults.header_max_bytes, NonZeroU32::get),
             },
         })
@@ -497,17 +481,11 @@ impl ConfigFile {
         &self,
         requested: Option<&GatewayName>,
     ) -> Result<(Option<GatewayName>, GatewaySection), ConfigError> {
-        let named = requested.map(|name| (name, Reference::Flag)).or_else(|| {
-            self.device_session
-                .gateway
-                .as_ref()
-                .map(|name| (name, Reference::DeviceSession))
-        });
-        if let Some((name, reference)) = named {
+        if let Some(name) = requested {
             let section = self.gateways.0.get(name).ok_or_else(|| {
                 self.error(ErrorKind::UnknownGateway {
                     name: name.clone(),
-                    reference: Some(reference),
+                    from_flag: true,
                     configured: self.gateways.names(),
                 })
             })?;
@@ -579,19 +557,13 @@ pub struct ConfigError {
     kind: ErrorKind,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Reference {
-    DeviceSession,
-    Flag,
-}
-
 #[derive(Debug)]
 enum ErrorKind {
     Read(io::Error),
     Parse(toml::de::Error),
     UnknownGateway {
         name: GatewayName,
-        reference: Option<Reference>,
+        from_flag: bool,
         configured: String,
     },
     AmbiguousGateway {
@@ -627,21 +599,17 @@ impl fmt::Display for ConfigError {
             ErrorKind::Read(error) => write!(f, "{error}"),
             ErrorKind::TunnelLimit(limit) => write!(
                 f,
-                "max_concurrent_tunnels (--max-tunnels) is {limit}; the maximum is {}",
+                "max_concurrent_tunnels is {limit}; the maximum is {}",
                 crate::proxy::MAX_TUNNELS
             ),
             ErrorKind::Parse(error) => write!(f, "{}", error.to_string().trim_end()),
             ErrorKind::UnknownGateway {
                 name,
-                reference,
+                from_flag,
                 configured,
             } => {
-                match reference {
-                    Some(Reference::DeviceSession) => {
-                        f.write_str("[device_session] gateway names the ")?
-                    }
-                    Some(Reference::Flag) => f.write_str("--gateway names the ")?,
-                    None => {}
+                if *from_flag {
+                    f.write_str("--gateway names the ")?;
                 }
                 write!(
                     f,
@@ -650,8 +618,7 @@ impl fmt::Display for ConfigError {
             }
             ErrorKind::AmbiguousGateway { count, configured } => write!(
                 f,
-                "{count} gateways are configured ({configured}) and [device_session] names none; \
-                 set [device_session] gateway (check-upstream also accepts --gateway)"
+                "{count} gateways are configured ({configured}); pass --gateway to choose one"
             ),
             ErrorKind::Gateway { name: None, kind } => match kind {
                 GatewayErrorKind::NoUpstream => f.write_str(
@@ -743,11 +710,6 @@ mod tests {
     }
 
     const FULL: &str = r#"
-[device_session]
-gateway = "office"
-listen = "127.0.0.2:8080"
-auth = "session_credentials"
-
 [gateways.office]
 host = "proxy.example.test"
 port = 8443
@@ -788,14 +750,22 @@ port = 443
         ConfigFile::parse(text)?.settings(&Overrides::default())
     }
 
+    fn office() -> Overrides {
+        Overrides {
+            gateway: Some(name("office")),
+            ..Overrides::default()
+        }
+    }
+
     #[test]
     fn every_section_is_read() {
-        let settings = settings(FULL).unwrap();
+        let settings = ConfigFile::parse(FULL)
+            .unwrap()
+            .settings(&office())
+            .unwrap();
         assert_eq!(
             settings,
             Settings {
-                listen: "127.0.0.2:8080".parse().unwrap(),
-                device_session_auth: LocalAuth::SESSION_CREDENTIALS,
                 gateway: GatewayProfile {
                     name: name("office"),
                     upstream: UpstreamSettings {
@@ -832,7 +802,6 @@ port = 443
     #[test]
     fn omitted_values_take_the_defaults() {
         let settings = settings(MINIMAL).unwrap();
-        assert_eq!(settings.listen, crate::proxy::DEFAULT_LISTEN);
         assert_eq!(settings.gateway.name, name("main"));
         assert_eq!(settings.gateway.upstream.server_name, "proxy.example.test");
         assert_eq!(settings.gateway.upstream.ca_file, None);
@@ -907,140 +876,45 @@ port = 443
     }
 
     #[test]
-    fn the_device_session_uses_the_only_gateway_by_default() {
+    fn the_only_gateway_is_used_by_default() {
         let settings = settings(MINIMAL).unwrap();
         assert_eq!(settings.gateway.name, name("main"));
         assert_eq!(settings.gateway.upstream.host, "proxy.example.test");
     }
 
     #[test]
-    fn the_device_session_names_its_gateway_among_several() {
-        let file = ConfigFile::parse(FULL).unwrap();
-        let settings = file.settings(&Overrides::default()).unwrap();
-        assert_eq!(settings.gateway.name, name("office"));
-        assert_eq!(settings.gateway.upstream.host, "proxy.example.test");
-
-        let text = FULL.replace("gateway = \"office\"", "gateway = \"home\"");
-        let settings = super::tests::settings(&text).unwrap();
-        assert_eq!(settings.gateway.name, name("home"));
-        assert_eq!(settings.gateway.upstream.host, "home.example.test");
-        assert_eq!(settings.gateway.upstream.port, 443);
-        assert_eq!(settings.gateway.tls_mode, TlsMode::HybridPreferred);
-        assert_eq!(settings.listen, "127.0.0.2:8080".parse().unwrap());
-    }
-
-    #[test]
-    fn the_device_session_auth_defaults_to_session_credentials() {
-        assert_eq!(
-            settings(MINIMAL).unwrap().device_session_auth,
-            LocalAuth::SESSION_CREDENTIALS
-        );
-        for (value, expected) in [
-            ("\"none\"", LocalAuth::NONE),
-            ("\"session_credentials\"", LocalAuth::SESSION_CREDENTIALS),
-            ("[\"none\"]", LocalAuth::NONE),
-            ("[\"session_credentials\"]", LocalAuth::SESSION_CREDENTIALS),
+    fn the_removed_device_session_section_fails_closed_naming_it() {
+        for text in [
+            "[device_session]\n",
+            "[device_session]\ngateway = \"main\"\nauth = \"none\"\n",
+            "[device_session]\nlisten = \"0.0.0.0:18736\"\n",
+            "device_session = 1\n",
         ] {
-            let text = format!("[device_session]\nauth = {value}\n{MINIMAL}");
-            assert_eq!(settings(&text).unwrap().device_session_auth, expected);
-        }
-        let error = ConfigFile::parse("[device_session]\nauth = \"basic\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("none"), "{error}");
-        assert!(error.contains("session_credentials"), "{error}");
-    }
-
-    fn auth_error(value: &str) -> String {
-        ConfigFile::parse(&format!("[device_session]\nauth = {value}\n"))
-            .unwrap_err()
-            .to_string()
-    }
-
-    #[test]
-    fn an_auth_list_names_each_method_once_and_none_alone() {
-        let error = auth_error("[]");
-        assert!(error.contains("at least one"), "{error}");
-        let error = auth_error("[\"session_credentials\", \"session_credentials\"]");
-        assert!(error.contains("more than once"), "{error}");
-        for value in [
-            "[\"none\", \"session_credentials\"]",
-            "[\"session_credentials\", \"none\"]",
-        ] {
-            let error = auth_error(value);
-            assert!(error.contains("\"none\" cannot be combined"), "{error}");
-        }
-        let error = auth_error("[\"session_credentials\", \"basic\"]");
-        assert!(error.contains("session_credentials"), "{error}");
-        assert_eq!(error.contains("os_user"), cfg!(windows), "{error}");
-        let error = auth_error("[\"basic_tofu\"]");
-        assert!(error.contains("was removed"), "{error}");
-        let error = auth_error("1");
-        assert!(error.contains("a method name or a list"), "{error}");
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn os_user_auth_fails_closed_outside_windows() {
-        for value in [
-            "\"os_user\"",
-            "[\"os_user\"]",
-            "[\"os_user\", \"session_credentials\"]",
-        ] {
-            let error = auth_error(value);
-            assert!(error.contains("only available on Windows"), "{error}");
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn os_user_auth_is_offered_alone_or_with_session_credentials() {
-        let both = LocalAuth {
-            os_user: true,
-            session_credentials: true,
-        };
-        for (value, expected) in [
-            ("\"os_user\"", LocalAuth::OS_USER),
-            ("[\"os_user\"]", LocalAuth::OS_USER),
-            ("[\"os_user\", \"session_credentials\"]", both),
-            ("[\"session_credentials\", \"os_user\"]", both),
-        ] {
-            let text = format!("[device_session]\nauth = {value}\n{MINIMAL}");
-            assert_eq!(settings(&text).unwrap().device_session_auth, expected);
+            let error = ConfigFile::parse(&format!("{text}{MINIMAL}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(
+                    "[device_session] was removed: Gateinto no longer runs a shared local proxy"
+                ),
+                "{text}: {error}"
+            );
+            assert!(error.contains("delete the section"), "{text}: {error}");
         }
     }
 
     #[test]
-    fn the_removed_basic_tofu_auth_fails_closed_naming_its_replacement() {
-        let error = ConfigFile::parse("[device_session]\nauth = \"basic_tofu\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("basic_tofu"), "{error}");
-        assert!(error.contains("was removed"), "{error}");
-        assert!(error.contains("session_credentials"), "{error}");
-    }
-
-    #[test]
-    fn several_gateways_need_a_device_session_gateway() {
+    fn several_gateways_need_a_gateway_flag() {
         let text = format!("{MINIMAL}[gateways.other]\nhost = \"other.test\"\nport = 443\n");
         let error = settings(&text).unwrap_err().to_string();
         assert_eq!(
             error,
-            "2 gateways are configured (main, other) and [device_session] names none; set \
-             [device_session] gateway (check-upstream also accepts --gateway)"
+            "2 gateways are configured (main, other); pass --gateway to choose one"
         );
     }
 
     #[test]
     fn an_unknown_gateway_reference_is_an_error_naming_it() {
-        let text = format!("[device_session]\ngateway = \"missing\"\n{MINIMAL}");
-        let error = settings(&text).unwrap_err().to_string();
-        assert_eq!(
-            error,
-            "[device_session] gateway names the unknown gateway \"missing\"; configured \
-             gateways: main"
-        );
-
         let overrides = Overrides {
             gateway: Some(name("absent")),
             ..Overrides::default()
@@ -1083,13 +957,9 @@ port = 443
                      a-z, 0-9, _ and -"
                 )
             );
-            for text in [
-                format!("[gateways.\"{invalid}\"]\nhost = \"h.test\"\nport = 1\n"),
-                format!("[device_session]\ngateway = \"{invalid}\"\n"),
-            ] {
-                let parsed = ConfigFile::parse(&text).unwrap_err().to_string();
-                assert!(parsed.contains(&error), "{text}: {parsed}");
-            }
+            let text = format!("[gateways.\"{invalid}\"]\nhost = \"h.test\"\nport = 1\n");
+            let parsed = ConfigFile::parse(&text).unwrap_err().to_string();
+            assert!(parsed.contains(&error), "{text}: {parsed}");
         }
     }
 
@@ -1117,7 +987,7 @@ port = 443
             ("[listen]\naddress = \"127.0.0.1:1\"\n", "listen"),
             ("[upstream]\nhost = \"x\"\n", "upstream"),
             ("[tls]\nmode = \"classical_only\"\n", "tls"),
-            ("[device_session]\nport = 1\n", "port"),
+            ("[gateways.main]\nlisten = \"127.0.0.1:1\"\n", "listen"),
             ("[device_key]\nbackend = \"tpm\"\n", "backend"),
             ("[limits]\nmax_tunnels = 1\n", "max_tunnels"),
         ] {
@@ -1133,24 +1003,31 @@ port = 443
 
     #[test]
     fn non_loopback_listen_cannot_be_allowed_from_the_file() {
-        for text in [
-            "unsafe_allow_non_loopback_listen = true\n",
-            "[device_session]\nunsafe_allow_non_loopback_listen = true\n",
-            "[device_session]\nallow_non_loopback = true\n",
-            "[gateways.main]\nunsafe_allow_non_loopback_listen = true\n",
+        for (text, key) in [
+            (
+                "unsafe_allow_non_loopback_listen = true\n",
+                "unsafe_allow_non_loopback_listen",
+            ),
+            (
+                "[gateways.main]\nunsafe_allow_non_loopback_listen = true\n",
+                "unsafe_allow_non_loopback_listen",
+            ),
+            (
+                "[limits]\nallow_non_loopback = true\n",
+                "allow_non_loopback",
+            ),
         ] {
-            assert!(ConfigFile::parse(text).is_err(), "{text}");
+            let error = ConfigFile::parse(text).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("unknown field `{key}`")),
+                "{text}: {error}"
+            );
         }
-        let text = format!("[device_session]\nlisten = \"0.0.0.0:18736\"\n{MINIMAL}");
-        let settings = settings(&text).unwrap();
-        assert!(!settings.listen.ip().is_loopback());
     }
 
     #[test]
     fn invalid_values_are_rejected() {
         for (text, expected) in [
-            ("[device_session]\nlisten = \"localhost\"\n", "listen"),
-            ("[device_session]\ngateway = 1\n", "gateway"),
             ("[gateways]\nmain = 1\n", "gateway \"main\""),
             ("[gateways.main]\nport = 0\n", "port"),
             ("[gateways.main]\nport = 70000\n", "port"),
@@ -1186,29 +1063,20 @@ port = 443
     }
 
     #[test]
-    fn tunnel_limits_above_the_http2_window_bound_are_rejected_from_file_and_flags() {
-        for (text, flag) in [("32767", None), ("32768", None), ("8", Some(32768))] {
-            let mut file = ConfigFile::parse(&format!(
-                "[gateways.main]\nhost = \"proxy.example.test\"\nport = 443\n\
-                 [limits]\nmax_concurrent_tunnels = {text}\n"
-            ))
-            .unwrap();
+    fn tunnel_limits_above_the_http2_window_bound_are_rejected() {
+        for limit in [32767, 32768] {
+            let text = format!("{MINIMAL}[limits]\nmax_concurrent_tunnels = {limit}\n");
+            let mut file = ConfigFile::parse(&text).unwrap();
             file.path = Some(PathBuf::from("gateinto.toml"));
-            let overrides = Overrides {
-                limits: LimitsSection {
-                    max_concurrent_tunnels: flag.and_then(NonZeroU32::new),
-                    ..LimitsSection::default()
-                },
-                ..Overrides::default()
-            };
-            let result = file.settings(&overrides);
-            if text == "32767" {
+            let result = file.settings(&Overrides::default());
+            if limit == 32767 {
                 assert_eq!(result.unwrap().limits.max_concurrent_tunnels, 32767);
             } else {
-                let error = result.unwrap_err().to_string();
-                assert!(error.contains("max_concurrent_tunnels"), "{error}");
-                assert!(error.contains("32767"), "{error}");
-                assert_eq!(error.contains("gateinto.toml"), flag.is_none(), "{error}");
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "config file gateinto.toml: max_concurrent_tunnels is 32768; the maximum is \
+                     32767"
+                );
             }
         }
     }
@@ -1283,7 +1151,14 @@ port = 443
     #[test]
     fn self_signed_client_cert_is_off_unless_enabled() {
         assert!(!settings(MINIMAL).unwrap().gateway.self_signed_client_cert);
-        assert!(!settings(FULL).unwrap().gateway.self_signed_client_cert);
+        assert!(
+            !ConfigFile::parse(FULL)
+                .unwrap()
+                .settings(&office())
+                .unwrap()
+                .gateway
+                .self_signed_client_cert
+        );
         let text = format!("{MINIMAL}self_signed_client_cert = true\n");
         assert!(settings(&text).unwrap().gateway.self_signed_client_cert);
         let error = ConfigFile::parse("[gateways.main]\nself_signed_client_cert = \"yes\"\n")
@@ -1339,7 +1214,7 @@ port = 443
     fn overrides_take_precedence_field_by_field() {
         let file = ConfigFile::parse(FULL).unwrap();
         let overrides = Overrides {
-            listen: Some("127.0.0.3:9000".parse().unwrap()),
+            gateway: Some(name("office")),
             gateway_settings: GatewaySection {
                 port: NonZeroU16::new(9443),
                 tls_mode: Some(TlsMode::ClassicalOnly),
@@ -1349,16 +1224,10 @@ port = 443
                 software_fallback_on_first_create: Some(true),
                 ..DeviceKey::default()
             },
-            limits: LimitsSection {
-                idle_timeout_seconds: NonZeroU64::new(5),
-                ..LimitsSection::default()
-            },
-            ..Overrides::default()
         };
 
         let settings = file.settings(&overrides).unwrap();
 
-        assert_eq!(settings.listen, "127.0.0.3:9000".parse().unwrap());
         assert_eq!(settings.gateway.name, name("office"));
         assert_eq!(settings.gateway.upstream.host, "proxy.example.test");
         assert_eq!(settings.gateway.upstream.port, 9443);
@@ -1370,7 +1239,7 @@ port = 443
         );
         assert_eq!(settings.device_key.preferred, Backend::Software);
         assert!(settings.device_key.software_fallback_on_first_create);
-        assert_eq!(settings.limits.idle_timeout_seconds, 5);
+        assert_eq!(settings.limits.idle_timeout_seconds, 60);
         assert_eq!(settings.limits.max_concurrent_tunnels, 8);
     }
 
@@ -1411,7 +1280,6 @@ port = 443
         assert_eq!(settings.gateway.name.as_str(), "command-line");
         assert_eq!(settings.gateway.upstream.host, "cli.example.test");
         assert_eq!(settings.gateway.upstream.server_name, "cli.example.test");
-        assert_eq!(settings.listen, crate::proxy::DEFAULT_LISTEN);
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -1484,7 +1352,6 @@ port = 443
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let file = ConfigFile::load(&path).unwrap();
         let settings = file.settings(&Overrides::default()).unwrap();
-        assert!(settings.listen.ip().is_loopback());
         assert_eq!(settings.gateway.name, name("default"));
         assert!(
             settings.gateway.upstream.host.ends_with(".invalid"),

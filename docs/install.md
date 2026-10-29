@@ -134,8 +134,8 @@ elevated installer account. Windows Installer runs a per-user package as the ins
 
 The `gateinto://` handler, the device key (a per-user CNG key) and the agent (a per-user named
 pipe) all belong to one Windows user. A machine-wide install would need an `HKLM` handler that
-competes with per-user ones, and would run its custom actions as `SYSTEM`. A machine service
-mode that keeps a device session running with no user logged on is not implemented.
+competes with per-user ones, and would run its custom actions as `SYSTEM`. There is no machine
+service mode and no shared local proxy; sessions run only for a logged-on user.
 
 ## First run: `gateinto setup`
 
@@ -182,12 +182,12 @@ uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe
 
 `device-key` is `created` or `reused`. `setup` exits nonzero on any error.
 
-Commands that run with logging (`agent`, `proxy`, `session browser`, `check-upstream`) log at
+Commands that run with logging (`agent`, `session browser`, `check-upstream`) log at
 `info` which default config file they loaded.
 
 `setup` is the only step besides `key init` that creates a key. `key init` refuses the same
 service accounts as `setup`. `gateinto agent`,
-`gateinto open` (and with it a clicked `gateinto://` link), `proxy` and `check-upstream`
+`gateinto open` (and with it a clicked `gateinto://` link), `session browser` and `check-upstream`
 only open the device key. If it is missing, a gateway with `client_certificate = "required"`
 fails with "no device key named …; run `gateinto setup` to create it". The agent can be started
 by the logon autostart or by a web page's link, with no console to show what was created or why
@@ -226,7 +226,6 @@ config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
 gateway: office: proxy.example.com:443 (config)
 linked-gateways: C:\Users\me\AppData\Roaming\Gateinto\gateways
 gateway: corp: proxy.corp.example:443 (linked)
-device-session: gateway office, listen 127.0.0.1:18736
 agent: running
 session: 2 browser office 127.0.0.1:50123
 uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1"
