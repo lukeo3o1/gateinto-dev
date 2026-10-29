@@ -13,13 +13,12 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use super::device::system;
-use crate::credentials::Reveal;
 use crate::demo;
 use crate::device::{self, Probe};
 use crate::gateways;
 use crate::message;
 use crate::settings;
-use crate::worker::{Command, Loaded, Mailbox, Prompt, Update, serve, serve_with, stalled};
+use crate::worker::{Command, Loaded, Mail, Mailbox, serve, serve_with, stalled};
 
 pub const WM_AGENT: u32 = message::AGENT;
 const FAREWELL: Duration = Duration::from_secs(2);
@@ -141,16 +140,8 @@ impl Link {
         let _ = self.commands.send(command);
     }
 
-    pub fn take(&self) -> Option<Update> {
-        open(&self.mailbox).take()
-    }
-
-    pub fn take_reveal(&self) -> Option<Reveal> {
-        open(&self.mailbox).take_reveal()
-    }
-
-    pub fn take_prompt(&self) -> Option<Prompt> {
-        open(&self.mailbox).take_prompt()
+    pub fn take_all(&self) -> Mail {
+        open(&self.mailbox).take_all()
     }
 }
 

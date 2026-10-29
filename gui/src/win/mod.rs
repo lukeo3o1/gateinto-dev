@@ -1113,16 +1113,19 @@ fn on_paint(hwnd: HWND) {
 }
 
 fn on_agent(hwnd: HWND) {
-    if let Some(Some(prompt)) = with_app(hwnd, |app| app.link.take_prompt()) {
+    let Some(mail) = with_app(hwnd, |app| app.link.take_all()) else {
+        return;
+    };
+    if let Some(prompt) = mail.prompt {
         approval::prompt(hwnd, prompt);
     }
+    let (reveal, update) = (mail.reveal, mail.update);
     let delivered = with_app(hwnd, |app| {
-        let reveal = app.link.take_reveal();
         let revealed = reveal.is_some();
         if let Some(reveal) = reveal {
             credentials::deliver(app.dialog.as_mut(), reveal);
         }
-        let Some(update) = app.link.take() else {
+        let Some(update) = update else {
             if revealed {
                 app.retarget();
                 app.invalidate();

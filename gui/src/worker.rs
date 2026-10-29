@@ -91,62 +91,58 @@ pub struct Update {
     pub log: Journal,
 }
 
+#[derive(Debug, Default)]
+pub struct Mail {
+    pub update: Option<Update>,
+    pub reveal: Option<Reveal>,
+    pub prompt: Option<Prompt>,
+}
+
 #[derive(Debug)]
 pub struct Mailbox {
     open: bool,
-    update: Option<Update>,
-    reveal: Option<Reveal>,
-    prompt: Option<Prompt>,
+    mail: Mail,
 }
 
 impl Default for Mailbox {
     fn default() -> Self {
         Self {
             open: true,
-            update: None,
-            reveal: None,
-            prompt: None,
+            mail: Mail::default(),
         }
     }
 }
 
 impl Mailbox {
-    fn empty(&self) -> bool {
-        self.update.is_none() && self.reveal.is_none() && self.prompt.is_none()
+    fn deliver(&mut self, put: impl FnOnce(&mut Mail)) -> bool {
+        if !self.open {
+            return false;
+        }
+        let m = &self.mail;
+        let empty = m.update.is_none() && m.reveal.is_none() && m.prompt.is_none();
+        put(&mut self.mail);
+        empty
     }
 
     pub fn put(&mut self, update: Update) -> bool {
-        let empty = self.empty();
-        self.open && self.update.replace(update).is_none() && empty
+        self.deliver(|mail| mail.update = Some(update))
     }
 
     pub fn put_reveal(&mut self, reveal: Reveal) -> bool {
-        let empty = self.empty();
-        self.open && self.reveal.replace(reveal).is_none() && empty
+        self.deliver(|mail| mail.reveal = Some(reveal))
     }
 
     pub fn put_prompt(&mut self, prompt: Prompt) -> bool {
-        let empty = self.empty();
-        self.open && self.prompt.replace(prompt).is_none() && empty
+        self.deliver(|mail| mail.prompt = Some(prompt))
     }
 
-    pub fn take(&mut self) -> Option<Update> {
-        self.update.take()
-    }
-
-    pub fn take_reveal(&mut self) -> Option<Reveal> {
-        self.reveal.take()
-    }
-
-    pub fn take_prompt(&mut self) -> Option<Prompt> {
-        self.prompt.take()
+    pub fn take_all(&mut self) -> Mail {
+        std::mem::take(&mut self.mail)
     }
 
     pub fn close(&mut self) {
         self.open = false;
-        self.update = None;
-        self.reveal = None;
-        self.prompt = None;
+        self.mail = Mail::default();
     }
 }
 
@@ -948,8 +944,8 @@ mod tests {
         let mut mailbox = Mailbox::default();
         assert!(mailbox.put(polled(None)));
         assert!(!mailbox.put(polled(said("busy"))));
-        assert_eq!(mailbox.take(), Some(polled(said("busy"))));
-        assert_eq!(mailbox.take(), None);
+        assert_eq!(mailbox.take_all().update, Some(polled(said("busy"))));
+        assert_eq!(mailbox.take_all().update, None);
         assert!(mailbox.put(polled(None)));
     }
 
@@ -957,10 +953,16 @@ mod tests {
     fn a_closed_mailbox_drops_what_it_holds_and_what_arrives() {
         let mut mailbox = Mailbox::default();
         mailbox.put(polled(None));
+        mailbox.put_reveal(revealed(3));
+        mailbox.put_prompt(Prompt::Ask(1, proposed()));
         mailbox.close();
-        assert_eq!(mailbox.take(), None);
         assert!(!mailbox.put(polled(None)));
-        assert_eq!(mailbox.take(), None);
+        assert!(!mailbox.put_reveal(revealed(4)));
+        assert!(!mailbox.put_prompt(Prompt::Ask(2, proposed())));
+        let mail = mailbox.take_all();
+        assert_eq!(mail.update, None);
+        assert!(mail.reveal.is_none());
+        assert_eq!(mail.prompt, None);
     }
 
     fn revealed(id: u64) -> Reveal {
@@ -972,51 +974,32 @@ mod tests {
     }
 
     #[test]
-    fn a_mailbox_holds_one_reveal_apart_from_updates_and_shares_one_notice() {
+    fn a_mailbox_keeps_the_latest_of_each_kind_and_shares_one_notice() {
         let mut mailbox = Mailbox::default();
         assert!(mailbox.put_reveal(revealed(3)));
         assert!(!mailbox.put(polled(None)));
         assert!(!mailbox.put_reveal(revealed(4)));
-        assert_eq!(mailbox.take_reveal().map(|reveal| reveal.id), Some(4));
-        assert_eq!(mailbox.take_reveal().map(|reveal| reveal.id), None);
-        assert_eq!(mailbox.take(), Some(polled(None)));
+        assert!(!mailbox.put_prompt(Prompt::Ask(1, proposed())));
+        assert!(!mailbox.put_prompt(Prompt::Dismiss(1)));
+
+        let mail = mailbox.take_all();
+        assert_eq!(mail.update, Some(polled(None)));
+        assert_eq!(mail.reveal.map(|reveal| reveal.id), Some(4));
+        assert_eq!(mail.prompt, Some(Prompt::Dismiss(1)));
+    }
+
+    #[test]
+    fn whatever_arrives_after_a_drain_asks_for_a_new_notice() {
+        let mut mailbox = Mailbox::default();
         assert!(mailbox.put(polled(None)));
-        assert!(!mailbox.put_reveal(revealed(5)));
-    }
-
-    #[test]
-    fn a_closed_mailbox_drops_a_reveal_and_refuses_new_ones() {
-        let mut mailbox = Mailbox::default();
-        mailbox.put_reveal(revealed(3));
-        mailbox.close();
-        assert!(mailbox.take_reveal().is_none());
-        assert!(!mailbox.put_reveal(revealed(3)));
-        assert!(mailbox.take_reveal().is_none());
-    }
-
-    #[test]
-    fn a_mailbox_keeps_the_latest_prompt_and_shares_one_notice() {
-        let mut mailbox = Mailbox::default();
+        mailbox.take_all();
         assert!(mailbox.put_prompt(Prompt::Ask(1, proposed())));
         assert!(!mailbox.put(polled(None)));
-        assert!(!mailbox.put_reveal(revealed(3)));
-        assert!(!mailbox.put_prompt(Prompt::Dismiss(1)));
-        assert_eq!(mailbox.take_prompt(), Some(Prompt::Dismiss(1)));
-        assert_eq!(mailbox.take_prompt(), None);
-        assert_eq!(mailbox.take(), Some(polled(None)));
-        assert!(mailbox.take_reveal().is_some());
-        assert!(mailbox.put(polled(None)));
-        assert!(!mailbox.put_prompt(Prompt::Ask(2, proposed())));
-    }
 
-    #[test]
-    fn a_closed_mailbox_drops_a_prompt_and_refuses_new_ones() {
-        let mut mailbox = Mailbox::default();
-        mailbox.put_prompt(Prompt::Ask(1, proposed()));
-        mailbox.close();
-        assert_eq!(mailbox.take_prompt(), None);
-        assert!(!mailbox.put_prompt(Prompt::Ask(2, proposed())));
-        assert_eq!(mailbox.take_prompt(), None);
+        let mail = mailbox.take_all();
+        assert_eq!(mail.prompt, Some(Prompt::Ask(1, proposed())));
+        assert_eq!(mail.update, Some(polled(None)));
+        assert!(mailbox.put_reveal(revealed(3)));
     }
 
     #[test]
