@@ -80,7 +80,15 @@ fn normalized(path: &str) -> impl Iterator<Item = char> + '_ {
         .chars()
         .chain(rest.chars())
         .map(|c| if c == '/' { '\\' } else { c })
-        .flat_map(char::to_uppercase)
+        .map(simple_uppercase)
+}
+
+fn simple_uppercase(c: char) -> char {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(one), None) => one,
+        _ => c,
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +253,22 @@ mod tests {
         assert!(same_image(
             r"C:\Users\Émile\gateinto-gui.exe",
             r"C:\Users\émile\gateinto-gui.exe"
+        ));
+    }
+
+    #[test]
+    fn letters_that_do_not_uppercase_to_one_letter_are_kept() {
+        assert!(!same_image(
+            r"C:\Users\Strauß\gateinto-gui.exe",
+            r"C:\Users\STRAUSS\gateinto-gui.exe"
+        ));
+        assert!(!same_image(
+            r"C:\Users\ﬁle\gateinto-gui.exe",
+            r"C:\Users\FILE\gateinto-gui.exe"
+        ));
+        assert!(same_image(
+            r"C:\Users\Strauß\gateinto-gui.exe",
+            r"C:\Users\STRAUß\gateinto-gui.exe"
         ));
     }
 
