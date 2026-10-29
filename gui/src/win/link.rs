@@ -136,8 +136,8 @@ impl Link {
         }
     }
 
-    pub fn send(&self, command: Command) {
-        let _ = self.commands.send(command);
+    pub fn send(&self, command: Command) -> bool {
+        self.commands.send(command).is_ok()
     }
 
     pub fn take_all(&self) -> Mail {

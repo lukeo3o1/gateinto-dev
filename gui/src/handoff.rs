@@ -23,12 +23,8 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn uri(&self) -> &str {
-        &self.uri
-    }
-
-    pub fn launch(&self) -> &LaunchRequest {
-        &self.launch
+    pub fn into_launch(self) -> LaunchRequest {
+        self.launch
     }
 
     pub fn payload(&self) -> &[u8] {
@@ -114,8 +110,8 @@ mod tests {
             panic!("the link was not opened");
         };
 
-        assert_eq!(link.uri(), LINK);
-        assert_eq!(*link.launch(), LINK.parse().unwrap());
+        assert_eq!(link.payload(), LINK.as_bytes());
+        assert_eq!(link.into_launch(), LINK.parse().unwrap());
     }
 
     #[test]

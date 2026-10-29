@@ -13,19 +13,25 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
+use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, FindWindowExW, GetWindowThreadProcessId, PostMessageW,
+    SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_COPYDATA,
 };
 use windows_sys::core::PWSTR;
 
 use super::sys::wide;
+use crate::handoff::{self, Link};
 use crate::{instance, message};
 
 pub const WM_REVEAL: u32 = message::REVEAL;
+
+const FORWARD_TIMEOUT_MS: u32 = 5_000;
+const LONGEST_PATH: usize = 32_768;
 
 pub struct Guard(HANDLE);
 
@@ -150,41 +156,104 @@ fn sid_string(sid: PSID) -> Option<String> {
 
 pub fn activate(demo: bool, sid: &str) {
     let class = wide(instance::class(demo));
-    for attempt in 0..instance::ATTEMPTS {
-        if attempt > 0 {
-            thread::sleep(instance::PAUSE);
-        }
-        if let Some((hwnd, pid)) = find(&class, sid) {
-            unsafe {
-                AllowSetForegroundWindow(pid);
-                PostMessageW(hwnd, WM_REVEAL, 0, 0);
-            }
-            return;
+    let same_user = |process| process_sid(process).as_deref() == Some(sid);
+    if let Some((hwnd, pid)) = wait_for(&class, same_user) {
+        unsafe {
+            AllowSetForegroundWindow(pid);
+            PostMessageW(hwnd, WM_REVEAL, 0, 0);
         }
     }
 }
 
-fn find(class: &[u16], sid: &str) -> Option<(HWND, u32)> {
+pub fn forward(sid: &str, link: &Link) -> bool {
+    let Some(image) = image_of(unsafe { GetCurrentProcess() }) else {
+        return false;
+    };
+    let class = wide(instance::class(false));
+    let same_app = |process| {
+        process_sid(process).as_deref() == Some(sid)
+            && image_of(process).is_some_and(|other| handoff::same_image(&image, &other))
+    };
+    let Some((hwnd, pid)) = wait_for(&class, same_app) else {
+        return false;
+    };
+    let payload = link.payload();
+    let data = COPYDATASTRUCT {
+        dwData: handoff::COPYDATA,
+        cbData: payload.len() as u32,
+        lpData: payload.as_ptr().cast_mut().cast(),
+    };
+    let mut result = 0;
+    let sent = unsafe {
+        AllowSetForegroundWindow(pid);
+        SendMessageTimeoutW(
+            hwnd,
+            WM_COPYDATA,
+            0,
+            &raw const data as isize,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            FORWARD_TIMEOUT_MS,
+            &mut result,
+        )
+    };
+    sent != 0 && result == 1
+}
+
+fn wait_for(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32)> {
+    for attempt in 0..instance::ATTEMPTS {
+        if attempt > 0 {
+            thread::sleep(instance::PAUSE);
+        }
+        if let Some(found) = find(class, &accept) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32)> {
     let mut hwnd = null_mut();
     loop {
         hwnd = unsafe { FindWindowExW(null_mut(), hwnd, class.as_ptr(), null()) };
         if hwnd.is_null() {
             return None;
         }
-        let mut pid = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        if pid != 0 && process_user(pid).as_deref() == Some(sid) {
+        let pid = window_process(hwnd);
+        if pid != 0
+            && with_process(pid, |process| {
+                accept(process) && window_process(hwnd) == pid
+            })
+        {
             return Some((hwnd, pid));
         }
     }
 }
 
-fn process_user(pid: u32) -> Option<String> {
+fn window_process(hwnd: HWND) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    pid
+}
+
+// The handle keeps the process id from being reused while the window is checked.
+fn with_process(pid: u32, check: impl FnOnce(HANDLE) -> bool) -> bool {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
+        return false;
+    }
+    let accepted = check(process);
+    unsafe { CloseHandle(process) };
+    accepted
+}
+
+fn image_of(process: HANDLE) -> Option<String> {
+    let mut buffer = vec![0u16; LONGEST_PATH];
+    let mut size = buffer.len() as u32;
+    let read = unsafe {
+        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut size)
+    };
+    if read == 0 {
         return None;
     }
-    let sid = process_sid(process);
-    unsafe { CloseHandle(process) };
-    sid
+    String::from_utf16(&buffer[..size as usize]).ok()
 }

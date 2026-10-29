@@ -11,6 +11,7 @@ mod text;
 mod tips;
 mod tray;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
@@ -19,6 +20,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
 };
+use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -36,17 +38,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCDESTROY,
-    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
-    WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOMMAND, WM_TIMER,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
-use gateinto::link::store;
+use gateinto::link::{handoff as reply, store};
+use gateinto::uri::LaunchRequest;
 
 use self::approval::Approval;
 use self::icon::Owned;
@@ -57,6 +60,7 @@ use crate::demo;
 use crate::focus::{self, Focus, Stop};
 use crate::frame::Frame;
 use crate::gateways::{self, Launches};
+use crate::handoff;
 use crate::hit::{Zone, hit};
 use crate::i18n::{self, Note, Text, tr};
 use crate::layout::{Layout, Rect};
@@ -1585,6 +1589,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             tray::open_main(hwnd);
             Some(0)
         }
+        WM_COPYDATA => Some(on_copy_data(hwnd, lp)),
         _ if tray::taskbar_created(msg) => {
             tray::on_taskbar_created(hwnd);
             Some(0)
@@ -1606,6 +1611,43 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         _ => None,
     };
     handled.unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, msg, wp, lp) })
+}
+
+fn on_copy_data(hwnd: HWND, lp: LPARAM) -> LRESULT {
+    if lp == 0 {
+        return 0;
+    }
+    let data = unsafe { &*(lp as *const COPYDATASTRUCT) };
+    let len = data.cbData as usize;
+    if data.dwData != handoff::COPYDATA || len > handoff::CAP || data.lpData.is_null() {
+        return 0;
+    }
+    let payload = unsafe { std::slice::from_raw_parts(data.lpData.cast::<u8>(), len) };
+    let opened = handoff::decode(data.dwData, payload)
+        .filter(|_| !demo::requested(std::env::args_os()))
+        .is_some_and(|launch| open_link(hwnd, launch));
+    LRESULT::from(opened)
+}
+
+fn open_link(hwnd: HWND, launch: LaunchRequest) -> bool {
+    let sent = with_app(hwnd, |app| app.link.send(Command::Link(launch))) == Some(true);
+    if sent {
+        tray::open_main(hwnd);
+    }
+    sent
+}
+
+fn answer(line: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
+fn give_up(linked: bool, message: Text) {
+    if linked {
+        answer(reply::REFUSED);
+    }
+    fail(message);
 }
 
 fn center_on_monitor(hwnd: HWND) {
@@ -1655,17 +1697,31 @@ fn fail(message: Text) {
 
 pub fn run() {
     let demo = demo::requested(std::env::args_os());
+    let link = match handoff::requested(std::env::args_os()) {
+        handoff::Start::Show => None,
+        handoff::Start::Open(link) => Some(link),
+        handoff::Start::Refused(message) => {
+            i18n::set(appearance::language().language(appearance::system_language()));
+            give_up(true, message);
+            return;
+        }
+    };
+    let linked = link.is_some();
     let _guard = match instance::start(demo) {
         Start::Alone(guard) => guard,
         Start::Second(sid) => {
-            instance::activate(demo, &sid);
+            match &link {
+                Some(link) if instance::forward(&sid, link) => answer(reply::HANDED),
+                Some(_) => answer(reply::REFUSED),
+                None => instance::activate(demo, &sid),
+            }
             return;
         }
     };
     sys::enable_dpi_awareness();
     i18n::set(appearance::language().language(appearance::system_language()));
     let Ok(gfx) = Graphics::new() else {
-        fail(Text::NoRendering);
+        give_up(linked, Text::NoRendering);
         return;
     };
     let mut gfx = Some(gfx);
@@ -1684,7 +1740,7 @@ pub fn run() {
         ..Default::default()
     };
     if unsafe { RegisterClassExW(&wc) } == 0 {
-        fail(Text::NoWindowClass);
+        give_up(linked, Text::NoWindowClass);
         return;
     }
     let hwnd = unsafe {
@@ -1704,7 +1760,7 @@ pub fn run() {
         )
     };
     if hwnd.is_null() {
-        fail(Text::NoWindow);
+        give_up(linked, Text::NoWindow);
         return;
     }
     apply_theme(hwnd);
@@ -1712,6 +1768,13 @@ pub fn run() {
     unsafe { ShowWindow(hwnd, SW_SHOW) };
     tray::install(hwnd, instance, demo);
     approval::install(hwnd, instance, demo);
+    if let Some(link) = link {
+        if open_link(hwnd, link.into_launch()) {
+            answer(reply::HANDED);
+        } else {
+            answer(reply::REFUSED);
+        }
+    }
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {

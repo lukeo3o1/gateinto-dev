@@ -32,13 +32,6 @@ pub enum Command {
     Probe,
     Watch(bool),
     Credentials(u64, u64),
-    #[cfg_attr(
-        all(windows, not(test)),
-        expect(
-            dead_code,
-            reason = "links reach the window with the handoff from gateinto open"
-        )
-    )]
     Link(LaunchRequest),
     Answer(u64, Answer),
 }
