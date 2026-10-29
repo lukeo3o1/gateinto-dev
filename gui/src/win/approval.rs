@@ -8,7 +8,7 @@ use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PA
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, VK_ESCAPE, VK_RETURN, VK_SPACE,
+    GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, VK_ESCAPE, VK_RETURN, VK_SPACE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos,
@@ -189,10 +189,17 @@ fn close(main: HWND) {
         app.approval.hwnd
     });
     if let Some(hwnd) = hwnd.filter(|hwnd| !hwnd.is_null()) {
+        release_capture(hwnd);
         unsafe {
             KillTimer(hwnd, TIMER);
             ShowWindow(hwnd, SW_HIDE);
         }
+    }
+}
+
+fn release_capture(hwnd: HWND) {
+    if unsafe { GetCapture() } == hwnd {
+        unsafe { ReleaseCapture() };
     }
 }
 
@@ -262,6 +269,9 @@ fn mouse(hwnd: HWND, main: HWND, msg: u32, lp: LPARAM) {
         Some((pressed, answer))
     });
     let Some(Some((pressed, answered))) = outcome else {
+        if msg == WM_LBUTTONUP {
+            release_capture(hwnd);
+        }
         return;
     };
     match msg {
@@ -269,9 +279,7 @@ fn mouse(hwnd: HWND, main: HWND, msg: u32, lp: LPARAM) {
         WM_LBUTTONDOWN if pressed => {
             unsafe { SetCapture(hwnd) };
         }
-        WM_LBUTTONUP => {
-            unsafe { ReleaseCapture() };
-        }
+        WM_LBUTTONUP => release_capture(hwnd),
         _ => {}
     }
     if let Some(answered) = answered {
