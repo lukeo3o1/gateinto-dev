@@ -3,6 +3,7 @@
 
 mod add;
 mod agent;
+mod approval;
 mod board;
 mod credentials;
 mod demo;
@@ -11,6 +12,7 @@ mod focus;
 mod fonts;
 mod frame;
 mod gateways;
+mod handoff;
 mod hit;
 mod i18n;
 mod icons;

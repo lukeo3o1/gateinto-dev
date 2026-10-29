@@ -1,5 +1,7 @@
 use std::io;
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use gateinto::browser::find_browser;
 use gateinto::config;
@@ -11,19 +13,20 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use super::device::system;
-use crate::credentials::Reveal;
 use crate::demo;
 use crate::device::{self, Probe};
 use crate::gateways;
 use crate::message;
 use crate::settings;
-use crate::worker::{Command, Loaded, Mailbox, Update, serve, serve_with, stalled};
+use crate::worker::{Command, Loaded, Mail, Mailbox, serve, serve_with, stalled};
 
 pub const WM_AGENT: u32 = message::AGENT;
+const FAREWELL: Duration = Duration::from_secs(2);
 
 pub struct Link {
     commands: UnboundedSender<Command>,
     mailbox: Arc<Mutex<Mailbox>>,
+    finished: Receiver<()>,
 }
 
 fn open(mailbox: &Mutex<Mailbox>) -> MutexGuard<'_, Mailbox> {
@@ -64,9 +67,11 @@ impl Link {
 
     fn spawn(hwnd: HWND, demo: bool) -> Self {
         let (commands, inbox) = unbounded_channel();
+        let (done, finished) = channel::<()>();
         let mailbox = Arc::new(Mutex::new(Mailbox::default()));
         let shared = Arc::clone(&mailbox);
         let secrets = Arc::clone(&mailbox);
+        let prompts = Arc::clone(&mailbox);
         let window = hwnd as isize;
         let deliver = move |update| {
             if open(&shared).put(update) {
@@ -78,9 +83,15 @@ impl Link {
                 unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
             }
         };
+        let prompt = move |prompt| {
+            if open(&prompts).put_prompt(prompt) {
+                unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
+            }
+        };
         let _ = std::thread::Builder::new()
             .name("agent link".to_owned())
             .spawn(move || {
+                let _done = done;
                 let runtime = match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
@@ -99,6 +110,7 @@ impl Link {
                         demo::probe,
                         deliver,
                         reveal,
+                        prompt,
                     ));
                     return;
                 }
@@ -115,26 +127,28 @@ impl Link {
                         }
                     }
                 };
-                runtime.block_on(serve(inbox, send, load, probe, deliver, reveal));
+                runtime.block_on(serve(inbox, send, load, probe, deliver, reveal, prompt));
             });
-        Self { commands, mailbox }
+        Self {
+            commands,
+            mailbox,
+            finished,
+        }
     }
 
-    pub fn send(&self, command: Command) {
-        let _ = self.commands.send(command);
+    pub fn send(&self, command: Command) -> bool {
+        self.commands.send(command).is_ok()
     }
 
-    pub fn take(&self) -> Option<Update> {
-        open(&self.mailbox).take()
-    }
-
-    pub fn take_reveal(&self) -> Option<Reveal> {
-        open(&self.mailbox).take_reveal()
+    pub fn take_all(&self) -> Mail {
+        open(&self.mailbox).take_all()
     }
 }
 
 impl Drop for Link {
     fn drop(&mut self) {
         open(&self.mailbox).close();
+        self.commands = unbounded_channel().0;
+        let _ = self.finished.recv_timeout(FAREWELL);
     }
 }

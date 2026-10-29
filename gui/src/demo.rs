@@ -190,10 +190,10 @@ pub fn answer(request: Request, now: u64) -> Response {
 
 pub fn refusal(command: &Command) -> Option<Text> {
     match command {
-        Command::Launch(_) => Some(NOT_STARTED),
+        Command::Launch(_) | Command::Link(_) => Some(NOT_STARTED),
         Command::Close(_) => Some(NOT_REVOKED),
         Command::Stop => Some(NOT_STOPPED),
-        Command::Probe | Command::Watch(_) | Command::Credentials(..) => None,
+        Command::Probe | Command::Watch(_) | Command::Credentials(..) | Command::Answer(..) => None,
     }
 }
 
@@ -352,6 +352,11 @@ mod tests {
         assert_eq!(refusal(&launch), Some(NOT_STARTED));
         assert_eq!(refusal(&Command::Close(3)), Some(NOT_REVOKED));
         assert_eq!(refusal(&Command::Stop), Some(NOT_STOPPED));
+        let link = "gateinto://connect?profile=newco&gateway=proxy.newco.example";
+        assert_eq!(
+            refusal(&Command::Link(link.parse().unwrap())),
+            Some(NOT_STARTED)
+        );
     }
 
     #[test]
@@ -429,6 +434,7 @@ mod tests {
             probe,
             |u| updates.borrow_mut().push(u),
             |r| reveals.borrow_mut().push(reveal(r)),
+            |_| panic!("the demo prompted for a link"),
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         let updates = updates.borrow();

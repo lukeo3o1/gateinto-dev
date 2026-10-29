@@ -2,6 +2,9 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt;
 
+use gateinto::link::{Confirmation, Origin};
+use gateinto::proxy::Route;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Language {
     #[default]
@@ -307,9 +310,17 @@ table! {
     NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";
     NoWindowClass => "Gateinto could not register its window class.", "Gateinto 無法登錄視窗類別。";
     NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
+    OpenRefused => "Gateinto could not open this link.", "Gateinto 無法開啟此連結。";
     LanguageRow => "Language", "語言";
     LanguageFailed => "Could not save the language setting", "無法儲存語言設定";
     AgentNotRunning => "no agent is running", "沒有正在執行的代理程式";
+    LinkAgentNotRunning => "the agent is not running; start it, then open the link again", "代理程式未在執行；請先啟動它，再重新開啟連結";
+    LinkUnnamed => "the link names no gateway to confirm", "連結未指定要確認的閘道";
+    LinkNotEchoed => "the agent asked to confirm another gateway than the link names; nothing was stored", "代理程式要求確認的閘道與連結指定的不同；未儲存任何項目";
+    ApprovalTitle => "Confirm gateway", "確認閘道";
+    Allow => "Allow", "允許";
+    Deny => "Deny", "拒絕";
+    AllowIn => "Allow ({0})", "允許（{0}）";
     AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
     AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
     Confirmation => "the agent asked to confirm this gateway; open its gateinto:// link to confirm it", "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認";
@@ -396,6 +407,41 @@ impl fmt::Display for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.get())
     }
+}
+
+pub fn confirmation_notice(confirmation: &Confirmation) -> String {
+    match current() {
+        Language::English => confirmation.message(),
+        Language::Chinese => chinese_notice(confirmation),
+    }
+}
+
+fn chinese_notice(confirmation: &Confirmation) -> String {
+    let local = if confirmation.gateway.is_local() {
+        "\n此位址位於您的電腦或區域網路上。"
+    } else {
+        ""
+    };
+    let portal = confirmation
+        .portal
+        .as_ref()
+        .and_then(Origin::of)
+        .map_or_else(|| "無".to_owned(), |origin| origin.to_string());
+    let traffic = match confirmation.route {
+        Route::Gateway => "隔離瀏覽器的所有流量",
+        Route::Mixed => {
+            "混合模式下轉送給它的流量。其他連線會直接使用您的網路，因而暴露您的 IP 位址與本機 \
+             DNS 查詢"
+        }
+    };
+    format!(
+        "有網站要求將閘道「{}」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+         閘道：{}{local}\n\
+         入口網站：{portal}\n\n\
+         閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及{traffic}。\
+         只有在您信任營運此閘道的組織時才允許。",
+        confirmation.profile, confirmation.gateway,
+    )
 }
 
 #[cfg(test)]
@@ -527,5 +573,110 @@ mod tests {
         assert_eq!(from_tags(&names(&list)), Some(Language::Chinese));
         assert!(names(&[0, 0]).is_empty());
         assert_eq!(from_tags(&names(&[])), None);
+    }
+
+    fn confirmations() -> Vec<Confirmation> {
+        let mut all = Vec::new();
+        for gateway in [
+            "proxy.newco.example",
+            "proxy.newco.example:8443",
+            "192.168.1.10",
+            "[fd00::1]:8443",
+        ] {
+            for portal in [
+                None,
+                Some("https://portal.newco.example/home"),
+                Some("https://portal.newco.example:8443/app?x=1"),
+            ] {
+                for route in [Route::Gateway, Route::Mixed] {
+                    all.push(Confirmation {
+                        route,
+                        profile: "newco".parse().unwrap(),
+                        gateway: gateway.parse().unwrap(),
+                        portal: portal.map(|portal| portal.parse().unwrap()),
+                    });
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn the_chinese_confirmation_notice_names_every_field_the_english_one_does() {
+        for confirmation in confirmations() {
+            let english = confirmation.message();
+            let chinese = chinese_notice(&confirmation);
+            let mut fields = vec![
+                format!("「{}」", confirmation.profile),
+                format!("閘道：{}", confirmation.gateway),
+            ];
+            match &confirmation.portal {
+                Some(_) => fields.push(format!("入口網站：{}", confirmation.portal_origin())),
+                None => fields.push("入口網站：無".to_owned()),
+            }
+            for field in [
+                confirmation.profile.to_string(),
+                confirmation.gateway.to_string(),
+                confirmation.portal_origin(),
+            ] {
+                assert!(english.contains(&field), "{field} in {english}");
+            }
+            for field in fields {
+                assert!(chinese.contains(&field), "{field} in {chinese}");
+            }
+            assert_eq!(
+                english.contains(gateinto::link::LOCAL_ADDRESS),
+                chinese.contains("此位址位於您的電腦或區域網路上。"),
+                "{chinese}"
+            );
+            for part in [
+                "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）",
+                "只有在您信任營運此閘道的組織時才允許。",
+            ] {
+                assert!(chinese.contains(part), "{part} in {chinese}");
+            }
+            assert!(!chinese.contains("none"), "{chinese}");
+        }
+    }
+
+    #[test]
+    fn the_chinese_notice_warns_about_direct_connections_only_in_mixed_mode() {
+        for confirmation in confirmations() {
+            let english = confirmation.message();
+            let chinese = chinese_notice(&confirmation);
+            let mixed = confirmation.route == Route::Mixed;
+            assert_eq!(
+                english.contains("exposing your IP address and local DNS lookups"),
+                mixed
+            );
+            assert_eq!(
+                chinese.contains(
+                    "混合模式下轉送給它的流量。其他連線會直接使用您的網路，因而暴露您的 IP 位址與本機 DNS 查詢"
+                ),
+                mixed,
+                "{chinese}"
+            );
+            assert_eq!(
+                chinese.contains("隔離瀏覽器的所有流量"),
+                !mixed,
+                "{chinese}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_confirmation_notice_follows_the_language() {
+        let confirmation = &confirmations()[1];
+        assert_eq!(confirmation_notice(confirmation), confirmation.message());
+        let _zh = speaking(Language::Chinese);
+        assert_eq!(
+            confirmation_notice(confirmation),
+            "有網站要求將閘道「newco」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+             閘道：proxy.newco.example:443\n\
+             入口網站：無\n\n\
+             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及混合模式下轉送給它的流量。\
+             其他連線會直接使用您的網路，因而暴露您的 IP 位址與本機 DNS 查詢。\
+             只有在您信任營運此閘道的組織時才允許。"
+        );
     }
 }

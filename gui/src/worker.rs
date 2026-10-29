@@ -1,14 +1,19 @@
+use std::cell::RefCell;
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use gateinto::config::{GatewayName, Gateways};
 use gateinto::ipc::{self, Request, RequestError, Response};
-use gateinto::link::Known;
+use gateinto::link::approval::{ApprovalError, settle};
+use gateinto::link::{Confirmation, Known};
 use gateinto::sessions::SessionId;
 use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::oneshot;
 
 use crate::agent::AgentState;
+use crate::approval::{self, Answer, Desk};
 use crate::credentials::{self, Reveal};
 use crate::device::{KeyState, Probe, System};
 use crate::i18n::{Note, Text};
@@ -27,6 +32,14 @@ pub enum Command {
     Probe,
     Watch(bool),
     Credentials(u64, u64),
+    Link(LaunchRequest),
+    Answer(u64, Answer),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prompt {
+    Ask(u64, Confirmation),
+    Dismiss(u64),
 }
 
 impl Command {
@@ -44,6 +57,9 @@ impl Command {
             }
             Command::Credentials(..) => {
                 return Err("credentials are revealed apart from commands".to_owned());
+            }
+            Command::Link(_) | Command::Answer(..) => {
+                return Err("links are settled apart from commands".to_owned());
             }
         })
     }
@@ -68,44 +84,58 @@ pub struct Update {
     pub log: Journal,
 }
 
+#[derive(Debug, Default)]
+pub struct Mail {
+    pub update: Option<Update>,
+    pub reveal: Option<Reveal>,
+    pub prompt: Option<Prompt>,
+}
+
 #[derive(Debug)]
 pub struct Mailbox {
     open: bool,
-    update: Option<Update>,
-    reveal: Option<Reveal>,
+    mail: Mail,
 }
 
 impl Default for Mailbox {
     fn default() -> Self {
         Self {
             open: true,
-            update: None,
-            reveal: None,
+            mail: Mail::default(),
         }
     }
 }
 
 impl Mailbox {
+    fn deliver(&mut self, put: impl FnOnce(&mut Mail)) -> bool {
+        if !self.open {
+            return false;
+        }
+        let m = &self.mail;
+        let empty = m.update.is_none() && m.reveal.is_none() && m.prompt.is_none();
+        put(&mut self.mail);
+        empty
+    }
+
     pub fn put(&mut self, update: Update) -> bool {
-        self.open && self.update.replace(update).is_none() && self.reveal.is_none()
+        self.deliver(|mail| mail.update = Some(update))
     }
 
     pub fn put_reveal(&mut self, reveal: Reveal) -> bool {
-        self.open && self.reveal.replace(reveal).is_none() && self.update.is_none()
+        self.deliver(|mail| mail.reveal = Some(reveal))
     }
 
-    pub fn take(&mut self) -> Option<Update> {
-        self.update.take()
+    pub fn put_prompt(&mut self, prompt: Prompt) -> bool {
+        self.deliver(|mail| mail.prompt = Some(prompt))
     }
 
-    pub fn take_reveal(&mut self) -> Option<Reveal> {
-        self.reveal.take()
+    pub fn take_all(&mut self) -> Mail {
+        std::mem::take(&mut self.mail)
     }
 
     pub fn close(&mut self) {
         self.open = false;
-        self.update = None;
-        self.reveal = None;
+        self.mail = Mail::default();
     }
 }
 
@@ -153,6 +183,68 @@ where
     failure(command, reply)
 }
 
+type Answers = RefCell<Desk<oneshot::Sender<Answer>>>;
+type Linking<'a> = Pin<Box<dyn Future<Output = Option<Note>> + 'a>>;
+
+fn unlinked(error: RequestError) -> Note {
+    match error {
+        RequestError::NotRunning => Text::LinkAgentNotRunning.into(),
+        error => crate::agent::note(error),
+    }
+}
+
+async fn link<F, R>(
+    launch: LaunchRequest,
+    send: &F,
+    ticket: u64,
+    answered: oneshot::Receiver<Answer>,
+    answers: &Answers,
+    prompt: &impl Fn(Prompt),
+) -> Option<Note>
+where
+    F: Fn(Request) -> R,
+    R: Future<Output = Result<Response, RequestError>>,
+{
+    let reply = match send(Request::Launch(launch.clone())).await {
+        Ok(reply) => reply,
+        Err(error) => return Some(unlinked(error)),
+    };
+    let ask = move |confirmation| async move {
+        if !answers.borrow().holds(ticket) {
+            return Ok(false);
+        }
+        prompt(Prompt::Ask(ticket, confirmation));
+        let answer = tokio::time::timeout(approval::TIMEOUT, answered).await;
+        answers.borrow_mut().take(ticket);
+        prompt(Prompt::Dismiss(ticket));
+        Ok(answer == Ok(Ok(Answer::Allow)))
+    };
+    match settle(&launch, reply, send, ask).await {
+        Ok(Response::Ok(_)) => None,
+        Ok(Response::Error(message)) => Some(Note::Agent(message)),
+        Err(error) => refused(error),
+    }
+}
+
+fn refused(error: ApprovalError) -> Option<Note> {
+    match error {
+        ApprovalError::Denied(_) => None,
+        ApprovalError::Request(error) => Some(unlinked(error)),
+        ApprovalError::MissingSelector | ApprovalError::UnnamedGateway => {
+            Some(Text::LinkUnnamed.into())
+        }
+        ApprovalError::NotEchoed => Some(Text::LinkNotEchoed.into()),
+        ApprovalError::Unasked(reason) => Some(Note::Agent(reason)),
+    }
+}
+
+async fn finish(linking: &mut Option<Linking<'_>>) -> Option<Note> {
+    match linking {
+        Some(linking) => linking.await,
+        None => std::future::pending().await,
+    }
+}
+
 pub async fn serve<F, R>(
     commands: UnboundedReceiver<Command>,
     send: F,
@@ -160,13 +252,28 @@ pub async fn serve<F, R>(
     probe: impl FnMut() -> Probe,
     deliver: impl FnMut(Update),
     reveal: impl FnMut(Reveal),
+    prompt: impl Fn(Prompt),
 ) where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
-    serve_with(|_| None, commands, send, load, probe, deliver, reveal).await;
+    serve_with(
+        |_| None,
+        commands,
+        send,
+        load,
+        probe,
+        deliver,
+        reveal,
+        prompt,
+    )
+    .await;
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each callback reaches a different part of the window"
+)]
 pub async fn serve_with<F, R>(
     refuse: impl Fn(&Command) -> Option<Text>,
     mut commands: UnboundedReceiver<Command>,
@@ -175,6 +282,7 @@ pub async fn serve_with<F, R>(
     mut probe: impl FnMut() -> Probe,
     mut deliver: impl FnMut(Update),
     mut reveal: impl FnMut(Reveal),
+    prompt: impl Fn(Prompt),
 ) where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
@@ -184,6 +292,8 @@ pub async fn serve_with<F, R>(
     let mut device = None;
     let mut watching = false;
     let mut journal = Journal::default();
+    let answers = Answers::default();
+    let mut linking: Option<Linking<'_>> = None;
     loop {
         let state = AgentState::from_list(send(Request::List).await);
         match state {
@@ -216,8 +326,21 @@ pub async fn serve_with<F, R>(
             log: journal.clone(),
         });
         tokio::select! {
+            biased;
             command = commands.recv() => {
-                let Some(command) = command else { return };
+                let Some(command) = command else {
+                    answers.borrow_mut().close();
+                    if let Some(superseded) = linking.take() {
+                        superseded.await;
+                    }
+                    return;
+                };
+                let launch = matches!(command, Command::Launch(_));
+                if let Some(text) = refuse(&command) {
+                    failure = Some(text.into());
+                    launched += u64::from(launch);
+                    continue;
+                }
                 match command {
                     Command::Probe => {
                         device = Some(probe());
@@ -235,14 +358,31 @@ pub async fn serve_with<F, R>(
                         reveal(credentials::reveal(id, ticket, reply));
                         continue;
                     }
+                    Command::Answer(ticket, answer) => {
+                        if let Some(answering) = answers.borrow_mut().take(ticket) {
+                            let _ = answering.send(answer);
+                        }
+                        continue;
+                    }
+                    Command::Link(launch) => {
+                        let (answering, answered) = oneshot::channel();
+                        let (ticket, _) = answers.borrow_mut().open(answering);
+                        if let Some(superseded) = linking.take() {
+                            failure = superseded.await;
+                        }
+                        linking = Some(Box::pin(link(
+                            launch, &send, ticket, answered, &answers, &prompt,
+                        )));
+                        continue;
+                    }
                     Command::Close(_) | Command::Stop | Command::Launch(_) => {}
                 }
-                let launch = matches!(command, Command::Launch(_));
-                failure = match refuse(&command) {
-                    Some(text) => Some(text.into()),
-                    None => run(command, &send).await,
-                };
+                failure = run(command, &send).await;
                 launched += u64::from(launch);
+            }
+            note = finish(&mut linking) => {
+                linking = None;
+                failure = note;
             }
             () = tokio::time::sleep(POLL) => {}
         }
@@ -310,6 +450,10 @@ mod tests {
         panic!("revealed credentials without being asked")
     }
 
+    fn unprompted(_: Prompt) {
+        panic!("prompted without a link")
+    }
+
     const PASSWORD: &str = "abcd-efgh-jkmn";
 
     fn revealer(
@@ -342,6 +486,7 @@ mod tests {
             unprobed,
             |u| updates.borrow_mut().push(u),
             |r| reveals.borrow_mut().push(r),
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
         assert_eq!(
@@ -390,6 +535,7 @@ mod tests {
             read,
             |u| updates.push(u.device),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
         assert_eq!(
@@ -420,6 +566,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
         assert_eq!(updates, [polled(None), polled(None), polled(None)]);
@@ -439,6 +586,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert_eq!(
@@ -469,6 +617,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_secs(10), run).await.is_ok());
         assert_eq!(updates, [polled(None)]);
@@ -504,6 +653,7 @@ mod tests {
                 })
             },
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert_eq!(updates, [read(1), read(2)]);
@@ -540,6 +690,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(updates, [polled(None), launched(polled(None))]);
@@ -564,6 +715,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
@@ -630,6 +782,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert_eq!(
@@ -661,6 +814,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert_eq!(
@@ -690,6 +844,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         let asked: Vec<Request> = log.borrow()[2..].to_vec();
@@ -718,6 +873,7 @@ mod tests {
             unprobed,
             |u| updates.push(u),
             unrevealed,
+            unprompted,
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
         let asked = log
@@ -742,7 +898,15 @@ mod tests {
             std::future::ready(Err(RequestError::NotRunning))
         };
         let mut updates = Vec::new();
-        let run = serve(rx, send, loaded, unprobed, |u| updates.push(u), unrevealed);
+        let run = serve(
+            rx,
+            send,
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         assert!(log.borrow().iter().all(|request| *request == Request::List));
         assert!(
@@ -773,8 +937,8 @@ mod tests {
         let mut mailbox = Mailbox::default();
         assert!(mailbox.put(polled(None)));
         assert!(!mailbox.put(polled(said("busy"))));
-        assert_eq!(mailbox.take(), Some(polled(said("busy"))));
-        assert_eq!(mailbox.take(), None);
+        assert_eq!(mailbox.take_all().update, Some(polled(said("busy"))));
+        assert_eq!(mailbox.take_all().update, None);
         assert!(mailbox.put(polled(None)));
     }
 
@@ -782,10 +946,16 @@ mod tests {
     fn a_closed_mailbox_drops_what_it_holds_and_what_arrives() {
         let mut mailbox = Mailbox::default();
         mailbox.put(polled(None));
+        mailbox.put_reveal(revealed(3));
+        mailbox.put_prompt(Prompt::Ask(1, proposed()));
         mailbox.close();
-        assert_eq!(mailbox.take(), None);
         assert!(!mailbox.put(polled(None)));
-        assert_eq!(mailbox.take(), None);
+        assert!(!mailbox.put_reveal(revealed(4)));
+        assert!(!mailbox.put_prompt(Prompt::Ask(2, proposed())));
+        let mail = mailbox.take_all();
+        assert_eq!(mail.update, None);
+        assert!(mail.reveal.is_none());
+        assert_eq!(mail.prompt, None);
     }
 
     fn revealed(id: u64) -> Reveal {
@@ -797,26 +967,32 @@ mod tests {
     }
 
     #[test]
-    fn a_mailbox_holds_one_reveal_apart_from_updates_and_shares_one_notice() {
+    fn a_mailbox_keeps_the_latest_of_each_kind_and_shares_one_notice() {
         let mut mailbox = Mailbox::default();
         assert!(mailbox.put_reveal(revealed(3)));
         assert!(!mailbox.put(polled(None)));
         assert!(!mailbox.put_reveal(revealed(4)));
-        assert_eq!(mailbox.take_reveal().map(|reveal| reveal.id), Some(4));
-        assert_eq!(mailbox.take_reveal().map(|reveal| reveal.id), None);
-        assert_eq!(mailbox.take(), Some(polled(None)));
-        assert!(mailbox.put(polled(None)));
-        assert!(!mailbox.put_reveal(revealed(5)));
+        assert!(!mailbox.put_prompt(Prompt::Ask(1, proposed())));
+        assert!(!mailbox.put_prompt(Prompt::Dismiss(1)));
+
+        let mail = mailbox.take_all();
+        assert_eq!(mail.update, Some(polled(None)));
+        assert_eq!(mail.reveal.map(|reveal| reveal.id), Some(4));
+        assert_eq!(mail.prompt, Some(Prompt::Dismiss(1)));
     }
 
     #[test]
-    fn a_closed_mailbox_drops_a_reveal_and_refuses_new_ones() {
+    fn whatever_arrives_after_a_drain_asks_for_a_new_notice() {
         let mut mailbox = Mailbox::default();
-        mailbox.put_reveal(revealed(3));
-        mailbox.close();
-        assert!(mailbox.take_reveal().is_none());
-        assert!(!mailbox.put_reveal(revealed(3)));
-        assert!(mailbox.take_reveal().is_none());
+        assert!(mailbox.put(polled(None)));
+        mailbox.take_all();
+        assert!(mailbox.put_prompt(Prompt::Ask(1, proposed())));
+        assert!(!mailbox.put(polled(None)));
+
+        let mail = mailbox.take_all();
+        assert_eq!(mail.prompt, Some(Prompt::Ask(1, proposed())));
+        assert_eq!(mail.update, Some(polled(None)));
+        assert!(mailbox.put_reveal(revealed(3)));
     }
 
     #[test]
@@ -858,6 +1034,348 @@ mod tests {
         assert_eq!(
             Note::from(CONFIRMATION).shown(),
             "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認"
+        );
+    }
+
+    const LINK: &str = "gateinto://connect?profile=newco&gateway=proxy.newco.example\
+                        &portal=https%3A%2F%2Fportal.newco.example%2Fhome";
+    const TOKEN: &str = "00112233445566778899aabbccddeeff";
+
+    fn link() -> LaunchRequest {
+        LINK.parse().unwrap()
+    }
+
+    fn token() -> ipc::ConfirmToken {
+        TOKEN.parse().unwrap()
+    }
+
+    fn proposed() -> Confirmation {
+        let launch = link();
+        Confirmation {
+            route: launch.route,
+            profile: launch.proposed_profile().unwrap(),
+            gateway: launch.gateway.clone().unwrap(),
+            portal: launch.portal.clone(),
+        }
+    }
+
+    fn confirming(
+        log: &RefCell<Vec<Request>>,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Launch(_) => {
+                    let mut lines = proposed().echo();
+                    lines.push(ipc::confirm_line(&token()));
+                    Response::Ok(lines)
+                }
+                _ => Response::Ok(Vec::new()),
+            }))
+        }
+    }
+
+    fn settled(log: &RefCell<Vec<Request>>) -> Vec<Request> {
+        log.borrow()
+            .iter()
+            .filter(|request| **request != Request::List)
+            .cloned()
+            .collect()
+    }
+
+    async fn linked(
+        send: impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>>,
+        commands: Vec<Command>,
+        answer: impl Fn(&Prompt) -> Vec<Command>,
+        wait: Duration,
+    ) -> (Vec<Prompt>, Vec<Option<Note>>) {
+        let (tx, rx) = unbounded_channel();
+        for command in commands {
+            tx.send(command).unwrap();
+        }
+        let prompts = RefCell::new(Vec::new());
+        let mut failures = Vec::new();
+        let prompt = |prompt: Prompt| {
+            for command in answer(&prompt) {
+                tx.send(command).unwrap();
+            }
+            prompts.borrow_mut().push(prompt);
+        };
+        let run = serve(
+            rx,
+            send,
+            loaded,
+            unprobed,
+            |u| failures.push(u.failure),
+            unrevealed,
+            prompt,
+        );
+        assert!(timeout(wait, run).await.is_err());
+        (prompts.into_inner(), failures)
+    }
+
+    fn reply(answer: Answer) -> impl Fn(&Prompt) -> Vec<Command> {
+        move |prompt| match prompt {
+            Prompt::Ask(ticket, _) => vec![Command::Answer(*ticket, answer)],
+            Prompt::Dismiss(_) => Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_allowed_link_approves_its_token() {
+        let log = RefCell::new(Vec::new());
+        let (prompts, failures) = linked(
+            confirming(&log),
+            vec![Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [Request::Launch(link()), Request::Approve(token())]
+        );
+        assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
+        assert!(failures.iter().all(Option::is_none));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_link_denies_its_token_without_a_failure() {
+        let log = RefCell::new(Vec::new());
+        let (prompts, failures) = linked(
+            confirming(&log),
+            vec![Command::Link(link())],
+            reply(Answer::Deny),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [Request::Launch(link()), Request::Deny(token())]
+        );
+        assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
+        assert!(failures.iter().all(Option::is_none));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn polling_goes_on_while_a_link_waits_for_its_answer() {
+        let log = RefCell::new(Vec::new());
+        let (prompts, _) = linked(
+            confirming(&log),
+            vec![Command::Link(link())],
+            |_| Vec::new(),
+            Duration::from_millis(4_500),
+        )
+        .await;
+        assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
+        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(log.borrow().len(), 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_link_is_denied_when_the_dialog_times_out() {
+        let log = RefCell::new(Vec::new());
+        let (prompts, _) = linked(
+            confirming(&log),
+            vec![Command::Link(link())],
+            |_| Vec::new(),
+            crate::approval::TIMEOUT + Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [Request::Launch(link()), Request::Deny(token())]
+        );
+        assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_for_a_stale_ticket_is_dropped() {
+        let log = RefCell::new(Vec::new());
+        let stale = |prompt: &Prompt| match prompt {
+            Prompt::Ask(ticket, _) => vec![Command::Answer(ticket + 1, Answer::Allow)],
+            Prompt::Dismiss(_) => Vec::new(),
+        };
+        let (prompts, _) = linked(
+            confirming(&log),
+            vec![Command::Link(link())],
+            stale,
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_link_denies_the_one_it_supersedes() {
+        let log = RefCell::new(Vec::new());
+        let supersede = |prompt: &Prompt| match prompt {
+            Prompt::Ask(1, _) => vec![Command::Link(link())],
+            Prompt::Ask(ticket, _) => vec![Command::Answer(*ticket, Answer::Allow)],
+            Prompt::Dismiss(_) => Vec::new(),
+        };
+        let (prompts, _) = linked(
+            confirming(&log),
+            vec![Command::Link(link())],
+            supersede,
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [
+                Request::Launch(link()),
+                Request::Deny(token()),
+                Request::Launch(link()),
+                Request::Approve(token())
+            ]
+        );
+        assert_eq!(
+            prompts,
+            [
+                Prompt::Ask(1, proposed()),
+                Prompt::Dismiss(1),
+                Prompt::Ask(2, proposed()),
+                Prompt::Dismiss(2)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_superseded_before_it_asks_is_denied_unasked() {
+        let log = RefCell::new(Vec::new());
+        let (prompts, _) = linked(
+            confirming(&log),
+            vec![Command::Link(link()), Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [
+                Request::Launch(link()),
+                Request::Deny(token()),
+                Request::Launch(link()),
+                Request::Approve(token())
+            ]
+        );
+        assert_eq!(prompts, [Prompt::Ask(2, proposed()), Prompt::Dismiss(2)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_the_gui_denies_an_open_link() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Link(link())).unwrap();
+        let tx = RefCell::new(Some(tx));
+        let run = serve(
+            rx,
+            confirming(&log),
+            loaded,
+            unprobed,
+            |_| {},
+            unrevealed,
+            |_| drop(tx.borrow_mut().take()),
+        );
+        timeout(Duration::from_millis(500), run).await.unwrap();
+        assert_eq!(
+            settled(&log),
+            [Request::Launch(link()), Request::Deny(token())]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_never_starts_a_missing_agent() {
+        let log = RefCell::new(Vec::new());
+        let missing = |request: Request| {
+            log.borrow_mut().push(request);
+            std::future::ready(Err(RequestError::NotRunning))
+        };
+        let (prompts, failures) = linked(
+            missing,
+            vec![Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert!(prompts.is_empty());
+        assert_eq!(
+            failures.last(),
+            Some(&Some(Text::LinkAgentNotRunning.into()))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_without_a_confirmation_reports_the_agent_reply() {
+        let log = RefCell::new(Vec::new());
+        let refused = |request: Request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Launch(_) => Response::Error("no such gateway".to_owned()),
+                _ => Response::Ok(Vec::new()),
+            }))
+        };
+        let (prompts, failures) = linked(
+            refused,
+            vec![Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert!(prompts.is_empty());
+        assert_eq!(failures.last(), Some(&said("no such gateway")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_confirmation_for_another_gateway_is_denied_with_a_fixed_note() {
+        let log = RefCell::new(Vec::new());
+        let other = |request: Request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Launch(_) => {
+                    let mut elsewhere = proposed();
+                    elsewhere.gateway = "proxy.elsewhere.example".parse().unwrap();
+                    let mut lines = elsewhere.echo();
+                    lines.push(ipc::confirm_line(&token()));
+                    Response::Ok(lines)
+                }
+                _ => Response::Ok(Vec::new()),
+            }))
+        };
+        let (prompts, failures) = linked(
+            other,
+            vec![Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [Request::Launch(link()), Request::Deny(token())]
+        );
+        assert!(prompts.is_empty());
+        assert_eq!(failures.last(), Some(&Some(Text::LinkNotEchoed.into())));
+    }
+
+    #[test]
+    fn links_naming_no_gateway_get_a_fixed_note() {
+        for error in [
+            ApprovalError::MissingSelector,
+            ApprovalError::UnnamedGateway,
+        ] {
+            assert_eq!(refused(error), Some(Text::LinkUnnamed.into()));
+        }
+        assert_eq!(
+            refused(ApprovalError::Request(RequestError::NotRunning)),
+            Some(Text::LinkAgentNotRunning.into())
+        );
+        assert_eq!(
+            refused(ApprovalError::Denied("newco".parse().unwrap())),
+            None
         );
     }
 }

@@ -39,6 +39,8 @@ pub enum Zone {
     AddField(Input),
     ConfirmAdd,
     OpenMain,
+    DenyLink,
+    AllowLink,
     Client,
 }
 
