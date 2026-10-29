@@ -17,7 +17,7 @@ use crate::device::{self, Probe};
 use crate::gateways;
 use crate::message;
 use crate::settings;
-use crate::worker::{Command, Loaded, Mailbox, Update, serve, serve_with, stalled};
+use crate::worker::{Command, Loaded, Mailbox, Prompt, Update, serve, serve_with, stalled};
 
 pub const WM_AGENT: u32 = message::AGENT;
 
@@ -67,6 +67,7 @@ impl Link {
         let mailbox = Arc::new(Mutex::new(Mailbox::default()));
         let shared = Arc::clone(&mailbox);
         let secrets = Arc::clone(&mailbox);
+        let prompts = Arc::clone(&mailbox);
         let window = hwnd as isize;
         let deliver = move |update| {
             if open(&shared).put(update) {
@@ -75,6 +76,11 @@ impl Link {
         };
         let reveal = move |reveal| {
             if open(&secrets).put_reveal(reveal) {
+                unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
+            }
+        };
+        let prompt = move |prompt| {
+            if open(&prompts).put_prompt(prompt) {
                 unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
             }
         };
@@ -99,6 +105,7 @@ impl Link {
                         demo::probe,
                         deliver,
                         reveal,
+                        prompt,
                     ));
                     return;
                 }
@@ -115,7 +122,7 @@ impl Link {
                         }
                     }
                 };
-                runtime.block_on(serve(inbox, send, load, probe, deliver, reveal));
+                runtime.block_on(serve(inbox, send, load, probe, deliver, reveal, prompt));
             });
         Self { commands, mailbox }
     }
@@ -130,6 +137,10 @@ impl Link {
 
     pub fn take_reveal(&self) -> Option<Reveal> {
         open(&self.mailbox).take_reveal()
+    }
+
+    pub fn take_prompt(&self) -> Option<Prompt> {
+        open(&self.mailbox).take_prompt()
     }
 }
 

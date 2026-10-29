@@ -105,8 +105,12 @@ impl<T> Desk<T> {
         (self.issued, superseded.map(|(_, value)| value))
     }
 
+    pub fn holds(&self, ticket: u64) -> bool {
+        self.open.as_ref().is_some_and(|(open, _)| *open == ticket)
+    }
+
     pub fn take(&mut self, ticket: u64) -> Option<T> {
-        if self.open.as_ref()?.0 != ticket {
+        if !self.holds(ticket) {
             return None;
         }
         self.close()
@@ -248,8 +252,11 @@ mod tests {
         let (first, _) = desk.open("first");
         let (second, _) = desk.open("second");
 
+        assert!(!desk.holds(first));
+        assert!(desk.holds(second));
         assert_eq!(desk.take(first), None);
         assert_eq!(desk.take(second), Some("second"));
+        assert!(!desk.holds(second));
         assert_eq!(desk.take(second), None);
     }
 
