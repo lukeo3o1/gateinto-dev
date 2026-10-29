@@ -21,7 +21,7 @@ use gateinto::identity::device_key::{
 use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
-use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
+use gateinto::link::{Known, KnownGateway, LinkedGateway, Source, approval};
 use gateinto::logbook::Logbook;
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
@@ -863,49 +863,16 @@ async fn open(args: OpenArgs) -> Result {
         }
         result => result?,
     };
-    let lines = match &response {
-        Response::Ok(lines) => lines.clone(),
-        Response::Error(_) => Vec::new(),
+    let send = |request| {
+        let endpoint = &endpoint;
+        async move { ipc::send(endpoint, &request).await }
     };
-    let Some(token) = ipc::confirm_token(&lines) else {
-        return print_launched(response).await;
+    let ask = async |confirmation| {
+        tokio::task::spawn_blocking(move || prompt::ask(&confirmation).map_err(|e| e.to_string()))
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
     };
-    let profile = launch
-        .proposed_profile()
-        .ok_or("the launch has no gateway selector")?;
-    let Some(gateway) = launch.gateway else {
-        ipc::send(&endpoint, &Request::Deny(token)).await?;
-        return Err("the agent asked to confirm a gateway the link does not name".into());
-    };
-    let confirmation = Confirmation {
-        route: launch.route,
-        profile: profile.clone(),
-        gateway,
-        portal: launch.portal,
-    };
-    if !confirmation.echoed_by(&lines) {
-        ipc::send(&endpoint, &Request::Deny(token)).await?;
-        return Err(
-            "the agent asked to confirm another gateway than the link names; nothing \
-                    was stored"
-                .into(),
-        );
-    }
-    let answer = tokio::task::spawn_blocking(move || {
-        prompt::ask(&confirmation).map_err(|error| error.to_string())
-    })
-    .await?;
-    match answer {
-        Ok(true) => print_launched(ipc::send(&endpoint, &Request::Approve(token)).await?).await,
-        Ok(false) => {
-            ipc::send(&endpoint, &Request::Deny(token)).await?;
-            Err(link::LinkError::Denied(profile).into())
-        }
-        Err(error) => {
-            ipc::send(&endpoint, &Request::Deny(token)).await?;
-            Err(error.into())
-        }
-    }
+    print_launched(approval::settle(&launch, response, send, ask).await?).await
 }
 
 fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
