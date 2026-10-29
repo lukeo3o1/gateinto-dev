@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSGFLT_ALLOW, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE,
     SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WA_INACTIVE,
-    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NULL, WM_PAINT, WNDCLASSEXW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -39,6 +39,7 @@ use crate::hit::{Zone, find};
 use crate::i18n::tr;
 use crate::layout::Rect;
 use crate::logo;
+use crate::message;
 use crate::nav::Page as NavPage;
 use crate::pointer::Action;
 use crate::scale::Scale;
@@ -47,7 +48,7 @@ use crate::theme::Theme;
 use crate::tray::{self, Event, Notice};
 use crate::worker::Command;
 
-pub const WM_TRAY: u32 = WM_APP + 1;
+pub const WM_TRAY: u32 = message::TRAY;
 const ICON_ID: u32 = 1;
 const OPEN_ID: usize = 1;
 const EXIT_ID: usize = 2;
@@ -490,20 +491,21 @@ fn act(main: HWND, action: Option<Action>) {
             with_app(main, |app| app.link.send(Command::Stop));
         }
         Some(Action::AddGateway) => {
-            hide_flyout(main);
-            show_main(main);
+            open_main(main);
             with_app(main, |app| {
                 app.dismiss();
                 app.select(NavPage::Gateways);
                 app.open_add();
             });
         }
-        Some(Action::OpenMain) => {
-            hide_flyout(main);
-            show_main(main);
-        }
+        Some(Action::OpenMain) => open_main(main),
         _ => {}
     }
+}
+
+pub fn open_main(main: HWND) {
+    hide_flyout(main);
+    show_main(main);
 }
 
 fn paint(hwnd: HWND, main: HWND) {
