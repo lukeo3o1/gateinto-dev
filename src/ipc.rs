@@ -11,7 +11,10 @@ use crate::proxy::SessionCredentials;
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
-pub use gateinto_ipc_types::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
+pub use gateinto_ipc_types::{
+    BrowserKind, LogError, LogEvent, LogLevel, LogPage, SessionAuth, SessionInfo, SessionKind,
+    SessionRoute,
+};
 
 pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -28,6 +31,7 @@ pub enum Request {
     Close(SessionId),
     Credentials(SessionId),
     Stop,
+    Log { after: u64 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,6 +134,7 @@ impl fmt::Display for Request {
             Self::Close(id) => write!(f, "close {id}"),
             Self::Credentials(id) => write!(f, "credentials {id}"),
             Self::Stop => f.write_str("stop"),
+            Self::Log { after } => write!(f, "log {after}"),
         }
     }
 }
@@ -138,7 +143,7 @@ impl FromStr for Request {
     type Err = ProtocolError;
 
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let invalid = ProtocolError("invalid request");
+        let invalid = ProtocolError(INVALID_REQUEST);
         let words: Vec<&str> = line.split(' ').collect();
         match words.as_slice() {
             ["launch", profile, auth @ "session_credentials", link @ ..] => {
@@ -162,6 +167,12 @@ impl FromStr for Request {
             ["close", id] => id.parse().map(Self::Close).map_err(|_| invalid),
             ["credentials", id] => id.parse().map(Self::Credentials).map_err(|_| invalid),
             ["stop"] => Ok(Self::Stop),
+            ["log", word] => word
+                .parse()
+                .ok()
+                .filter(|after: &u64| after.to_string() == *word)
+                .map(|after| Self::Log { after })
+                .ok_or(invalid),
             _ => Err(invalid),
         }
     }
@@ -224,6 +235,22 @@ impl Response {
             None => Err(invalid),
         }
     }
+}
+
+pub const INVALID_REQUEST: &str = "invalid request";
+
+pub fn log_response(last: u64, events: impl IntoIterator<Item = LogEvent>) -> Response {
+    let mut lines = vec![agent_pid_line(), LogPage::last_line(last)];
+    let mut size = "ok\n".len() + lines.iter().map(|line| line.len() + 1).sum::<usize>();
+    for event in events {
+        let line = event.to_line();
+        size += line.len() + 1;
+        if size > MAX_RESPONSE_BYTES {
+            break;
+        }
+        lines.push(line);
+    }
+    Response::Ok(lines)
 }
 
 const USERNAME: &str = "username: ";
@@ -979,6 +1006,57 @@ mod tests {
         assert_eq!(agent_pid(&[]), None);
     }
 
+    fn logged(seq: u64, message: &str) -> LogEvent {
+        LogEvent {
+            seq,
+            time: 1_700_000_000_000 + seq,
+            level: LogLevel::Info,
+            scope: "agent".to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_log_response_names_the_agent_and_its_last_sequence_number() {
+        let events = vec![logged(4, "agent ready"), logged(5, "session started")];
+        let Response::Ok(lines) = log_response(5, events.clone()) else {
+            panic!("a log response is ok");
+        };
+        assert_eq!(agent_pid(&lines), Some(std::process::id()));
+        assert_eq!(LogPage::parse(&lines).unwrap(), LogPage { last: 5, events });
+    }
+
+    #[test]
+    fn a_log_response_keeps_the_oldest_events_that_fit() {
+        let message = "x".repeat(1000);
+        let events: Vec<LogEvent> = (1..=200).map(|seq| logged(seq, &message)).collect();
+        let response = log_response(200, events.clone());
+        assert!(response.encode().len() <= MAX_RESPONSE_BYTES);
+        let Response::Ok(lines) = response else {
+            panic!("a log response is ok");
+        };
+        let page = LogPage::parse(&lines).unwrap();
+        assert_eq!(page.last, 200);
+        assert!(page.events.len() > 50, "{}", page.events.len());
+        assert_eq!(page.events[..], events[..page.events.len()]);
+        let next = log_response(200, events[page.events.len()..].to_vec());
+        assert!(next.encode().len() <= MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn unknown_words_are_rejected_with_the_invalid_request_message() {
+        assert_eq!(
+            "log 1"
+                .parse::<Request>()
+                .map_err(|error| error.to_string()),
+            Ok(Request::Log { after: 1 })
+        );
+        assert_eq!(
+            "logs 1".parse::<Request>().unwrap_err().to_string(),
+            INVALID_REQUEST
+        );
+    }
+
     #[test]
     fn gateway_only_launches_round_trip_without_a_profile_or_portal() {
         for line in [
@@ -1066,6 +1144,8 @@ mod tests {
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
             (Request::Stop, "stop"),
+            (Request::Log { after: 0 }, "log 0"),
+            (Request::Log { after: u64::MAX }, "log 18446744073709551615"),
         ] {
             assert_eq!(request.to_string(), line);
             assert_eq!(line.parse::<Request>(), Ok(request));
@@ -1263,6 +1343,14 @@ mod tests {
             "credentials x",
             "credentials 1 2",
             "credentials  1",
+            "log",
+            "log x",
+            "log -1",
+            "log +1",
+            "log 01",
+            "log 1 2",
+            "log  1",
+            "log 18446744073709551616",
             "open gateinto://connect?profile=office",
         ] {
             assert!(line.parse::<Request>().is_err(), "{line:?}");

@@ -316,6 +316,11 @@ impl Known {
     }
 }
 
+pub const IDENTITY: &str =
+    "The gateway will see this device's identity (its client certificate, if one is installed)";
+pub const TRUST: &str = "only if you trust the organisation that runs this gateway.";
+pub const LOCAL_ADDRESS: &str = "This address is on your computer or local network.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
     pub route: Route,
@@ -358,9 +363,9 @@ impl Confirmation {
 
     pub fn message(&self) -> String {
         let local = if self.gateway.is_local() {
-            "\nThis address is on your computer or local network."
+            format!("\n{LOCAL_ADDRESS}")
         } else {
-            ""
+            String::new()
         };
         let traffic = match self.route {
             Route::Gateway => "all traffic of the isolated browser",
@@ -373,9 +378,7 @@ impl Confirmation {
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
-             The gateway will see this device's identity (its client certificate, if one is \
-             installed) and {traffic}. Allow it only if you trust \
-             the organisation that runs this gateway.",
+             {IDENTITY} and {traffic}. Allow it {TRUST}",
             self.profile,
             self.gateway,
             self.portal_origin()
@@ -1528,6 +1531,23 @@ mod tests {
             assert!(text.contains(expected), "{expected}: {text}");
         }
         assert!(!text.contains("/home"), "{text}");
+    }
+
+    #[test]
+    fn the_confirmation_text_is_built_from_the_shared_identity_and_trust_wording() {
+        assert_eq!(
+            confirmation().message(),
+            "A website asks to add the gateway \"newco\" to Gateinto and to open a browser \
+             session through it.\n\n\
+             Gateway: proxy.newco.example:443\n\
+             Portal: https://portal.newco.example\n\n\
+             The gateway will see this device's identity (its client certificate, if one is \
+             installed) and all traffic of the isolated browser. Allow it only if you trust \
+             the organisation that runs this gateway."
+        );
+        let text = confirmation().message();
+        assert!(text.contains(&format!("{IDENTITY} and ")), "{text}");
+        assert!(text.ends_with(&format!(" Allow it {TRUST}")), "{text}");
     }
 
     fn config_file(text: &str) -> ConfigFile {

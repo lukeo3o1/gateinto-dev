@@ -1,9 +1,22 @@
+use std::ops::RangeInclusive;
+
+use crate::i18n::Language;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Font {
     Brand,
     Item,
     ItemSelected,
     Title,
+    Status,
+    Heading,
+    Body,
+    BodyStrong,
+    Small,
+    SmallStrong,
+    Pill,
+    Mono,
+    Lead,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,7 +26,21 @@ pub struct Spec {
 }
 
 impl Font {
-    pub const ALL: [Font; 4] = [Font::Brand, Font::Item, Font::ItemSelected, Font::Title];
+    pub const ALL: [Font; 13] = [
+        Font::Brand,
+        Font::Item,
+        Font::ItemSelected,
+        Font::Title,
+        Font::Status,
+        Font::Heading,
+        Font::Body,
+        Font::BodyStrong,
+        Font::Small,
+        Font::SmallStrong,
+        Font::Pill,
+        Font::Mono,
+        Font::Lead,
+    ];
 
     pub fn spec(self) -> Spec {
         let (size, weight) = match self {
@@ -21,12 +48,54 @@ impl Font {
             Font::Item => (14, 400),
             Font::ItemSelected => (14, 600),
             Font::Title => (24, 600),
+            Font::Status => (20, 600),
+            Font::Heading => (15, 600),
+            Font::Body => (13, 400),
+            Font::BodyStrong => (13, 600),
+            Font::Small => (12, 400),
+            Font::SmallStrong => (12, 600),
+            Font::Pill => (11, 400),
+            Font::Mono => (12, 400),
+            Font::Lead => (17, 600),
         };
         Spec { size, weight }
     }
+
+    pub fn families(self) -> &'static [&'static str] {
+        match self {
+            Font::Mono => MONO_FAMILIES,
+            _ => UI_FAMILIES,
+        }
+    }
+}
+
+pub trait Measure {
+    fn width(&self, font: Font, text: &str) -> i32;
 }
 
 pub const UI_FAMILIES: &[&str] = &["Segoe UI Variable Text", "Segoe UI"];
+pub const MONO_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas"];
+pub const CJK_FAMILY: &str = "Microsoft JhengHei UI";
+pub const CJK_RANGES: &[RangeInclusive<u32>] = &[
+    0x2E80..=0x2FDF,
+    0x3000..=0x303F,
+    0x3100..=0x312F,
+    0x31A0..=0x31BF,
+    0x3400..=0x4DBF,
+    0x4E00..=0x9FFF,
+    0xF900..=0xFAFF,
+    0xFE10..=0xFE1F,
+    0xFE30..=0xFE4F,
+    0xFF00..=0xFFEF,
+    0x20000..=0x3134F,
+];
+
+pub fn locale(language: Language) -> &'static str {
+    match language {
+        Language::English => "en-us",
+        Language::Chinese => "zh-tw",
+    }
+}
 
 pub fn choose_family<'a, S: AsRef<str>>(installed: &[S], preferred: &[&'a str]) -> &'a str {
     preferred
@@ -52,6 +121,28 @@ mod tests {
         assert_eq!(Font::Item.spec(), s(14, 400));
         assert_eq!(Font::ItemSelected.spec(), s(14, 600));
         assert_eq!(Font::Title.spec(), s(24, 600));
+        assert_eq!(Font::Status.spec(), s(20, 600));
+        assert_eq!(Font::Heading.spec(), s(15, 600));
+        assert_eq!(Font::Body.spec(), s(13, 400));
+        assert_eq!(Font::BodyStrong.spec(), s(13, 600));
+        assert_eq!(Font::Small.spec(), s(12, 400));
+        assert_eq!(Font::SmallStrong.spec(), s(12, 600));
+        assert_eq!(Font::Pill.spec(), s(11, 400));
+        assert_eq!(Font::Mono.spec(), s(12, 400));
+        assert_eq!(Font::Lead.spec(), s(17, 600));
+    }
+
+    #[test]
+    fn only_mono_uses_the_monospaced_families() {
+        for font in Font::ALL {
+            let want = if font == Font::Mono {
+                MONO_FAMILIES
+            } else {
+                UI_FAMILIES
+            };
+            assert_eq!(font.families(), want);
+        }
+        assert_eq!(MONO_FAMILIES, ["Cascadia Mono", "Consolas"]);
     }
 
     #[test]
@@ -73,5 +164,27 @@ mod tests {
     #[test]
     fn falls_back_to_the_last_preference() {
         assert_eq!(choose_family::<&str>(&[], UI_FAMILIES), "Segoe UI");
+    }
+
+    #[test]
+    fn chinese_text_falls_back_to_a_traditional_chinese_ui_font() {
+        assert_eq!(CJK_FAMILY, "Microsoft JhengHei UI");
+        let covered = |c: char| CJK_RANGES.iter().any(|r| r.contains(&u32::from(c)));
+        for text in crate::i18n::Text::ALL {
+            for c in text.chinese().chars() {
+                assert!(
+                    c.is_ascii() || matches!(c, '·' | '…') || covered(c),
+                    "{c:?} in {text:?}"
+                );
+            }
+        }
+        assert!(!covered('a') && !covered('é') && !covered('…'));
+    }
+
+    #[test]
+    fn text_is_shaped_for_the_language_it_is_in() {
+        use crate::i18n::Language;
+        assert_eq!(locale(Language::English), "en-us");
+        assert_eq!(locale(Language::Chinese), "zh-tw");
     }
 }

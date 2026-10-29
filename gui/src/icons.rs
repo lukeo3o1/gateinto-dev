@@ -12,6 +12,7 @@ pub enum Cmd {
         start: f32,
         sweep: f32,
     },
+    Cubic(Point, Point, Point),
     Close,
 }
 
@@ -70,6 +71,7 @@ pub type Point = (f32, f32);
 pub enum Seg {
     Line(Point),
     Arc { to: Point, r: f32, sweep: f32 },
+    Cubic { c1: Point, c2: Point, to: Point },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,8 +103,12 @@ pub fn snap(v: f32, width: f32) -> f32 {
     }
 }
 
+fn settle(v: f32) -> f32 {
+    (v * 1024.0).round() / 1024.0
+}
+
 fn about(offset: f32, centre: f32) -> f32 {
-    centre + offset.round()
+    centre + settle(offset).round()
 }
 
 struct Grid {
@@ -125,6 +131,13 @@ impl Grid {
 
     fn raw(&self, (x, y): Point) -> Point {
         self.t.point(x, y)
+    }
+
+    fn exact(&self, (x, y): Point) -> Point {
+        (
+            self.centre.0 + self.t.len(x - self.mid),
+            self.centre.1 + self.t.len(y - self.mid),
+        )
     }
 
     fn snap(&self, (x, y): Point) -> Point {
@@ -177,6 +190,14 @@ fn figures(cmds: &[Cmd], g: &Grid, out: &mut Vec<Prim>) {
                 let r = g.t.len(r) * scale;
                 (to_raw, Seg::Arc { to, r, sweep })
             }
+            Cmd::Cubic(c1, c2, to) => (
+                g.raw(to),
+                Seg::Cubic {
+                    c1: g.exact(c1),
+                    c2: g.exact(c2),
+                    to: g.snap(to),
+                },
+            ),
             Cmd::Close => {
                 if let Some(figure) = current.as_mut() {
                     figure.2 = true;
@@ -186,7 +207,7 @@ fn figures(cmds: &[Cmd], g: &Grid, out: &mut Vec<Prim>) {
         };
         raw = to_raw;
         at = match seg {
-            Seg::Line(p) | Seg::Arc { to: p, .. } => p,
+            Seg::Line(p) | Seg::Arc { to: p, .. } | Seg::Cubic { to: p, .. } => p,
         };
         if let Some(figure) = current.as_mut() {
             figure.1.push(seg);
@@ -227,7 +248,6 @@ pub fn trace(icon: &Icon, target: Rect, width: f32) -> Vec<Prim> {
 
 pub fn arc_end(cx: f32, cy: f32, r: f32, start: f32, sweep: f32) -> (f32, f32) {
     let a = (start + sweep).to_radians();
-    let settle = |v: f32| (v * 1024.0).round() / 1024.0;
     (settle(cx + r * a.cos()), settle(cy + r * a.sin()))
 }
 
@@ -360,6 +380,165 @@ pub const CLOSE: Icon = Icon {
     ],
 };
 
+pub const GLOBE: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        circle(12.0, 12.0, 8.5),
+        Shape::Path(&line(3.5, 12.0, 20.5, 12.0)),
+        Shape::Path(&[
+            Cmd::Move(12.0, 3.5),
+            Cmd::Cubic((14.6, 5.9), (15.8, 8.7), (15.8, 12.0)),
+            Cmd::Cubic((15.8, 15.3), (14.6, 18.1), (12.0, 20.5)),
+            Cmd::Cubic((9.4, 18.1), (8.2, 15.3), (8.2, 12.0)),
+            Cmd::Cubic((8.2, 8.7), (9.4, 5.9), (12.0, 3.5)),
+            Cmd::Close,
+        ]),
+    ],
+};
+
+pub const POWER: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        Shape::Path(&line(12.0, 3.5, 12.0, 11.5)),
+        Shape::Path(&[
+            Cmd::Move(7.2, 6.4),
+            Cmd::Arc {
+                cx: 12.0,
+                cy: 12.163,
+                r: 7.5,
+                start: 230.209,
+                sweep: -280.418,
+            },
+        ]),
+    ],
+};
+
+pub const STOP: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[rect(6.5, 6.5, 11.0, 11.0, 2.0)],
+};
+
+pub const LOCK: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        rect(5.0, 10.5, 14.0, 10.0, 2.0),
+        Shape::Path(&[
+            Cmd::Move(8.5, 10.5),
+            Cmd::Line(8.5, 8.0),
+            Cmd::Arc {
+                cx: 12.0,
+                cy: 8.0,
+                r: 3.5,
+                start: 180.0,
+                sweep: 180.0,
+            },
+            Cmd::Line(15.5, 10.5),
+        ]),
+    ],
+};
+
+pub const PLUS: Icon = Icon {
+    view: RAIL,
+    stroke: 2.0,
+    shapes: &[
+        Shape::Path(&line(12.0, 5.0, 12.0, 19.0)),
+        Shape::Path(&line(5.0, 12.0, 19.0, 12.0)),
+    ],
+};
+
+pub const MORE: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        circle(5.5, 12.0, 0.6),
+        circle(12.0, 12.0, 0.6),
+        circle(18.5, 12.0, 0.6),
+    ],
+};
+
+const EYE_OUTLINE: Shape = Shape::Path(&[
+    Cmd::Move(2.5, 12.0),
+    Cmd::Cubic((5.0, 8.0), (8.0, 6.0), (12.0, 6.0)),
+    Cmd::Cubic((16.0, 6.0), (19.0, 8.0), (21.5, 12.0)),
+    Cmd::Cubic((19.0, 16.0), (16.0, 18.0), (12.0, 18.0)),
+    Cmd::Cubic((8.0, 18.0), (5.0, 16.0), (2.5, 12.0)),
+    Cmd::Close,
+]);
+
+pub const EYE: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[EYE_OUTLINE, circle(12.0, 12.0, 2.6)],
+};
+
+pub const EYE_OFF: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        EYE_OUTLINE,
+        circle(12.0, 12.0, 2.6),
+        Shape::Path(&line(4.0, 4.0, 20.0, 20.0)),
+    ],
+};
+
+pub const COPY: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        rect(8.5, 8.5, 11.0, 11.0, 2.0),
+        Shape::Path(&[
+            Cmd::Move(4.5, 15.5),
+            Cmd::Line(4.5, 4.5),
+            Cmd::Line(15.5, 4.5),
+        ]),
+    ],
+};
+
+pub const EXTERNAL: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        Shape::Path(&[
+            Cmd::Move(13.5, 4.5),
+            Cmd::Line(19.5, 4.5),
+            Cmd::Line(19.5, 10.5),
+        ]),
+        Shape::Path(&line(19.5, 4.5, 11.5, 12.5)),
+        Shape::Path(&[
+            Cmd::Move(17.5, 14.0),
+            Cmd::Line(17.5, 18.5),
+            Cmd::Arc {
+                cx: 16.0,
+                cy: 18.5,
+                r: 1.5,
+                start: 0.0,
+                sweep: 90.0,
+            },
+            Cmd::Line(6.0, 20.0),
+            Cmd::Arc {
+                cx: 6.0,
+                cy: 18.5,
+                r: 1.5,
+                start: 90.0,
+                sweep: 90.0,
+            },
+            Cmd::Line(4.5, 8.0),
+            Cmd::Arc {
+                cx: 6.0,
+                cy: 8.0,
+                r: 1.5,
+                start: 180.0,
+                sweep: 90.0,
+            },
+            Cmd::Line(10.5, 6.5),
+        ]),
+    ],
+};
+
 pub fn rail_icon(page: Page) -> Icon {
     match page {
         Page::Sessions => SESSIONS,
@@ -374,8 +553,9 @@ pub fn rail_icon(page: Page) -> Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 9] = [
-        SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE,
+    const ALL: [Icon; 17] = [
+        SESSIONS, GATEWAYS, DEVICE, LOG, SETTINGS, MINIMIZE, MAXIMIZE, RESTORE, CLOSE, GLOBE,
+        POWER, STOP, LOCK, PLUS, MORE, EXTERNAL, COPY,
     ];
 
     #[test]
@@ -415,6 +595,13 @@ mod tests {
         assert_eq!(about(-2.5, 29.5), 26.5);
         assert_eq!(about(2.5, 29.5), 32.5);
         assert_eq!(about(0.0, 29.5), 29.5);
+    }
+
+    #[test]
+    fn offsets_within_float_noise_of_a_half_round_alike() {
+        assert_eq!(about(-3.4998, 0.5), -3.5);
+        assert_eq!(about(-3.500_000_2, 0.5), -3.5);
+        assert_eq!(about(3.4998, 0.5), 4.5);
     }
 
     #[test]
@@ -466,6 +653,42 @@ mod tests {
     }
 
     #[test]
+    fn cubic_controls_keep_their_exact_offset_from_the_snapped_centre() {
+        let prims = trace(&GLOBE, Rect::new(0, 0, 24, 24), 1.0);
+        let Prim::Figure {
+            start,
+            segs,
+            closed,
+        } = &prims[2]
+        else {
+            panic!("expected the meridian");
+        };
+        assert_eq!(*start, (12.5, 3.5));
+        assert!(*closed);
+        let Seg::Cubic { c1, c2, to } = segs[0] else {
+            panic!("expected a cubic");
+        };
+        let near = |a: Point, b: Point| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4;
+        assert!(near(c1, (15.1, 6.4)), "{c1:?}");
+        assert!(near(c2, (16.3, 9.2)), "{c2:?}");
+        assert_eq!(to, (16.5, 12.5));
+    }
+
+    #[test]
+    fn the_power_arc_runs_counter_clockwise_around_the_bottom() {
+        let prims = trace(&POWER, Rect::new(0, 0, 24, 24), 1.0);
+        let Prim::Figure { start, segs, .. } = &prims[1] else {
+            panic!("expected the ring");
+        };
+        assert_eq!(*start, (7.5, 6.5));
+        let Seg::Arc { to, sweep, .. } = segs[0] else {
+            panic!("expected an arc");
+        };
+        assert_eq!(to, (17.5, 6.5));
+        assert!(sweep < -180.0);
+    }
+
+    #[test]
     fn closed_paths_stay_closed() {
         let prims = trace(&LOG, Rect::new(0, 0, 24, 24), 1.0);
         let Prim::Figure { closed, segs, .. } = &prims[0] else {
@@ -486,7 +709,7 @@ mod tests {
                 Prim::Figure { start, segs, .. } => {
                     points.push(*start);
                     points.extend(segs.iter().map(|seg| match *seg {
-                        Seg::Line(p) | Seg::Arc { to: p, .. } => p,
+                        Seg::Line(p) | Seg::Arc { to: p, .. } | Seg::Cubic { to: p, .. } => p,
                     }));
                 }
             }
@@ -522,7 +745,9 @@ mod tests {
 
     #[test]
     fn mirror_symmetric_icons_trace_symmetrically_about_the_snapped_axis() {
-        for icon in [GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE] {
+        for icon in [
+            GATEWAYS, DEVICE, MINIMIZE, MAXIMIZE, CLOSE, GLOBE, POWER, STOP, LOCK, PLUS, MORE,
+        ] {
             for size in [10, 15, 20, 25, 30, 40] {
                 for width in [1.0, 2.0, 3.0] {
                     let target = Rect::new(3, 7, size, size);
@@ -537,6 +762,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_more_icon_is_three_dots_in_a_row() {
+        let prims = trace(&MORE, Rect::new(0, 0, 24, 24), 1.0);
+        let dot = |cx| Prim::Circle {
+            cx,
+            cy: 12.5,
+            r: 1.0,
+        };
+        assert_eq!(prims, [dot(5.5), dot(12.5), dot(19.5)]);
     }
 
     #[test]

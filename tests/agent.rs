@@ -15,16 +15,18 @@ use gateinto::browser::ProfileDir;
 use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::{
-    self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server, SessionAuth,
-    SessionInfo, SessionKind, SessionRoute,
+    self, BindError, ConfirmToken, Endpoint, LogPage, Request, RequestError, Response, Server,
+    SessionAuth, SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
+use gateinto::logbook::Logbook;
 use gateinto::proxy::Config;
 use gateinto::sessions::SessionId;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
+use tracing_subscriber::layer::SubscriberExt;
 
 type Linked = Arc<Mutex<Vec<LinkedGateway>>>;
 
@@ -160,6 +162,7 @@ impl TestAgent {
                 browser,
                 profiles_root: profiles_root.clone(),
                 limits,
+                logbook: Default::default(),
             },
             TestProfiles {
                 plans,
@@ -747,6 +750,7 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
             browser: None,
             profiles_root: root,
             limits: limits(),
+            logbook: Default::default(),
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -769,6 +773,52 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
 
     assert!(!stale.path().exists());
     assert!(foreign.exists());
+    ipc::send(&endpoint, &Request::Stop).await.unwrap();
+    tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_answers_log_requests_from_its_logbook() {
+    let dir = temp_dir("logbook");
+    let logbook = Logbook::default();
+    let subscriber = tracing_subscriber::registry().with(logbook.layer());
+    tracing::subscriber::with_default(subscriber, || tracing::warn!("kept for the log page"));
+    let agent = Agent::new(
+        AgentOptions {
+            browser: None,
+            profiles_root: dir.join("profiles"),
+            limits: limits(),
+            logbook,
+        },
+        TestProfiles {
+            plans: BTreeMap::new(),
+            template: agent_config(
+                SocketAddr::from((LOOPBACK, 1)),
+                rustls::RootCertStore::empty(),
+                PROXY_NAME,
+            ),
+            linked: Linked::default(),
+        },
+    );
+    let endpoint = endpoint(&dir);
+    let server = Server::bind(&endpoint).unwrap();
+    let serving = tokio::spawn(async move { agent.serve(server, std::future::pending()).await });
+
+    let page = |response| match response {
+        Ok(Response::Ok(lines)) => LogPage::parse(&lines).unwrap(),
+        other => panic!("unexpected log answer: {other:?}"),
+    };
+    let first = page(ipc::send(&endpoint, &Request::Log { after: 0 }).await);
+    assert_eq!(first.last, 1);
+    let messages: Vec<&str> = first
+        .events
+        .iter()
+        .map(|event| event.message.as_str())
+        .collect();
+    assert_eq!(messages, ["kept for the log page"]);
+    let next = page(ipc::send(&endpoint, &Request::Log { after: 1 }).await);
+    assert_eq!((next.last, next.events.len()), (1, 0));
+
     ipc::send(&endpoint, &Request::Stop).await.unwrap();
     tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
 }

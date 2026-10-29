@@ -1,22 +1,142 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, c_void};
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{HWND, RECT};
-use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, LOGPIXELSY, ReleaseDC};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE, HWND, RECT,
+    SYSTEMTIME,
+};
+use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, HMONITOR, LOGPIXELSY, ReleaseDC};
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
-use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
-use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, GetSystemMetrics, SM_CXPADDEDBORDER, SM_CYFRAME, SYSTEM_METRICS_INDEX,
-    SetProcessDPIAware,
+use windows_sys::Win32::System::Registry::{
+    HKEY, REG_ROUTINE_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
 };
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, OSVERSIONINFOW};
+use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    AdjustWindowRectEx, GetSystemMetrics, SM_CXPADDEDBORDER, SM_CYFRAME, SPI_GETWHEELSCROLLLINES,
+    SW_SHOWNORMAL, SYSTEM_METRICS_INDEX, SetProcessDPIAware, SystemParametersInfoW,
+};
+
+use crate::log;
+use crate::menu;
+use crate::theme;
+
+pub fn utc_offset() -> u64 {
+    let seconds = |t: SYSTEMTIME| {
+        u64::from(t.wHour) * 3600 + u64::from(t.wMinute) * 60 + u64::from(t.wSecond)
+    };
+    let (mut local, mut utc) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    unsafe {
+        GetLocalTime(&mut local);
+        GetSystemTime(&mut utc);
+    }
+    log::local_offset(seconds(local), seconds(utc))
+}
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+pub fn reg_string(
+    root: HKEY,
+    key: &str,
+    name: &str,
+    flags: REG_ROUTINE_FLAGS,
+) -> Result<Option<String>, ()> {
+    let (key, name) = (wide(key), wide(name));
+    let mut buf: Vec<u16> = Vec::new();
+    for _ in 0..4 {
+        let mut size = (buf.len() * 2) as u32;
+        let data = if buf.is_empty() {
+            null_mut()
+        } else {
+            buf.as_mut_ptr().cast::<c_void>()
+        };
+        let code = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ | flags,
+                null_mut(),
+                data,
+                &mut size,
+            )
+        };
+        match code {
+            ERROR_SUCCESS if !buf.is_empty() => {
+                let text = &buf[..(size as usize / 2).min(buf.len())];
+                let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+                return Ok(Some(String::from_utf16_lossy(&text[..end])));
+            }
+            ERROR_SUCCESS | ERROR_MORE_DATA => buf = vec![0; (size as usize).div_ceil(2) + 1],
+            ERROR_FILE_NOT_FOUND | ERROR_UNSUPPORTED_TYPE => return Ok(None),
+            _ => return Err(()),
+        }
+    }
+    Err(())
+}
+
+pub fn reg_dword(root: HKEY, key: &str, name: &str) -> Option<u32> {
+    let (key, name) = (wide(key), wide(name));
+    let mut value = 0u32;
+    let mut size = 4u32;
+    let code = unsafe {
+        RegGetValueW(
+            root,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            (&raw mut value).cast(),
+            &mut size,
+        )
+    };
+    (code == ERROR_SUCCESS).then_some(value)
+}
+
+pub fn open_https(hwnd: HWND, url: &str) -> bool {
+    menu::https(url) && open(hwnd, wide(url))
+}
+
+pub fn open_file(hwnd: HWND, path: &Path) -> bool {
+    let path = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    open(hwnd, path)
+}
+
+fn open(hwnd: HWND, target: Vec<u16>) -> bool {
+    let verb = wide("open");
+    let code = unsafe {
+        ShellExecuteW(
+            hwnd,
+            verb.as_ptr(),
+            target.as_ptr(),
+            null(),
+            null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    menu::opened(code as isize)
+}
+
 fn lookup(module: &str, name: &CStr, load: bool) -> Option<unsafe extern "system" fn() -> isize> {
+    lookup_raw(module, name.as_ptr().cast(), load)
+}
+
+fn lookup_ordinal(module: &str, ordinal: u16) -> Option<unsafe extern "system" fn() -> isize> {
+    lookup_raw(module, usize::from(ordinal) as *const u8, true)
+}
+
+fn lookup_raw(
+    module: &str,
+    name: *const u8,
+    load: bool,
+) -> Option<unsafe extern "system" fn() -> isize> {
     let module = wide(module);
     unsafe {
         let mut handle = GetModuleHandleW(module.as_ptr());
@@ -30,7 +150,7 @@ fn lookup(module: &str, name: &CStr, load: bool) -> Option<unsafe extern "system
         if handle.is_null() {
             return None;
         }
-        GetProcAddress(handle, name.as_ptr().cast())
+        GetProcAddress(handle, name)
     }
 }
 
@@ -46,6 +166,12 @@ type AdjustForDpi = unsafe extern "system" fn(*mut RECT, u32, i32, u32, u32) -> 
 type MetricsForDpi = unsafe extern "system" fn(SYSTEM_METRICS_INDEX, u32) -> i32;
 type GetVersion = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> i32;
 type CompositionEnabled = unsafe extern "system" fn(*mut i32) -> i32;
+type DpiForMonitor = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> i32;
+type WindowAttribute = unsafe extern "system" fn(HWND, u32, *const c_void, u32) -> i32;
+
+const EFFECTIVE_DPI: i32 = 0;
+const CORNER_PREFERENCE: u32 = 33;
+const ROUND: u32 = 2;
 
 pub fn enable_dpi_awareness() {
     let context = resolve!(
@@ -77,6 +203,77 @@ pub fn window_dpi(hwnd: HWND) -> u32 {
             dpi => dpi,
         },
         None => screen_dpi(hwnd),
+    }
+}
+
+pub fn monitor_dpi(monitor: HMONITOR) -> u32 {
+    let (mut x, mut y) = (0, 0);
+    match resolve!("shcore.dll", c"GetDpiForMonitor", true, DpiForMonitor) {
+        Some(f) if unsafe { f(monitor, EFFECTIVE_DPI, &mut x, &mut y) } == 0 && y > 0 => y,
+        _ => window_dpi(null_mut()),
+    }
+}
+
+pub fn round_corners(hwnd: HWND) {
+    if let Some(set) = resolve!(
+        "dwmapi.dll",
+        c"DwmSetWindowAttribute",
+        true,
+        WindowAttribute
+    ) {
+        let round = ROUND;
+        unsafe { set(hwnd, CORNER_PREFERENCE, (&raw const round).cast(), 4) };
+    }
+}
+
+type SetWindowTheme = unsafe extern "system" fn(HWND, *const u16, *const u16) -> i32;
+type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+type FlushMenuThemes = unsafe extern "system" fn();
+
+const PREFERRED_APP_MODE: u16 = 135;
+const FLUSH_MENU_THEMES: u16 = 136;
+
+pub fn dark_title_bar(hwnd: HWND, dark: bool, build: u32) {
+    let Some(attribute) = theme::immersive_attribute(build) else {
+        return;
+    };
+    if let Some(set) = resolve!(
+        "dwmapi.dll",
+        c"DwmSetWindowAttribute",
+        true,
+        WindowAttribute
+    ) {
+        let on = i32::from(dark);
+        unsafe { set(hwnd, attribute, (&raw const on).cast(), 4) };
+    }
+}
+
+pub fn dark_controls(hwnd: HWND, dark: bool, build: u32) {
+    if !theme::dark_controls(build) {
+        return;
+    }
+    if let Some(set) = resolve!("uxtheme.dll", c"SetWindowTheme", true, SetWindowTheme) {
+        let name = wide("DarkMode_Explorer");
+        let name = if dark { name.as_ptr() } else { null() };
+        unsafe { set(hwnd, name, null()) };
+    }
+}
+
+// Ordinals 135 and 136 of uxtheme.dll are SetPreferredAppMode and FlushMenuThemes from
+// build 18362 on; theme::menu_mode keeps older builds, where they differ, away from them.
+pub fn menu_mode(choice: theme::Choice, build: u32) {
+    let Some(mode) = theme::menu_mode(choice, build) else {
+        return;
+    };
+    let set = lookup_ordinal("uxtheme.dll", PREFERRED_APP_MODE)
+        .map(|f| unsafe { std::mem::transmute::<_, SetPreferredAppMode>(f) });
+    let flush = lookup_ordinal("uxtheme.dll", FLUSH_MENU_THEMES)
+        .map(|f| unsafe { std::mem::transmute::<_, FlushMenuThemes>(f) });
+    if let (Some(set), Some(flush)) = (set, flush) {
+        unsafe {
+            set(mode as i32);
+            flush();
+        }
     }
 }
 
@@ -116,19 +313,30 @@ pub fn adjusted_rect(w: i32, h: i32, style: u32, ex_style: u32, dpi: u32) -> [i3
     [r.left, r.top, r.right, r.bottom]
 }
 
-pub fn os_major() -> u32 {
-    let Some(get) = resolve!("ntdll.dll", c"RtlGetVersion", false, GetVersion) else {
-        return 0;
-    };
+pub fn wheel_lines() -> u32 {
+    let mut lines = 3u32;
+    let ok =
+        unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut lines).cast(), 0) };
+    if ok != 0 { lines } else { 3 }
+}
+
+fn os_version() -> Option<OSVERSIONINFOW> {
+    let get = resolve!("ntdll.dll", c"RtlGetVersion", false, GetVersion)?;
     let mut info = OSVERSIONINFOW {
         dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
         ..unsafe { std::mem::zeroed() }
     };
-    if unsafe { get(&mut info) } == 0 {
-        info.dwMajorVersion
-    } else {
-        0
-    }
+    (unsafe { get(&mut info) } == 0).then_some(info)
+}
+
+pub fn os_major() -> u32 {
+    os_version().map_or(0, |info| info.dwMajorVersion)
+}
+
+pub fn os_build() -> u32 {
+    os_version()
+        .filter(|info| info.dwMajorVersion >= 10)
+        .map_or(0, |info| info.dwBuildNumber)
 }
 
 pub fn composition_enabled() -> bool {

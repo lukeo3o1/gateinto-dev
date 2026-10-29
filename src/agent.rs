@@ -16,6 +16,7 @@ use crate::config::GatewayName;
 use crate::ipc::{self, BrowserKind, ConfirmToken, Connection, Request, Response, Server};
 use crate::job::{Job, SpawnError};
 use crate::link::{self, Decision, Known, Launch, LinkedGateway, Resolution};
+use crate::logbook::Logbook;
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use crate::uri::LaunchRequest;
@@ -101,6 +102,7 @@ pub struct AgentOptions {
     pub browser: Option<PathBuf>,
     pub profiles_root: PathBuf,
     pub limits: AgentLimits,
+    pub logbook: Logbook,
 }
 
 #[derive(Debug)]
@@ -293,6 +295,7 @@ impl Agent {
                 self.close_all().await;
                 Ok(vec![ipc::agent_pid_line()])
             }
+            Request::Log { after } => return self.inner.options.logbook.response(after),
         };
         match result {
             Ok(lines) => Response::Ok(lines),
@@ -845,6 +848,7 @@ mod tests {
                     browser: Some(PathBuf::from("/bin/sleep")),
                     profiles_root: root.clone(),
                     limits: AgentLimits::default(),
+                    logbook: Default::default(),
                 },
                 Plan(proxy_config()),
                 launcher.clone(),

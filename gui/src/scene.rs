@@ -1,19 +1,29 @@
+use std::borrow::Cow;
+
 use crate::fonts::Font;
 use crate::hit::Zone;
+use crate::i18n::Text;
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
+use crate::logo::State;
+use crate::menu::Popup;
 use crate::nav::Nav;
 use crate::pointer::{Look, Pointer};
 use crate::scale::Scale;
+use crate::scroll::Offsets;
 use crate::theme::{Rgb, Theme};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     Fill(Rect, Rgb),
+    Shade(Rect, Rgb, f32),
     Round(Rect, f32, Rgb),
     Icon(Icon, Rect, f32, Rgb),
-    Text(Font, &'static str, Rect, Rgb),
-    Logo(Rect),
+    Text(Font, Cow<'static, str>, Rect, Rgb),
+    Logo(Rect, State),
+    Ring(Rect, f32, f32, Rgb),
+    Clip(Rect),
+    Unclip,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -21,12 +31,20 @@ pub struct View {
     pub nav: Nav,
     pub pointer: Pointer,
     pub maximized: bool,
+    pub scroll: Offsets,
+    pub popup: Option<Popup>,
+    pub popup_scroll: i32,
+    pub logo: State,
+    pub demo: bool,
 }
+
+pub const BANNER: Text = Text::Demo;
+pub const BANNER_NOTE: Text = Text::DemoNote;
 
 const RAIL_ICON: f32 = 20.0;
 const CAPTION_GLYPH: f32 = 10.0;
 
-fn stroke(s: Scale, icon: &Icon, size: f32) -> f32 {
+pub fn stroke(s: Scale, icon: &Icon, size: f32) -> f32 {
     s.stroke(icon.stroke * size / icon.view)
 }
 
@@ -35,8 +53,8 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         Op::Fill(Rect::new(0, 0, l.caption_row.right(), l.rail.h), t.bg),
         Op::Fill(l.rail, t.rail),
         Op::Fill(l.rail_edge, t.rail_edge),
-        Op::Logo(l.logo),
-        Op::Text(Font::Brand, "Gateinto", l.brand_text, t.rail_on),
+        Op::Logo(l.logo, v.logo),
+        Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, t.rail_on),
     ];
     for item in l.nav {
         let selected = v.nav.selected() == item.page;
@@ -58,7 +76,23 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
             stroke(s, &icon, RAIL_ICON),
             glyph,
         ));
-        ops.push(Op::Text(font, item.page.label(), item.label, ink));
+        ops.push(Op::Text(font, item.page.label().into(), item.label, ink));
+    }
+    if v.demo {
+        let b = l.banner;
+        ops.push(Op::Round(b.card, s.pxf(6.0), t.notice));
+        ops.push(Op::Text(
+            Font::SmallStrong,
+            BANNER.into(),
+            b.title,
+            t.notice_text,
+        ));
+        ops.push(Op::Text(
+            Font::Small,
+            BANNER_NOTE.into(),
+            b.note,
+            t.notice_text,
+        ));
     }
     if let Some(b) = l.buttons {
         let maximize = if v.maximized {
@@ -97,7 +131,7 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
     }
     ops.push(Op::Text(
         Font::Title,
-        v.nav.selected().title(),
+        v.nav.selected().title().into(),
         l.title,
         t.text,
     ));
@@ -134,13 +168,17 @@ mod tests {
             o.x >= r.x && o.y >= r.y && o.right() <= r.right() && o.bottom() <= r.bottom()
         };
         ops.iter()
-            .copied()
-            .filter(|op| match *op {
-                Op::Fill(o, _) | Op::Round(o, ..) | Op::Icon(_, o, ..) | Op::Text(_, _, o, _) => {
-                    within(o)
-                }
-                Op::Logo(o) => within(o),
+            .filter(|op| match op {
+                Op::Fill(o, _)
+                | Op::Shade(o, ..)
+                | Op::Round(o, ..)
+                | Op::Icon(_, o, ..)
+                | Op::Text(_, _, o, _)
+                | Op::Logo(o, _)
+                | Op::Ring(o, ..) => within(*o),
+                Op::Clip(_) | Op::Unclip => false,
             })
+            .cloned()
             .collect()
     }
 
@@ -154,10 +192,74 @@ mod tests {
                 Op::Fill(Rect::new(0, 0, 1040, 680), T.bg),
                 Op::Fill(l.rail, T.rail),
                 Op::Fill(l.rail_edge, T.rail_edge),
-                Op::Logo(l.logo),
-                Op::Text(Font::Brand, "Gateinto", l.brand_text, T.rail_on),
+                Op::Logo(l.logo, State::Idle),
+                Op::Text(Font::Brand, "Gateinto".into(), l.brand_text, T.rail_on),
             ]
         );
+    }
+
+    #[test]
+    fn the_brand_logo_follows_the_agent_state() {
+        let l = layout(true);
+        for logo in [State::Stopped, State::Relaying, State::Attention] {
+            let v = View {
+                logo,
+                ..View::default()
+            };
+            assert_eq!(draw(&v)[3], Op::Logo(l.logo, logo));
+        }
+        assert_eq!(draw(&View::default())[3], Op::Logo(l.logo, State::Idle));
+    }
+
+    #[test]
+    fn the_rail_title_and_banner_speak_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let l = layout(true);
+        let demo = View {
+            demo: true,
+            ..at(Page::Device)
+        };
+        let ops = draw(&demo);
+        let texts: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, text, ..) => Some(text.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Gateinto",
+                "工作階段",
+                "閘道",
+                "裝置",
+                "記錄",
+                "設定",
+                "示範",
+                "僅為範例資料",
+                "這部裝置"
+            ]
+        );
+        assert!(l.banner.card.h > 0);
+    }
+
+    #[test]
+    fn only_the_demo_draws_its_banner() {
+        let b = layout(true).banner;
+        let demo = View {
+            demo: true,
+            ..View::default()
+        };
+        assert_eq!(
+            inside(&draw(&demo), b.card),
+            [
+                Op::Round(b.card, 6.0, T.notice),
+                Op::Text(Font::SmallStrong, BANNER.into(), b.title, T.notice_text),
+                Op::Text(Font::Small, BANNER_NOTE.into(), b.note, T.notice_text),
+            ]
+        );
+        assert!(inside(&draw(&View::default()), b.card).is_empty());
     }
 
     #[test]
@@ -170,7 +272,7 @@ mod tests {
                 Op::Round(item.frame, 6.0, T.rail_selected),
                 Op::Round(item.bar, 1.5, T.accent),
                 Op::Icon(icons::GATEWAYS, item.icon, 1.0, T.rail_icon),
-                Op::Text(Font::ItemSelected, "Gateways", item.label, T.rail_on),
+                Op::Text(Font::ItemSelected, "Gateways".into(), item.label, T.rail_on),
             ]
         );
     }
@@ -183,7 +285,7 @@ mod tests {
             rest,
             [
                 Op::Icon(icons::LOG, item.icon, 1.0, T.rail_text),
-                Op::Text(Font::Item, "Log", item.label, T.rail_text),
+                Op::Text(Font::Item, "Log".into(), item.label, T.rail_text),
             ]
         );
         let mut v = View::default();
@@ -230,7 +332,7 @@ mod tests {
         let glyph = Op::Icon(icons::CLOSE, b.glyph(b.close), 1.0, T.close_glyph_hover);
         assert_eq!(
             inside(&draw(&v), b.close),
-            [Op::Fill(b.close, T.close_hover), glyph]
+            [Op::Fill(b.close, T.close_hover), glyph.clone()]
         );
         v.pointer.down(Zone::Close);
         assert_eq!(
@@ -272,7 +374,12 @@ mod tests {
         let ops = draw(&at(Page::Device));
         assert_eq!(
             ops.last(),
-            Some(&Op::Text(Font::Title, "This device", l.title, T.text))
+            Some(&Op::Text(
+                Font::Title,
+                "This device".into(),
+                l.title,
+                T.text
+            ))
         );
     }
 

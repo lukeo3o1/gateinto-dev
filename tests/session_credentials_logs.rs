@@ -6,9 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fixture::*;
+use gateinto::ipc::{LogPage, Response};
+use gateinto::logbook::Logbook;
 use gateinto::proxy::{FailureLimit, LocalAuth};
 use gateinto::sessions::{SessionConfig, SessionKind, SessionManager};
 use tokio::io::AsyncWriteExt;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
+
+const PAGE_CONTENT: &str = "page-content-4f1c9e";
 
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -28,9 +35,14 @@ impl Write for Captured {
 async fn logs_never_contain_the_credentials() {
     let captured = Captured::default();
     let writer = captured.clone();
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(move || writer.clone())
+    let logbook = Logbook::default();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || writer.clone())
+                .with_filter(LevelFilter::TRACE),
+        )
+        .with(logbook.layer())
         .init();
     let ca = TestCa::new();
     let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
@@ -64,7 +76,7 @@ async fn logs_never_contain_the_credentials() {
 
     let (mut stream, response) = send(agent, &connect_with(&target, Some(&right))).await;
     assert_eq!(response.status, 200, "{}", response.head);
-    stream.write_all(b"logged").await.unwrap();
+    stream.write_all(PAGE_CONTENT.as_bytes()).await.unwrap();
     stream.shutdown().await.unwrap();
     read_to_end_within(&mut stream, Duration::from_secs(5)).await;
     let mut statuses = Vec::new();
@@ -96,5 +108,51 @@ async fn logs_never_contain_the_credentials() {
         &malformed["Basic ".len()..],
     ] {
         assert!(!logs.contains(secret), "{secret} leaked into\n{logs}");
+    }
+    assert!(
+        !logs.contains(PAGE_CONTENT),
+        "page content leaked into\n{logs}"
+    );
+
+    let response = logbook.response(0);
+    let Response::Ok(lines) = &response else {
+        panic!("a log response is ok");
+    };
+    let page = LogPage::parse(lines).unwrap();
+    let kept: Vec<&str> = page
+        .events
+        .iter()
+        .map(|event| event.message.as_str())
+        .collect();
+    for expected in [
+        "tunnel established",
+        "differ from the ones issued",
+        "malformed local proxy credential",
+        "rate limited",
+    ] {
+        assert!(
+            kept.iter().any(|message| message.contains(expected)),
+            "{expected} missing from {kept:?}"
+        );
+    }
+    assert!(
+        page.events
+            .iter()
+            .any(|event| event.scope == format!("session {id}"))
+    );
+    let encoded = response.encode();
+    for secret in [
+        password,
+        wrong_password,
+        &right["Basic ".len()..],
+        &wrong["Basic ".len()..],
+        &malformed["Basic ".len()..],
+        PAGE_CONTENT,
+        username,
+    ] {
+        assert!(
+            !encoded.contains(secret),
+            "{secret} reached the log page\n{encoded}"
+        );
     }
 }
