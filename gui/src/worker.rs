@@ -224,10 +224,21 @@ where
         Ok(answer == Ok(Ok(Answer::Allow)))
     };
     match settle(&launch, reply, send, ask).await {
-        Ok(Response::Ok(_)) | Err(ApprovalError::Denied(_)) => None,
+        Ok(Response::Ok(_)) => None,
         Ok(Response::Error(message)) => Some(Note::Agent(message)),
-        Err(ApprovalError::Request(error)) => Some(unlinked(error)),
-        Err(error) => Some(Note::Agent(error.to_string())),
+        Err(error) => refused(error),
+    }
+}
+
+fn refused(error: ApprovalError) -> Option<Note> {
+    match error {
+        ApprovalError::Denied(_) => None,
+        ApprovalError::Request(error) => Some(unlinked(error)),
+        ApprovalError::MissingSelector | ApprovalError::UnnamedGateway => {
+            Some(Text::LinkUnnamed.into())
+        }
+        ApprovalError::NotEchoed => Some(Text::LinkNotEchoed.into()),
+        ApprovalError::Unasked(reason) => Some(Note::Agent(reason)),
     }
 }
 
@@ -1334,5 +1345,54 @@ mod tests {
         assert_eq!(settled(&log), [Request::Launch(link())]);
         assert!(prompts.is_empty());
         assert_eq!(failures.last(), Some(&said("no such gateway")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_confirmation_for_another_gateway_is_denied_with_a_fixed_note() {
+        let log = RefCell::new(Vec::new());
+        let other = |request: Request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Launch(_) => {
+                    let mut elsewhere = proposed();
+                    elsewhere.gateway = "proxy.elsewhere.example".parse().unwrap();
+                    let mut lines = elsewhere.echo();
+                    lines.push(ipc::confirm_line(&token()));
+                    Response::Ok(lines)
+                }
+                _ => Response::Ok(Vec::new()),
+            }))
+        };
+        let (prompts, failures) = linked(
+            other,
+            vec![Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(
+            settled(&log),
+            [Request::Launch(link()), Request::Deny(token())]
+        );
+        assert!(prompts.is_empty());
+        assert_eq!(failures.last(), Some(&Some(Text::LinkNotEchoed.into())));
+    }
+
+    #[test]
+    fn links_naming_no_gateway_get_a_fixed_note() {
+        for error in [
+            ApprovalError::MissingSelector,
+            ApprovalError::UnnamedGateway,
+        ] {
+            assert_eq!(refused(error), Some(Text::LinkUnnamed.into()));
+        }
+        assert_eq!(
+            refused(ApprovalError::Request(RequestError::NotRunning)),
+            Some(Text::LinkAgentNotRunning.into())
+        );
+        assert_eq!(
+            refused(ApprovalError::Denied("newco".parse().unwrap())),
+            None
+        );
     }
 }
