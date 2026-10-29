@@ -464,9 +464,13 @@ ca_file = '$ca'
     Get-Content $logs.open
     $guis = @(Get-CimInstance Win32_Process -Filter "Name = 'gateinto-gui.exe'")
     if ($handed) {
-      $opened = @($guis | Where-Object { [string] $_.CommandLine -like '*--open*' })
+      $printed = [System.IO.File]::ReadAllText($logs.open[0])
+      if (-not [string]::IsNullOrWhiteSpace($printed)) {
+        throw "gateinto open exited with 0 but printed output, so it did not hand the link to gateinto-gui.exe: $printed"
+      }
+      $opened = @($guis | Where-Object { $_.ParentProcessId -eq $open.Id -and [string] $_.CommandLine -like '*--open*' })
       if ($guis.Count -ne 1 -or $opened.Count -ne 1) {
-        throw "expected one gateinto-gui.exe --open started by gateinto open, found [$(($guis | ForEach-Object { "$($_.ProcessId): $($_.CommandLine)" }) -join '; ')]"
+        throw "expected one gateinto-gui.exe --open started by gateinto open ($($open.Id)), found [$(($guis | ForEach-Object { "$($_.ProcessId) (parent $($_.ParentProcessId)): $($_.CommandLine)" }) -join '; ')]"
       }
       "gateinto open handed the link to gateinto-gui.exe $($opened[0].ProcessId): $($opened[0].CommandLine)"
     }
