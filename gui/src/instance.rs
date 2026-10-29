@@ -12,6 +12,10 @@ pub fn descriptor(sid: &str) -> String {
     format!("O:{sid}D:P(A;;GA;;;{sid})")
 }
 
+pub fn running(owner: Option<&str>, sid: &str) -> bool {
+    owner == Some(sid)
+}
+
 pub fn class(demo: bool) -> &'static str {
     if demo {
         "GateintoDemoWindow"
@@ -49,6 +53,13 @@ mod tests {
     #[test]
     fn the_mutex_is_owned_by_and_only_granted_to_the_user() {
         assert_eq!(descriptor(SID), format!("O:{SID}D:P(A;;GA;;;{SID})"));
+    }
+
+    #[test]
+    fn only_a_mutex_owned_by_the_user_means_an_instance_is_running() {
+        assert!(running(Some(SID), SID));
+        assert!(!running(Some("S-1-5-21-1-2-3-1002"), SID));
+        assert!(!running(None, SID));
     }
 
     #[test]

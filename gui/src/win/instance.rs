@@ -6,11 +6,12 @@ use windows_sys::Win32::Foundation::{
     SetLastError,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken,
@@ -44,13 +45,15 @@ pub fn start(demo: bool) -> Start {
         return Start::Alone(None);
     };
     match create(&sid, demo) {
-        Ok(guard) => Start::Alone(Some(guard)),
-        Err(ERROR_ALREADY_EXISTS) => Start::Second(sid),
-        Err(_) => Start::Alone(None),
+        Some((guard, false)) => Start::Alone(Some(guard)),
+        Some((guard, true)) if instance::running(mutex_owner(&guard).as_deref(), &sid) => {
+            Start::Second(sid)
+        }
+        _ => Start::Alone(None),
     }
 }
 
-fn create(sid: &str, demo: bool) -> Result<Guard, u32> {
+fn create(sid: &str, demo: bool) -> Option<(Guard, bool)> {
     let sddl = wide(&instance::descriptor(sid));
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     let converted = unsafe {
@@ -62,7 +65,7 @@ fn create(sid: &str, demo: bool) -> Result<Guard, u32> {
         )
     };
     if converted == 0 {
-        return Err(unsafe { GetLastError() });
+        return None;
     }
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -76,15 +79,30 @@ fn create(sid: &str, demo: bool) -> Result<Guard, u32> {
         (handle, GetLastError())
     };
     unsafe { LocalFree(descriptor) };
-    if handle.is_null() {
-        return Err(error);
+    (!handle.is_null()).then(|| (Guard(handle), error == ERROR_ALREADY_EXISTS))
+}
+
+fn mutex_owner(guard: &Guard) -> Option<String> {
+    let mut owner: PSID = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    let error = unsafe {
+        GetSecurityInfo(
+            guard.0,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if error != ERROR_SUCCESS {
+        return None;
     }
-    let guard = Guard(handle);
-    if error == ERROR_ALREADY_EXISTS {
-        Err(error)
-    } else {
-        Ok(guard)
-    }
+    let sid = sid_string(owner);
+    unsafe { LocalFree(descriptor) };
+    sid
 }
 
 fn process_sid(process: HANDLE) -> Option<String> {
@@ -114,8 +132,12 @@ fn token_sid(token: HANDLE) -> Option<String> {
         return None;
     }
     let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    sid_string(user.User.Sid)
+}
+
+fn sid_string(sid: PSID) -> Option<String> {
     let mut text: PWSTR = null_mut();
-    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } == 0 {
+    if sid.is_null() || unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return None;
     }
     let sid = unsafe {
@@ -151,13 +173,13 @@ fn find(class: &[u16], sid: &str) -> Option<(HWND, u32)> {
         }
         let mut pid = 0;
         unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        if pid != 0 && owner(pid).as_deref() == Some(sid) {
+        if pid != 0 && process_user(pid).as_deref() == Some(sid) {
             return Some((hwnd, pid));
         }
     }
 }
 
-fn owner(pid: u32) -> Option<String> {
+fn process_user(pid: u32) -> Option<String> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         return None;
