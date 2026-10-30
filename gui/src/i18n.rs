@@ -200,6 +200,7 @@ table! {
     SessionCount => "{0} session", "{0} 個工作階段";
     SessionsCount => "{0} sessions", "{0} 個工作階段";
     GatewayAndMixed => "Gateway and Mixed", "閘道與混合";
+    On => "On", "開啟";
     Off => "Off", "關閉";
     Optional => "Optional", "選用";
     Required => "Required", "必要";
@@ -242,8 +243,10 @@ table! {
     App => "App", "應用程式";
     Theme => "Theme", "主題";
     ThemeFailed => "Could not save the theme setting", "無法儲存主題設定";
-    SignIn => "Start at sign-in", "登入時啟動";
-    SignInNote => "Opens Gateinto when you sign in", "登入時開啟 Gateinto";
+    SignIn => "Start the app at sign-in", "登入時啟動應用程式";
+    SignInNote => "Opens this app when you sign in, not the agent", "登入時開啟此應用程式，不含代理程式";
+    AgentSignIn => "Agent starts at sign-in", "代理程式於登入時啟動";
+    AgentSignInNote => "Set by the installer (AUTOSTART=1); read only here", "由安裝程式設定（AUTOSTART=1），此處僅供檢視";
     SignInUnread => "Could not read the sign-in setting", "無法讀取登入時啟動設定";
     SignInFailed => "Could not change the sign-in setting", "無法變更登入時啟動設定";
     FromConfig => "From the config file", "來自設定檔";

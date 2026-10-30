@@ -19,6 +19,10 @@ fn value() -> Result<Option<String>, ()> {
     reg_string(HKEY_CURRENT_USER, KEY, settings::RUN_VALUE, 0)
 }
 
+pub fn agent() -> Result<Option<String>, ()> {
+    reg_string(HKEY_CURRENT_USER, KEY, settings::AGENT_RUN_VALUE, 0)
+}
+
 pub fn enabled() -> Result<bool, ()> {
     let exe = exe().ok_or(())?;
     Ok(value()?.is_some_and(|value| settings::launches(&value, &exe)))

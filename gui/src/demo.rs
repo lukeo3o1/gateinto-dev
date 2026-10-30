@@ -14,7 +14,7 @@ use crate::agent::Config;
 use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
 use crate::i18n::{Note, Text};
-use crate::settings;
+use crate::settings::{self, AgentStart};
 use crate::worker::{Command, Loaded};
 
 pub const FLAG: &str = "--demo";
@@ -27,6 +27,7 @@ pub const NOT_SAVED: Text = Text::DemoNotSaved;
 pub const NOT_OPENED: Text = Text::DemoNotOpened;
 pub const NOT_REMOVED: Text = Text::DemoNotRemoved;
 pub const CONFIG_PATH: &str = r"%APPDATA%\Gateinto\gateinto.toml";
+pub const AGENT_START: AgentStart = AgentStart::On;
 
 const PROFILE: &str = "g-4f0c2a9d7e1b83c56a0d9e2f4b7c1a3e5d8f0b2c4a6e8d1f3b5c7e9a0c2e4d";
 const PID: u32 = 4242;
