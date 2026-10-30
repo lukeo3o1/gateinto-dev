@@ -837,6 +837,21 @@ another file, Settings shows its path marked as used by the running agent; if
 it runs without one, Settings says so. The GUI never writes the config file.
 This is unit-tested but has not been tried on a real Windows desktop.
 
+## Removing a gateway in the GUI
+
+The gateway details in the GUI offer **Remove** only for a gateway added on
+this device from a `gateinto://` link. Gateways from the config file stay
+read-only there. Remove first asks for confirmation in a dialog that names
+the gateway and has Cancel first; it then does what `gateinto gateway forget
+<name>` does, with the same refusals: a name defined in the config file, a
+name held by several files, a damaged file or no such gateway removes
+nothing and shows a fixed message. Only that gateway's file in `gateways/` is
+deleted; the config file, the device key and its identity are not touched.
+Browser sessions already open through the gateway stay open until they are
+closed. The list shows the change at the next refresh, within 2 seconds. The
+demo never removes anything. This is unit-tested but has not been tried on a
+real Windows desktop.
+
 ## Verification status
 
 [docs/verification.md](docs/verification.md) lists each capability (relay,

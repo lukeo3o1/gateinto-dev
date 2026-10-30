@@ -341,6 +341,21 @@ The full protocol, limits and guarantees are in
   not the default one or when the agent loaded no file. The GUI only reads
   the file and opens it in the system's editor on request; it never writes
   it. This is unit-tested but has not been tried on a real Windows desktop.
+- The GUI removes a gateway added from a link without the agent: its gateway
+  details offer Remove only when the listed gateway's source is the link
+  store (a config gateway, including one that shadows a linked entry of the
+  same name, has no such control). A confirmation dialog names the gateway
+  as the list shows it, with Cancel first in the tab order. Confirming reads
+  the config file from the same path as the list and calls
+  `LinkedStore::forget_gateway` on `store::default_dir()`, the decision
+  `gateinto gateway forget` uses: a name in the config file, a name held by
+  several files, a damaged entry or a missing name removes nothing, and an
+  unreadable config file or store refuses too. Each refusal maps to a fixed
+  message in the dialog (`gui/src/remove.rs`), never the error, which can
+  hold paths. Only that gateway's file is deleted. Sessions are not stopped,
+  as with the command line. The list changes at the next 2-second poll. Demo
+  mode only shows a fixed note. This is unit-tested but has not been tried
+  on a real Windows desktop.
 
 ## Modules
 
@@ -350,7 +365,7 @@ The full protocol, limits and guarantees are in
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
-| `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting and purging. |
+| `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting (with the `gateway forget` decision shared with the GUI) and purging. |
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
@@ -372,6 +387,7 @@ The full protocol, limits and guarantees are in
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
+| `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
 
 ## Local 200 only after upstream 2xx
