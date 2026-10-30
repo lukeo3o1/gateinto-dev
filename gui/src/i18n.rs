@@ -161,6 +161,10 @@ table! {
     Days => "{0} d", "{0} 天";
     NoSessionsHint => "No sessions. Start one from a gateinto:// link.", "沒有工作階段。請從 gateinto:// 連結啟動。";
     StopAgent => "Stop agent", "停止代理程式";
+    StartAgent => "Start agent", "啟動代理程式";
+    StartingAgent => "Starting the agent…", "正在啟動代理程式…";
+    AgentStartFailed => "Could not start the agent. Run `gateinto agent` to see why.", "無法啟動代理程式。請執行 `gateinto agent` 查看原因。";
+    AgentCommandMissing => "gateinto.exe was not found next to Gateinto.", "在 Gateinto 旁找不到 gateinto.exe。";
     StartBrowser => "Start browser", "啟動瀏覽器";
     RevokeSession => "Revoke session", "撤銷工作階段";
     More => "More", "更多";
@@ -305,6 +309,7 @@ table! {
     DemoNotStarted => "Demo: nothing was started", "示範：未啟動任何項目";
     DemoNotRevoked => "Demo: nothing was revoked", "示範：未撤銷任何項目";
     DemoNotStopped => "Demo: the agent was not stopped", "示範：未停止代理程式";
+    DemoAgentNotStarted => "Demo: the agent was not started", "示範：未啟動代理程式";
     DemoNotSaved => "Demo: nothing was saved", "示範：未儲存任何項目";
     DemoNotOpened => "Demo: nothing was opened", "示範：未開啟任何項目";
     NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";

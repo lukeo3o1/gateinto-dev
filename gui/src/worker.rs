@@ -28,6 +28,7 @@ pub const CONFIRMATION: Text = Text::Confirmation;
 pub enum Command {
     Close(u64),
     Stop,
+    Start,
     Launch(GatewayName),
     Probe,
     Watch(bool),
@@ -51,6 +52,7 @@ impl Command {
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
                     .map_err(|error| error.to_string())?,
             ),
+            Command::Start => return Err("starting the agent is not an agent request".to_owned()),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
             Command::Watch(_) => {
                 return Err("watching the log is not an agent request".to_owned());
@@ -82,6 +84,7 @@ pub struct Update {
     pub launched: u64,
     pub device: Option<Probe>,
     pub log: Journal,
+    pub starting: bool,
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +155,7 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
             system: System::default(),
         }),
         log: Journal::default(),
+        starting: false,
     }
 }
 
@@ -238,9 +242,12 @@ fn refused(error: ApprovalError) -> Option<Note> {
     }
 }
 
-async fn finish(linking: &mut Option<Linking<'_>>) -> Option<Note> {
-    match linking {
-        Some(linking) => linking.await,
+async fn finish<T>(pending: &mut Option<Pin<Box<T>>>) -> Option<Note>
+where
+    T: Future<Output = Option<Note>> + ?Sized,
+{
+    match pending {
+        Some(pending) => pending.await,
         None => std::future::pending().await,
     }
 }
@@ -259,6 +266,7 @@ pub async fn serve<F, R>(
 {
     serve_with(
         |_| None,
+        crate::start::agent,
         commands,
         send,
         load,
@@ -274,8 +282,9 @@ pub async fn serve<F, R>(
     clippy::too_many_arguments,
     reason = "each callback reaches a different part of the window"
 )]
-pub async fn serve_with<F, R>(
+pub async fn serve_with<F, R, S>(
     refuse: impl Fn(&Command) -> Option<Text>,
+    start: impl Fn() -> S,
     mut commands: UnboundedReceiver<Command>,
     send: F,
     mut load: impl FnMut() -> Loaded,
@@ -286,6 +295,7 @@ pub async fn serve_with<F, R>(
 ) where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
+    S: Future<Output = Option<Note>>,
 {
     let mut failure = None;
     let mut launched = 0;
@@ -294,6 +304,7 @@ pub async fn serve_with<F, R>(
     let mut journal = Journal::default();
     let answers = Answers::default();
     let mut linking: Option<Linking<'_>> = None;
+    let mut starting: Option<Pin<Box<S>>> = None;
     loop {
         let state = AgentState::from_list(send(Request::List).await);
         match state {
@@ -310,6 +321,7 @@ pub async fn serve_with<F, R>(
             }
             AgentState::Running(_) | AgentState::Unreachable(_) => {}
         }
+        let stopped = state == AgentState::Stopped;
         let Loaded {
             gateways,
             sections,
@@ -324,6 +336,7 @@ pub async fn serve_with<F, R>(
             launched,
             device: device.clone(),
             log: journal.clone(),
+            starting: starting.is_some(),
         });
         tokio::select! {
             biased;
@@ -375,6 +388,12 @@ pub async fn serve_with<F, R>(
                         )));
                         continue;
                     }
+                    Command::Start => {
+                        if stopped && starting.is_none() {
+                            starting = Some(Box::pin(start()));
+                        }
+                        continue;
+                    }
                     Command::Close(_) | Command::Stop | Command::Launch(_) => {}
                 }
                 failure = run(command, &send).await;
@@ -382,6 +401,10 @@ pub async fn serve_with<F, R>(
             }
             note = finish(&mut linking) => {
                 linking = None;
+                failure = note;
+            }
+            note = finish(&mut starting) => {
+                starting = None;
                 failure = note;
             }
             () = tokio::time::sleep(POLL) => {}
@@ -431,6 +454,7 @@ mod tests {
             launched: 0,
             device: None,
             log: Journal::default(),
+            starting: false,
         }
     }
 
@@ -1377,5 +1401,137 @@ mod tests {
             refused(ApprovalError::Denied("newco".parse().unwrap())),
             None
         );
+    }
+
+    fn listing(
+        log: &RefCell<Vec<Request>>,
+        reply: fn() -> Result<Response, RequestError>,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request);
+            std::future::ready(reply())
+        }
+    }
+
+    type Seen = (u64, bool, Option<Note>);
+
+    async fn starts(
+        send: impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>>,
+        commands: Vec<Command>,
+        took: Duration,
+        note: Option<Note>,
+        wait: Duration,
+    ) -> (u32, Vec<Seen>) {
+        let (tx, rx) = unbounded_channel();
+        for command in commands {
+            tx.send(command).unwrap();
+        }
+        let calls = RefCell::new(0);
+        let start = || {
+            *calls.borrow_mut() += 1;
+            let note = note.clone();
+            async move {
+                tokio::time::sleep(took).await;
+                note
+            }
+        };
+        let begun = tokio::time::Instant::now();
+        let mut seen = Vec::new();
+        let run = serve_with(
+            |_| None,
+            start,
+            rx,
+            send,
+            loaded,
+            unprobed,
+            |u| {
+                let at = begun.elapsed().as_millis() as u64;
+                seen.push((at, u.starting, u.failure));
+            },
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(wait, run).await.is_err());
+        (calls.into_inner(), seen)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_agent_is_started_once_and_refreshed_as_soon_as_it_runs() {
+        let log = RefCell::new(Vec::new());
+        let (calls, seen) = starts(
+            listing(&log, || Err(RequestError::NotRunning)),
+            vec![Command::Start, Command::Start],
+            Duration::from_secs(9),
+            None,
+            Duration::from_millis(12_500),
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(
+            seen,
+            [
+                (0, false, None),
+                (0, true, None),
+                (0, true, None),
+                (2_000, true, None),
+                (4_000, true, None),
+                (6_000, true, None),
+                (8_000, true, None),
+                (9_000, false, None),
+                (11_000, false, None),
+            ]
+        );
+        assert!(log.borrow().iter().all(|r| *r == Request::List));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_start_carries_its_note_once() {
+        let log = RefCell::new(Vec::new());
+        let failed = Some(crate::start::FAILED.into());
+        let (calls, seen) = starts(
+            listing(&log, || Err(RequestError::NotRunning)),
+            vec![Command::Start],
+            Duration::from_secs(1),
+            failed.clone(),
+            Duration::from_millis(3_500),
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(
+            seen,
+            [
+                (0, false, None),
+                (0, true, None),
+                (1_000, false, failed),
+                (3_000, false, None),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_stopped_agent_is_started() {
+        let running = || Ok(Response::Ok(Vec::new()));
+        let unreachable = || Err(RequestError::TimedOut);
+        for reply in [running as fn() -> _, unreachable] {
+            let log = RefCell::new(Vec::new());
+            let (calls, seen) = starts(
+                listing(&log, reply),
+                vec![Command::Start],
+                Duration::from_secs(1),
+                None,
+                Duration::from_millis(500),
+            )
+            .await;
+            assert_eq!(calls, 0);
+            assert!(
+                seen.iter()
+                    .all(|&(_, starting, ref failure)| !starting && failure.is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn starting_is_not_an_agent_request() {
+        assert!(Command::Start.request().is_err());
     }
 }

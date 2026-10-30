@@ -104,6 +104,7 @@ impl Link {
                     let reveal = move |r| reveal(demo::reveal(r));
                     runtime.block_on(serve_with(
                         demo::refusal,
+                        demo::start,
                         inbox,
                         demo::send,
                         demo::loaded,

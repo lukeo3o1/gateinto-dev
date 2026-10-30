@@ -36,6 +36,7 @@ pub struct Board {
 }
 
 const STOP_LABEL: Text = Text::StopAgent;
+const START_AGENT: Text = Text::StartAgent;
 const REVOKE_TIP: Text = Text::RevokeSession;
 const MORE_TIP: Text = Text::More;
 
@@ -212,6 +213,11 @@ impl<'a, M: Measure> Painter<'a, M> {
         if let Some(button) = button {
             right = button.x - s.px(16.0);
         }
+        let start =
+            (status.start != Launch::Hidden).then(|| self.button(card, right, tr(START_AGENT)));
+        if let Some(start) = start {
+            right = start.x - s.px(16.0);
+        }
         let pick = (status.launch != Launch::Hidden).then(|| self.button(card, right, tr(START)));
         if let Some(pick) = pick {
             right = pick.x - s.px(16.0);
@@ -229,10 +235,20 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.text(Font::Body, status.subtitle.clone(), subtitle, t.muted);
         if let Some(pick) = pick {
             let ready = status.launch == Launch::Ready;
-            self.start(pick, tr(START), Zone::Picker, ready);
+            self.start(pick, icons::PLUS, tr(START), Zone::Picker, ready);
             if ready && self.v.popup == Some(Popup::Picker) {
                 self.board.anchor = Some(pick);
             }
+        }
+        if let Some(start) = start {
+            let ready = status.start == Launch::Ready;
+            self.start(
+                start,
+                icons::POWER,
+                tr(START_AGENT),
+                Zone::StartAgent,
+                ready,
+            );
         }
         if let Some(button) = button {
             self.stop(button);
@@ -248,18 +264,18 @@ impl<'a, M: Measure> Painter<'a, M> {
         Rect::new(right - w, card.y + (card.h - h) / 2, w, h)
     }
 
-    fn start(&mut self, button: Rect, label: &'static str, zone: Zone, enabled: bool) {
+    fn start(&mut self, button: Rect, icon: Icon, label: &'static str, zone: Zone, enabled: bool) {
         let (s, t) = (self.s, self.t);
-        let (fill, glyph, ink) = match (enabled, self.v.pointer.look(zone)) {
+        let (fill, glyph_ink, ink) = match (enabled, self.v.pointer.look(zone)) {
             (false, _) => (t.tile, t.eyes_idle, t.eyes_idle),
             (true, Look::Rest) => (t.button, t.button_glyph, t.button_text),
             (true, Look::Hover) => (t.button_hover, t.button_glyph, t.button_text),
             (true, Look::Pressed) => (t.button_pressed, t.button_glyph, t.button_text),
         };
         self.push(Op::Round(button, s.pxf(6.0), fill));
-        let icon = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
-        self.icon(icons::PLUS, icon, 16.0, glyph);
-        let x = icon.right() + s.px(8.0);
+        let glyph = Rect::new(button.x + s.px(14.0), button.y, s.px(16.0), button.h);
+        self.icon(icon, glyph, 16.0, glyph_ink);
+        let x = glyph.right() + s.px(8.0);
         let text = Rect::new(x, button.y, button.right() - s.px(14.0) - x, button.h);
         self.text(Font::BodyStrong, label, text, ink);
         if enabled {
@@ -467,6 +483,7 @@ mod tests {
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
     const STOP: Rect = Rect::new(870, 110, 122, 32);
+    const START_AGENT: Rect = Rect::new(863, 110, 129, 32);
     pub(super) const PICK: Rect = Rect::new(711, 110, 143, 32);
     const FIRST_ROW: i32 = 264;
 
@@ -567,6 +584,7 @@ mod tests {
                 logo: if active { State::Relaying } else { State::Idle },
                 stop: true,
                 launch: Launch::Ready,
+                start: Launch::Hidden,
             },
             rows: Some(rows),
         }
@@ -580,6 +598,7 @@ mod tests {
                 logo: State::Stopped,
                 stop: false,
                 launch: Launch::Hidden,
+                start: Launch::Ready,
             },
             rows: None,
         }
@@ -690,27 +709,66 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_agent_has_a_wide_subtitle_and_no_button_heading_or_table() {
+    fn a_stopped_agent_offers_only_start_agent_and_no_heading_or_table() {
         let b = draw(&stopped());
-        assert!(b.targets.is_empty());
+        assert_eq!(b.targets, [(START_AGENT, Zone::StartAgent)]);
         assert_eq!(
             b.ops[4..],
             [
                 text(
                     Font::Status,
                     "Stopped",
-                    Rect::new(340, 102, 652, 28),
+                    Rect::new(340, 102, 507, 28),
                     T.text
                 ),
                 text(
                     Font::Body,
                     "The agent is not running",
-                    Rect::new(340, 132, 652, 18),
+                    Rect::new(340, 132, 507, 18),
                     T.muted
+                ),
+                Op::Round(START_AGENT, 6.0, T.button),
+                Op::Icon(icons::POWER, Rect::new(877, 118, 16, 16), 1.0, T.accent),
+                text(
+                    Font::BodyStrong,
+                    "Start agent",
+                    Rect::new(901, 110, 77, 32),
+                    T.button_text
                 ),
                 Op::Unclip,
             ]
         );
+    }
+
+    #[test]
+    fn the_start_agent_button_is_disabled_while_a_start_is_in_flight() {
+        let mut page = stopped();
+        page.status.start = Launch::Busy;
+        let b = draw(&page);
+        assert!(b.targets.is_empty());
+        assert_eq!(
+            inside(&b.ops, START_AGENT),
+            [
+                Op::Round(START_AGENT, 6.0, T.tile),
+                Op::Icon(icons::POWER, Rect::new(877, 118, 16, 16), 1.0, T.eyes_idle),
+                text(
+                    Font::BodyStrong,
+                    "Start agent",
+                    Rect::new(901, 110, 77, 32),
+                    T.eyes_idle
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_start_agent_button_tints_on_hover_and_press() {
+        let fill = |v: &View| inside(&draw_with(&stopped(), v).ops, START_AGENT)[0].clone();
+        let mut v = View::default();
+        v.pointer.moved(Zone::StartAgent);
+        assert_eq!(fill(&v), Op::Round(START_AGENT, 6.0, T.button_hover));
+        v.pointer.down(Zone::StartAgent);
+        assert_eq!(fill(&v), Op::Round(START_AGENT, 6.0, T.button_pressed));
     }
 
     #[test]

@@ -103,7 +103,13 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Mono, row.address.clone(), address, t.muted);
 
         self.eyes(sessions, row);
-        self.start(button, tr(START), Zone::StartBrowser(index), launch);
+        self.start(
+            button,
+            icons::PLUS,
+            tr(START),
+            Zone::StartBrowser(index),
+            launch,
+        );
         self.target(card, Zone::GatewayCard(index));
     }
 

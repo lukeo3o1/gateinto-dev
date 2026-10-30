@@ -11,6 +11,7 @@ pub struct Status {
     pub logo: State,
     pub stop: bool,
     pub launch: Launch,
+    pub start: Launch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +49,13 @@ pub struct Page {
 
 pub const EMPTY: Text = Text::NoSessionsHint;
 
-pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> Page {
+pub fn page(
+    state: &AgentState,
+    failure: Option<&str>,
+    now: u64,
+    busy: bool,
+    starting: bool,
+) -> Page {
     let (status, rows) = match state {
         AgentState::Running(sessions) => {
             let active = sessions.iter().filter(|s| s.tunnels > 0).count();
@@ -71,16 +78,27 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
                 },
                 stop: true,
                 launch: if busy { Launch::Busy } else { Launch::Ready },
+                start: Launch::Hidden,
             };
             (status, Some(sessions.iter().map(|s| row(s, now)).collect()))
         }
         AgentState::Stopped => (
             Status {
                 title: tr(Text::Stopped),
-                subtitle: tr(Text::AgentStopped).to_owned(),
+                subtitle: tr(if starting {
+                    Text::StartingAgent
+                } else {
+                    Text::AgentStopped
+                })
+                .to_owned(),
                 logo: State::Stopped,
                 stop: false,
                 launch: Launch::Hidden,
+                start: if starting {
+                    Launch::Busy
+                } else {
+                    Launch::Ready
+                },
             },
             None,
         ),
@@ -91,6 +109,7 @@ pub fn page(state: &AgentState, failure: Option<&str>, now: u64, busy: bool) -> 
                 logo: State::Attention,
                 stop: false,
                 launch: Launch::Hidden,
+                start: Launch::Hidden,
             },
             None,
         ),
@@ -212,7 +231,7 @@ mod tests {
     #[test]
     fn a_running_agent_relays_while_any_session_has_tunnels() {
         let state = AgentState::Running(vec![session(1, 0), session(2, 3), session(3, 1)]);
-        let page = page(&state, None, 1_000, false);
+        let page = page(&state, None, 1_000, false, false);
         assert_eq!(
             page.status,
             Status {
@@ -221,6 +240,7 @@ mod tests {
                 logo: State::Relaying,
                 stop: true,
                 launch: Launch::Ready,
+                start: Launch::Hidden,
             }
         );
         let ids: Vec<u64> = page.rows.unwrap().iter().map(|r| r.id).collect();
@@ -231,7 +251,7 @@ mod tests {
     fn the_status_and_rows_speak_chinese() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         let state = AgentState::Running(vec![session(1, 0), session(2, 3)]);
-        let page = page(&state, None, 1_000 + 7_200, false);
+        let page = page(&state, None, 1_000 + 7_200, false, false);
         assert_eq!(page.status.title, "轉送中");
         assert_eq!(
             page.status.subtitle,
@@ -249,16 +269,47 @@ mod tests {
     }
 
     fn page_title(state: &AgentState) -> &'static str {
-        page(state, None, 0, false).status.title
+        page(state, None, 0, false, false).status.title
     }
 
     #[test]
     fn the_start_browser_button_waits_for_a_launch_in_flight() {
         let running = AgentState::Running(Vec::new());
-        assert_eq!(page(&running, None, 0, false).status.launch, Launch::Ready);
-        assert_eq!(page(&running, None, 0, true).status.launch, Launch::Busy);
-        let stopped = page(&AgentState::Stopped, None, 0, true).status.launch;
+        assert_eq!(
+            page(&running, None, 0, false, false).status.launch,
+            Launch::Ready
+        );
+        assert_eq!(
+            page(&running, None, 0, true, false).status.launch,
+            Launch::Busy
+        );
+        let stopped = page(&AgentState::Stopped, None, 0, true, false)
+            .status
+            .launch;
         assert_eq!(stopped, Launch::Hidden);
+    }
+
+    #[test]
+    fn only_a_stopped_agent_offers_to_start_and_waits_for_a_start_in_flight() {
+        let starting = page(&AgentState::Stopped, None, 0, false, true).status;
+        assert_eq!(starting.start, Launch::Busy);
+        assert_eq!(starting.subtitle, "Starting the agent…");
+        assert_eq!(starting.title, "Stopped");
+        let running = AgentState::Running(Vec::new());
+        assert_eq!(
+            page(&running, None, 0, false, true).status.start,
+            Launch::Hidden
+        );
+        let unreachable = AgentState::Unreachable(crate::i18n::Note::Agent("x".to_owned()));
+        assert_eq!(
+            page(&unreachable, None, 0, false, true).status.start,
+            Launch::Hidden
+        );
+        let failed = page(&AgentState::Stopped, Some("could not"), 0, false, false).status;
+        assert_eq!(
+            (failed.start, failed.subtitle.as_str()),
+            (Launch::Ready, "could not")
+        );
     }
 
     #[test]
@@ -267,6 +318,7 @@ mod tests {
             &AgentState::Running(vec![session(4, 0)]),
             None,
             1_000,
+            false,
             false,
         );
         assert_eq!(page.status.title, "Idle");
@@ -280,7 +332,7 @@ mod tests {
 
     #[test]
     fn a_running_agent_without_sessions_shows_an_empty_table() {
-        let page = page(&AgentState::Running(Vec::new()), None, 1_000, false);
+        let page = page(&AgentState::Running(Vec::new()), None, 1_000, false, false);
         assert_eq!(page.status.title, "Idle");
         assert_eq!(
             page.status.subtitle,
@@ -292,7 +344,7 @@ mod tests {
     #[test]
     fn a_stopped_agent_has_no_table_open_eyes_or_stop_button() {
         assert_eq!(
-            page(&AgentState::Stopped, None, 0, false),
+            page(&AgentState::Stopped, None, 0, false, false),
             Page {
                 status: Status {
                     title: "Stopped",
@@ -300,6 +352,7 @@ mod tests {
                     logo: State::Stopped,
                     stop: false,
                     launch: Launch::Hidden,
+                    start: Launch::Ready,
                 },
                 rows: None,
             }
@@ -312,7 +365,7 @@ mod tests {
             "the agent did not answer".to_owned(),
         ));
         assert_eq!(
-            page(&state, None, 0, false),
+            page(&state, None, 0, false, false),
             Page {
                 status: Status {
                     title: "Agent unreachable",
@@ -320,6 +373,7 @@ mod tests {
                     logo: State::Attention,
                     stop: false,
                     launch: Launch::Hidden,
+                    start: Launch::Hidden,
                 },
                 rows: None,
             }
@@ -329,7 +383,7 @@ mod tests {
     #[test]
     fn a_failed_command_replaces_the_subtitle() {
         let state = AgentState::Running(vec![session(1, 1)]);
-        let page = page(&state, Some("no session 9"), 1_000, false);
+        let page = page(&state, Some("no session 9"), 1_000, false, false);
         assert_eq!(page.status.title, "Relaying");
         assert_eq!(page.status.subtitle, "no session 9");
         assert_eq!(page.rows.unwrap().len(), 1);

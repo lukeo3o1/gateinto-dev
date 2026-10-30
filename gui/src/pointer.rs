@@ -12,6 +12,7 @@ pub enum Action {
     ToggleMaximize,
     Close,
     StopAgent,
+    StartAgent,
     Revoke(u64),
     More(u64),
     StartBrowser(usize),
@@ -60,6 +61,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::Maximize => Some(Action::ToggleMaximize),
         Zone::Close => Some(Action::Close),
         Zone::StopAgent => Some(Action::StopAgent),
+        Zone::StartAgent => Some(Action::StartAgent),
         Zone::Revoke(id) => Some(Action::Revoke(id)),
         Zone::More(id) => Some(Action::More(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
@@ -220,6 +222,13 @@ mod tests {
         assert_eq!(p.up(Zone::Revoke(4)), Some(Action::Revoke(4)));
         assert!(p.moved(Zone::Revoke(9)));
         assert_eq!(p.look(Zone::Revoke(9)), Look::Hover);
+    }
+
+    #[test]
+    fn the_start_agent_button_starts_the_agent() {
+        let mut p = Pointer::default();
+        p.down(Zone::StartAgent);
+        assert_eq!(p.up(Zone::StartAgent), Some(Action::StartAgent));
     }
 
     #[test]

@@ -7,8 +7,9 @@ use crate::layout::Rect;
 use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
+use crate::sessions::Launch;
 use crate::theme::Theme;
-use crate::tray::{ADD, Flyout, LABEL, OPEN, Row, STOP};
+use crate::tray::{ADD, Flyout, LABEL, OPEN, Row, START_AGENT, STOP};
 
 pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl Measure) -> Board {
     let mut p = Painter::within(frame, s, t, v, m);
@@ -46,11 +47,15 @@ pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl M
     y = label.bottom() + s.px(6.0);
 
     let mut actions = vec![
-        (icons::SESSIONS, tr(OPEN), Zone::OpenMain),
-        (icons::GATEWAYS, tr(ADD), Zone::AddGateway),
+        (icons::SESSIONS, tr(OPEN), Zone::OpenMain, true),
+        (icons::GATEWAYS, tr(ADD), Zone::AddGateway, true),
     ];
     if f.stop {
-        actions.push((icons::STOP, tr(STOP), Zone::StopAgent));
+        actions.push((icons::STOP, tr(STOP), Zone::StopAgent, true));
+    }
+    if f.start != Launch::Hidden {
+        let ready = f.start == Launch::Ready;
+        actions.push((icons::POWER, tr(START_AGENT), Zone::StartAgent, ready));
     }
     let (item, inner) = (s.px(36.0), s.px(8.0));
     let area = frame.bottom() - (2 * inner + actions.len() as i32 * item);
@@ -76,14 +81,14 @@ pub fn flyout(frame: Rect, s: Scale, t: &Theme, v: &View, f: &Flyout, m: &impl M
     }
 
     p.push(Op::Fill(Rect::new(frame.x, area, frame.w, edge), t.border));
-    for (i, (icon, label, zone)) in actions.into_iter().enumerate() {
+    for (i, (icon, label, zone, enabled)) in actions.into_iter().enumerate() {
         let r = Rect::new(
             frame.x + inner,
             area + inner + i as i32 * item,
             frame.w - 2 * inner,
             item,
         );
-        p.action(r, icon, label, zone);
+        p.action(r, icon, label, zone, enabled);
     }
     p.finish()
 }
@@ -165,26 +170,38 @@ impl<M: Measure> Painter<'_, M> {
         }
     }
 
-    fn action(&mut self, r: Rect, icon: Icon, label: &'static str, zone: Zone) {
+    fn action(&mut self, r: Rect, icon: Icon, label: &'static str, zone: Zone, enabled: bool) {
         let (s, t) = (self.s, self.t);
-        let fill = match self.v.pointer.look(zone) {
+        let look = if enabled {
+            self.v.pointer.look(zone)
+        } else {
+            Look::Rest
+        };
+        let fill = match look {
             Look::Rest => None,
             Look::Hover => Some(t.caption_hover),
             Look::Pressed => Some(t.caption_pressed),
+        };
+        let (glyph_ink, ink) = if enabled {
+            (t.muted, t.text)
+        } else {
+            (t.eyes_idle, t.eyes_idle)
         };
         if let Some(fill) = fill {
             self.push(Op::Round(r, s.pxf(6.0), fill));
         }
         let glyph = Rect::new(r.x + s.px(10.0), r.y, s.px(16.0), r.h);
-        self.icon(icon, glyph, 16.0, t.muted);
+        self.icon(icon, glyph, 16.0, glyph_ink);
         let x = glyph.right() + s.px(10.0);
         self.text(
             Font::Body,
             label,
             Rect::new(x, r.y, r.right() - s.px(10.0) - x, r.h),
-            t.text,
+            ink,
         );
-        self.target(r, zone);
+        if enabled {
+            self.target(r, zone);
+        }
     }
 }
 
@@ -193,7 +210,8 @@ mod tests {
     use super::*;
     use crate::board::tests::{Chars, text};
     use crate::logo::State;
-    use crate::tray::{ADD, LABEL, NO_GATEWAYS, OPEN, Row, STOP};
+    use crate::sessions::Launch;
+    use crate::tray::{ADD, LABEL, NO_GATEWAYS, OPEN, Row, START_AGENT, STOP};
 
     const T: Theme = Theme::DARK;
     const S: Scale = Scale { dpi: 96 };
@@ -214,6 +232,7 @@ mod tests {
             subtitle: "2 sessions · 1 with traffic".to_owned(),
             logo: State::Relaying,
             stop: true,
+            start: Launch::Hidden,
             launch: true,
             rows,
             empty: None,
@@ -390,6 +409,59 @@ mod tests {
                 .contains(&Op::Round(Rect::new(304, 122, 30, 30), 6.0, T.tile))
         );
         assert!(!texts(&board).contains(&STOP.english()));
+    }
+
+    fn stopped(start: Launch) -> Flyout {
+        Flyout {
+            title: "Stopped",
+            stop: false,
+            start,
+            launch: false,
+            ..relaying(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_stopped_agent_offers_to_start_where_stop_would_be() {
+        let board = draw(&stopped(Launch::Ready));
+        let r = Rect::new(8, 476, 344, 36);
+        assert_eq!(
+            board.targets,
+            [
+                (Rect::new(8, 404, 344, 36), Zone::OpenMain),
+                (Rect::new(8, 440, 344, 36), Zone::AddGateway),
+                (r, Zone::StartAgent),
+            ]
+        );
+        assert_eq!(
+            crate::board::tests::inside(&board.ops, r),
+            [
+                Op::Icon(icons::POWER, Rect::new(18, 486, 16, 16), 1.0, T.muted),
+                text(Font::Body, START_AGENT, Rect::new(44, 476, 298, 36), T.text),
+            ]
+        );
+        assert!(!texts(&board).contains(&STOP.english()));
+    }
+
+    #[test]
+    fn a_start_in_flight_greys_out_start_agent() {
+        let mut v = View::default();
+        v.pointer.moved(Zone::StartAgent);
+        let board = flyout(SIZE, S, &T, &v, &stopped(Launch::Busy), &Chars);
+        let r = Rect::new(8, 476, 344, 36);
+        assert!(!board.targets.iter().any(|&(_, z)| z == Zone::StartAgent));
+        assert_eq!(
+            crate::board::tests::inside(&board.ops, r),
+            [
+                Op::Icon(icons::POWER, Rect::new(18, 486, 16, 16), 1.0, T.eyes_idle),
+                text(
+                    Font::Body,
+                    START_AGENT,
+                    Rect::new(44, 476, 298, 36),
+                    T.eyes_idle
+                ),
+            ]
+        );
     }
 
     #[test]

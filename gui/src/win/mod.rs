@@ -278,7 +278,13 @@ impl App {
                 s,
                 t,
                 v,
-                &sessions::page(&update.state, failure, unix_now(), self.launches.busy()),
+                &sessions::page(
+                    &update.state,
+                    failure,
+                    unix_now(),
+                    self.launches.busy(),
+                    update.starting,
+                ),
                 m,
             ),
         };
@@ -865,6 +871,7 @@ fn hit_code(zone: Zone) -> u32 {
         Zone::Close => HTCLOSE,
         Zone::Nav(_)
         | Zone::StopAgent
+        | Zone::StartAgent
         | Zone::Revoke(_)
         | Zone::More(_)
         | Zone::StartBrowser(_)
@@ -912,6 +919,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::StopAgent) => {
             with_app(hwnd, |app| app.link.send(Command::Stop));
+            return;
+        }
+        Some(Action::StartAgent) => {
+            with_app(hwnd, |app| app.link.send(Command::Start));
             return;
         }
         Some(Action::Revoke(id)) => {

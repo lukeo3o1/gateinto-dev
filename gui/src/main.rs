@@ -31,6 +31,7 @@ mod scene;
 mod scroll;
 mod sessions;
 mod settings;
+mod start;
 mod theme;
 mod tray;
 #[cfg(windows)]
