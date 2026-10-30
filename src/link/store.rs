@@ -173,6 +173,26 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forgotten {
+    pub path: PathBuf,
+    pub configured: bool,
+}
+
+#[derive(Debug)]
+pub enum ForgetError {
+    Store(StoreError),
+    Damaged(InvalidEntry),
+    Configured,
+    Missing,
+}
+
+impl From<StoreError> for ForgetError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
@@ -434,6 +454,27 @@ impl LinkedStore {
         std::fs::remove_file(&path).map_err(self.io(&path))?;
         self.sync_dir()?;
         Ok(Some(path))
+    }
+
+    pub fn forget_gateway(
+        &self,
+        config: &config::ConfigFile,
+        name: &GatewayName,
+    ) -> Result<Forgotten, ForgetError> {
+        let configured = config.gateways.iter().any(|(known, _)| known == name);
+        if let Some(path) = self.forget(name)? {
+            return Ok(Forgotten { path, configured });
+        }
+        let damaged = self
+            .load()?
+            .invalid
+            .into_iter()
+            .find(|entry| entry.name.as_ref() == Some(name));
+        Err(match damaged {
+            Some(entry) => ForgetError::Damaged(entry),
+            None if configured => ForgetError::Configured,
+            None => ForgetError::Missing,
+        })
     }
 
     pub fn purge_candidates(&self) -> Result<Vec<PathBuf>, StoreError> {
@@ -1138,6 +1179,55 @@ mod tests {
         assert_eq!(store.forget(&name("newco")).unwrap(), None);
         assert_eq!(store.forget(&name("broken")).unwrap(), None);
         assert_eq!(files(&store), vec!["b.example.toml", "c.example.toml"]);
+    }
+
+    #[test]
+    fn forgetting_a_known_gateway_explains_why_nothing_was_removed() {
+        let store = store();
+        let config = config::ConfigFile::parse("[gateways.main]\nhost = \"m.example\"\n").unwrap();
+        store.add(&gateway("newco", "a.example")).unwrap();
+        store.add(&gateway("main", "b.example")).unwrap();
+        let damaged = plant(
+            &store,
+            "c.example.toml",
+            &format!("{}ca_file = \"x\"\n", entry("broken", "c.example", 443)),
+        );
+        plant(&store, "d.example.toml", &entry("twin", "d.example", 443));
+        plant(&store, "e.example.toml", &entry("twin", "e.example", 443));
+        assert!(matches!(
+            store.forget_gateway(&config, &name("broken")),
+            Err(ForgetError::Damaged(entry)) if entry.file == damaged
+        ));
+        assert!(matches!(
+            store.forget_gateway(&config, &name("twin")),
+            Err(ForgetError::Store(StoreError::Ambiguous(..)))
+        ));
+        assert!(matches!(
+            store.forget_gateway(&config, &name("nope")),
+            Err(ForgetError::Missing)
+        ));
+        assert_eq!(
+            store.forget_gateway(&config, &name("newco")).unwrap(),
+            Forgotten {
+                path: store.dir().join("a.example.toml"),
+                configured: false,
+            }
+        );
+        assert_eq!(
+            store.forget_gateway(&config, &name("main")).unwrap(),
+            Forgotten {
+                path: store.dir().join("b.example.toml"),
+                configured: true,
+            }
+        );
+        assert!(matches!(
+            store.forget_gateway(&config, &name("main")),
+            Err(ForgetError::Configured)
+        ));
+        assert_eq!(
+            files(&store),
+            vec!["c.example.toml", "d.example.toml", "e.example.toml"]
+        );
     }
 
     #[test]
