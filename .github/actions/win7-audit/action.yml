@@ -1,32 +1,50 @@
 name: Audit a Windows 7 gateinto build
-description: Checks the static C runtime and audits the imports of a -win7-windows-msvc gateinto.exe against .github/scripts/win7-imports.txt, writing imports.txt.
+description: Checks the static C runtime and audits the imports of a -win7-windows-msvc gateinto binary against .github/scripts/win7-imports.txt and any extra allow-list, writing the dumpbin import list.
 
 inputs:
   target:
     description: A -win7-windows-msvc target, such as i686-win7-windows-msvc
     required: true
+  bin:
+    description: Binary to audit
+    default: gateinto
+  imports:
+    description: File the dumpbin import list is written to
+    default: imports.txt
+  extra-allow-list:
+    description: Allow-list of further imports known to exist on Windows 7 SP1, checked in addition to .github/scripts/win7-imports.txt
+    default: ''
 
 runs:
   using: composite
   steps:
-    - name: Check that gateinto.exe links the C runtime statically
+    - name: Check that ${{ inputs.bin }}.exe links the C runtime statically
       shell: pwsh
       env:
         WIN7_TARGET: ${{ inputs.target }}
-      run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:WIN7_TARGET\release\gateinto.exe"
+        WIN7_BIN: ${{ inputs.bin }}
+      run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:WIN7_TARGET\release\$env:WIN7_BIN.exe"
     - name: List imports
       shell: pwsh
       env:
         WIN7_TARGET: ${{ inputs.target }}
+        WIN7_BIN: ${{ inputs.bin }}
+        WIN7_IMPORTS: ${{ inputs.imports }}
       run: |
-        $exe = "target\$env:WIN7_TARGET\release\gateinto.exe"
+        $exe = "target\$env:WIN7_TARGET\release\$env:WIN7_BIN.exe"
         $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
         $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
         if (-not $dumpbin) { throw 'dumpbin.exe not found' }
-        & $dumpbin /nologo /imports $exe | Tee-Object -FilePath imports.txt
+        & $dumpbin /nologo /imports $exe | Tee-Object -FilePath $env:WIN7_IMPORTS
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    - name: Audit imports against the Windows 7 allow-list
+    - name: Audit imports against the Windows 7 allow-lists
       shell: pwsh
       env:
         WIN7_TARGET: ${{ inputs.target }}
-      run: .github/scripts/assert-win7-imports.ps1 -Path "target\$env:WIN7_TARGET\release\gateinto.exe" -Imports imports.txt
+        WIN7_BIN: ${{ inputs.bin }}
+        WIN7_IMPORTS: ${{ inputs.imports }}
+        WIN7_EXTRA_ALLOW_LIST: ${{ inputs.extra-allow-list }}
+      run: |
+        $allow = @('.github/scripts/win7-imports.txt')
+        if ($env:WIN7_EXTRA_ALLOW_LIST) { $allow += $env:WIN7_EXTRA_ALLOW_LIST }
+        .github/scripts/assert-win7-imports.ps1 -Path "target\$env:WIN7_TARGET\release\$env:WIN7_BIN.exe" -Imports $env:WIN7_IMPORTS -AllowList $allow

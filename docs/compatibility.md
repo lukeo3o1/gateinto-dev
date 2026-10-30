@@ -21,7 +21,7 @@ Storage Provider key. Recorded on 2026-10-17.
 | Windows Server 2022 | CI (windows-2022, `compat.yml`): not run yet | CI (windows-2022, `compat.yml`): not run yet | CI (windows-2022, `compat.yml`): not run yet | none: no TPM on hosted runners | not verified |
 | Windows Server 2025 | CI (windows-latest, `ci.yml`); CI (windows-2025, `compat.yml`): not run yet | CI (windows-latest, `ci.yml`); CI (windows-2025, `compat.yml`): not run yet | CI (windows-latest, `ci.yml` `msi` job): passed on 553b5ae before the PATH, autostart, StopAgent and no-key checks were added; CI (windows-2025, `compat.yml`): not run yet | none: no TPM on hosted runners | not verified |
 | 32-bit Windows 10 | CI (windows-latest, `ci.yml` `windows-i686`, 64-bit host): not run yet | CI under WOW64 on 64-bit Windows Server only (`ci.yml` `windows-i686`, `compat.yml` `i686`): not run yet; on 32-bit Windows 10: manual: not yet | CI under WOW64 (windows-latest, `ci.yml` `msi` x86 run): not run yet; on 32-bit Windows 10: manual: not yet | manual: not yet | manual: not yet |
-| Windows 7 SP1 | see [windows7-feasibility.md](windows7-feasibility.md) | manual: not yet | not verified | not verified | not verified |
+| Windows 7 SP1 | see [windows7-feasibility.md](windows7-feasibility.md); `gateinto-gui.exe`: static import audit only ([GUI static import audit](windows7-feasibility.md#gui-static-import-audit)), never run | manual: not yet | not verified | not verified | not verified |
 
 Windows Server is not client Windows. Windows Server 2022 shares the servicing
 base of Windows 10 21H2, and Windows Server 2025 that of Windows 11 24H2; this
@@ -294,7 +294,7 @@ environment they got `-MD`.
 used by the `quickstart` and `msi` jobs, the release workflow on the release
 binary of each target before packaging, the `windows-i686` CI job on the
 `i686-pc-windows-msvc` debug binary, and the Windows 7 workflow on the
-`i686-win7-windows-msvc` build,
+`i686-win7-windows-msvc` builds of `gateinto.exe` and `gateinto-gui.exe`,
 whose import table names `kernel32.dll` in lower case; the `KERNEL32.dll` check
 is case-insensitive. Whether the binary starts on a Windows 10 machine without
 the redistributable has not been checked; only this import check verifies it.
