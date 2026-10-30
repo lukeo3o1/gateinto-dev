@@ -95,7 +95,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-i686-debug
-          path: target/${{ env.TARGET }}/debug/gateinto.exe
+          path: |
+            target/${{ env.TARGET }}/debug/gateinto.exe
+            target/${{ env.TARGET }}/debug/gateinto-gui.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -115,13 +117,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo build --release --locked
       - run: cargo build --release --locked --example test_upstream
+      - run: cargo build --release --locked -p gateinto-gui
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto.exe
+      - name: Check that gateinto-gui.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto-gui.exe
       - uses: actions/upload-artifact@v7
         with:
           name: windows-release
           path: |
             target/release/gateinto.exe
+            target/release/gateinto-gui.exe
             target/release/examples/test_upstream.exe
           if-no-files-found: error
           retention-days: 1
@@ -273,6 +279,7 @@ jobs:
       WIX_VERSION: '5.0.2'
       MSI_ARCH: ${{ matrix.arch }}
       EXE: ${{ matrix.dir }}/gateinto.exe
+      GUI_EXE: ${{ matrix.dir }}/gateinto-gui.exe
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -286,7 +293,7 @@ jobs:
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
       - name: Build the MSI
         run: |
-          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
       - name: Check that the MSI build writes only the MSI
         run: |

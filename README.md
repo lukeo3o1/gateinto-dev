@@ -56,6 +56,13 @@ purge. The MSI can also be built with `packaging/wix/build.ps1`. There is no
 WinGet package; `winget install` does not install Gateinto. `packaging/winget`
 holds manifest templates that have not been submitted.
 
+The MSI installs `gateinto.exe` and the GUI, `gateinto-gui.exe`, side by
+side in `%LOCALAPPDATA%\Programs\Gateinto`, and adds a per-user Start Menu
+shortcut named **Gateinto** that opens the GUI. Installing starts neither the
+GUI nor the agent, and does not turn on the GUI's own **Start the app at
+sign-in** value. Exit the GUI from its tray icon before uninstalling or
+upgrading: the uninstaller stops the agent but not the GUI.
+
 ## Releases
 
 The repository is private, so its GitHub Releases are for the owner's own

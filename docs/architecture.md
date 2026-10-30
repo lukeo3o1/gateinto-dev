@@ -504,9 +504,12 @@ and port have no default. See the README for the schema.
 ## Installation and the device identity
 
 The per-user MSI ([packaging/wix](../packaging/wix/README.md),
-[install.md](install.md)) installs `gateinto.exe` under
-`%LOCALAPPDATA%\Programs\Gateinto`, the `HKCU` `gateinto://` handler and an
-optional `HKCU` Run entry. Installing binaries is separate from creating the
+[install.md](install.md)) installs `gateinto.exe` and `gateinto-gui.exe` side
+by side under `%LOCALAPPDATA%\Programs\Gateinto`, so the GUI's Start agent
+finds `gateinto.exe` next to it, a per-user Start Menu shortcut to the GUI,
+the `HKCU` `gateinto://` handler and an optional `HKCU` Run entry for the
+agent. It never runs the GUI or the agent after installing and never writes
+the GUI's own `Gateinto App` Run value. Installing binaries is separate from creating the
 device key: no custom action touches a key, and the only uninstall custom
 action runs `gateinto stop --remove-stale-profiles` as the user. The key is
 created by `gateinto setup` (or `key init`) as the user who will use it;
