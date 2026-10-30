@@ -395,24 +395,25 @@ following with the Microsoft Software Key Storage Provider (the runners have no 
   shortcut pointing at the GUI, the user `PATH` entry, the exact handler command and the
   uninstall entry, starts no `gateinto.exe` or `gateinto-gui.exe` process, writes no
   `Gateinto App` Run value, and creates no device key (`key info` fails until `setup` runs);
-- a silent uninstall, after the GUI was started and `Gateinto App` was set to the installed GUI
-  with a StartupApproved entry, closes the GUI and removes both values but keeps an unrelated
-  Run value; if the runner shows no GUI window, only the values are checked, with a warning;
-- a silent uninstall keeps a `Gateinto App` value that points at another copy, its
-  StartupApproved entry and the StartupApproved entry of the agent's `Gateinto` value;
 - the first `setup` creates a key;
 - a silent uninstall with a running agent stops the agent and removes the exe, the GUI, the
   shortcut and the handler,
-  while `key info`, run from a copy outside the install folder, still shows the same SPKI;
+  while `key info`, run from a copy outside the install folder, still shows the same SPKI; the
+  GUI was started before it and `Gateinto App` was set to the installed GUI with a
+  StartupApproved entry, and the uninstall closes the GUI and removes both values but keeps an
+  unrelated Run value; if the runner shows no GUI window, only the values are checked, with a
+  warning;
 - after a reinstall with `AUTOSTART=1`, the Run value is exactly
   `"…\gateinto.exe" agent --detach`, the GUI and the shortcut are back, and `setup` reuses the
   key with the same SPKI; the uninstall after the purge below removes the Run value, the GUI and
-  the shortcut;
+  the shortcut, and keeps a `Gateinto App` value that points at another copy, its
+  StartupApproved entry and the StartupApproved entry of the agent's `Gateinto` value;
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
 runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
 the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
-keeping `Gateinto App` across an upgrade between two versions. See
+keeping `Gateinto App` across an upgrade between two versions. The checks that close the GUI and
+remove or keep `Gateinto App` on uninstall are in the script but have not run on Windows yet. See
 [verification.md](verification.md).
