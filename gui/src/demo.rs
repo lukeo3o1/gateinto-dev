@@ -25,6 +25,7 @@ pub const NOT_STOPPED: Text = Text::DemoNotStopped;
 pub const AGENT_NOT_STARTED: Text = Text::DemoAgentNotStarted;
 pub const NOT_SAVED: Text = Text::DemoNotSaved;
 pub const NOT_OPENED: Text = Text::DemoNotOpened;
+pub const NOT_REMOVED: Text = Text::DemoNotRemoved;
 pub const CONFIG_PATH: &str = r"%APPDATA%\Gateinto\gateinto.toml";
 
 const PROFILE: &str = "g-4f0c2a9d7e1b83c56a0d9e2f4b7c1a3e5d8f0b2c4a6e8d1f3b5c7e9a0c2e4d";
@@ -516,6 +517,7 @@ mod tests {
         assert_eq!(shown(Command::Credentials(3, 1)), None);
         assert_eq!(crate::i18n::tr(NOT_SAVED), "示範：未儲存任何項目");
         assert_eq!(crate::i18n::tr(NOT_OPENED), "示範：未開啟任何項目");
+        assert_eq!(crate::i18n::tr(NOT_REMOVED), "示範：未移除任何項目");
         assert_eq!(crate::i18n::tr(TITLE), "Gateinto 示範");
     }
 }

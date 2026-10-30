@@ -33,6 +33,8 @@ pub enum Action {
     AddGateway,
     Focus(Input),
     ConfirmAdd,
+    RemoveGateway,
+    ConfirmRemove,
     OpenMain,
 }
 
@@ -82,6 +84,8 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::AddGateway => Some(Action::AddGateway),
         Zone::AddField(input) => Some(Action::Focus(input)),
         Zone::ConfirmAdd => Some(Action::ConfirmAdd),
+        Zone::RemoveGateway => Some(Action::RemoveGateway),
+        Zone::ConfirmRemove => Some(Action::ConfirmRemove),
         Zone::OpenMain => Some(Action::OpenMain),
         _ => None,
     }
@@ -408,6 +412,18 @@ mod tests {
             (Zone::AddGateway, Action::AddGateway),
             (Zone::AddField(Input::Name), Action::Focus(Input::Name)),
             (Zone::ConfirmAdd, Action::ConfirmAdd),
+        ] {
+            let mut p = Pointer::default();
+            assert!(p.down(zone));
+            assert_eq!(p.up(zone), Some(action));
+        }
+    }
+
+    #[test]
+    fn the_remove_gateway_zones_act() {
+        for (zone, action) in [
+            (Zone::RemoveGateway, Action::RemoveGateway),
+            (Zone::ConfirmRemove, Action::ConfirmRemove),
         ] {
             let mut p = Pointer::default();
             assert!(p.down(zone));

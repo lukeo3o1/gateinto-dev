@@ -282,6 +282,13 @@ table! {
     Full => "This device holds as many added gateways as it can. Remove one first.", "這台裝置可新增的閘道已達上限。請先移除一個。";
     NotSaved => "The gateway could not be saved on this device.", "無法在這台裝置上儲存閘道。";
     Unlisted => "The gateway list cannot be read.", "無法讀取閘道清單。";
+    RemoveGateway => "Remove gateway", "移除閘道";
+    Remove => "Remove", "移除";
+    RemoveAsk => "Remove \"{0}\" from the gateways added on this device?", "要從這台裝置上新增的閘道中移除「{0}」嗎？";
+    RemoveKeeps => "Browser sessions already open through it stay open until they are closed. This device's key and identity are not changed.", "已透過它開啟的瀏覽器工作階段會保持開啟，直到關閉為止。這台裝置的金鑰與身分不會變更。";
+    NotAddedHere => "No gateway added on this device has this name. Nothing was removed.", "這台裝置上新增的閘道中沒有這個名稱。未移除任何項目。";
+    NameHeldTwice => "Several entries on this device use this name. Nothing was removed.", "這台裝置上有多筆項目使用這個名稱。未移除任何項目。";
+    NotRemoved => "The gateway could not be removed from this device.", "無法從這台裝置上移除閘道。";
     Unusable => "These values cannot be used for a gateway.", "這些值無法用於閘道。";
     EnterHost => "Enter a host name or IP address, with an optional :port.", "請輸入主機名稱或 IP 位址，可加上 :連接埠。";
     ReservedHost => "The host may not start with a Windows device name such as CON or NUL.", "主機名稱不可用 CON 或 NUL 等 Windows 裝置名稱開頭。";
@@ -314,6 +321,7 @@ table! {
     DemoAgentNotStarted => "Demo: the agent was not started", "示範：未啟動代理程式";
     DemoNotSaved => "Demo: nothing was saved", "示範：未儲存任何項目";
     DemoNotOpened => "Demo: nothing was opened", "示範：未開啟任何項目";
+    DemoNotRemoved => "Demo: nothing was removed", "示範：未移除任何項目";
     NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";
     NoWindowClass => "Gateinto could not register its window class.", "Gateinto 無法登錄視窗類別。";
     NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";

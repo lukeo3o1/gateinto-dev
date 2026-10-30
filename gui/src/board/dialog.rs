@@ -10,6 +10,7 @@ use crate::i18n::{Text, tr};
 use crate::icons::{self, Icon};
 use crate::layout::{Layout, Rect};
 use crate::pointer::Look;
+use crate::remove::{self, Prompt};
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::theme::{Rgb, Theme};
@@ -296,7 +297,72 @@ pub fn gateway(
     }
     modal.close(board, |p, footer| {
         let close = p.close_rect(footer);
+        if details.removable {
+            let remove = p.footer_rect(footer, close.x - s.px(8.0), tr(remove::REMOVE));
+            p.plain(remove, tr(remove::REMOVE), Zone::RemoveGateway);
+        }
         p.primary(close, tr(CLOSE), Zone::CloseDialog);
+    });
+}
+
+pub fn remove(
+    board: &mut Board,
+    l: &Layout,
+    s: Scale,
+    t: &Theme,
+    v: &View,
+    prompt: &Prompt,
+    m: &impl Measure,
+) {
+    let w = width(l, s);
+    let (line, note, gap, pad, glyph) = (s.px(18.0), s.px(NOTE), s.px(GAP), s.px(10.0), s.px(16.0));
+    let question = wrap(m, Font::Body, &prompt.question, w);
+    let keeps = wrap(m, Font::Small, tr(remove::KEEPS), w);
+    let failure = prompt
+        .failure
+        .map(|text| wrap(m, Font::Small, text, w - 3 * pad - glyph));
+    let notice_h = failure
+        .as_ref()
+        .map_or(0, |lines| gap + 2 * pad + lines.len() as i32 * note);
+    let body =
+        s.px(42.0) + question.len() as i32 * line + gap + keeps.len() as i32 * note + notice_h;
+    let mut modal = Modal::open(l, s, t, v, m, body);
+    let inner = modal.inner;
+    let p = &mut modal.p;
+    let x = inner.x;
+    p.text(
+        Font::Title,
+        remove::TITLE,
+        Rect::new(x, inner.y, w, s.px(28.0)),
+        t.text,
+    );
+    let mut y = inner.y + s.px(42.0);
+    for text in question {
+        p.text(Font::Body, text, Rect::new(x, y, w, line), t.text);
+        y += line;
+    }
+    y += gap;
+    for text in keeps {
+        p.text(Font::Small, text, Rect::new(x, y, w, note), t.muted);
+        y += note;
+    }
+    if let Some(lines) = failure {
+        y += gap;
+        let r = Rect::new(x, y, w, notice_h - gap);
+        p.push(Op::Round(r, s.pxf(8.0), t.notice));
+        let icon = Rect::new(x + pad, y + pad, glyph, note);
+        p.icon(icons::CLOSE, icon, 14.0, t.notice_text);
+        let tx = icon.right() + pad;
+        for (i, text) in lines.into_iter().enumerate() {
+            let r = Rect::new(tx, y + pad + i as i32 * note, r.right() - pad - tx, note);
+            p.text(Font::Small, text, r, t.notice_text);
+        }
+    }
+    modal.close(board, |p, footer| {
+        let confirm = p.footer_rect(footer, footer.right() - s.px(24.0), tr(remove::REMOVE));
+        let cancel = p.footer_rect(footer, confirm.x - s.px(8.0), tr(CANCEL));
+        p.primary(cancel, tr(CANCEL), Zone::CloseDialog);
+        p.plain(confirm, tr(remove::REMOVE), Zone::ConfirmRemove);
     });
 }
 
@@ -548,6 +614,7 @@ mod tests {
     use crate::hit::Zone;
     use crate::i18n::Text;
     use crate::layout::Rect;
+    use crate::remove::Prompt;
     use crate::scale::Scale;
     use crate::scene::{Op, View};
     use crate::theme::Theme;
@@ -761,6 +828,7 @@ mod tests {
                 (Text::ClientCertificate, "Required, self-signed".to_owned()),
                 (Text::ActiveSessions, "2 sessions".to_owned()),
             ],
+            removable: false,
         }
     }
 
@@ -794,6 +862,129 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("Remove") || t.contains("Forget"))
         );
+    }
+
+    fn draw_gateway(details: &Details) -> Board {
+        let mut board = Board {
+            targets: vec![(Rect::new(900, 300, 32, 32), Zone::Revoke(3))],
+            ..Board::default()
+        };
+        gateway(
+            &mut board,
+            &layout(),
+            S,
+            &T,
+            &View::default(),
+            details,
+            &Chars,
+        );
+        board
+    }
+
+    #[test]
+    fn gateway_details_added_on_this_device_offer_remove_before_close() {
+        let details = Details {
+            removable: true,
+            ..gateway_details()
+        };
+        let board = draw_gateway(&details);
+        assert_eq!(
+            zones(&board),
+            [Zone::RemoveGateway, Zone::CloseDialog, Zone::Dialog]
+        );
+        let remove = board.targets[0].0;
+        let close = board.targets[1].0;
+        assert!(remove.right() < close.x, "{remove:?} {close:?}");
+        assert!(texts(&board).iter().any(|t| t == "Remove"));
+    }
+
+    fn removal(failure: Option<&'static str>) -> Prompt {
+        Prompt {
+            question: "Remove \"lab\" from the gateways added on this device?".to_owned(),
+            failure,
+        }
+    }
+
+    fn draw_remove(l: &crate::layout::Layout, prompt: &Prompt) -> Board {
+        let mut board = Board {
+            targets: vec![(Rect::new(900, 300, 32, 32), Zone::Revoke(3))],
+            ..Board::default()
+        };
+        remove(&mut board, l, S, &T, &View::default(), prompt, &Chars);
+        board
+    }
+
+    #[test]
+    fn the_remove_prompt_names_the_gateway_and_puts_cancel_first() {
+        let board = draw_remove(&layout(), &removal(None));
+        assert_eq!(
+            zones(&board),
+            [Zone::CloseDialog, Zone::ConfirmRemove, Zone::Dialog]
+        );
+        let cancel = board.targets[0].0;
+        let confirm = board.targets[1].0;
+        assert!(cancel.right() < confirm.x, "{cancel:?} {confirm:?}");
+        assert!(board.ops.contains(&Op::Round(cancel, S.pxf(6.0), T.button)));
+        assert!(
+            !board
+                .ops
+                .contains(&Op::Round(confirm, S.pxf(6.0), T.button))
+        );
+        let all = texts(&board).join(" ");
+        for part in [
+            "Remove gateway",
+            "Remove \"lab\" from the gateways added on this device?",
+            "stay open until they are closed",
+            "Cancel",
+            "Remove",
+        ] {
+            assert!(all.contains(part), "{part}: {all}");
+        }
+    }
+
+    #[test]
+    fn the_remove_prompt_shows_why_the_last_try_failed() {
+        let failure = crate::i18n::Text::NotRemoved.english();
+        let board = draw_remove(&layout(), &removal(Some(failure)));
+        assert!(texts(&board).join(" ").contains(failure));
+        assert_eq!(
+            zones(&board),
+            [Zone::CloseDialog, Zone::ConfirmRemove, Zone::Dialog]
+        );
+    }
+
+    #[test]
+    fn the_remove_prompt_speaks_chinese() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let all = texts(&draw_remove(&layout(), &removal(None))).join("");
+        for part in ["移除閘道", "取消", "移除", "保持開啟"] {
+            assert!(all.contains(part), "{part}: {all}");
+        }
+    }
+
+    #[test]
+    fn the_remove_prompt_fits_a_window_of_the_minimum_size() {
+        let (w, h) = crate::layout::Layout::min_size(S);
+        let l = crate::layout::Layout::new(w, h, S, true);
+        let failure = crate::i18n::Text::NameHeldTwice.english();
+        let board = draw_remove(&l, &removal(Some(failure)));
+        let panel = board.targets.last().unwrap().0;
+        assert!(
+            panel.y >= l.caption_row.bottom() && panel.bottom() <= h,
+            "{panel:?}"
+        );
+        let words = board
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(_, _, r, _) => Some(*r),
+                _ => None,
+            })
+            .filter(|r| r.y < board.targets[0].0.y - 20)
+            .map(|r| r.bottom())
+            .max()
+            .unwrap();
+        assert!(words <= board.targets[0].0.y, "{words}");
     }
 
     #[test]
