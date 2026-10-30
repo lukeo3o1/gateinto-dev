@@ -70,10 +70,12 @@ These are limits of the design, not open defects:
   unit-tested but has not been tried on a real Windows desktop. See
   [architecture.md](architecture.md).
 - The GUI only reads the installer's `Gateinto` value in
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, to show whether the
-  agent starts at sign-in as a fixed On, Off or Unknown text. It never
-  writes, creates or deletes that value, never shows its contents and never
-  starts the agent because of it. The only Run value the GUI writes is its
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the `Gateinto`
+  value in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`,
+  to show whether the agent starts at sign-in as a fixed On, Off or Unknown
+  text. It never writes, creates or deletes either value, never shows their
+  contents and never starts the agent because of them. The only Run value the GUI writes is its
   own `Gateinto App`, through the app's sign-in switch. This is unit-tested
   but has not been tried on a real Windows desktop. See
   [architecture.md](architecture.md).

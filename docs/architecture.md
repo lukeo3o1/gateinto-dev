@@ -342,15 +342,25 @@ The full protocol, limits and guarantees are in
   the file and opens it in the system's editor on request; it never writes
   it. This is unit-tested but has not been tried on a real Windows desktop.
 - Settings shows whether the agent starts at sign-in, read-only. On Windows
-  `gui/src/win/run.rs` reads the installer's `Gateinto` value in
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` with the same
-  helper as the app's own `Gateinto App` value, and `settings::agent_start`
-  decides the state without Windows calls: On for a program named
-  `gateinto.exe` followed exactly by `agent --detach`, Off for no value, and
-  Unknown for any other command or a read error. Each state is a fixed
-  translated text; the value and its path are never shown. A fixed note says
-  the installer sets it (`AUTOSTART=1`). The GUI has no control for it and
-  never writes, creates or deletes the value. It reads it when Settings is
+  `gui/src/win/run.rs` reads, with `RegGetValueW` and no expansion, the
+  installer's `Gateinto` value in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the `Gateinto`
+  value in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`,
+  where Windows records whether the user turned the entry off. It does not
+  use the string helper of the app's own `Gateinto App` value, which treats
+  a value of another type as missing. `sys::reg_value` returns each value as
+  absent, a string, binary data or another type, and `settings::agent_start`
+  decides the state without Windows calls. Only a missing Run value is Off.
+  A Run value of another type, any command other than a program named
+  `gateinto.exe` followed exactly by `agent --detach`, or a read error is
+  Unknown. When the command matches, a missing StartupApproved value or one
+  whose first byte is `02` is On, a first byte of `03` is Off, and any other
+  first byte, an empty value, another type or a read error is Unknown. Each
+  state is a fixed translated text; the values and their paths are never
+  shown. A fixed note says the installer sets it, for example with
+  `AUTOSTART=1`. The GUI has no control for it and never writes, creates or
+  deletes either value. It reads it when Settings is
   selected and, while Settings stays selected, on worker updates at most once
   per 2-second poll (`settings::reread`); there is no extra timer. Demo mode
   shows a fixed On and never reads the registry. The app's own switch is
@@ -403,7 +413,7 @@ The full protocol, limits and guarantees are in
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
 | `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
-| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value, which it only reads and maps to On, Off or Unknown. |
+| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
 
 ## Local 200 only after upstream 2xx
