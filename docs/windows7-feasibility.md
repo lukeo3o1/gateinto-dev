@@ -1,7 +1,7 @@
 # Windows 7 feasibility
 
 Feasibility study, not a release gate. Windows 7 is experimental and
-unsupported. Recorded on 2026-10-16, updated on 2026-10-17.
+unsupported. Recorded on 2026-10-16, updated on 2026-10-17 and 2026-10-30.
 
 The regular releases, `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc`,
 require Windows 10 or later: Rust std for those targets needs Windows 10. They
@@ -116,9 +116,12 @@ assembled with `nasm -f win32`. The build log should contain the `aws-lc-sys` wa
 without it the binary uses `ProcessPrng` (see below).
 
 CI: [.github/workflows/windows7.yml](../.github/workflows/windows7.yml) runs this
-build for `i686-win7-windows-msvc` only on `windows-latest`. It runs on `workflow_dispatch` and on pull requests that
+build for `i686-win7-windows-msvc` only on `windows-latest`, once for
+`gateinto.exe` and once for `gateinto-gui.exe` (see
+[GUI static import audit](#gui-static-import-audit)). It runs on `workflow_dispatch` and on pull requests that
 change the workflow, its actions, its scripts, `.cargo/config.toml`,
-`Cargo.toml`, `Cargo.lock`, anything under `src/` or this document. The steps
+`Cargo.toml`, `Cargo.lock`, anything under `src/`, `ipc-types/` or `gui/`, or
+this document. The steps
 live in two composite actions,
 [win7-build](../.github/actions/win7-build/action.yml) and
 [win7-audit](../.github/actions/win7-audit/action.yml), which the
@@ -139,8 +142,12 @@ job in two cases:
   which aborts on Windows 7).
 
 The audit also lists the other Windows 8+ names found as strings (candidates for
-`GetProcAddress`). Each job uploads its `gateinto.exe` and `imports.txt` as the
-artifact `gateinto-<target>` when the build succeeded.
+`GetProcAddress`), including the DPI functions the GUI resolves at runtime. The
+`gateinto` job uploads `gateinto.exe` and `imports.txt` as the artifact
+`gateinto-<target>`, and the GUI job uploads `gateinto-gui.exe` and
+`gui-imports.txt` as `gateinto-gui-<target>`, when the build succeeded. The
+release workflow builds and audits only `gateinto.exe`; no GUI is attached to
+the experimental Windows 7 release.
 
 An allow-list replaced the old deny-list because the deny-list only caught the
 names someone thought of. `Tbsi_GetDeviceInfo` and `BCryptHash` got through it.
@@ -214,6 +221,116 @@ runtime applies to this target. It also lists `tbs.dll!Tbsi_GetDeviceInfo`
 have loaded on Windows 7. Run against this run's import table, the new audit
 reports exactly those two imports. With both removed, it passes.
 
+## GUI static import audit
+
+Recorded on 2026-10-30. This is a static import audit of `gateinto-gui.exe`
+(crate `gui/`). The GUI has not been run on Windows 7, and nothing below shows
+that it starts, draws or works there.
+
+Executed, on Linux x86_64 with `cargo xwin` (clang, lld-link and the xwin
+Windows SDK):
+
+- `cargo xwin build --release --locked -p gateinto-gui` for
+  `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc`, and
+  `cargo +nightly-2026-09-15 xwin build -Z build-std=std,panic_abort --target i686-win7-windows-msvc --release --locked -p gateinto-gui`
+  with `AWS_LC_SYS_CMAKE_BUILDER=0` and NASM, on commit `7090bd3`. The win7
+  link needed `LIB` pointed at the xwin `i686-unknown-windows-msvc` libraries,
+  because `cargo xwin` does not set the library path for the Tier 3 triple.
+- `llvm-readobj --coff-imports` on the three executables, compared with
+  [win7-imports.txt](../.github/scripts/win7-imports.txt), and a scan of the
+  binaries for the API names of the audit's string check.
+- Reading every `GetProcAddress` lookup in `gui/src/win/sys.rs` and the COM
+  interfaces used in `gui/src/win/d2d.rs` and `gui/src/win/text.rs`.
+
+Not executed: the `dumpbin` audit in CI (the workflow has not run with the GUI
+yet), and anything on Windows 7.
+
+The `i686-win7-windows-msvc` `gateinto-gui.exe` has 247 static imports from 13
+DLLs: `advapi32`, `bcrypt`, `comctl32`, `d2d1`, `dwrite`, `gdi32`, `kernel32`,
+`ncrypt`, `ntdll`, `oleaut32`, `secur32`, `shell32` and `user32`. There are no
+delay-load imports, no ordinal imports, no API-set DLLs (`api-ms-win-*`), and
+no static import from `shcore.dll`, `dwmapi.dll` or `uxtheme.dll`. 157 of the
+imports are already in `win7-imports.txt`; the other 90 are in
+[win7-gui-imports.txt](../.github/scripts/win7-gui-imports.txt), which the GUI
+job checks in addition to `win7-imports.txt`. Each of those 90 has a minimum
+supported client of Windows 7 or earlier according to its Microsoft
+documentation; none was found missing from Windows 7. The string scan found no
+`ProcessPrng`, and the same std names as in `gateinto.exe`
+(`api-ms-win-core-synch-l1-2-0`, `GetSystemTimePreciseAsFileTime`,
+`SetThreadDescription`, `WaitOnAddress`, `WakeByAddressSingle`) plus
+`Tbsi_GetDeviceInfo` from the `gateinto` library.
+
+The regular `x86_64-pc-windows-msvc` and `i686-pc-windows-msvc` GUI builds also
+import `bcryptprimitives.dll!ProcessPrng`,
+`api-ms-win-core-synch-l1-2-0.dll!WaitOnAddress`, `WakeByAddressSingle`,
+`WakeByAddressAll` and `kernel32.dll!GetSystemTimePreciseAsFileTime` (Windows 8
+or later) through Rust std, so, like the regular `gateinto.exe`, they cannot
+load on Windows 7. Only the win7 target replaces those. Compared with the two
+allow-lists, the i686 import table differs in exactly those five imports, which
+shows that the allow-lists would reject them.
+
+Static imports added by the GUI, by DLL. "Windows 7 SP1" is the documented
+minimum supported client, not a runtime observation:
+
+| DLL | Functions | Minimum client | Windows 7 SP1 |
+| --- | --- | --- | --- |
+| `d2d1.dll` | `D2D1CreateFactory` | Windows 7, or Vista SP2 with the Platform Update | present |
+| `dwrite.dll` | `DWriteCreateFactory` | Windows 7, or Vista SP2 with the Platform Update | present |
+| `user32.dll` | 63 window, message, menu, clipboard, cursor, monitor and timer functions, such as `CreateWindowExW`, `GetMonitorInfoW`, `TrackMouseEvent`, `SetProcessDPIAware` (Vista) and `ChangeWindowMessageFilterEx` (Windows 7) | Windows 7 or earlier | present |
+| `gdi32.dll` | `CreateBitmap`, `CreateDIBSection`, `DeleteObject`, `GetDeviceCaps` | Windows 2000 | present |
+| `shell32.dll` | `ShellExecuteW`, `Shell_NotifyIconW` | Windows XP or earlier | present |
+| `comctl32.dll` | `InitCommonControlsEx` | Windows XP or earlier | present |
+| `oleaut32.dll` | `GetErrorInfo` (from the `windows` crate's error handling) | Windows 2000 | present |
+| `secur32.dll` | `GetUserNameExW` | Windows 2000 | present |
+| `advapi32.dll` | `RegDeleteKeyValueW`, `RegSetKeyValueW` | Windows Vista | present |
+| `kernel32.dll` | `GetTickCount64`, `GetUserPreferredUILanguages`, `QueryFullProcessImageNameW` (Vista); `CreateMutexW`, `GetComputerNameExW`, `GetLocalTime`, `GetNativeSystemInfo`, `GetSystemTime`, `GetUserDefaultUILanguage`, `GlobalAlloc`, `GlobalFree`, `GlobalLock`, `GlobalSize`, `GlobalUnlock` (XP or earlier) | Windows Vista or earlier | present |
+
+Functions newer than Windows 7 that the GUI uses, all looked up at runtime by
+`gui/src/win/sys.rs` with `GetModuleHandleW` or
+`LoadLibraryExW(LOAD_LIBRARY_SEARCH_SYSTEM32)` and `GetProcAddress`, none in the
+import table:
+
+| DLL | Function | Minimum client | Fallback when missing |
+| --- | --- | --- | --- |
+| `user32.dll` | `SetProcessDpiAwarenessContext` | Windows 10 1703 | `SetProcessDPIAware` (static, Vista) |
+| `user32.dll` | `GetDpiForWindow` | Windows 10 1607 | `GetDeviceCaps(LOGPIXELSY)` of the window's DC |
+| `user32.dll` | `GetSystemMetricsForDpi` | Windows 10 1607 | `GetSystemMetrics` |
+| `user32.dll` | `AdjustWindowRectExForDpi` | Windows 10 1607 | `AdjustWindowRectEx` |
+| `shcore.dll` | `GetDpiForMonitor` | Windows 8.1 | the window DPI path above for the whole screen |
+| `uxtheme.dll` | ordinals 135 and 136 (`SetPreferredAppMode`, `FlushMenuThemes`) | Windows 10 1903 (undocumented) | not called: `theme::menu_mode` requires build 18362 |
+| `dwmapi.dll` | `DwmSetWindowAttribute` with `DWMWA_USE_IMMERSIVE_DARK_MODE` (19 or 20) | function Vista; attribute Windows 10 1809 | not called: `theme::immersive_attribute` returns `None` below build 17763 |
+| `dwmapi.dll` | `DwmSetWindowAttribute` with `DWMWA_WINDOW_CORNER_PREFERENCE` (33) | attribute Windows 11 | called for the tray flyout on every version; the result is ignored |
+| `uxtheme.dll` | `SetWindowTheme` with `DarkMode_Explorer` | function XP; theme Windows 10 1809 | not called: `theme::dark_controls` requires build 17763 |
+
+Other runtime lookups exist on Windows 7: `dwmapi.dll!DwmIsCompositionEnabled`
+(Vista) and `ntdll.dll!RtlGetVersion` (2000). `sys::os_build` reports build 0
+below Windows 10, and `Frame::choose` keeps the system window frame below
+Windows 10; unit tests in `gui/src/theme.rs` (build 7601 gets no dark title bar
+attribute) and `gui/src/frame.rs` (major version 6 gets the system frame) cover
+those decisions, not the Windows calls. On Windows 7 without KB2533623
+(superseded by KB3063858), `LOAD_LIBRARY_SEARCH_SYSTEM32` makes `LoadLibraryExW`
+fail, so `dwmapi.dll` and `uxtheme.dll` lookups would fail unless the DLL is
+already loaded, and `DwmIsCompositionEnabled` would then report no composition;
+`shcore.dll` does not exist on Windows 7 either way.
+
+Direct2D and DirectWrite are used only through their 1.0 interfaces, which ship
+with Windows 7 SP1 without the Platform Update (KB2670838): `ID2D1Factory`,
+`ID2D1DCRenderTarget`, `ID2D1PathGeometry`, `ID2D1SolidColorBrush`,
+`ID2D1StrokeStyle`, `IDWriteFactory`, `IDWriteFontCollection` (the system
+font collection), `IDWriteTextFormat`, `IDWriteInlineObject` (the ellipsis
+trimming sign), `IDWriteTextLayout` and `IDWriteRenderingParams`.
+`IDWriteFactory2`, `IDWriteFontFallbackBuilder`, `IDWriteFontFallback` and
+`IDWriteTextFormat1` (Windows 8.1) serve only to add a CJK font fallback: the
+builder and the fallback are reached only through `IDWriteFactory2`, which is
+obtained with `QueryInterface`, and the fallback is applied through
+`IDWriteTextFormat1`, also obtained with `QueryInterface`. When either cast
+fails, the fallback is skipped and the text formats are created without it. These COM paths are not visible in an import
+table, and none of them has been run on Windows 7.
+
+Not checked: the manifest's `dpiAwareness` and `dpiAware` (`true/pm`) settings
+on Windows 7, the tray icon and its menu, font rendering of the fallback path,
+and whether the hard-coded Windows 10 UI looks acceptable on Windows 7.
+
 ## Dependency findings
 
 Versions are those in `Cargo.lock`. Only crates that reach the Windows binary
@@ -253,6 +370,12 @@ fixed x64 build passed that audit. The `i686-win7-windows-msvc` build succeeded
 and failed only on three Windows 7-safe imports, which are now on the list.
 Nothing has been run on Windows 7 SP1, the targets are Tier 3, and the TPM key storage provider
 does not exist on Windows 7, so only software keys can work there.
+
+`gateinto-gui.exe` for `i686-win7-windows-msvc` built locally with `cargo xwin`
+and its import table contains only functions documented as present on Windows
+7 SP1 (see [GUI static import audit](#gui-static-import-audit)). That is a
+static import audit only: the GUI has not been run on Windows 7, and it is not
+part of any Windows 7 release.
 
 ## Alternatives if blocked
 

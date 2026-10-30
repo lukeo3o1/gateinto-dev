@@ -10,10 +10,13 @@ on:
       - .github/scripts/assert-static-crt.ps1
       - .github/scripts/assert-win7-imports.ps1
       - .github/scripts/win7-imports.txt
+      - .github/scripts/win7-gui-imports.txt
       - .cargo/config.toml
       - Cargo.toml
       - Cargo.lock
       - src/**
+      - ipc-types/**
+      - gui/**
       - docs/windows7-feasibility.md
 
 permissions:
@@ -29,13 +32,23 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.target }}
+    name: ${{ matrix.target }}, ${{ matrix.bin }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         target: [i686-win7-windows-msvc]
+        bin: [gateinto, gateinto-gui]
+        include:
+          - bin: gateinto
+            package: gateinto
+            imports: imports.txt
+            extra-allow-list: ''
+          - bin: gateinto-gui
+            package: gateinto-gui
+            imports: gui-imports.txt
+            extra-allow-list: .github/scripts/win7-gui-imports.txt
     steps:
       - uses: actions/checkout@v7
       - name: Build
@@ -43,16 +56,21 @@ jobs:
         uses: ./.github/actions/win7-build
         with:
           target: ${{ matrix.target }}
+          package: ${{ matrix.package }}
+          bin: ${{ matrix.bin }}
           nasm-version: ${{ env.NASM_VERSION }}
           cache-save: ${{ github.event_name == 'workflow_dispatch' }}
       - uses: ./.github/actions/win7-audit
         with:
           target: ${{ matrix.target }}
+          bin: ${{ matrix.bin }}
+          imports: ${{ matrix.imports }}
+          extra-allow-list: ${{ matrix.extra-allow-list }}
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         with:
-          name: gateinto-${{ matrix.target }}
+          name: ${{ matrix.bin }}-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/gateinto.exe
-            imports.txt
+            ${{ steps.build.outputs.exe }}
+            ${{ matrix.imports }}
           if-no-files-found: error
