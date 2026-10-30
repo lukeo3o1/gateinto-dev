@@ -276,7 +276,7 @@ minimum supported client, not a runtime observation:
 | --- | --- | --- | --- |
 | `d2d1.dll` | `D2D1CreateFactory` | Windows 7, or Vista SP2 with the Platform Update | present |
 | `dwrite.dll` | `DWriteCreateFactory` | Windows 7, or Vista SP2 with the Platform Update | present |
-| `user32.dll` | 64 window, message, menu, clipboard, cursor, monitor and timer functions, such as `CreateWindowExW`, `GetMonitorInfoW`, `TrackMouseEvent`, `SetProcessDPIAware` (Vista) and `ChangeWindowMessageFilterEx` (Windows 7) | Windows 7 or earlier | present |
+| `user32.dll` | 63 window, message, menu, clipboard, cursor, monitor and timer functions, such as `CreateWindowExW`, `GetMonitorInfoW`, `TrackMouseEvent`, `SetProcessDPIAware` (Vista) and `ChangeWindowMessageFilterEx` (Windows 7) | Windows 7 or earlier | present |
 | `gdi32.dll` | `CreateBitmap`, `CreateDIBSection`, `DeleteObject`, `GetDeviceCaps` | Windows 2000 | present |
 | `shell32.dll` | `ShellExecuteW`, `Shell_NotifyIconW` | Windows XP or earlier | present |
 | `comctl32.dll` | `InitCommonControlsEx` | Windows XP or earlier | present |
@@ -316,11 +316,15 @@ already loaded, and `DwmIsCompositionEnabled` would then report no composition;
 Direct2D and DirectWrite are used only through their 1.0 interfaces, which ship
 with Windows 7 SP1 without the Platform Update (KB2670838): `ID2D1Factory`,
 `ID2D1DCRenderTarget`, `ID2D1PathGeometry`, `ID2D1SolidColorBrush`,
-`ID2D1StrokeStyle`, `IDWriteFactory`, `IDWriteTextFormat`,
-`IDWriteTextLayout` and `IDWriteRenderingParams`. `IDWriteFactory2` and
-`IDWriteTextFormat1` (Windows 8.1) are obtained with `QueryInterface` only to
-add a CJK font fallback; when that fails, the fallback is skipped and the text
-formats are created without it. These COM paths are not visible in an import
+`ID2D1StrokeStyle`, `IDWriteFactory`, `IDWriteFontCollection` (the system
+font collection), `IDWriteTextFormat`, `IDWriteInlineObject` (the ellipsis
+trimming sign), `IDWriteTextLayout` and `IDWriteRenderingParams`.
+`IDWriteFactory2`, `IDWriteFontFallbackBuilder`, `IDWriteFontFallback` and
+`IDWriteTextFormat1` (Windows 8.1) serve only to add a CJK font fallback: the
+builder and the fallback are reached only through `IDWriteFactory2`, which is
+obtained with `QueryInterface`, and the fallback is applied through
+`IDWriteTextFormat1`, also obtained with `QueryInterface`. When either cast
+fails, the fallback is skipped and the text formats are created without it. These COM paths are not visible in an import
 table, and none of them has been run on Windows 7.
 
 Not checked: the manifest's `dpiAwareness` and `dpiAware` (`true/pm`) settings
