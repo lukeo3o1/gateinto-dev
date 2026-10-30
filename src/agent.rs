@@ -103,6 +103,7 @@ pub struct AgentOptions {
     pub profiles_root: PathBuf,
     pub limits: AgentLimits,
     pub logbook: Logbook,
+    pub config: ipc::ConfigSource,
 }
 
 #[derive(Debug)]
@@ -296,6 +297,9 @@ impl Agent {
                 Ok(vec![ipc::agent_pid_line()])
             }
             Request::Log { after } => return self.inner.options.logbook.response(after),
+            Request::Config => ipc::config_line(&self.inner.options.config)
+                .map(|line| vec![line])
+                .ok_or_else(|| "the config path cannot be sent over IPC".to_owned()),
         };
         match result {
             Ok(lines) => Response::Ok(lines),
@@ -849,6 +853,7 @@ mod tests {
                     profiles_root: root.clone(),
                     limits: AgentLimits::default(),
                     logbook: Default::default(),
+                    config: ipc::ConfigSource::Defaults,
                 },
                 Plan(proxy_config()),
                 launcher.clone(),

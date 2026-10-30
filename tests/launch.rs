@@ -845,6 +845,67 @@ async fn agent_detach_starts_a_background_agent_once_and_returns() {
     launcher.run(&["stop"]).await.success();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_reports_the_absolute_path_of_a_relative_config() {
+    use gateinto::ipc::{self, ConfigSource, Request, Response};
+    let launcher = Launcher::new("").await;
+    let mut command = launcher.command(&["agent", "--detach", "--config", "gateinto.toml"]);
+    command
+        .current_dir(&launcher.dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let status = tokio::task::spawn_blocking(move || command.status().unwrap())
+        .await
+        .unwrap();
+    assert!(status.success());
+
+    let reply = ipc::send(&launcher.endpoint(), &Request::Config).await;
+
+    let Ok(Response::Ok(lines)) = reply else {
+        panic!("the config path was not reported: {reply:?}");
+    };
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        ipc::config_source(&lines),
+        Some(ConfigSource::File(launcher.dir.join("gateinto.toml")))
+    );
+    launcher.run(&["stop"]).await.success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_without_a_config_file_reports_none() {
+    use gateinto::ipc::{self, ConfigSource, Request, Response};
+    let launcher = Launcher::without_gateways().await;
+    launcher.run(&["agent", "--detach"]).await.success();
+
+    let reply = ipc::send(&launcher.endpoint(), &Request::Config).await;
+
+    assert!(
+        matches!(&reply, Ok(Response::Ok(lines)) if ipc::config_source(lines) == Some(ConfigSource::Defaults)),
+        "{reply:?}"
+    );
+    launcher.run(&["stop"]).await.success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_on_the_default_config_file_reports_its_path() {
+    use gateinto::ipc::{self, ConfigSource, Request, Response};
+    let launcher = Launcher::without_gateways().await;
+    let default = launcher.linked_store().with_file_name("gateinto.toml");
+    std::fs::create_dir_all(default.parent().unwrap()).unwrap();
+    std::fs::copy(&launcher.config, &default).unwrap();
+    launcher.run(&["agent", "--detach"]).await.success();
+
+    let reply = ipc::send(&launcher.endpoint(), &Request::Config).await;
+
+    assert!(
+        matches!(&reply, Ok(Response::Ok(lines)) if ipc::config_source(lines) == Some(ConfigSource::File(default.clone()))),
+        "{reply:?}"
+    );
+    launcher.run(&["stop"]).await.success();
+}
+
 fn stopped_pid(lines: &[String]) -> u32 {
     lines
         .iter()

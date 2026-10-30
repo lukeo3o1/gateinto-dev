@@ -184,6 +184,7 @@ pub fn answer(request: Request, now: u64) -> Response {
         | Request::Launch(_)
         | Request::Close(_)
         | Request::Stop
+        | Request::Config
         | Request::Approve(_)
         | Request::Deny(_) => Response::Ok(Vec::new()),
     }

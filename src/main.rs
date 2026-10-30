@@ -18,7 +18,9 @@ use gateinto::identity::client_cert::{
 use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
-use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
+use gateinto::ipc::{
+    self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
+};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
 use gateinto::link::{
@@ -804,7 +806,11 @@ impl Profiles for ConfigProfiles {
 
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
-    let file = args.load()?;
+    let path = args.path();
+    let file = path.as_ref().map_or_else(
+        || Ok(ConfigFile::default()),
+        |(path, _)| ConfigFile::load(path),
+    )?;
     let logbook = Logbook::default();
     init_logging_into("info", Some(&logbook));
     args.log_default();
@@ -812,11 +818,16 @@ async fn agent(args: ConfigArg) -> Result {
     let server = Server::bind(&endpoint)?;
     let profiles_root = browser::profiles_root()
         .ok_or("cannot find the per-user application data directory for browser profiles")?;
+    let config = match path {
+        Some((path, _)) => ConfigSource::File(std::path::absolute(path)?),
+        None => ConfigSource::Defaults,
+    };
     let options = AgentOptions {
         browser: file.browser.executable.clone(),
         profiles_root,
         limits: AgentLimits::default(),
         logbook,
+        config,
     };
     let profiles = ConfigProfiles {
         file: file.clone(),
