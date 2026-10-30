@@ -22,7 +22,7 @@ use gateinto::ipc::{
     self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
 };
 use gateinto::lifecycle::{self, Purge};
-use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
+use gateinto::link::store::{self, ForgetError, Forgotten, LinkedStore, Loaded, StoreError};
 use gateinto::link::{
     Known, KnownGateway, LinkedGateway, Source, approval,
     handoff::{self, Handoff},
@@ -1238,35 +1238,35 @@ fn gateway(command: GatewayCommand) -> Result {
         GatewayCommand::Forget { config, name } => {
             let file = config.load()?;
             let store = linked_store().ok_or("cannot find the per-user config directory")?;
-            let configured = file.gateways.iter().any(|(known, _)| *known == name);
-            if let Some(path) = store.forget(&name)? {
-                println!(
-                    "removed the gateway \"{name}\" added from a link ({})",
-                    path.display()
-                );
-                if configured {
-                    println!("the config file still defines a gateway \"{name}\"");
+            match store.forget_gateway(&file, &name) {
+                Ok(Forgotten { path, configured }) => {
+                    println!(
+                        "removed the gateway \"{name}\" added from a link ({})",
+                        path.display()
+                    );
+                    if configured {
+                        println!("the config file still defines a gateway \"{name}\"");
+                    }
+                    println!("open browser sessions of this gateway stay open until closed");
                 }
-                println!("open browser sessions of this gateway stay open until closed");
-            } else if let Some(entry) = store
-                .load()?
-                .invalid
-                .into_iter()
-                .find(|entry| entry.name.as_ref() == Some(&name))
-            {
-                return Err(format!(
-                    "the gateway \"{name}\" is in a damaged file ({entry}); delete that file to \
-                     remove it"
-                )
-                .into());
-            } else if configured {
-                return Err(format!(
-                    "the gateway \"{name}\" is defined in the config file, not added from a \
-                     link; edit the config file to change it"
-                )
-                .into());
-            } else {
-                return Err(format!("no gateway added from a link named \"{name}\"").into());
+                Err(ForgetError::Store(error)) => return Err(error.into()),
+                Err(ForgetError::Damaged(entry)) => {
+                    return Err(format!(
+                        "the gateway \"{name}\" is in a damaged file ({entry}); delete that file \
+                         to remove it"
+                    )
+                    .into());
+                }
+                Err(ForgetError::Configured) => {
+                    return Err(format!(
+                        "the gateway \"{name}\" is defined in the config file, not added from a \
+                         link; edit the config file to change it"
+                    )
+                    .into());
+                }
+                Err(ForgetError::Missing) => {
+                    return Err(format!("no gateway added from a link named \"{name}\"").into());
+                }
             }
         }
     }

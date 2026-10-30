@@ -70,6 +70,7 @@ use crate::logo;
 use crate::menu::{self, Choice, Entry, Popup, Wheel};
 use crate::nav::{self, Page as NavPage};
 use crate::pointer::{self, Action};
+use crate::remove::{self, Removal};
 use crate::scale::Scale;
 use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
@@ -164,6 +165,7 @@ struct App {
     dialog: Option<Dialog>,
     details: Option<GatewayName>,
     adding: Option<Form>,
+    removing: Option<Removal>,
     units: Units,
     tickets: u64,
     secret: Option<u32>,
@@ -219,6 +221,7 @@ impl App {
             dialog: None,
             details: None,
             adding: None,
+            removing: None,
             units: Units::default(),
             tickets: 0,
             secret: None,
@@ -296,8 +299,13 @@ impl App {
             let page = dialog.page(&update.state);
             board::dialog::credentials(&mut board, l, s, t, v, &page, m);
         }
-        if let Some(details) = self.gateway_details() {
-            board::dialog::gateway(&mut board, l, s, t, v, &details, m);
+        match self.removal() {
+            Some(prompt) => board::dialog::remove(&mut board, l, s, t, v, &prompt, m),
+            None => {
+                if let Some(details) = self.gateway_details() {
+                    board::dialog::gateway(&mut board, l, s, t, v, &details, m);
+                }
+            }
         }
         if let Some(form) = &self.adding {
             let sheet = add::sheet(form, &update.gateways);
@@ -418,8 +426,15 @@ impl App {
         gateways::details(&update.gateways, &update.sections, &update.state, name)
     }
 
+    fn removal(&self) -> Option<remove::Prompt> {
+        remove::prompt(&self.update.as_ref()?.gateways, self.removing.as_ref()?)
+    }
+
     fn modal(&self) -> bool {
-        self.dialog.is_some() || self.details.is_some() || self.adding.is_some()
+        self.dialog.is_some()
+            || self.details.is_some()
+            || self.adding.is_some()
+            || self.removing.is_some()
     }
 
     fn portal(&self, id: u64) -> Option<String> {
@@ -442,6 +457,7 @@ impl App {
             }
             self.details = None;
             self.adding = None;
+            self.removing = None;
             self.relog();
             if self.copied {
                 self.uncopy();
@@ -489,6 +505,7 @@ impl App {
         self.uncopy();
         self.details = None;
         self.adding = None;
+        self.removing = None;
         self.dialog = Some(dialog);
         self.link.send(Command::Credentials(id, ticket));
         self.retarget();
@@ -496,6 +513,7 @@ impl App {
     }
 
     fn show_gateway(&mut self, name: GatewayName) {
+        self.removing = None;
         self.close_dialog();
         self.details = Some(name);
         if self.gateway_details().is_none() {
@@ -524,7 +542,10 @@ impl App {
     }
 
     fn close_dialog(&mut self) -> bool {
-        if self.details.take().is_some() || self.adding.take().is_some() {
+        if self.removing.take().is_some()
+            || self.details.take().is_some()
+            || self.adding.take().is_some()
+        {
             self.retarget();
             self.invalidate();
             return true;
@@ -542,6 +563,7 @@ impl App {
     }
 
     fn open_add(&mut self) {
+        self.removing = None;
         self.close_dialog();
         self.units = Units::default();
         self.adding = Some(Form::default());
@@ -611,6 +633,35 @@ impl App {
         self.retarget();
         self.invalidate();
         true
+    }
+
+    fn ask_remove(&mut self) {
+        let Some(name) = self.details.clone() else {
+            return;
+        };
+        self.removing = Some(Removal::new(name));
+        if self.removal().is_none() {
+            self.removing = None;
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn confirm_remove(&mut self) {
+        let path = self.config_path();
+        let Some(removal) = &mut self.removing else {
+            return;
+        };
+        if self.demo {
+            self.removing = None;
+            self.details = None;
+            self.fail(demo::NOT_REMOVED);
+        } else if remove::commit(removal, &gateways::read(path), store::default_dir()) {
+            self.removing = None;
+            self.details = None;
+        }
+        self.retarget();
+        self.invalidate();
     }
 
     fn revoke_credentials(&mut self) {
@@ -910,6 +961,8 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::AddGateway
         | Zone::AddField(_)
         | Zone::ConfirmAdd
+        | Zone::RemoveGateway
+        | Zone::ConfirmRemove
         | Zone::OpenMain
         | Zone::DenyLink
         | Zone::AllowLink
@@ -1080,6 +1133,16 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             rehover(hwnd);
             return;
         }
+        Some(Action::RemoveGateway) => {
+            with_app(hwnd, App::ask_remove);
+            rehover(hwnd);
+            return;
+        }
+        Some(Action::ConfirmRemove) => {
+            with_app(hwnd, App::confirm_remove);
+            rehover(hwnd);
+            return;
+        }
         Some(Action::OpenMain) => {
             show_main(hwnd);
             return;
@@ -1186,6 +1249,9 @@ fn on_agent(hwnd: HWND) {
         app.config = app.config_line();
         if app.details.is_some() && app.gateway_details().is_none() {
             app.details = None;
+        }
+        if app.removing.is_some() && app.removal().is_none() {
+            app.removing = None;
         }
         app.relog();
         if pinned {

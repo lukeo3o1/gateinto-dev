@@ -39,6 +39,8 @@ pub enum Zone {
     AddGateway,
     AddField(Input),
     ConfirmAdd,
+    RemoveGateway,
+    ConfirmRemove,
     OpenMain,
     DenyLink,
     AllowLink,

@@ -24,6 +24,7 @@ mod menu;
 mod message;
 mod nav;
 mod pointer;
+mod remove;
 #[cfg(test)]
 mod res;
 mod scale;

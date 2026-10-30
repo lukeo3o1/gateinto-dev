@@ -122,6 +122,7 @@ pub struct Details {
     pub title: String,
     pub address: String,
     pub facts: Vec<(Text, String)>,
+    pub removable: bool,
 }
 
 pub fn details(
@@ -201,6 +202,7 @@ pub fn details(
             (Text::ActiveSessions, count(open.len())),
         ],
         address: address(gateway.host.as_deref(), gateway.port),
+        removable: crate::remove::removable(gateway),
         title,
     })
 }
@@ -414,6 +416,7 @@ mod tests {
         let details = details(&listing, &sections, &state, &name("office")).unwrap();
         assert_eq!(details.title, "office");
         assert_eq!(details.address, "proxy.example.com:8443");
+        assert!(!details.removable);
         assert_eq!(
             facts(&details),
             [
@@ -447,6 +450,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(details.title, "edge.example");
+        assert!(details.removable);
         assert_eq!(
             facts(&details),
             [

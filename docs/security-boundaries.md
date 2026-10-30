@@ -69,6 +69,15 @@ These are limits of the design, not open defects:
   within its existing 2-second poll and never writes the file. This is
   unit-tested but has not been tried on a real Windows desktop. See
   [architecture.md](architecture.md).
+- The GUI deletes a file only when the user confirms Remove for a gateway
+  added on this device, and then only that gateway's file in `gateways/`,
+  with the same checks as `gateinto gateway forget`. It never writes the
+  config file and does not touch the device key, its identity or open
+  sessions; sessions already open through the gateway stay open until they
+  are closed. Refusals show fixed messages without paths, and no credential
+  is shown or logged. The demo deletes nothing. This is unit-tested but has
+  not been tried on a real Windows desktop. See
+  [architecture.md](architecture.md).
 
 ## Routing selection
 
