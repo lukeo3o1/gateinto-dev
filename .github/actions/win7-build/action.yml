@@ -1,10 +1,16 @@
 name: Build gateinto for a Windows 7 target
-description: Builds gateinto.exe for a -win7-windows-msvc target with a pinned nightly and build-std.
+description: Builds a gateinto binary for a -win7-windows-msvc target with a pinned nightly and build-std.
 
 inputs:
   target:
     description: A -win7-windows-msvc target, such as i686-win7-windows-msvc
     required: true
+  package:
+    description: Cargo package of the binary
+    default: gateinto
+  bin:
+    description: Binary to build
+    default: gateinto
   nasm-version:
     description: NASM version for i686 targets
     required: true
@@ -17,8 +23,8 @@ inputs:
 
 outputs:
   exe:
-    description: Path of the built gateinto.exe
-    value: target/${{ inputs.target }}/release/gateinto.exe
+    description: Path of the built executable
+    value: target/${{ inputs.target }}/release/${{ inputs.bin }}.exe
 
 runs:
   using: composite
@@ -45,5 +51,7 @@ runs:
       env:
         NIGHTLY_TOOLCHAIN: ${{ inputs.toolchain }}
         WIN7_TARGET: ${{ inputs.target }}
+        WIN7_PACKAGE: ${{ inputs.package }}
+        WIN7_BIN: ${{ inputs.bin }}
         AWS_LC_SYS_CMAKE_BUILDER: '0'
-      run: cargo +$env:NIGHTLY_TOOLCHAIN build -Z build-std=std,panic_abort --target $env:WIN7_TARGET --locked --release --bin gateinto
+      run: cargo +$env:NIGHTLY_TOOLCHAIN build -Z build-std=std,panic_abort --target $env:WIN7_TARGET --locked --release --package $env:WIN7_PACKAGE --bin $env:WIN7_BIN
