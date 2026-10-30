@@ -1,5 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
@@ -26,6 +27,9 @@ pub const SIGN_IN_NOTE: Text = Text::SignInNote;
 pub const SIGN_IN_UNREAD: Text = Text::SignInUnread;
 pub const SIGN_IN_FAILED: Text = Text::SignInFailed;
 pub const RUN_VALUE: &str = "Gateinto App";
+pub const AGENT_RUN_VALUE: &str = "Gateinto";
+pub const AGENT_SIGN_IN: Text = Text::AgentSignIn;
+pub const AGENT_SIGN_IN_NOTE: Text = Text::AgentSignInNote;
 pub const AGENT: Text = Text::Agent;
 pub const FROM_CONFIG: Text = Text::FromConfig;
 
@@ -35,6 +39,7 @@ pub struct Page {
     pub failed: bool,
     pub agent: Result<Vec<(&'static str, String)>, String>,
     pub sign_in: bool,
+    pub agent_start: AgentStart,
     pub theme: Choice,
     pub language: Language,
 }
@@ -44,6 +49,7 @@ pub fn page(
     agent: &Result<Agent, String>,
     failure: Option<&str>,
     sign_in: bool,
+    agent_start: AgentStart,
     theme: Choice,
     language: Language,
 ) -> Page {
@@ -55,6 +61,7 @@ pub fn page(
             Err(error) => Err(error.lines().next().unwrap_or_default().to_owned()),
         },
         sign_in,
+        agent_start,
         theme,
         language,
     }
@@ -187,6 +194,15 @@ fn comparable(path: &str) -> String {
     path.replace('/', "\\").to_lowercase()
 }
 
+fn split(value: &str) -> Option<(&str, &str)> {
+    let value = value.trim();
+    let (program, rest) = match value.strip_prefix('"') {
+        Some(quoted) => quoted.split_once('"')?,
+        None => value.split_once(char::is_whitespace).unwrap_or((value, "")),
+    };
+    (!program.is_empty()).then_some((program, rest))
+}
+
 pub fn launches(value: &str, exe: &Path) -> bool {
     let value = value.trim();
     let program = match value.strip_prefix('"') {
@@ -202,12 +218,276 @@ pub fn launches(value: &str, exe: &Path) -> bool {
     !program.is_empty() && comparable(program) == comparable(exe)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentStart {
+    On,
+    Off,
+    #[default]
+    Unknown,
+}
+
+impl AgentStart {
+    pub fn text(self) -> Text {
+        match self {
+            AgentStart::On => Text::On,
+            AgentStart::Off => Text::Off,
+            AgentStart::Unknown => Text::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegValue {
+    Absent,
+    Text(String),
+    Binary(Vec<u8>),
+    Other,
+}
+
+pub fn reg_text(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
+        .take_while(|&unit| unit != 0)
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+pub fn agent_start(run: Result<RegValue, ()>, approved: Result<RegValue, ()>) -> AgentStart {
+    match run {
+        Ok(RegValue::Absent) => AgentStart::Off,
+        Ok(RegValue::Text(value)) if installed(&value) => approval(approved),
+        _ => AgentStart::Unknown,
+    }
+}
+
+fn approval(approved: Result<RegValue, ()>) -> AgentStart {
+    match approved {
+        Ok(RegValue::Absent) => AgentStart::On,
+        Ok(RegValue::Binary(bytes)) => match bytes.first() {
+            Some(0x02) => AgentStart::On,
+            Some(0x03) => AgentStart::Off,
+            _ => AgentStart::Unknown,
+        },
+        _ => AgentStart::Unknown,
+    }
+}
+
+fn installed(value: &str) -> bool {
+    let Some((program, args)) = split(value) else {
+        return false;
+    };
+    let program = comparable(program);
+    let name = program.rsplit('\\').next().unwrap_or_default();
+    name == "gateinto.exe" && args.split_whitespace().eq(["agent", "--detach"])
+}
+
+pub fn read_agent_start(
+    demo: bool,
+    run: impl FnOnce() -> Result<RegValue, ()>,
+    approved: impl FnOnce() -> Result<RegValue, ()>,
+) -> AgentStart {
+    if demo {
+        return crate::demo::AGENT_START;
+    }
+    agent_start(run(), approved())
+}
+
+pub fn reread(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= crate::worker::POLL)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::MAIN_SEPARATOR_STR;
+    use std::time::Duration;
+
+    use crate::worker::POLL;
 
     use super::*;
     use crate::i18n::Choice as Language;
+
+    #[test]
+    fn the_agent_run_value_is_the_one_the_installer_writes() {
+        let wxs = include_str!("../../packaging/wix/gateinto.wxs");
+        let run = format!(
+            r#"Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="{AGENT_RUN_VALUE}" Type="string" Value="&quot;[INSTALLFOLDER]gateinto.exe&quot; agent --detach""#
+        );
+        assert!(wxs.contains(&run));
+        assert_ne!(AGENT_RUN_VALUE, RUN_VALUE);
+    }
+
+    fn text(value: &str) -> Result<RegValue, ()> {
+        Ok(RegValue::Text(value.to_owned()))
+    }
+
+    fn approved(bytes: &[u8]) -> Result<RegValue, ()> {
+        Ok(RegValue::Binary(bytes.to_vec()))
+    }
+
+    const INSTALLED: &str = r#""C:\G\gateinto.exe" agent --detach"#;
+
+    #[test]
+    fn the_installer_command_means_the_agent_starts_at_sign_in() {
+        for value in [
+            r#""C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" agent --detach"#,
+            r#"  "D:\Tools\GATEINTO.EXE"   agent   --detach  "#,
+            r#""C:/Programs/Gateinto/gateinto.exe" agent --detach"#,
+            r"C:\Gateinto\gateinto.exe agent --detach",
+        ] {
+            assert_eq!(
+                agent_start(text(value), Ok(RegValue::Absent)),
+                AgentStart::On,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_missing_run_value_means_the_agent_does_not_start_at_sign_in() {
+        for approval in [
+            Ok(RegValue::Absent),
+            approved(&[2]),
+            approved(&[3]),
+            Err(()),
+        ] {
+            assert_eq!(agent_start(Ok(RegValue::Absent), approval), AgentStart::Off);
+        }
+    }
+
+    #[test]
+    fn a_run_value_of_another_type_is_unknown() {
+        for run in [
+            Ok(RegValue::Other),
+            Ok(RegValue::Binary(
+                INSTALLED
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            )),
+        ] {
+            assert_eq!(agent_start(run, Ok(RegValue::Absent)), AgentStart::Unknown);
+        }
+    }
+
+    #[test]
+    fn any_other_command_or_a_read_error_is_unknown() {
+        for value in [
+            "",
+            r#""C:\Gateinto\gateinto.exe""#,
+            r#""C:\Gateinto\gateinto.exe" agent"#,
+            r#""C:\Gateinto\gateinto.exe" agent --detach --config x.toml"#,
+            r#""C:\Gateinto\gateinto.exe" --detach agent"#,
+            r#""C:\Gateinto\gateinto-gui.exe" agent --detach"#,
+            r#""C:\Gateinto\not-gateinto.exe" agent --detach"#,
+            r#""C:\Gateinto\gateinto.exe agent --detach"#,
+            r"C:\Program Files\Gateinto\gateinto.exe agent --detach",
+            r#"cmd /c "C:\Gateinto\gateinto.exe" agent --detach"#,
+        ] {
+            assert_eq!(
+                agent_start(text(value), Ok(RegValue::Absent)),
+                AgentStart::Unknown,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            agent_start(Err(()), Ok(RegValue::Absent)),
+            AgentStart::Unknown
+        );
+    }
+
+    #[test]
+    fn the_startup_approved_value_can_turn_the_installer_command_off() {
+        let start = |approval| agent_start(text(INSTALLED), approval);
+        assert_eq!(start(Ok(RegValue::Absent)), AgentStart::On);
+        assert_eq!(
+            start(approved(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+            AgentStart::On
+        );
+        assert_eq!(start(approved(&[0x02])), AgentStart::On);
+        assert_eq!(
+            start(approved(&[0x03, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])),
+            AgentStart::Off
+        );
+        assert_eq!(start(approved(&[0x03])), AgentStart::Off);
+    }
+
+    #[test]
+    fn any_other_startup_approved_value_is_unknown() {
+        for approval in [
+            approved(&[0x00]),
+            approved(&[0x01]),
+            approved(&[0x06, 0, 0, 0]),
+            approved(&[]),
+            text("02"),
+            Ok(RegValue::Other),
+            Err(()),
+        ] {
+            assert_eq!(agent_start(text(INSTALLED), approval), AgentStart::Unknown);
+        }
+    }
+
+    #[test]
+    fn registry_text_is_read_up_to_its_terminator() {
+        let bytes =
+            |value: &str| -> Vec<u8> { value.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        assert_eq!(
+            reg_text(&bytes("gateinto.exe agent\0junk")),
+            "gateinto.exe agent"
+        );
+        assert_eq!(reg_text(&bytes("代理程式")), "代理程式");
+        let mut odd = bytes("ab");
+        odd.push(b'c');
+        assert_eq!(reg_text(&odd), "ab");
+        assert_eq!(reg_text(&[]), "");
+    }
+
+    #[test]
+    fn each_agent_start_state_has_a_fixed_text_in_both_languages() {
+        let shown =
+            || [AgentStart::On, AgentStart::Off, AgentStart::Unknown].map(|state| tr(state.text()));
+        assert_eq!(shown(), ["On", "Off", "Unknown"]);
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(shown(), ["開啟", "關閉", "未知"]);
+    }
+
+    #[test]
+    fn the_demo_shows_a_fixed_agent_start_without_reading_the_registry() {
+        let unasked = || -> Result<RegValue, ()> { panic!("the demo read the registry") };
+        assert_eq!(
+            read_agent_start(true, unasked, unasked),
+            crate::demo::AGENT_START
+        );
+        assert_eq!(crate::demo::AGENT_START, AgentStart::On);
+        let absent = || Ok(RegValue::Absent);
+        assert_eq!(
+            read_agent_start(false, || text(INSTALLED), absent),
+            AgentStart::On
+        );
+        assert_eq!(
+            read_agent_start(false, || text(INSTALLED), || approved(&[3])),
+            AgentStart::Off
+        );
+        assert_eq!(read_agent_start(false, absent, absent), AgentStart::Off);
+        assert_eq!(
+            read_agent_start(false, || Err(()), absent),
+            AgentStart::Unknown
+        );
+    }
+
+    #[test]
+    fn the_agent_run_value_is_read_again_at_most_once_per_poll() {
+        let start = Instant::now();
+        assert!(reread(None, start));
+        assert!(!reread(Some(start), start));
+        assert!(!reread(
+            Some(start),
+            start + POLL - Duration::from_millis(1)
+        ));
+        assert!(reread(Some(start), start + POLL));
+    }
 
     #[test]
     fn the_sign_in_value_is_not_the_installer_agent_value() {
@@ -227,12 +507,13 @@ mod tests {
     }
 
     #[test]
-    fn the_page_shows_the_path_rows_and_sign_in_state() {
+    fn the_page_shows_the_path_rows_and_both_sign_in_states() {
         let page = page(
             "%APPDATA%\\g.toml",
             &Ok(Agent::default()),
             None,
             true,
+            AgentStart::On,
             Choice::Dark,
             Language::Chinese,
         );
@@ -243,6 +524,7 @@ mod tests {
                 failed: false,
                 agent: Ok(rows(&Agent::default())),
                 sign_in: true,
+                agent_start: AgentStart::On,
                 theme: Choice::Dark,
                 language: Language::Chinese,
             }
@@ -257,6 +539,7 @@ mod tests {
                 &Ok(Agent::default()),
                 Some(crate::i18n::Note::from(OPEN_FAILED).shown()),
                 false,
+                AgentStart::Unknown,
                 Choice::System,
                 Language::System,
             )
@@ -273,7 +556,15 @@ mod tests {
     #[test]
     fn a_config_error_shows_its_first_line_instead_of_values() {
         let error = Err("config file c.toml: TOML parse error\n  |\n1 | x".to_owned());
-        let page = page("p", &error, None, false, Choice::System, Language::System);
+        let page = page(
+            "p",
+            &error,
+            None,
+            false,
+            AgentStart::Off,
+            Choice::System,
+            Language::System,
+        );
         assert_eq!(
             page.agent,
             Err("config file c.toml: TOML parse error".to_owned())

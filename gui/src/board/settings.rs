@@ -9,7 +9,8 @@ use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::settings::{
-    AGENT, APP, FROM_CONFIG, LANGUAGE, OPEN, Page, SIGN_IN, SIGN_IN_NOTE, THEME,
+    AGENT, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, APP, FROM_CONFIG, LANGUAGE, OPEN, Page, SIGN_IN,
+    SIGN_IN_NOTE, THEME,
 };
 use crate::theme::{Choice, Theme};
 
@@ -41,7 +42,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let top = line.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
     let rows = page.agent.as_ref().map_or(1, Vec::len) as i32;
-    let app_h = card_height(s, 3);
+    let app_h = card_height(s, 4);
     let agent_h = card_height(s, rows);
     let offset = p.scroll(view, app_h + gap + agent_h);
     let app = Rect::new(content.x, top - offset, content.w, app_h);
@@ -95,14 +96,24 @@ impl<M: Measure> Painter<'_, M> {
         let row = self.line(heading, 2);
         let (w, h) = (s.px(40.0), s.px(22.0));
         let switch = Rect::new(row.right() - w, row.y + (row.h - h) / 2, w, h);
-        let x = switch.x - s.px(16.0);
-        let (label, note) = (s.px(18.0), s.px(16.0));
-        let y = row.y + (row.h - label - s.px(2.0) - note) / 2;
-        let text = Rect::new(row.x, y, x - row.x, label);
-        self.text(Font::Body, SIGN_IN, text, t.text);
-        let below = Rect::new(row.x, text.bottom() + s.px(2.0), text.w, note);
-        self.text(Font::Small, SIGN_IN_NOTE, below, t.muted);
+        self.noted(row, switch.x, SIGN_IN, SIGN_IN_NOTE);
         self.switch(switch, page.sign_in);
+        let row = self.line(heading, 3);
+        let state = tr(page.agent_start.text());
+        let w = self.m.width(Font::Body, state).min(row.w);
+        let value = Rect::new(row.right() - w, row.y, w, row.h);
+        self.noted(row, value.x, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE);
+        self.text(Font::Body, state, value, t.muted);
+    }
+
+    fn noted(&mut self, row: Rect, right: i32, label: Text, note: Text) {
+        let (s, t) = (self.s, self.t);
+        let (label_h, note_h) = (s.px(18.0), s.px(16.0));
+        let y = row.y + (row.h - label_h - s.px(2.0) - note_h) / 2;
+        let text = Rect::new(row.x, y, right - s.px(16.0) - row.x, label_h);
+        self.text(Font::Body, label, text, t.text);
+        let below = Rect::new(row.x, text.bottom() + s.px(2.0), text.w, note_h);
+        self.text(Font::Small, note, below, t.muted);
     }
 
     fn segments(&mut self, row: Rect, title: Text, parts: &[(&'static str, Zone, bool)]) {
@@ -214,14 +225,17 @@ mod tests {
     use crate::nav::{Nav, Page as NavPage};
     use crate::scene::{Op, stroke};
     use crate::scroll::Pane;
-    use crate::settings::{AGENT, APP, FROM_CONFIG, LANGUAGE, OPEN, SIGN_IN, SIGN_IN_NOTE, THEME};
+    use crate::settings::{
+        AGENT, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, APP, AgentStart, FROM_CONFIG, LANGUAGE, OPEN,
+        SIGN_IN, SIGN_IN_NOTE, THEME,
+    };
     use crate::theme::Choice;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
     const BUTTON: Rect = Rect::new(848, 66, 164, 32);
     const SWITCH: Rect = Rect::new(952, 259, 40, 22);
-    const AGENT_Y: i32 = 314;
+    const AGENT_Y: i32 = 358;
     const SYSTEM: Rect = Rect::new(808, 169, 66, 26);
     const LIGHT: Rect = Rect::new(876, 169, 59, 26);
     const DARK: Rect = Rect::new(937, 169, 52, 26);
@@ -241,6 +255,7 @@ mod tests {
                 ("Request header limit", "16 KB".to_owned()),
             ]),
             sign_in,
+            agent_start: AgentStart::On,
             theme: Choice::System,
             language: Language::System,
         }
@@ -287,7 +302,7 @@ mod tests {
                     T.muted
                 ),
                 Op::Clip(Rect::new(248, 112, 764, 544)),
-                Op::Round(Rect::new(248, 112, 764, 188), 12.0, T.border),
+                Op::Round(Rect::new(248, 112, 764, 232), 12.0, T.border),
             ]
         );
     }
@@ -329,19 +344,19 @@ mod tests {
     #[test]
     fn the_app_card_has_the_theme_and_language_rows_then_the_sign_in_switch_on() {
         let ops = draw(&page(true)).ops;
-        let card = inside(&ops, Rect::new(248, 112, 764, 188));
+        let card = inside(&ops, Rect::new(248, 112, 764, 232));
         assert_eq!(
             card[..5],
             [
-                Op::Round(Rect::new(248, 112, 764, 188), 12.0, T.border),
-                Op::Round(Rect::new(249, 113, 762, 186), 11.0, T.card),
+                Op::Round(Rect::new(248, 112, 764, 232), 12.0, T.border),
+                Op::Round(Rect::new(249, 113, 762, 230), 11.0, T.card),
                 text(Font::Heading, APP, Rect::new(268, 116, 724, 44), T.text),
                 Op::Fill(Rect::new(268, 160, 724, 1), T.border),
                 text(Font::Body, THEME, Rect::new(268, 160, 521, 44), T.text),
             ]
         );
         assert_eq!(
-            card[card.len() - 5..],
+            card[card.len() - 9..card.len() - 4],
             [
                 Op::Fill(Rect::new(268, 248, 724, 1), T.border),
                 text(Font::Body, SIGN_IN, Rect::new(268, 252, 668, 18), T.text),
@@ -409,8 +424,11 @@ mod tests {
             "語言",
             "English",
             "繁體中文",
-            "登入時啟動",
-            "登入時開啟 Gateinto",
+            "登入時啟動應用程式",
+            "登入時開啟此應用程式，不會啟動代理程式",
+            "代理程式於登入時啟動",
+            "由安裝程式設定（例如 AUTOSTART=1），此處僅供檢視",
+            "開啟",
             "代理程式",
             "來自設定檔",
         ] {
@@ -557,7 +575,7 @@ mod tests {
             ]
         );
         assert!(ops.contains(&Op::Round(Rect::new(248, y, 764, 100), 12.0, T.border)));
-        assert_eq!(draw(&p).pane.map(|p| p.content), Some(302));
+        assert_eq!(draw(&p).pane.map(|p| p.content), Some(346));
     }
 
     #[test]
@@ -565,7 +583,7 @@ mod tests {
         let b = draw(&page(true));
         assert_eq!(
             b.pane,
-            Some(Pane::new(Rect::new(248, 112, 764, 544), 478, 0))
+            Some(Pane::new(Rect::new(248, 112, 764, 544), 522, 0))
         );
         let short = Layout::new(1040, 400, S, true);
         let mut v = view();
@@ -575,7 +593,7 @@ mod tests {
         assert_eq!(pane.offset, 50);
         assert!(
             b.ops
-                .contains(&Op::Round(Rect::new(248, 62, 764, 188), 12.0, T.border))
+                .contains(&Op::Round(Rect::new(248, 62, 764, 232), 12.0, T.border))
         );
         assert_eq!(b.targets[0], (BUTTON, Zone::OpenConfig));
         assert_eq!(b.targets[7], (Rect::new(952, 209, 40, 22), Zone::SignIn));
@@ -607,5 +625,116 @@ mod tests {
             Rect::new(268, 204, 507, 44),
             T.text
         )));
+    }
+
+    #[test]
+    fn the_app_card_ends_with_the_read_only_agent_sign_in_state() {
+        let ops = draw(&page(true)).ops;
+        let card = inside(&ops, Rect::new(248, 112, 764, 232));
+        assert_eq!(
+            card[card.len() - 4..],
+            [
+                Op::Fill(Rect::new(268, 292, 724, 1), T.border),
+                text(
+                    Font::Body,
+                    AGENT_SIGN_IN,
+                    Rect::new(268, 296, 694, 18),
+                    T.text
+                ),
+                text(
+                    Font::Small,
+                    AGENT_SIGN_IN_NOTE,
+                    Rect::new(268, 316, 694, 16),
+                    T.muted
+                ),
+                text(Font::Body, "On", Rect::new(978, 292, 14, 44), T.muted),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_agent_sign_in_state_shows_its_fixed_text() {
+        for (state, shown) in [
+            (AgentStart::On, "On"),
+            (AgentStart::Off, "Off"),
+            (AgentStart::Unknown, "Unknown"),
+        ] {
+            let mut p = page(true);
+            p.agent_start = state;
+            let ops = draw(&p).ops;
+            let w = 7 * shown.len() as i32;
+            assert!(
+                ops.contains(&text(
+                    Font::Body,
+                    shown,
+                    Rect::new(992 - w, 292, w, 44),
+                    T.muted
+                )),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_sign_in_state_is_not_a_target() {
+        let targets = draw(&page(true)).targets;
+        assert_eq!(targets.len(), 8);
+        assert!(
+            targets
+                .iter()
+                .all(|&(r, _)| r.bottom() <= 292 || r.y >= 344)
+        );
+    }
+
+    struct Wide;
+
+    impl Measure for Wide {
+        fn width(&self, _font: Font, text: &str) -> i32 {
+            text.chars()
+                .map(|c| match c {
+                    c if !c.is_ascii() => 14,
+                    c if c.is_ascii_uppercase() => 9,
+                    _ => 7,
+                })
+                .sum()
+        }
+    }
+
+    #[test]
+    fn the_sign_in_rows_fit_the_minimum_window_in_both_languages() {
+        let (w, h) = Layout::min_size(S);
+        let l = Layout::new(w, h, S, true);
+        for language in [
+            crate::i18n::Language::English,
+            crate::i18n::Language::Chinese,
+        ] {
+            let _speaking = crate::i18n::speaking(language);
+            for state in [AgentStart::On, AgentStart::Off, AgentStart::Unknown] {
+                let mut p = page(true);
+                p.agent_start = state;
+                let b = board(&l, S, &T, &view(), &p, &Wide);
+                let switch = b.targets.last().unwrap().0;
+                let rect = |wanted: &str| {
+                    let found = b.ops.iter().find_map(|op| match op {
+                        Op::Text(_, shown, r, _) if shown == wanted => Some(*r),
+                        _ => None,
+                    });
+                    let r = found.unwrap_or_else(|| panic!("{wanted} is not drawn"));
+                    assert!(Wide.width(Font::Body, wanted) <= r.w, "{wanted} {r:?}");
+                    r
+                };
+                let value = rect(tr(state.text()));
+                assert!(value.right() <= l.content.right() - S.px(20.0));
+                for (label, right) in [
+                    (SIGN_IN, switch.x),
+                    (SIGN_IN_NOTE, switch.x),
+                    (AGENT_SIGN_IN, value.x),
+                    (AGENT_SIGN_IN_NOTE, value.x),
+                ] {
+                    let r = rect(tr(label));
+                    assert!(r.right() < right, "{label:?} {r:?}");
+                }
+            }
+        }
     }
 }

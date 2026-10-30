@@ -12,7 +12,8 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, REG_ROUTINE_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+    HKEY, REG_BINARY, REG_ROUTINE_FLAGS, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_ANY,
+    RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
 };
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, OSVERSIONINFOW};
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
@@ -24,6 +25,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::log;
 use crate::menu;
+use crate::settings::{self, RegValue};
 use crate::theme;
 
 pub fn utc_offset() -> u64 {
@@ -76,6 +78,45 @@ pub fn reg_string(
             }
             ERROR_SUCCESS | ERROR_MORE_DATA => buf = vec![0; (size as usize).div_ceil(2) + 1],
             ERROR_FILE_NOT_FOUND | ERROR_UNSUPPORTED_TYPE => return Ok(None),
+            _ => return Err(()),
+        }
+    }
+    Err(())
+}
+
+pub fn reg_value(root: HKEY, key: &str, name: &str) -> Result<RegValue, ()> {
+    let (key, name) = (wide(key), wide(name));
+    let mut buf: Vec<u8> = Vec::new();
+    for _ in 0..4 {
+        let mut kind: REG_VALUE_TYPE = 0;
+        let mut size = buf.len() as u32;
+        let data = if buf.is_empty() {
+            null_mut()
+        } else {
+            buf.as_mut_ptr().cast::<c_void>()
+        };
+        let code = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_ANY | RRF_NOEXPAND,
+                &mut kind,
+                data,
+                &mut size,
+            )
+        };
+        match code {
+            ERROR_SUCCESS if !buf.is_empty() || size == 0 => {
+                let bytes = &buf[..(size as usize).min(buf.len())];
+                return Ok(match kind {
+                    REG_SZ => RegValue::Text(settings::reg_text(bytes)),
+                    REG_BINARY => RegValue::Binary(bytes.to_vec()),
+                    _ => RegValue::Other,
+                });
+            }
+            ERROR_SUCCESS | ERROR_MORE_DATA => buf = vec![0; size as usize + 2],
+            ERROR_FILE_NOT_FOUND => return Ok(RegValue::Absent),
             _ => return Err(()),
         }
     }

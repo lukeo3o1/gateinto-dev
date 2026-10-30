@@ -837,6 +837,33 @@ another file, Settings shows its path marked as used by the running agent; if
 it runs without one, Settings says so. The GUI never writes the config file.
 This is unit-tested but has not been tried on a real Windows desktop.
 
+## Agent at sign-in in the GUI
+
+Settings shows, read-only, whether the agent starts at sign-in, from the
+installer's `Gateinto` string value in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the `Gateinto`
+value Windows keeps in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`
+when the entry is turned on or off in Task Manager or Settings. It shows:
+
+- **On** when the Run value runs `gateinto.exe agent --detach` and the
+  StartupApproved value is absent or its first byte is `02`;
+- **Off** when the Run value is missing, or when it runs that command and the
+  StartupApproved value's first byte is `03`;
+- **Unknown** otherwise: the Run value holds any other command, has another
+  type than a plain string, or cannot be read, or the StartupApproved value
+  is empty, starts with another byte, has another type than binary, or cannot
+  be read.
+
+Only that fixed text is shown, never the values themselves. A note says the
+installer sets it, for example when installed with `AUTOSTART=1` (see
+[docs/install.md](docs/install.md)). The GUI never writes, creates or deletes
+either value and never starts the agent on its own. It reads the value when Settings opens and at most once per 2-second
+refresh while Settings is shown. The separate **Start the app at sign-in**
+switch only controls the GUI's own `Gateinto App` value, which opens the app,
+not the agent. The demo shows **On** without reading the registry. This is
+unit-tested but has not been tried on a real Windows desktop.
+
 ## Removing a gateway in the GUI
 
 The gateway details in the GUI offer **Remove** only for a gateway added on

@@ -14,6 +14,7 @@ mod tray;
 use std::io::Write;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -75,7 +76,7 @@ use crate::scale::Scale;
 use crate::scene::{Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
-use crate::settings;
+use crate::settings::{self, AgentStart};
 use crate::theme::{self, Theme};
 use crate::worker::{Command, Update};
 use d2d::Graphics;
@@ -155,6 +156,8 @@ struct App {
     tips: Tips,
     config: String,
     sign_in: bool,
+    agent_start: AgentStart,
+    agent_read: Option<Instant>,
     theme: theme::Choice,
     language: i18n::Choice,
     dark: bool,
@@ -211,6 +214,8 @@ impl App {
             tips: Tips::new(hwnd),
             config: config_line(demo, &Config::Unreported),
             sign_in: false,
+            agent_start: AgentStart::default(),
+            agent_read: None,
             theme,
             language,
             dark: theme.dark(appearance::light_apps()),
@@ -257,6 +262,7 @@ impl App {
                     &update.agent,
                     failure,
                     self.sign_in,
+                    self.agent_start,
                     self.theme,
                     self.language,
                 );
@@ -467,6 +473,9 @@ impl App {
             }
             if page == NavPage::Log {
                 self.view.scroll.set(page, i32::MAX);
+            }
+            if page == NavPage::Settings {
+                self.read_agent_start();
             }
             if page == NavPage::Settings && !self.demo {
                 match run::enabled() {
@@ -705,6 +714,11 @@ impl App {
         self.retarget();
         self.invalidate();
         true
+    }
+
+    fn read_agent_start(&mut self) {
+        self.agent_start = settings::read_agent_start(self.demo, run::agent, run::agent_approved);
+        self.agent_read = Some(Instant::now());
     }
 
     fn toggle_sign_in(&mut self) {
@@ -1247,6 +1261,11 @@ fn on_agent(hwnd: HWND) {
         }
         app.update = Some(update);
         app.config = app.config_line();
+        if app.view.nav.selected() == NavPage::Settings
+            && settings::reread(app.agent_read, Instant::now())
+        {
+            app.read_agent_start();
+        }
         if app.details.is_some() && app.gateway_details().is_none() {
             app.details = None;
         }
