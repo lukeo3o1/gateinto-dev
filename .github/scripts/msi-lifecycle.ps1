@@ -21,6 +21,8 @@ $probe = 'Gateinto Lifecycle Probe'
 $probeData = '"C:\gateinto-lifecycle-probe.exe"'
 $approvedOn = [byte[]] (2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 $script:spki = $null
+$script:written = @()
+$script:guis = @()
 
 Add-Type -Namespace Lifecycle -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -64,8 +66,9 @@ function Get-Value([string] $Key, [string] $Name) {
 }
 
 function Set-Value([string] $Key, [string] $Name, $Value, [string] $Type) {
-  if (-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key | Out-Null }
+  if (-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key -Force | Out-Null }
   New-ItemProperty -LiteralPath $Key -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
+  $script:written += , @($Key, $Name)
 }
 
 function Remove-Value([string] $Key, [string] $Name) {
@@ -78,6 +81,7 @@ function Same-Bytes($Actual, [byte[]] $Expected) {
 
 function Start-Gui {
   $gui = Start-Process $installedGui -PassThru
+  $script:guis += $gui
   $deadline = (Get-Date).AddSeconds(30)
   while ([Lifecycle.Win32]::FindWindowW('GateintoWindow', [IntPtr]::Zero) -eq [IntPtr]::Zero) {
     if ($gui.HasExited) { throw "the GUI exited with $($gui.ExitCode) before showing its window" }
@@ -95,6 +99,11 @@ function Start-Gui {
 function Test-UserPathHasInstallDir {
   $userPath = (Get-ItemProperty 'HKCU:\Environment' -ErrorAction SilentlyContinue).Path
   [bool] ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir })
+}
+
+$touched = @(@($runKey, $guiValue), @($runKey, $probe), @($approvedKey, $guiValue), @($approvedKey, 'Gateinto'))
+foreach ($value in $touched) {
+  if ($null -ne (Get-Value $value[0] $value[1])) { throw "$($value[0]) already has a value '$($value[1])'; remove it before running this script" }
 }
 
 try {
@@ -155,7 +164,7 @@ try {
     Set-Value $runKey $guiValue "`"$installedGui`"" String
     Set-Value $approvedKey $guiValue $approvedOn Binary
     Set-Value $runKey $probe $probeData String
-    $log = Invoke-Msiexec '/x' 'uninstall-1.log'
+    $log = Invoke-Msiexec '/x' 'uninstall-1.log' @('MSIRESTARTMANAGERCONTROL=Disable')
     if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: StopAgent')) { throw 'the uninstall log has no StopAgent action' }
     if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: UninstallGui')) { throw 'the uninstall log has no UninstallGui action' }
     if (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: QuitGui') { throw 'a plain uninstall ran QuitGui' }
@@ -235,11 +244,8 @@ try {
   }
 } finally {
   Step 'Clean up the key, the test values and the installation' {
-    Get-Process -Name gateinto-gui -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Remove-Value $runKey $guiValue
-    Remove-Value $runKey $probe
-    Remove-Value $approvedKey $guiValue
-    Remove-Value $approvedKey 'Gateinto'
+    $script:guis | Where-Object { -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    foreach ($value in $script:written) { Remove-Value $value[0] $value[1] }
     if ($script:spki -and (Test-Path $outside)) {
       & $outside reset --purge-device-identity --confirm-spki $script:spki
     }
