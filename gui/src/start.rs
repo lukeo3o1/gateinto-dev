@@ -100,6 +100,38 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    const WXS: &str = include_str!("../../packaging/wix/gateinto.wxs");
+    const GUI_FILE: &str = r#"<File Id="GateintoGuiExe" Name="gateinto-gui.exe""#;
+    const SHORTCUT: &str = r#"<Shortcut Id="GuiShortcut" Name="Gateinto" "#;
+
+    fn component_of(element: &str) -> &'static str {
+        let at = WXS.find(element).unwrap();
+        let start = WXS[..at].rfind("<Component ").unwrap();
+        let end = start + WXS[start..].find('>').unwrap();
+        &WXS[start..end]
+    }
+
+    #[test]
+    fn the_installer_puts_the_gui_beside_the_command() {
+        let folder = r#"Directory="INSTALLFOLDER""#;
+        assert!(component_of(&format!(r#"Name="{CLI}""#)).contains(folder));
+        assert!(component_of(GUI_FILE).contains(folder));
+    }
+
+    #[test]
+    fn the_installer_adds_a_start_menu_shortcut_to_the_gui_and_never_runs_it() {
+        let file = &WXS[WXS.find(GUI_FILE).unwrap()..];
+        let file = &file[..file.find("</File>").unwrap()];
+        let shortcut = &file[file.find(SHORTCUT).unwrap()..];
+        let shortcut = &shortcut[..shortcut.find("/>").unwrap()];
+        assert!(shortcut.contains(r#"Directory="ProgramMenuFolder""#));
+        assert!(shortcut.contains(r#"Advertise="no""#));
+        assert_eq!(WXS.matches("<Shortcut ").count(), 1);
+        assert_eq!(WXS.matches("GateintoGuiExe").count(), 1);
+        assert_eq!(WXS.matches("<CustomAction").count(), 1);
+        assert!(WXS.contains(r#"FileRef="GateintoExe""#));
+    }
+
     #[test]
     fn the_command_detaches_an_agent_by_absolute_path_without_a_config() {
         let cli = std::env::temp_dir().join(CLI);

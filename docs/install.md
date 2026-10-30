@@ -93,7 +93,8 @@ MSI (`0.0.0`) over it as a downgrade and refuses with "A newer version of Gatein
 installed. Uninstall it first, then install this one." Uninstall the local build first (see
 [Uninstall](#uninstall)); the device key and the config file are kept.
 
-The x86 MSI installs the `i686-pc-windows-msvc` executable, which needs Windows 10 or later. CI
+The x86 MSI installs the `i686-pc-windows-msvc` executables, which need Windows 10 or later. The
+GUI is not part of the experimental Windows 7 build and has no Windows 7 version. CI
 runs it only under WOW64 on 64-bit Windows Server; it has not been tested on a real 32-bit
 Windows 10 installation, and it is untested on Windows 7, where that executable does not start.
 
@@ -113,6 +114,10 @@ It installs:
 - `%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe`, with that folder appended to the user
   `PATH` (`HKCU\Environment`). Open a new terminal after installing so that `gateinto` is
   found; terminals that were already open keep the old `PATH`;
+- the GUI, `%LOCALAPPDATA%\Programs\Gateinto\gateinto-gui.exe`, next to `gateinto.exe`, where
+  its **Start agent** button looks for it;
+- a Start Menu shortcut named **Gateinto** in the user's own Start Menu
+  (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Gateinto.lnk`) that opens the GUI;
 - the `gateinto://` handler in `HKCU\Software\Classes\gateinto`, with the command
   `"%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe" open -- "%1"` (the path is written out in
   full). The handler is per-user only; the MSI writes no `HKLM` handler. The executable path is
@@ -126,9 +131,12 @@ It installs:
   is off by default;
 - the uninstall entry under Settings → Apps → Installed apps, written by Windows Installer.
 
-The package creates no shortcuts. It does not create a device key or a config file, and none of
-its custom actions creates a key: the installer never creates a key as `SYSTEM` or as an
-elevated installer account. Windows Installer runs a per-user package as the installing user.
+The package creates no other shortcuts. Installing starts neither the GUI nor the agent, and does
+not write the GUI's own `Gateinto App` value in the Run key (the GUI's **Start the app at
+sign-in** switch); only that switch writes it. The package does not create a device key or a
+config file, and none of its custom actions creates a key: the installer never creates a key as
+`SYSTEM` or as an elevated installer account. Windows Installer runs a per-user package as the
+installing user.
 
 ### Why per-user
 
@@ -248,6 +256,7 @@ msiexec /x gateinto.msi /qn
 | Resource | Default uninstall |
 |---|---|
 | `gateinto.exe` | removed |
+| `gateinto-gui.exe` and the **Gateinto** Start Menu shortcut | removed |
 | Install folder in the user `PATH` | removed |
 | `gateinto://` handler (`HKCU\Software\Classes\gateinto`) | removed |
 | Logon autostart entry created by the installer | removed |
@@ -271,6 +280,12 @@ During an interactive uninstall a console window may flash briefly while `gatein
 runs, because `gateinto.exe` is a console program. A major upgrade (installing a newer MSI over
 an older one) runs the same step for the old version: it stops a running agent and does not
 start it again. The next `gateinto://` link or `gateinto agent --detach` starts a new one.
+
+The uninstaller does not close the GUI. Exit it from its tray icon (**Exit**) first; while it runs,
+`gateinto-gui.exe` is in use, and Windows Installer may ask to close it or need a restart to
+remove it. This case is not tested. The GUI's own `Gateinto App` Run value, if its **Start the
+app at sign-in** switch was turned on, is not an MSI component and is left in place; turn the
+switch off before uninstalling to remove it.
 
 An uninstall does not revoke anything and does not delete the device identity.
 
@@ -360,17 +375,22 @@ and run
 [.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), which checks the
 following with the Microsoft Software Key Storage Provider (the runners have no TPM):
 
-- a silent per-user install writes the exe, the user `PATH` entry, the exact handler command
-  and the uninstall entry, and creates no device key (`key info` fails until `setup` runs);
+- a silent per-user install writes the exe, the GUI next to it, the **Gateinto** Start Menu
+  shortcut pointing at the GUI, the user `PATH` entry, the exact handler command and the
+  uninstall entry, starts no `gateinto.exe` or `gateinto-gui.exe` process, writes no
+  `Gateinto App` Run value, and creates no device key (`key info` fails until `setup` runs);
 - the first `setup` creates a key;
-- a silent uninstall with a running agent stops the agent and removes the exe and the handler,
+- a silent uninstall with a running agent stops the agent and removes the exe, the GUI, the
+  shortcut and the handler,
   while `key info`, run from a copy outside the install folder, still shows the same SPKI;
 - after a reinstall with `AUTOSTART=1`, the Run value is exactly
-  `"…\gateinto.exe" agent --detach` and `setup` reuses the key with the same SPKI; the next
-  uninstall removes the Run value;
+  `"…\gateinto.exe" agent --detach`, the GUI and the shortcut are back, and `setup` reuses the
+  key with the same SPKI; the uninstall after the purge below removes the Run value, the GUI and
+  the shortcut;
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
-runners are Windows Server), and a `gateinto://` link clicked in a real browser. See
+runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
+the Start Menu shortcut, and uninstalling or upgrading while the GUI runs. See
 [verification.md](verification.md).

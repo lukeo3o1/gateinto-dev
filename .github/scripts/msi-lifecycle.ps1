@@ -12,6 +12,9 @@ $outside = Join-Path $LogDir 'gateinto-outside.exe'
 Copy-Item -LiteralPath $Exe -Destination $outside
 $installDir = "$env:LOCALAPPDATA\Programs\Gateinto"
 $installed = "$installDir\gateinto.exe"
+$installedGui = "$installDir\gateinto-gui.exe"
+$shortcut = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Gateinto.lnk"
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $script:spki = $null
 
 function Step([string] $Name, [scriptblock] $Body) {
@@ -27,6 +30,24 @@ function Invoke-Msiexec([string] $Action, [string] $LogName, [string[]] $Propert
   $log
 }
 
+function Assert-GuiInstalled {
+  if (-not (Test-Path $installedGui)) { throw "$installedGui is missing" }
+  if (-not (Test-Path $shortcut)) { throw "the Start Menu shortcut $shortcut is missing" }
+  $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
+  "shortcut target: $target"
+  if ($target -ne $installedGui) { throw "the Start Menu shortcut points to '$target', expected '$installedGui'" }
+  if ($null -ne (Get-ItemProperty $runKey -Name 'Gateinto App' -ErrorAction SilentlyContinue)) {
+    throw 'the installer created the GUI sign-in value Gateinto App'
+  }
+  $running = @(Get-Process -Name gateinto, gateinto-gui -ErrorAction SilentlyContinue)
+  if ($running) { throw "the installer started $(($running | ForEach-Object { $_.Name }) -join ', ')" }
+}
+
+function Assert-GuiRemoved {
+  if (Test-Path $installedGui) { throw "$installedGui still exists after uninstall" }
+  if (Test-Path $shortcut) { throw "the Start Menu shortcut $shortcut still exists after uninstall" }
+}
+
 function Test-UserPathHasInstallDir {
   $userPath = (Get-ItemProperty 'HKCU:\Environment' -ErrorAction SilentlyContinue).Path
   [bool] ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir })
@@ -37,8 +58,9 @@ try {
     $null = Invoke-Msiexec '/i' 'install-1.log'
   }
 
-  Step 'Check the exe, PATH, the gateinto:// handler, the uninstall entry, and that no key was created' {
+  Step 'Check the exe, the GUI and its shortcut, PATH, the gateinto:// handler, the uninstall entry, that nothing was started and that no key was created' {
     if (-not (Test-Path $installed)) { throw "$installed is missing" }
+    Assert-GuiInstalled
     "user PATH: $((Get-ItemProperty 'HKCU:\Environment').Path)"
     if (-not (Test-UserPathHasInstallDir)) { throw "the user PATH does not contain $installDir" }
     $command = (Get-ItemProperty 'HKCU:\Software\Classes\gateinto\shell\open\command').'(default)'
@@ -89,6 +111,7 @@ try {
     if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: StopAgent')) { throw 'the uninstall log has no StopAgent action' }
     if (-not $agent.WaitForExit(30000)) { Stop-Process -Id $agent.Id -Force; throw 'the uninstaller did not stop the agent' }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
+    Assert-GuiRemoved
     if (Test-Path 'HKCU:\Software\Classes\gateinto') { throw 'the gateinto:// handler still exists after uninstall' }
     if (Test-UserPathHasInstallDir) { throw "the user PATH still contains $installDir" }
     $out = & $outside key info | Out-String
@@ -99,6 +122,7 @@ try {
 
   Step 'Reinstall with AUTOSTART=1 and set up again (Software KSP)' {
     $null = Invoke-Msiexec '/i' 'install-2.log' @('AUTOSTART=1')
+    Assert-GuiInstalled
     $run = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Gateinto -ErrorAction SilentlyContinue).Gateinto
     $expected = "`"$installed`" agent --detach"
     "autostart: $run"
@@ -139,12 +163,13 @@ try {
     $script:spki = $new
   }
 
-  Step 'Uninstall the AUTOSTART install and check that the autostart entry is gone' {
+  Step 'Uninstall the AUTOSTART install and check that the autostart entry, the GUI and its shortcut are gone' {
     $null = Invoke-Msiexec '/x' 'uninstall-2.log'
     if ($null -ne (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Gateinto -ErrorAction SilentlyContinue)) {
       throw 'the autostart entry still exists after uninstall'
     }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
+    Assert-GuiRemoved
   }
 } finally {
   Step 'Clean up the key and the installation' {

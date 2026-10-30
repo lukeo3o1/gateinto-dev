@@ -20,6 +20,7 @@
         <Directory Id="INSTALLFOLDER" Name="Gateinto" />
       </Directory>
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
 
     <Feature Id="Main" Title="Gateinto" Level="1" AllowAbsent="no">
       <Component Id="Executable" Directory="INSTALLFOLDER" Guid="D0BAAB5A-B9FF-4F34-9BBE-8F2E399F5E34">
@@ -28,6 +29,13 @@
         <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveLocalProgramsFolder" Directory="LocalProgramsFolder" On="uninstall" />
+      </Component>
+
+      <Component Id="Gui" Directory="INSTALLFOLDER" Guid="719E9D77-6A62-4A25-9EE3-00DC08543968">
+        <File Id="GateintoGuiExe" Name="gateinto-gui.exe" Source="$(var.GuiBinaryPath)" KeyPath="no">
+          <Shortcut Id="GuiShortcut" Name="Gateinto" Directory="ProgramMenuFolder" Description="Gateinto desktop window" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+        </File>
+        <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="Gui" Type="integer" Value="1" KeyPath="yes" />
       </Component>
 
       <Component Id="UriHandler" Directory="INSTALLFOLDER" Guid="7AFE4CDF-3B66-4F54-88E4-A3929B2B22E6">

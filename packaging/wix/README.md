@@ -6,7 +6,8 @@ Settings → Apps → Installed apps, and Windows Installer writes the uninstall
 ## Per-user scope
 
 The package is `Scope="perUser"`. It installs without elevation to
-`%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe` and writes only to `HKEY_CURRENT_USER`.
+`%LOCALAPPDATA%\Programs\Gateinto` and writes only to `HKEY_CURRENT_USER` and the user's own
+Start Menu.
 This scope fits the rest of Gateinto:
 
 - The `gateinto://` handler goes in `HKCU\Software\Classes\gateinto`, the same per-user scope
@@ -23,10 +24,12 @@ A machine-wide install for several users is not provided.
 | Item | Where | Removed by uninstall |
 |---|---|---|
 | `gateinto.exe` | `%LOCALAPPDATA%\Programs\Gateinto` | yes |
+| `gateinto-gui.exe`, the GUI | `%LOCALAPPDATA%\Programs\Gateinto`, next to `gateinto.exe`, where its Start agent looks for it | yes |
+| Start Menu shortcut **Gateinto** to `gateinto-gui.exe` | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Gateinto.lnk` (`ProgramMenuFolder` of a per-user package) | yes |
 | Install folder appended to the user `PATH` | `HKCU\Environment` | yes |
 | `gateinto://` handler | `HKCU\Software\Classes\gateinto`, command `"<INSTALLFOLDER>gateinto.exe" open -- "%1"` | yes, the whole key |
 | Logon autostart (optional, off by default) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Gateinto` = `"<INSTALLFOLDER>gateinto.exe" agent --detach` | yes |
-| Install marker | `HKCU\Software\Gateinto\Installer` | yes |
+| Install markers (`InstallFolder`, `Gui`), the key paths of the components | `HKCU\Software\Gateinto\Installer` | yes |
 | Uninstall entry | written by Windows Installer | yes |
 
 The handler command uses the same format that `gateinto uri register` writes for an executable
@@ -34,7 +37,17 @@ without `--config`, so `gateinto uri unregister` and `gateinto status` recognise
 Gateinto's. Without `--config`, `gateinto open` and the agent read the per-user default config
 file `%APPDATA%\Gateinto\gateinto.toml`.
 
-The package creates no shortcuts. `MajorUpgrade` replaces an older version in place, and a
+The shortcut is not advertised and sits directly in the Start Menu's `Programs` folder, so the
+package creates no Start Menu folder of its own. It belongs to the GUI's component, whose key path
+is the `HKCU` marker value `Gui`, as a per-user component with a shortcut needs. Keeping the
+shortcut with its target file avoids a cross-component file reference (ICE69).
+The package never runs the GUI or the agent after installing: its only custom action is the
+uninstall's `StopAgent`. It does not write the GUI's own `Gateinto App` Run value either; only
+the GUI's **Start the app at sign-in** switch does, and the uninstall leaves that value alone.
+The uninstaller does not close a running GUI; exit it from its tray icon first (untested
+otherwise).
+
+`MajorUpgrade` replaces an older version in place, and a
 downgrade to a lower `major.minor.patch` is refused with "A newer version of Gateinto is already
 installed. Uninstall it first, then install this one." `AllowSameVersionUpgrades="yes"` makes an
 MSI with the same version replace the installed one too: every alpha, beta and latest build has
@@ -50,7 +63,7 @@ over another of the same version or of the other architecture.
 
 ## Build
 
-The release workflow builds the MSI from the release's `gateinto.exe` with the same `build.ps1` and
+The release workflow builds the MSI from the release's `gateinto.exe` and `gateinto-gui.exe` with the same `build.ps1` and
 WiX 5.0.2 and attaches an x64 MSI and an x86 MSI to each release (see
 [install](../../docs/install.md#releases)). It passes `-Version 0.0.0 -DisplayVersion
 0.0.0-<commit>`. To build it from a checkout instead you need the Rust toolchain, the .NET SDK
@@ -58,17 +71,18 @@ and WiX v5:
 
 ```powershell
 dotnet tool install --global wix --version 5.0.2
-cargo build --release --locked
+cargo build --release --locked -p gateinto -p gateinto-gui
 pwsh packaging/wix/build.ps1
 ```
 
-`build.ps1` reads the version from `Cargo.toml`, takes `target\release\gateinto.exe` and writes
-`target\wix\gateinto.msi`. Use `-Binary` and `-Output` to choose other paths. Other parameters:
+`build.ps1` reads the version from `Cargo.toml`, takes `target\release\gateinto.exe` and
+`target\release\gateinto-gui.exe` and writes `target\wix\gateinto.msi`. Use `-Binary`,
+`-GuiBinary` and `-Output` to choose other paths. Other parameters:
 
 - `-Arch x64` (default) or `-Arch x86`, passed to `wix build -arch`. The package is per-user,
   installs into `%LOCALAPPDATA%\Programs\Gateinto` and writes only `HKCU` keys that both
   registry views share, so nothing in `gateinto.wxs` depends on the architecture. Build the x86
-  MSI from an `i686-pc-windows-msvc` `gateinto.exe`.
+  MSI from the `i686-pc-windows-msvc` `gateinto.exe` and `gateinto-gui.exe`.
 - `-Version X.Y.Z` sets the MSI version instead of the `Cargo.toml` one.
 - `-DisplayVersion <text>` names the product `Gateinto <text>` in **Installed apps**; without it
   the name is `Gateinto`.
@@ -127,8 +141,11 @@ See [docs/install.md](../../docs/install.md).
 ## Verification status
 
 CI (`windows-latest`, Microsoft Software Key Storage Provider) builds an x64 MSI and an x86 MSI
-(the latter with the i686 debug build, run under WOW64), installs and uninstalls each silently, and checks that the SPKI survives a reinstall and changes only after a
-purge. The following are not verified by CI and need manual testing: TPM keys, interactive
+(the latter with the i686 debug build, run under WOW64), installs and uninstalls each silently,
+checks that the GUI and its Start Menu shortcut are installed and removed and that installing
+starts nothing, and checks that the SPKI survives a reinstall and changes only after a
+purge. The following are not verified by CI and need manual testing: opening the GUI from the
+shortcut, uninstalling or upgrading while the GUI runs, TPM keys, interactive
 install, the Windows 10/11 matrix, the x86 MSI on real 32-bit Windows (it is untested on Windows
 7, where the i686 executable does not start) and clicking a real `gateinto://` link.
 

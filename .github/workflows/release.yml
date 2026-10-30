@@ -113,8 +113,11 @@ jobs:
           version: ${{ env.NASM_VERSION }}
       - run: cargo test ${{ matrix.test-args }} --all-targets --all-features --locked
       - run: cargo build --locked --release --target $env:RELEASE_TARGET --bin gateinto
+      - run: cargo build --locked --release --target $env:RELEASE_TARGET -p gateinto-gui
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe"
+      - name: Check that gateinto-gui.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto-gui.exe"
       - name: Check that gateinto.exe prints the build version
         run: .github/scripts/assert-version.ps1 -Path "target\$env:RELEASE_TARGET\release\gateinto.exe" -Version $env:GATEINTO_BUILD_VERSION
       - name: Stage gateinto.exe
@@ -133,7 +136,8 @@ jobs:
           MSI_ARCH: ${{ matrix.msi-arch }}
         run: |
           $msi = Join-Path $PWD "dist\gateinto-$env:SHORT_SHA-$env:RELEASE_TARGET.msi"
-          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" -Output $msi `
+          pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" `
+            -GuiBinary "target\$env:RELEASE_TARGET\release\gateinto-gui.exe" -Output $msi `
             -Arch $env:MSI_ARCH -Version $env:RELEASE_VERSION -DisplayVersion $env:GATEINTO_BUILD_VERSION
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
           .github/scripts/write-sha256.ps1 -Path $msi
