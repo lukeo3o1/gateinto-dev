@@ -236,11 +236,42 @@ impl AgentStart {
     }
 }
 
-pub fn agent_start(value: Result<Option<&str>, ()>) -> AgentStart {
-    match value {
-        Ok(None) => AgentStart::Off,
-        Ok(Some(value)) if installed(value) => AgentStart::On,
-        Ok(Some(_)) | Err(()) => AgentStart::Unknown,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegValue {
+    Absent,
+    Text(String),
+    Binary(Vec<u8>),
+    Other,
+}
+
+pub fn reg_text(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
+        .take_while(|&unit| unit != 0)
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+pub fn agent_start(run: Result<RegValue, ()>, approved: Result<RegValue, ()>) -> AgentStart {
+    match run {
+        Ok(RegValue::Absent) => AgentStart::Off,
+        Ok(RegValue::Text(value)) if installed(&value) => approval(approved),
+        _ => AgentStart::Unknown,
+    }
+}
+
+fn approval(approved: Result<RegValue, ()>) -> AgentStart {
+    match approved {
+        Ok(RegValue::Absent) => AgentStart::On,
+        Ok(RegValue::Binary(bytes)) => match bytes.first() {
+            Some(0x02) => AgentStart::On,
+            Some(0x03) => AgentStart::Off,
+            _ => AgentStart::Unknown,
+        },
+        _ => AgentStart::Unknown,
     }
 }
 
@@ -255,13 +286,13 @@ fn installed(value: &str) -> bool {
 
 pub fn read_agent_start(
     demo: bool,
-    read: impl FnOnce() -> Result<Option<String>, ()>,
+    run: impl FnOnce() -> Result<RegValue, ()>,
+    approved: impl FnOnce() -> Result<RegValue, ()>,
 ) -> AgentStart {
     if demo {
         return crate::demo::AGENT_START;
     }
-    let value = read();
-    agent_start(value.as_ref().map(Option::as_deref).map_err(|_| ()))
+    agent_start(run(), approved())
 }
 
 pub fn reread(last: Option<Instant>, now: Instant) -> bool {
@@ -288,6 +319,16 @@ mod tests {
         assert_ne!(AGENT_RUN_VALUE, RUN_VALUE);
     }
 
+    fn text(value: &str) -> Result<RegValue, ()> {
+        Ok(RegValue::Text(value.to_owned()))
+    }
+
+    fn approved(bytes: &[u8]) -> Result<RegValue, ()> {
+        Ok(RegValue::Binary(bytes.to_vec()))
+    }
+
+    const INSTALLED: &str = r#""C:\G\gateinto.exe" agent --detach"#;
+
     #[test]
     fn the_installer_command_means_the_agent_starts_at_sign_in() {
         for value in [
@@ -296,13 +337,39 @@ mod tests {
             r#""C:/Programs/Gateinto/gateinto.exe" agent --detach"#,
             r"C:\Gateinto\gateinto.exe agent --detach",
         ] {
-            assert_eq!(agent_start(Ok(Some(value))), AgentStart::On, "{value}");
+            assert_eq!(
+                agent_start(text(value), Ok(RegValue::Absent)),
+                AgentStart::On,
+                "{value}"
+            );
         }
     }
 
     #[test]
-    fn a_missing_value_means_the_agent_does_not_start_at_sign_in() {
-        assert_eq!(agent_start(Ok(None)), AgentStart::Off);
+    fn only_a_missing_run_value_means_the_agent_does_not_start_at_sign_in() {
+        for approval in [
+            Ok(RegValue::Absent),
+            approved(&[2]),
+            approved(&[3]),
+            Err(()),
+        ] {
+            assert_eq!(agent_start(Ok(RegValue::Absent), approval), AgentStart::Off);
+        }
+    }
+
+    #[test]
+    fn a_run_value_of_another_type_is_unknown() {
+        for run in [
+            Ok(RegValue::Other),
+            Ok(RegValue::Binary(
+                INSTALLED
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            )),
+        ] {
+            assert_eq!(agent_start(run, Ok(RegValue::Absent)), AgentStart::Unknown);
+        }
     }
 
     #[test]
@@ -319,9 +386,62 @@ mod tests {
             r"C:\Program Files\Gateinto\gateinto.exe agent --detach",
             r#"cmd /c "C:\Gateinto\gateinto.exe" agent --detach"#,
         ] {
-            assert_eq!(agent_start(Ok(Some(value))), AgentStart::Unknown, "{value}");
+            assert_eq!(
+                agent_start(text(value), Ok(RegValue::Absent)),
+                AgentStart::Unknown,
+                "{value}"
+            );
         }
-        assert_eq!(agent_start(Err(())), AgentStart::Unknown);
+        assert_eq!(
+            agent_start(Err(()), Ok(RegValue::Absent)),
+            AgentStart::Unknown
+        );
+    }
+
+    #[test]
+    fn the_startup_approved_value_can_turn_the_installer_command_off() {
+        let start = |approval| agent_start(text(INSTALLED), approval);
+        assert_eq!(start(Ok(RegValue::Absent)), AgentStart::On);
+        assert_eq!(
+            start(approved(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+            AgentStart::On
+        );
+        assert_eq!(start(approved(&[0x02])), AgentStart::On);
+        assert_eq!(
+            start(approved(&[0x03, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])),
+            AgentStart::Off
+        );
+        assert_eq!(start(approved(&[0x03])), AgentStart::Off);
+    }
+
+    #[test]
+    fn any_other_startup_approved_value_is_unknown() {
+        for approval in [
+            approved(&[0x00]),
+            approved(&[0x01]),
+            approved(&[0x06, 0, 0, 0]),
+            approved(&[]),
+            text("02"),
+            Ok(RegValue::Other),
+            Err(()),
+        ] {
+            assert_eq!(agent_start(text(INSTALLED), approval), AgentStart::Unknown);
+        }
+    }
+
+    #[test]
+    fn registry_text_is_read_up_to_its_terminator() {
+        let bytes =
+            |value: &str| -> Vec<u8> { value.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        assert_eq!(
+            reg_text(&bytes("gateinto.exe agent\0junk")),
+            "gateinto.exe agent"
+        );
+        assert_eq!(reg_text(&bytes("代理程式")), "代理程式");
+        let mut odd = bytes("ab");
+        odd.push(b'c');
+        assert_eq!(reg_text(&odd), "ab");
+        assert_eq!(reg_text(&[]), "");
     }
 
     #[test]
@@ -335,13 +455,26 @@ mod tests {
 
     #[test]
     fn the_demo_shows_a_fixed_agent_start_without_reading_the_registry() {
-        let unasked = || -> Result<Option<String>, ()> { panic!("the demo read the registry") };
-        assert_eq!(read_agent_start(true, unasked), crate::demo::AGENT_START);
+        let unasked = || -> Result<RegValue, ()> { panic!("the demo read the registry") };
+        assert_eq!(
+            read_agent_start(true, unasked, unasked),
+            crate::demo::AGENT_START
+        );
         assert_eq!(crate::demo::AGENT_START, AgentStart::On);
-        let read = || Ok(Some(r#""C:\G\gateinto.exe" agent --detach"#.to_owned()));
-        assert_eq!(read_agent_start(false, read), AgentStart::On);
-        assert_eq!(read_agent_start(false, || Ok(None)), AgentStart::Off);
-        assert_eq!(read_agent_start(false, || Err(())), AgentStart::Unknown);
+        let absent = || Ok(RegValue::Absent);
+        assert_eq!(
+            read_agent_start(false, || text(INSTALLED), absent),
+            AgentStart::On
+        );
+        assert_eq!(
+            read_agent_start(false, || text(INSTALLED), || approved(&[3])),
+            AgentStart::Off
+        );
+        assert_eq!(read_agent_start(false, absent, absent), AgentStart::Off);
+        assert_eq!(
+            read_agent_start(false, || Err(()), absent),
+            AgentStart::Unknown
+        );
     }
 
     #[test]

@@ -6,10 +6,12 @@ use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
 
-use super::sys::{reg_string, wide};
-use crate::settings;
+use super::sys::{reg_string, reg_value, wide};
+use crate::settings::{self, RegValue};
 
 const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const APPROVED: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 
 fn exe() -> Option<PathBuf> {
     std::env::current_exe().ok()
@@ -19,8 +21,12 @@ fn value() -> Result<Option<String>, ()> {
     reg_string(HKEY_CURRENT_USER, KEY, settings::RUN_VALUE, 0)
 }
 
-pub fn agent() -> Result<Option<String>, ()> {
-    reg_string(HKEY_CURRENT_USER, KEY, settings::AGENT_RUN_VALUE, 0)
+pub fn agent() -> Result<RegValue, ()> {
+    reg_value(HKEY_CURRENT_USER, KEY, settings::AGENT_RUN_VALUE)
+}
+
+pub fn agent_approved() -> Result<RegValue, ()> {
+    reg_value(HKEY_CURRENT_USER, APPROVED, settings::AGENT_RUN_VALUE)
 }
 
 pub fn enabled() -> Result<bool, ()> {

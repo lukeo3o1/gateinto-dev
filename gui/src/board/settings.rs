@@ -425,9 +425,9 @@ mod tests {
             "English",
             "繁體中文",
             "登入時啟動應用程式",
-            "登入時開啟此應用程式，不含代理程式",
+            "登入時開啟此應用程式，不會啟動代理程式",
             "代理程式於登入時啟動",
-            "由安裝程式設定（AUTOSTART=1），此處僅供檢視",
+            "由安裝程式設定（例如 AUTOSTART=1），此處僅供檢視",
             "開啟",
             "代理程式",
             "來自設定檔",
@@ -626,6 +626,7 @@ mod tests {
             T.text
         )));
     }
+
     #[test]
     fn the_app_card_ends_with_the_read_only_agent_sign_in_state() {
         let ops = draw(&page(true)).ops;

@@ -244,9 +244,9 @@ table! {
     Theme => "Theme", "主題";
     ThemeFailed => "Could not save the theme setting", "無法儲存主題設定";
     SignIn => "Start the app at sign-in", "登入時啟動應用程式";
-    SignInNote => "Opens this app when you sign in, not the agent", "登入時開啟此應用程式，不含代理程式";
+    SignInNote => "Opens this app when you sign in, not the agent", "登入時開啟此應用程式，不會啟動代理程式";
     AgentSignIn => "Agent starts at sign-in", "代理程式於登入時啟動";
-    AgentSignInNote => "Set by the installer (AUTOSTART=1); read only here", "由安裝程式設定（AUTOSTART=1），此處僅供檢視";
+    AgentSignInNote => "Installer-set, for example AUTOSTART=1; read-only", "由安裝程式設定（例如 AUTOSTART=1），此處僅供檢視";
     SignInUnread => "Could not read the sign-in setting", "無法讀取登入時啟動設定";
     SignInFailed => "Could not change the sign-in setting", "無法變更登入時啟動設定";
     FromConfig => "From the config file", "來自設定檔";

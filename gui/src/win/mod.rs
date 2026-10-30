@@ -717,7 +717,7 @@ impl App {
     }
 
     fn read_agent_start(&mut self) {
-        self.agent_start = settings::read_agent_start(self.demo, run::agent);
+        self.agent_start = settings::read_agent_start(self.demo, run::agent, run::agent_approved);
         self.agent_read = Some(Instant::now());
     }
 
