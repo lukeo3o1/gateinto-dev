@@ -41,11 +41,15 @@ The shortcut is not advertised and sits directly in the Start Menu's `Programs` 
 package creates no Start Menu folder of its own. It belongs to the GUI's component, whose key path
 is the `HKCU` marker value `Gui`, as a per-user component with a shortcut needs. Keeping the
 shortcut with its target file avoids a cross-component file reference (ICE69).
-The package never runs the GUI or the agent after installing: its only custom action is the
-uninstall's `StopAgent`. It does not write the GUI's own `Gateinto App` Run value either; only
-the GUI's **Start the app at sign-in** switch does, and the uninstall leaves that value alone.
-The uninstaller does not close a running GUI; exit it from its tray icon first (untested
-otherwise).
+The package never runs the GUI or the agent after installing. Its custom actions are deferred,
+impersonated, ignore failures, run before `RemoveFiles` and only when `REMOVE~="ALL"`:
+`StopAgent` (`gateinto.exe stop --remove-stale-profiles`); `UninstallGui`
+(`gateinto-gui.exe --uninstall`) when `NOT UPGRADINGPRODUCTCODE`, which closes a running GUI of
+the user and deletes the GUI's own `Gateinto App` Run value and its StartupApproved entry if the
+value runs the installed GUI; and `QuitGui` (`gateinto-gui.exe --quit`) when a major upgrade
+removes the old version, which only closes the GUI so the user's **Start the app at sign-in**
+choice survives the upgrade. The package never writes `Gateinto App`; only the GUI's switch
+does. See [docs/install.md](../../docs/install.md).
 
 `MajorUpgrade` replaces an older version in place, and a
 downgrade to a lower `major.minor.patch` is refused with "A newer version of Gateinto is already
@@ -143,9 +147,11 @@ See [docs/install.md](../../docs/install.md).
 CI (`windows-latest`, Microsoft Software Key Storage Provider) builds an x64 MSI and an x86 MSI
 (the latter with the i686 debug build, run under WOW64), installs and uninstalls each silently,
 checks that the GUI and its Start Menu shortcut are installed and removed and that installing
-starts nothing, and checks that the SPKI survives a reinstall and changes only after a
+starts nothing, that uninstalling closes a running GUI (when the runner shows its window) and
+removes only the GUI's own `Gateinto App` sign-in value, and checks that the SPKI survives a reinstall and changes only after a
 purge. The following are not verified by CI and need manual testing: opening the GUI from the
-shortcut, uninstalling or upgrading while the GUI runs, TPM keys, interactive
+shortcut, closing the GUI during an interactive uninstall or an upgrade, keeping `Gateinto App`
+across an upgrade between two versions, TPM keys, interactive
 install, the Windows 10/11 matrix, the x86 MSI on real 32-bit Windows (it is untested on Windows
 7, where the i686 executable does not start) and clicking a real `gateinto://` link.
 

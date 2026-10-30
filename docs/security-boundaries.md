@@ -79,6 +79,17 @@ These are limits of the design, not open defects:
   own `Gateinto App`, through the app's sign-in switch. This is unit-tested
   but has not been tried on a real Windows desktop. See
   [architecture.md](architecture.md).
+- `gateinto-gui.exe --uninstall`, run by a full uninstall as the user,
+  deletes only `Gateinto App` in the user's Run key and its StartupApproved
+  entry, and only when the value is a plain string that runs exactly the
+  running `gateinto-gui.exe`; `--quit`, run when an upgrade removes the old
+  version, deletes nothing. Both close only windows of the GUI's own classes
+  whose process has the same user and the same image, by a private exit
+  message that clears secrets like any other exit, and never end a process
+  by force. Any program running as the user on the same desktop can post
+  that message and close the GUI; such a program can already end the GUI
+  process. The decision is unit-tested; the Windows calls run only in the
+  MSI lifecycle CI job.
 - The GUI deletes a file only when the user confirms Remove for a gateway
   added on this device, and then only that gateway's file in `gateways/`,
   with the same checks as `gateinto gateway forget`. It never writes the

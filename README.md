@@ -60,8 +60,10 @@ The MSI installs `gateinto.exe` and the GUI, `gateinto-gui.exe`, side by
 side in `%LOCALAPPDATA%\Programs\Gateinto`, and adds a per-user Start Menu
 shortcut named **Gateinto** that opens the GUI. Installing starts neither the
 GUI nor the agent, and does not turn on the GUI's own **Start the app at
-sign-in** value. Exit the GUI from its tray icon before uninstalling or
-upgrading: the uninstaller stops the agent but not the GUI.
+sign-in** value. Uninstalling or upgrading closes a running GUI of the
+current user and stops the agent. A full uninstall also removes the GUI's
+`Gateinto App` sign-in value when it opens the installed GUI; an upgrade
+keeps it. See [docs/install.md](docs/install.md).
 
 ## Releases
 
@@ -868,7 +870,8 @@ installer sets it, for example when installed with `AUTOSTART=1` (see
 either value and never starts the agent on its own. It reads the value when Settings opens and at most once per 2-second
 refresh while Settings is shown. The separate **Start the app at sign-in**
 switch only controls the GUI's own `Gateinto App` value, which opens the app,
-not the agent. The demo shows **On** without reading the registry. This is
+not the agent; a full uninstall removes that value (see
+[docs/install.md](docs/install.md)). The demo shows **On** without reading the registry. This is
 unit-tested but has not been tried on a real Windows desktop.
 
 ## Removing a gateway in the GUI
