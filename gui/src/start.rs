@@ -100,7 +100,10 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    const WXS: &str = include_str!("../../packaging/wix/gateinto.wxs");
+    use std::collections::BTreeSet;
+
+    use crate::uninstall::wxs::{WXS, attribute, ids};
+
     const GUI_FILE: &str = r#"<File Id="GateintoGuiExe" Name="gateinto-gui.exe""#;
     const SHORTCUT: &str = r#"<Shortcut Id="GuiShortcut" Name="Gateinto" "#;
 
@@ -127,13 +130,18 @@ mod tests {
         assert!(shortcut.contains(r#"Directory="ProgramMenuFolder""#));
         assert!(shortcut.contains(r#"Advertise="no""#));
         assert_eq!(WXS.matches("<Shortcut ").count(), 1);
-        let runs = WXS.matches(r#"FileRef="GateintoGuiExe""#).count();
-        assert_eq!(runs, 2);
-        assert_eq!(WXS.matches("GateintoGuiExe").count(), 1 + runs);
+        let refs = |file: &'static str| {
+            ids("CustomAction", "Id", move |a| {
+                attribute(a, "FileRef") == Some(file)
+            })
+        };
+        let gui = refs("GateintoGuiExe");
+        assert_eq!(gui, BTreeSet::from(["UninstallGui", "QuitGui"]));
+        assert_eq!(refs("GateintoExe"), BTreeSet::from(["StopAgent"]));
+        assert_eq!(WXS.matches("GateintoGuiExe").count(), 1 + gui.len());
         assert!(!WXS.contains("InstallUISequence"));
         assert!(!WXS.contains("ExitDialog"));
         assert!(!WXS.contains("LaunchApplication"));
-        assert!(WXS.contains(r#"FileRef="GateintoExe""#));
     }
 
     #[test]

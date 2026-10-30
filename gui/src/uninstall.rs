@@ -38,6 +38,7 @@ pub fn removes(run: &Result<RegValue, ()>, exe: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use super::*;
@@ -119,61 +120,17 @@ mod tests {
         assert!(!removes(&text(&written), &exe));
     }
 
-    const WXS: &str = include_str!("../../packaging/wix/gateinto.wxs");
-
-    fn elements(tag: &str) -> Vec<&'static str> {
-        let open = format!("<{tag}\n");
-        let inline = format!("<{tag} ");
-        let mut found = Vec::new();
-        let mut rest = WXS;
-        while let Some(at) = [rest.find(&open), rest.find(&inline)]
-            .into_iter()
-            .flatten()
-            .min()
-        {
-            let element = &rest[at..];
-            let end = element.find("/>").unwrap();
-            found.push(&element[..end]);
-            rest = &element[end..];
-        }
-        found
-    }
-
-    fn attribute(element: &'static str, name: &str) -> Option<&'static str> {
-        let at = element
-            .split_whitespace()
-            .find_map(|word| word.strip_prefix(name)?.strip_prefix("=\""))?;
-        let value = &element[at.as_ptr() as usize - element.as_ptr() as usize..];
-        Some(&value[..value.find('"').unwrap()])
-    }
-
-    fn action(id: &str) -> &'static str {
-        let found: Vec<_> = elements("CustomAction")
-            .into_iter()
-            .filter(|a| attribute(a, "Id") == Some(id))
-            .collect();
-        assert_eq!(found.len(), 1, "{id}");
-        found[0]
-    }
-
-    fn scheduled(id: &str) -> &'static str {
-        let found: Vec<_> = elements("Custom")
-            .into_iter()
-            .filter(|c| attribute(c, "Action") == Some(id))
-            .collect();
-        assert_eq!(found.len(), 1, "{id}");
-        found[0]
-    }
+    use super::wxs::{action, attribute, elements, ids, scheduled};
 
     const REMOVING: &str = "REMOVE~=&quot;ALL&quot;";
 
     #[test]
     fn the_installer_runs_the_gui_only_to_quit_or_uninstall_it_on_removal() {
-        let gui: Vec<_> = elements("CustomAction")
-            .into_iter()
-            .filter(|a| attribute(a, "FileRef") == Some("GateintoGuiExe"))
-            .collect();
-        assert_eq!(gui, [action("UninstallGui"), action("QuitGui")]);
+        assert_eq!(
+            ids("CustomAction", "Id", |a| attribute(a, "FileRef")
+                == Some("GateintoGuiExe")),
+            set(&["UninstallGui", "QuitGui"])
+        );
         for (id, argument) in [("UninstallGui", UNINSTALL), ("QuitGui", QUIT)] {
             let action = action(id);
             assert_eq!(attribute(action, "ExeCommand"), Some(argument));
@@ -202,11 +159,16 @@ mod tests {
         );
     }
 
+    fn set(ids: &[&'static str]) -> BTreeSet<&'static str> {
+        ids.iter().copied().collect()
+    }
+
     #[test]
     fn every_scheduled_action_runs_only_on_removal() {
-        let custom = elements("Custom");
-        assert_eq!(custom.len(), 3);
-        for custom in custom {
+        let actions = set(&["StopAgent", "UninstallGui", "QuitGui"]);
+        assert_eq!(ids("CustomAction", "Id", |_| true), actions);
+        assert_eq!(ids("Custom", "Action", |_| true), actions);
+        for custom in elements("Custom") {
             assert!(
                 attribute(custom, "Condition")
                     .unwrap()
@@ -214,10 +176,68 @@ mod tests {
                 "{custom}"
             );
         }
-        assert_eq!(elements("CustomAction").len(), 3);
         assert_eq!(
             attribute(action("StopAgent"), "FileRef"),
             Some("GateintoExe")
         );
+    }
+}
+
+#[cfg(test)]
+pub mod wxs {
+    use std::collections::BTreeSet;
+
+    pub const WXS: &str = include_str!("../../packaging/wix/gateinto.wxs");
+
+    pub fn elements(tag: &str) -> Vec<&'static str> {
+        let open = format!("<{tag}\n");
+        let inline = format!("<{tag} ");
+        let mut found = Vec::new();
+        let mut rest = WXS;
+        while let Some(at) = [rest.find(&open), rest.find(&inline)]
+            .into_iter()
+            .flatten()
+            .min()
+        {
+            let element = &rest[at..];
+            let end = element.find("/>").unwrap();
+            found.push(&element[..end]);
+            rest = &element[end..];
+        }
+        found
+    }
+
+    pub fn attribute(element: &'static str, name: &str) -> Option<&'static str> {
+        let at = element
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix(name)?.strip_prefix("=\""))?;
+        let value = &element[at.as_ptr() as usize - element.as_ptr() as usize..];
+        Some(&value[..value.find('"').unwrap()])
+    }
+
+    pub fn ids(tag: &str, id: &str, keep: impl Fn(&'static str) -> bool) -> BTreeSet<&'static str> {
+        elements(tag)
+            .into_iter()
+            .filter(|&element| keep(element))
+            .filter_map(|element| attribute(element, id))
+            .collect()
+    }
+
+    pub fn action(id: &str) -> &'static str {
+        let found: Vec<_> = elements("CustomAction")
+            .into_iter()
+            .filter(|a| attribute(a, "Id") == Some(id))
+            .collect();
+        assert_eq!(found.len(), 1, "{id}");
+        found[0]
+    }
+
+    pub fn scheduled(id: &str) -> &'static str {
+        let found: Vec<_> = elements("Custom")
+            .into_iter()
+            .filter(|c| attribute(c, "Action") == Some(id))
+            .collect();
+        assert_eq!(found.len(), 1, "{id}");
+        found[0]
     }
 }
