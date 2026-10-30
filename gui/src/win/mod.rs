@@ -283,7 +283,7 @@ impl App {
                     failure,
                     unix_now(),
                     self.launches.busy(),
-                    update.starting,
+                    &update.starting,
                 ),
                 m,
             ),

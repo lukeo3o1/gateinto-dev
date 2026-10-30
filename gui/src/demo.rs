@@ -288,6 +288,7 @@ mod tests {
     use crate::device::KeyState;
     use crate::gateways;
     use crate::sessions;
+    use crate::start::Starting;
     use crate::worker::{Update, serve_with};
 
     const NOW: u64 = 1_800_000_000;
@@ -488,7 +489,10 @@ mod tests {
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
             *failures.borrow(),
-            [(false, None), (false, Some(AGENT_NOT_STARTED.into()))]
+            [
+                (Starting::Idle, None),
+                (Starting::Idle, Some(AGENT_NOT_STARTED.into()))
+            ]
         );
         assert_eq!(start().await, Some(AGENT_NOT_STARTED.into()));
     }

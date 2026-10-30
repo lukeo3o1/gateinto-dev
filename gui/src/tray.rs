@@ -7,6 +7,7 @@ use crate::i18n::{Note, Text, fill, tr};
 use crate::layout::Rect;
 use crate::logo::State;
 use crate::sessions::Launch;
+use crate::start::Starting;
 
 pub const TIP_UNITS: usize = 127;
 pub const LABEL: Text = Text::StartSession;
@@ -156,7 +157,7 @@ pub fn flyout(
     listing: &Result<Known, String>,
     state: &AgentState,
     busy: bool,
-    starting: bool,
+    starting: &Starting,
     notice: Option<&str>,
 ) -> Flyout {
     let page = gateways::page(listing, state, None, busy);
@@ -198,8 +199,9 @@ pub fn flyout(
     } = status(state);
     let (subtitle, start) = match (start, starting) {
         (false, _) => (subtitle, Launch::Hidden),
-        (true, false) => (subtitle, Launch::Ready),
-        (true, true) => (tr(Text::StartingAgent).to_owned(), Launch::Busy),
+        (true, Starting::Idle) => (subtitle, Launch::Ready),
+        (true, Starting::InFlight) => (tr(Text::StartingAgent).to_owned(), Launch::Busy),
+        (true, Starting::Failed(note)) => (note.shown().to_owned(), Launch::Ready),
     };
     Flyout {
         title,
@@ -510,7 +512,7 @@ mod tests {
             gateway("lab", "lab.example"),
         ]);
         let state = running(vec![session(1, "office", 1), session(2, "office", 0)]);
-        let flyout = flyout(&listing, &state, false, false, None);
+        let flyout = flyout(&listing, &state, false, &Starting::Idle, None);
         assert_eq!(
             flyout.rows,
             [
@@ -536,9 +538,9 @@ mod tests {
     #[test]
     fn rows_launch_only_like_the_gateways_page() {
         let listing = known(vec![gateway("office", "proxy.example.com")]);
-        assert!(!flyout(&listing, &running(Vec::new()), true, false, None).launch);
-        assert!(!flyout(&listing, &AgentState::Stopped, false, false, None).launch);
-        let stopped = flyout(&listing, &AgentState::Stopped, false, false, None);
+        assert!(!flyout(&listing, &running(Vec::new()), true, &Starting::Idle, None).launch);
+        assert!(!flyout(&listing, &AgentState::Stopped, false, &Starting::Idle, None).launch);
+        let stopped = flyout(&listing, &AgentState::Stopped, false, &Starting::Idle, None);
         assert!(!stopped.stop);
         assert_eq!(stopped.rows.len(), 1);
     }
@@ -546,34 +548,64 @@ mod tests {
     #[test]
     fn only_a_stopped_agent_offers_to_start_and_waits_for_a_start_in_flight() {
         let listing = known(Vec::new());
-        let stopped = flyout(&listing, &AgentState::Stopped, false, false, None);
+        let stopped = flyout(&listing, &AgentState::Stopped, false, &Starting::Idle, None);
         assert_eq!(stopped.start, Launch::Ready);
         assert_eq!(stopped.subtitle, "The agent is not running");
-        let starting = flyout(&listing, &AgentState::Stopped, false, true, None);
+        let starting = flyout(
+            &listing,
+            &AgentState::Stopped,
+            false,
+            &Starting::InFlight,
+            None,
+        );
         assert_eq!(starting.start, Launch::Busy);
         assert_eq!(starting.subtitle, "Starting the agent…");
-        let relaying = flyout(&listing, &running(Vec::new()), false, true, None);
+        let failed = Starting::Failed(crate::start::MISSING.into());
+        let unstarted = flyout(&listing, &AgentState::Stopped, false, &failed, None);
+        assert_eq!(unstarted.start, Launch::Ready);
+        assert_eq!(unstarted.subtitle, crate::start::MISSING.english());
+        let after = flyout(&listing, &running(Vec::new()), false, &failed, None);
+        assert_eq!(after.subtitle, status(&running(Vec::new())).subtitle);
+        let relaying = flyout(
+            &listing,
+            &running(Vec::new()),
+            false,
+            &Starting::InFlight,
+            None,
+        );
         assert_eq!(relaying.start, Launch::Hidden);
         let lost = AgentState::Unreachable(crate::i18n::Note::Agent("x".to_owned()));
         assert_eq!(
-            flyout(&listing, &lost, false, true, None).start,
+            flyout(&listing, &lost, false, &Starting::InFlight, None).start,
             Launch::Hidden
         );
     }
 
     #[test]
     fn an_empty_or_unreadable_list_says_so() {
-        let empty = flyout(&known(Vec::new()), &AgentState::Stopped, false, false, None);
+        let empty = flyout(
+            &known(Vec::new()),
+            &AgentState::Stopped,
+            false,
+            &Starting::Idle,
+            None,
+        );
         assert_eq!(empty.empty.as_deref(), Some(NO_GATEWAYS.english()));
         let broken = Err("config is broken".to_owned());
-        let broken = flyout(&broken, &AgentState::Stopped, false, false, None);
+        let broken = flyout(&broken, &AgentState::Stopped, false, &Starting::Idle, None);
         assert_eq!(broken.empty.as_deref(), Some("config is broken"));
     }
 
     #[test]
     fn the_flyout_carries_the_notice() {
         let listing = known(Vec::new());
-        let shown = flyout(&listing, &AgentState::Stopped, false, false, Some("Busy"));
+        let shown = flyout(
+            &listing,
+            &AgentState::Stopped,
+            false,
+            &Starting::Idle,
+            Some("Busy"),
+        );
         assert_eq!(shown.notice.as_deref(), Some("Busy"));
         assert_eq!(shown.title, "Stopped");
     }
@@ -752,20 +784,26 @@ mod tests {
         let mut started = Notice::default();
         started.wait();
         started.settle(None, true);
-        let shown = flyout(&listing, &state, false, false, started.text());
+        let shown = flyout(&listing, &state, false, &Starting::Idle, started.text());
         assert_eq!(shown.rows[0].open, "2 個已開啟");
         assert_eq!(shown.notice.as_deref(), Some("已啟動瀏覽器工作階段"));
         let mut refused = Notice::default();
         refused.wait();
         refused.settle(Some(&Note::Agent(STARTED.english().to_owned())), true);
-        let refused = flyout(&listing, &state, false, false, refused.text());
+        let refused = flyout(&listing, &state, false, &Starting::Idle, refused.text());
         assert_eq!(refused.notice.as_deref(), Some(STARTED.english()));
-        let empty = flyout(&known(Vec::new()), &AgentState::Stopped, false, false, None);
+        let empty = flyout(
+            &known(Vec::new()),
+            &AgentState::Stopped,
+            false,
+            &Starting::Idle,
+            None,
+        );
         assert_eq!(empty.empty.as_deref(), Some("尚無閘道。"));
 
         let mut notice = Notice::default();
         notice.wait();
-        let waiting = flyout(&listing, &state, false, false, notice.text());
+        let waiting = flyout(&listing, &state, false, &Starting::Idle, notice.text());
         assert_eq!(waiting.notice.as_deref(), Some("正在啟動瀏覽器工作階段…"));
         assert_eq!(
             (tr(OPEN), tr(EXIT), tr(FLYOUT_TITLE)),

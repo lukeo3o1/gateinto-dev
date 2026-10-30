@@ -168,7 +168,7 @@ impl App {
                 &u.gateways,
                 &u.state,
                 self.launches.busy(),
-                u.starting,
+                &u.starting,
                 panel.notice.text(),
             ),
             None => tray::waiting(),

@@ -13,6 +13,14 @@ pub const WAIT: Duration = Duration::from_secs(45);
 pub const FAILED: Text = Text::AgentStartFailed;
 pub const MISSING: Text = Text::AgentCommandMissing;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Starting {
+    #[default]
+    Idle,
+    InFlight,
+    Failed(Note),
+}
+
 pub fn beside(gui: &Path) -> Option<PathBuf> {
     gui.parent()
         .map(|dir| dir.join(CLI))
