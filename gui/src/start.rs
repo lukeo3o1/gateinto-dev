@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wait_outlasts_the_command_s_own_retries() {
+    fn the_wait_is_longer_than_the_cli_s_30_second_start_timeout() {
         assert!(WAIT > std::time::Duration::from_secs(30));
     }
 
