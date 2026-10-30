@@ -58,7 +58,8 @@ These are limits of the design, not open defects:
   `gateinto.exe` from its own directory with `agent --detach`, by absolute
   path, without a shell or `--config`, and never shows the child's output.
   It trusts whatever `gateinto.exe` is in that directory. This is
-  unit-tested but has not been tried on a real Windows desktop. See [architecture.md](architecture.md).
+  unit-tested but has not been tried on a real Windows desktop. See
+  [architecture.md](architecture.md).
 
 ## Routing selection
 

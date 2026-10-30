@@ -818,9 +818,13 @@ and tray flyout offer **Start agent**. Only a click starts it, and only one
 start runs at a time. The GUI runs `gateinto.exe agent --detach` from its own
 directory by absolute path, without a shell, without `--config` and without
 a console window, and waits up to 45 seconds for it to exit. On success it
-refreshes at once; otherwise it shows a fixed message and never the
-command's output. It does not retry. If `gateinto.exe` is missing it shows a
-fixed message and starts nothing. The demo never starts an agent. This is
+refreshes at once; otherwise it shows a fixed message, never the command's
+output, until the next start or until the agent is no longer stopped. It does
+not retry. After a timeout, an agent the command had already started may
+still come up and show as running at the next refresh. Quitting the GUI
+during a start normally ends the `agent --detach` command, so whether an agent
+comes up depends on how far it got. If `gateinto.exe` is missing it shows a fixed
+message and starts nothing. The demo never starts an agent. This is
 unit-tested but has not been tried on a real Windows desktop.
 
 ## Verification status
