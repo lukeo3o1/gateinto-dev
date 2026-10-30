@@ -15,7 +15,19 @@ $installed = "$installDir\gateinto.exe"
 $installedGui = "$installDir\gateinto-gui.exe"
 $shortcut = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Gateinto.lnk"
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$approvedKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+$guiValue = 'Gateinto App'
+$probe = 'Gateinto Lifecycle Probe'
+$probeData = '"C:\gateinto-lifecycle-probe.exe"'
+$approvedOn = [byte[]] (2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 $script:spki = $null
+$script:written = @()
+$script:guis = @()
+
+Add-Type -Namespace Lifecycle -Name Win32 -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr FindWindowW(string className, IntPtr windowName);
+'@
 
 function Step([string] $Name, [scriptblock] $Body) {
   "::group::$Name"
@@ -48,9 +60,50 @@ function Assert-GuiRemoved {
   if (Test-Path $shortcut) { throw "the Start Menu shortcut $shortcut still exists after uninstall" }
 }
 
+function Get-Value([string] $Key, [string] $Name) {
+  $item = Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction SilentlyContinue
+  if ($null -eq $item) { $null } else { $item.$Name }
+}
+
+function Set-Value([string] $Key, [string] $Name, $Value, [string] $Type) {
+  if (-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key -Force | Out-Null }
+  New-ItemProperty -LiteralPath $Key -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
+  $script:written += , @($Key, $Name)
+}
+
+function Remove-Value([string] $Key, [string] $Name) {
+  Remove-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction SilentlyContinue
+}
+
+function Same-Bytes($Actual, [byte[]] $Expected) {
+  ($null -ne $Actual) -and (($Actual -join ',') -eq ($Expected -join ','))
+}
+
+function Start-Gui {
+  $gui = Start-Process $installedGui -PassThru
+  $script:guis += $gui
+  $deadline = (Get-Date).AddSeconds(30)
+  while ([Lifecycle.Win32]::FindWindowW('GateintoWindow', [IntPtr]::Zero) -eq [IntPtr]::Zero) {
+    if ($gui.HasExited) { throw "the GUI exited with $($gui.ExitCode) before showing its window" }
+    if ((Get-Date) -gt $deadline) {
+      Stop-Process -Id $gui.Id -Force -ErrorAction SilentlyContinue
+      Write-Host '::warning::the GUI showed no GateintoWindow within 30 seconds (no interactive desktop?); closing it on uninstall is not checked'
+      return $null
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  Write-Host "GUI window shown by process $($gui.Id)"
+  $gui
+}
+
 function Test-UserPathHasInstallDir {
   $userPath = (Get-ItemProperty 'HKCU:\Environment' -ErrorAction SilentlyContinue).Path
   [bool] ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir })
+}
+
+$touched = @(@($runKey, $guiValue), @($runKey, $probe), @($approvedKey, $guiValue), @($approvedKey, 'Gateinto'))
+foreach ($value in $touched) {
+  if ($null -ne (Get-Value $value[0] $value[1])) { throw "$($value[0]) already has a value '$($value[1])'; remove it before running this script" }
 }
 
 try {
@@ -107,9 +160,19 @@ try {
       if ((Get-Date) -gt $deadline) { throw 'the agent did not start within 30 seconds' }
       Start-Sleep -Milliseconds 250
     }
-    $log = Invoke-Msiexec '/x' 'uninstall-1.log'
+    $gui = Start-Gui
+    Set-Value $runKey $guiValue "`"$installedGui`"" String
+    Set-Value $approvedKey $guiValue $approvedOn Binary
+    Set-Value $runKey $probe $probeData String
+    $log = Invoke-Msiexec '/x' 'uninstall-1.log' @('MSIRESTARTMANAGERCONTROL=Disable')
     if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: StopAgent')) { throw 'the uninstall log has no StopAgent action' }
+    if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: UninstallGui')) { throw 'the uninstall log has no UninstallGui action' }
+    if (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: QuitGui') { throw 'a plain uninstall ran QuitGui' }
     if (-not $agent.WaitForExit(30000)) { Stop-Process -Id $agent.Id -Force; throw 'the uninstaller did not stop the agent' }
+    if ($gui -and -not $gui.WaitForExit(1000)) { Stop-Process -Id $gui.Id -Force; throw 'the uninstaller did not close the GUI' }
+    if ($null -ne (Get-Value $runKey $guiValue)) { throw "the $guiValue Run value still exists after uninstall" }
+    if ($null -ne (Get-Value $approvedKey $guiValue)) { throw "the $guiValue StartupApproved value still exists after uninstall" }
+    if ((Get-Value $runKey $probe) -ne $probeData) { throw "the uninstaller changed the unrelated Run value $probe" }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
     Assert-GuiRemoved
     if (Test-Path 'HKCU:\Software\Classes\gateinto') { throw 'the gateinto:// handler still exists after uninstall' }
@@ -163,16 +226,26 @@ try {
     $script:spki = $new
   }
 
-  Step 'Uninstall the AUTOSTART install and check that the autostart entry, the GUI and its shortcut are gone' {
+  Step 'Uninstall the AUTOSTART install and check that the autostart entry, the GUI and its shortcut are gone and values the GUI did not write are kept' {
+    $elsewhere = "`"$LogDir\gateinto-gui.exe`""
+    Set-Value $runKey $guiValue $elsewhere String
+    Set-Value $approvedKey $guiValue $approvedOn Binary
+    Set-Value $approvedKey 'Gateinto' $approvedOn Binary
     $null = Invoke-Msiexec '/x' 'uninstall-2.log'
     if ($null -ne (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Gateinto -ErrorAction SilentlyContinue)) {
       throw 'the autostart entry still exists after uninstall'
     }
+    if ((Get-Value $runKey $guiValue) -ne $elsewhere) { throw "the uninstaller removed a $guiValue Run value that points at another copy" }
+    if (-not (Same-Bytes (Get-Value $approvedKey $guiValue) $approvedOn)) { throw "the uninstaller changed the $guiValue StartupApproved value of another copy" }
+    if (-not (Same-Bytes (Get-Value $approvedKey 'Gateinto') $approvedOn)) { throw 'the uninstaller changed the StartupApproved value of the agent autostart entry' }
+    if ((Get-Value $runKey $probe) -ne $probeData) { throw "the uninstaller changed the unrelated Run value $probe" }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
     Assert-GuiRemoved
   }
 } finally {
-  Step 'Clean up the key and the installation' {
+  Step 'Clean up the key, the test values and the installation' {
+    $script:guis | Where-Object { -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    foreach ($value in $script:written) { Remove-Value $value[0] $value[1] }
     if ($script:spki -and (Test-Path $outside)) {
       & $outside reset --purge-device-identity --confirm-spki $script:spki
     }

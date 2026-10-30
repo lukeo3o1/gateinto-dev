@@ -133,7 +133,7 @@ It installs:
 
 The package creates no other shortcuts. Installing starts neither the GUI nor the agent, and does
 not write the GUI's own `Gateinto App` value in the Run key (the GUI's **Start the app at
-sign-in** switch); only that switch writes it. The package does not create a device key or a
+sign-in** switch); only that switch writes it. A full uninstall removes it (see below). The package does not create a device key or a
 config file, and none of its custom actions creates a key: the installer never creates a key as
 `SYSTEM` or as an elevated installer account. Windows Installer runs a per-user package as the
 installing user.
@@ -281,11 +281,27 @@ runs, because `gateinto.exe` is a console program. A major upgrade (installing a
 an older one) runs the same step for the old version: it stops a running agent and does not
 start it again. The next `gateinto://` link or `gateinto agent --detach` starts a new one.
 
-The uninstaller does not close the GUI. Exit it from its tray icon (**Exit**) first; while it runs,
-`gateinto-gui.exe` is in use, and Windows Installer may ask to close it or need a restart to
-remove it. This case is not tested. The GUI's own `Gateinto App` Run value, if its **Start the
-app at sign-in** switch was turned on, is not an MSI component and is left in place; turn the
-switch off before uninstalling to remove it.
+Also before files are removed, the uninstaller runs `gateinto-gui.exe --uninstall` as the
+installing user. It looks for windows of the GUI's own window classes (`GateintoWindow` and
+the demo's `GateintoDemoWindow`) that belong to a process of the same user and the same
+`gateinto-gui.exe` file, posts each a private exit message that closes it like **Exit** in the
+tray menu (also when it would hide to the tray), and waits at most 5 seconds for those
+processes to end. Secrets the window held are cleared as on any other exit. It then deletes
+the GUI's `Gateinto App` value in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` only
+if that value is a plain string that runs exactly the installed `gateinto-gui.exe` (the path is
+compared without regard to case), and in that case also the `Gateinto App` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, where Task
+Manager records whether the entry is turned off. A value that points at another copy, has
+another type or cannot be read is left in place, and so is every other value, including the
+installer's `Gateinto` value and its StartupApproved entry. A GUI that does not close in time
+is not ended by force; Windows Installer may then need a restart to remove the file. The step's
+failure does not stop the uninstall. An interactive uninstall may still ask to close the GUI
+before this step runs; this is not tested.
+
+A major upgrade removes the old version with `gateinto-gui.exe --quit` instead: it closes
+the GUI the same way but keeps the `Gateinto App` value and its StartupApproved entry, so
+**Start the app at sign-in** stays on. Only an old version that already has this step runs
+it during an upgrade. Installing never runs the GUI.
 
 An uninstall does not revoke anything and does not delete the device identity.
 
@@ -382,15 +398,22 @@ following with the Microsoft Software Key Storage Provider (the runners have no 
 - the first `setup` creates a key;
 - a silent uninstall with a running agent stops the agent and removes the exe, the GUI, the
   shortcut and the handler,
-  while `key info`, run from a copy outside the install folder, still shows the same SPKI;
+  while `key info`, run from a copy outside the install folder, still shows the same SPKI; the
+  GUI was started before it and `Gateinto App` was set to the installed GUI with a
+  StartupApproved entry, and the uninstall closes the GUI and removes both values but keeps an
+  unrelated Run value; if the runner shows no GUI window, only the values are checked, with a
+  warning;
 - after a reinstall with `AUTOSTART=1`, the Run value is exactly
   `"…\gateinto.exe" agent --detach`, the GUI and the shortcut are back, and `setup` reuses the
   key with the same SPKI; the uninstall after the purge below removes the Run value, the GUI and
-  the shortcut;
+  the shortcut, and keeps a `Gateinto App` value that points at another copy, its
+  StartupApproved entry and the StartupApproved entry of the agent's `Gateinto` value;
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
 runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
-the Start Menu shortcut, and uninstalling or upgrading while the GUI runs. See
+the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
+keeping `Gateinto App` across an upgrade between two versions. The checks that close the GUI and
+remove or keep `Gateinto App` on uninstall are in the script but have not run on Windows yet. See
 [verification.md](verification.md).

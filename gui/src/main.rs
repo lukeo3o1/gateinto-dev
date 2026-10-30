@@ -35,6 +35,7 @@ mod settings;
 mod start;
 mod theme;
 mod tray;
+mod uninstall;
 #[cfg(windows)]
 mod win;
 mod worker;

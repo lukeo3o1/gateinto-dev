@@ -30,21 +30,21 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
-    HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON,
-    IsIconic, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG,
-    MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SC_CLOSE,
-    SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON, SM_CXSMICON, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
+    GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT,
+    HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
+    IDC_ARROW, IMAGE_ICON, IsIconic, IsZoomed, KillTimer, LoadCursorW, LoadImageW, MB_ICONERROR,
+    MB_OK, MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SM_CXICON,
+    SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendMessageW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_CREATE, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE,
+    WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use gateinto::clock::unix_now;
@@ -78,9 +78,10 @@ use crate::scroll::Pane;
 use crate::sessions;
 use crate::settings::{self, AgentStart};
 use crate::theme::{self, Theme};
+use crate::uninstall::{self, Mode};
 use crate::worker::{Command, Update};
 use d2d::Graphics;
-use instance::{Start, WM_REVEAL};
+use instance::{Start, WM_EXIT, WM_REVEAL};
 use link::{Link, WM_AGENT};
 use sys::wide;
 use text::Fonts;
@@ -1703,6 +1704,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             tray::open_main(hwnd);
             Some(0)
         }
+        WM_EXIT => {
+            unsafe { DestroyWindow(hwnd) };
+            Some(0)
+        }
         WM_COPYDATA => Some(on_copy_data(hwnd, lp)),
         _ if tray::taskbar_created(msg) => {
             tray::on_taskbar_created(hwnd);
@@ -1810,6 +1815,15 @@ fn fail(message: Text) {
 }
 
 pub fn run() {
+    match uninstall::requested(std::env::args_os()) {
+        Mode::Show => {}
+        Mode::Quit => return instance::exit_all(),
+        Mode::Uninstall => {
+            instance::exit_all();
+            return run::uninstall();
+        }
+        Mode::Ignored => return,
+    }
     let demo = demo::requested(std::env::args_os());
     let link = match handoff::requested(std::env::args_os()) {
         handoff::Start::Show => None,

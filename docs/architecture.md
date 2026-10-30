@@ -510,8 +510,18 @@ finds `gateinto.exe` next to it, a per-user Start Menu shortcut to the GUI,
 the `HKCU` `gateinto://` handler and an optional `HKCU` Run entry for the
 agent. It never runs the GUI or the agent after installing and never writes
 the GUI's own `Gateinto App` Run value. Installing binaries is separate from creating the
-device key: no custom action touches a key, and the only uninstall custom
-action runs `gateinto stop --remove-stale-profiles` as the user. The key is
+device key: no custom action touches a key. The uninstall custom actions,
+all deferred, impersonated and run only on removal, are
+`gateinto stop --remove-stale-profiles`, and `gateinto-gui.exe --uninstall`
+on a full uninstall or `gateinto-gui.exe --quit` when a major upgrade removes
+the old version. Both GUI flags are accepted only alone and never show a
+window (`gui/src/uninstall.rs`); `gui/src/win/instance.rs` posts the private
+`message::EXIT` to windows of the GUI's classes owned by the same user and
+image, whose window procedure destroys the window as the tray's Exit does,
+and waits at most 5 seconds. `--uninstall` then lets `gui/src/win/run.rs`
+delete `Gateinto App` and its StartupApproved entry only when
+`uninstall::removes` finds a plain string that launches the running
+`gateinto-gui.exe`. The key is
 created by `gateinto setup` (or `key init`) as the user who will use it;
 `setup` refuses the LocalSystem, LocalService and NetworkService accounts.
 Other commands only open the key. The key and the config file

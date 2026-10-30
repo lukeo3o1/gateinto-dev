@@ -62,8 +62,26 @@
         Impersonate="yes"
         Return="ignore" />
 
+    <CustomAction
+        Id="UninstallGui"
+        FileRef="GateintoGuiExe"
+        ExeCommand="--uninstall"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore" />
+
+    <CustomAction
+        Id="QuitGui"
+        FileRef="GateintoGuiExe"
+        ExeCommand="--quit"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore" />
+
     <InstallExecuteSequence>
       <Custom Action="StopAgent" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="UninstallGui" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="QuitGui" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
   </Package>
 </Wix>
