@@ -8,6 +8,7 @@ use windows_sys::Win32::System::Registry::{
 
 use super::sys::{reg_string, reg_value, wide};
 use crate::settings::{self, RegValue};
+use crate::uninstall;
 
 const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const APPROVED: &str =
@@ -34,6 +35,24 @@ pub fn enabled() -> Result<bool, ()> {
     Ok(value()?.is_some_and(|value| settings::launches(&value, &exe)))
 }
 
+fn delete(key: &str) -> u32 {
+    let (key, name) = (wide(key), wide(settings::RUN_VALUE));
+    match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr()) } {
+        ERROR_FILE_NOT_FOUND => ERROR_SUCCESS,
+        code => code,
+    }
+}
+
+pub fn uninstall() {
+    let Some(exe) = exe() else {
+        return;
+    };
+    let run = reg_value(HKEY_CURRENT_USER, KEY, settings::RUN_VALUE);
+    if uninstall::removes(&run, &exe) && delete(KEY) == ERROR_SUCCESS {
+        delete(APPROVED);
+    }
+}
+
 pub fn set(on: bool) -> Result<(), ()> {
     let (key, name) = (wide(KEY), wide(settings::RUN_VALUE));
     let code = if on {
@@ -50,10 +69,7 @@ pub fn set(on: bool) -> Result<(), ()> {
             )
         }
     } else {
-        match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr()) } {
-            ERROR_FILE_NOT_FOUND => ERROR_SUCCESS,
-            code => code,
-        }
+        delete(KEY)
     };
     if code == ERROR_SUCCESS {
         Ok(())

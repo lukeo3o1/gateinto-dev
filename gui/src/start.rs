@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_adds_a_start_menu_shortcut_to_the_gui_and_never_runs_it() {
+    fn the_installer_adds_a_start_menu_shortcut_and_runs_the_gui_only_to_quit_or_uninstall_it() {
         let file = &WXS[WXS.find(GUI_FILE).unwrap()..];
         let file = &file[..file.find("</File>").unwrap()];
         let shortcut = &file[file.find(SHORTCUT).unwrap()..];
@@ -127,8 +127,12 @@ mod tests {
         assert!(shortcut.contains(r#"Directory="ProgramMenuFolder""#));
         assert!(shortcut.contains(r#"Advertise="no""#));
         assert_eq!(WXS.matches("<Shortcut ").count(), 1);
-        assert_eq!(WXS.matches("GateintoGuiExe").count(), 1);
-        assert_eq!(WXS.matches("<CustomAction").count(), 1);
+        let runs = WXS.matches(r#"FileRef="GateintoGuiExe""#).count();
+        assert_eq!(runs, 2);
+        assert_eq!(WXS.matches("GateintoGuiExe").count(), 1 + runs);
+        assert!(!WXS.contains("InstallUISequence"));
+        assert!(!WXS.contains("ExitDialog"));
+        assert!(!WXS.contains("LaunchApplication"));
         assert!(WXS.contains(r#"FileRef="GateintoExe""#));
     }
 

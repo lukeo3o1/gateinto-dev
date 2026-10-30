@@ -496,6 +496,8 @@ mod tests {
         assert!(wxs.contains(run));
         assert_eq!(RUN_VALUE, "Gateinto App");
         assert!(!wxs.contains(&format!(r#"Name="{RUN_VALUE}""#)));
+        assert!(!wxs.contains(RUN_VALUE));
+        assert!(!wxs.contains("StartupApproved"));
     }
 
     fn parsed(text: &str) -> ConfigFile {

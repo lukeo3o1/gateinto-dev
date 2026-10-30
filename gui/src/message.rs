@@ -2,12 +2,13 @@ pub const APP: u32 = 0x8000;
 pub const AGENT: u32 = APP;
 pub const TRAY: u32 = APP + 1;
 pub const REVEAL: u32 = APP + 2;
+pub const EXIT: u32 = APP + 3;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [u32; 3] = [AGENT, TRAY, REVEAL];
+    const ALL: [u32; 4] = [AGENT, TRAY, REVEAL, EXIT];
 
     #[test]
     fn app_messages_are_pairwise_distinct() {

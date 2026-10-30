@@ -1,5 +1,6 @@
 use std::ptr::{null, null_mut};
 use std::thread;
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, HANDLE, HWND,
@@ -16,7 +17,8 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+    WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, FindWindowExW, GetWindowThreadProcessId, PostMessageW,
@@ -28,9 +30,10 @@ use gateinto::link::handoff as reply;
 
 use super::sys::wide;
 use crate::handoff::{self, Link};
-use crate::{instance, message};
+use crate::{instance, message, uninstall};
 
 pub const WM_REVEAL: u32 = message::REVEAL;
+pub const WM_EXIT: u32 = message::EXIT;
 
 const FORWARD_TIMEOUT_MS: u32 = 5_000;
 const LONGEST_PATH: usize = 32_768;
@@ -210,6 +213,39 @@ pub fn forward(sid: &str, link: &Link) -> &'static str {
     )
 }
 
+pub fn exit_all() {
+    let current = unsafe { GetCurrentProcess() };
+    let (Some(sid), Some(image)) = (process_sid(current), image_of(current)) else {
+        return;
+    };
+    let same_app = |process| {
+        process_sid(process).as_deref() == Some(sid.as_str())
+            && image_of(process).is_some_and(|other| handoff::same_image(&image, &other))
+    };
+    let mut found = Vec::new();
+    for demo in [false, true] {
+        let class = wide(instance::class(demo));
+        let mut after = null_mut();
+        while let Some((hwnd, pid, _query)) = find_after(&class, after, same_app) {
+            after = hwnd;
+            let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if !process.is_null() {
+                found.push((hwnd, Process(process)));
+            }
+        }
+    }
+    let exiting: Vec<Process> = found
+        .into_iter()
+        .filter(|&(hwnd, _)| unsafe { PostMessageW(hwnd, WM_EXIT, 0, 0) } != 0)
+        .map(|(_, process)| process)
+        .collect();
+    let deadline = Instant::now() + uninstall::WAIT;
+    for process in exiting {
+        let left = deadline.saturating_duration_since(Instant::now());
+        unsafe { WaitForSingleObject(process.0, left.as_millis() as u32) };
+    }
+}
+
 struct Process(HANDLE);
 
 impl Drop for Process {
@@ -230,9 +266,17 @@ fn wait_for(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32
     None
 }
 
-// The open handle keeps the process id from being reused until it is dropped.
 fn find(class: &[u16], accept: impl Fn(HANDLE) -> bool) -> Option<(HWND, u32, Process)> {
-    let mut hwnd = null_mut();
+    find_after(class, null_mut(), accept)
+}
+
+// The open handle keeps the process id from being reused until it is dropped.
+fn find_after(
+    class: &[u16],
+    after: HWND,
+    accept: impl Fn(HANDLE) -> bool,
+) -> Option<(HWND, u32, Process)> {
+    let mut hwnd = after;
     loop {
         hwnd = unsafe { FindWindowExW(null_mut(), hwnd, class.as_ptr(), null()) };
         if hwnd.is_null() {
