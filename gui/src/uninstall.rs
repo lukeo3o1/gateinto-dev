@@ -190,21 +190,34 @@ pub mod wxs {
     pub const WXS: &str = include_str!("../../packaging/wix/gateinto.wxs");
 
     pub fn elements(tag: &str) -> Vec<&'static str> {
-        let open = format!("<{tag}\n");
-        let inline = format!("<{tag} ");
+        elements_in(WXS, tag)
+    }
+
+    pub fn elements_in<'a>(source: &'a str, tag: &str) -> Vec<&'a str> {
+        let open = format!("<{tag}");
         let mut found = Vec::new();
-        let mut rest = WXS;
-        while let Some(at) = [rest.find(&open), rest.find(&inline)]
-            .into_iter()
-            .flatten()
-            .min()
-        {
+        let mut rest = source;
+        while let Some(at) = rest.find(&open) {
             let element = &rest[at..];
+            if !element[open.len()..].starts_with(|c: char| c.is_ascii_whitespace()) {
+                rest = &element[open.len()..];
+                continue;
+            }
             let end = element.find("/>").unwrap();
             found.push(&element[..end]);
             rest = &element[end..];
         }
         found
+    }
+
+    #[test]
+    fn elements_are_found_after_any_whitespace() {
+        let source = "<Custom\r\n  A=\"1\" /><Custom\tA=\"2\" /><Custom A=\"3\" /><Custom\nA=\"4\" /><CustomAction A=\"5\" />";
+        let found: Vec<_> = elements_in(source, "Custom")
+            .into_iter()
+            .filter_map(|element| attribute(element, "A"))
+            .collect();
+        assert_eq!(found, ["1", "2", "3", "4"]);
     }
 
     pub fn attribute(element: &'static str, name: &str) -> Option<&'static str> {

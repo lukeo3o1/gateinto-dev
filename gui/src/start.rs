@@ -102,7 +102,7 @@ mod tests {
 
     use std::collections::BTreeSet;
 
-    use crate::uninstall::wxs::{WXS, attribute, ids};
+    use crate::uninstall::wxs::{WXS, attribute, elements, ids};
 
     const GUI_FILE: &str = r#"<File Id="GateintoGuiExe" Name="gateinto-gui.exe""#;
     const SHORTCUT: &str = r#"<Shortcut Id="GuiShortcut" Name="Gateinto" "#;
@@ -129,7 +129,7 @@ mod tests {
         let shortcut = &shortcut[..shortcut.find("/>").unwrap()];
         assert!(shortcut.contains(r#"Directory="ProgramMenuFolder""#));
         assert!(shortcut.contains(r#"Advertise="no""#));
-        assert_eq!(WXS.matches("<Shortcut ").count(), 1);
+        assert_eq!(elements("Shortcut").len(), 1);
         let refs = |file: &'static str| {
             ids("CustomAction", "Id", move |a| {
                 attribute(a, "FileRef") == Some(file)
