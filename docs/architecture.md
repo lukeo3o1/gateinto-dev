@@ -307,6 +307,19 @@ The full protocol, limits and guarantees are in
   request; if no agent answers it starts one (Windows: `DETACHED_PROCESS`
   and `CREATE_NEW_PROCESS_GROUP`, standard handles made non-inheritable; Unix:
   a new process group) and retries with backoff for up to 30 seconds.
+- The GUI (`gateinto-gui.exe`) starts an agent only when the user clicks
+  Start agent, which it offers on the sessions page and in the tray flyout
+  only while its last poll found no agent. It runs `gateinto.exe agent
+  --detach` from the GUI's own directory by absolute path, without a shell or
+  `--config`, with null standard handles and, on Windows, `CREATE_NO_WINDOW`.
+  At most one start is in flight; the button stays disabled until it ends.
+  The GUI waits for that command to exit, off the UI thread, for up to 45
+  seconds (then kills it), and polls the agent at once after a clean exit.
+  A nonzero exit, a failure to start it or the timeout shows a fixed message,
+  never the command's output or error; there are no retries. If
+  `gateinto.exe` is not a file next to the GUI, it shows a fixed message and
+  starts nothing. Demo mode never starts an agent. This is unit-tested but has
+  not been tried on a real Windows desktop.
 
 ## Modules
 
@@ -320,6 +333,7 @@ The full protocol, limits and guarantees are in
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
+| `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
 | `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |

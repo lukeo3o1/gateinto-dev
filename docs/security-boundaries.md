@@ -54,6 +54,11 @@ These are limits of the design, not open defects:
 - Gateinto does not authorize access to services on the remote Edge's behalf;
   authorization stays with the upstream. See
   [threat-model.md](threat-model.md#non-goals).
+- The GUI starts a process only on an explicit Start agent click: it runs
+  `gateinto.exe` from its own directory with `agent --detach`, by absolute
+  path, without a shell or `--config`, and never shows the child's output.
+  It trusts whatever `gateinto.exe` is in that directory. This is
+  unit-tested but has not been tried on a real Windows desktop. See [architecture.md](architecture.md).
 
 ## Routing selection
 
