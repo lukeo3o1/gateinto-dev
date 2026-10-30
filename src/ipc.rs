@@ -32,6 +32,7 @@ pub enum Request {
     Credentials(SessionId),
     Stop,
     Log { after: u64 },
+    Config,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,6 +136,7 @@ impl fmt::Display for Request {
             Self::Credentials(id) => write!(f, "credentials {id}"),
             Self::Stop => f.write_str("stop"),
             Self::Log { after } => write!(f, "log {after}"),
+            Self::Config => f.write_str("config"),
         }
     }
 }
@@ -167,6 +169,7 @@ impl FromStr for Request {
             ["close", id] => id.parse().map(Self::Close).map_err(|_| invalid),
             ["credentials", id] => id.parse().map(Self::Credentials).map_err(|_| invalid),
             ["stop"] => Ok(Self::Stop),
+            ["config"] => Ok(Self::Config),
             ["log", word] => word
                 .parse()
                 .ok()
@@ -273,6 +276,34 @@ pub fn without_credentials(lines: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|line| !line.starts_with(USERNAME) && !line.starts_with(PASSWORD))
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    File(PathBuf),
+    Defaults,
+}
+
+const CONFIG: &str = "config: ";
+const NO_CONFIG: &str = "none";
+
+pub fn config_line(source: &ConfigSource) -> Option<String> {
+    let text = match source {
+        ConfigSource::File(path) => path
+            .to_str()
+            .filter(|text| path.is_absolute() && !text.contains(['\r', '\n']))?,
+        ConfigSource::Defaults => NO_CONFIG,
+    };
+    Some(format!("{CONFIG}{text}"))
+}
+
+pub fn config_source(lines: &[String]) -> Option<ConfigSource> {
+    let text = lines.iter().find_map(|line| line.strip_prefix(CONFIG))?;
+    if text == NO_CONFIG {
+        return Some(ConfigSource::Defaults);
+    }
+    let path = PathBuf::from(text);
+    path.is_absolute().then_some(ConfigSource::File(path))
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
@@ -1144,6 +1175,7 @@ mod tests {
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
             (Request::Stop, "stop"),
+            (Request::Config, "config"),
             (Request::Log { after: 0 }, "log 0"),
             (Request::Log { after: u64::MAX }, "log 18446744073709551615"),
         ] {
@@ -1298,6 +1330,46 @@ mod tests {
     }
 
     #[test]
+    fn the_config_source_is_read_from_its_line() {
+        let path = std::env::temp_dir().join("gateinto.toml");
+        let line = config_line(&ConfigSource::File(path.clone())).unwrap();
+        assert_eq!(line, format!("config: {}", path.display()));
+        assert_eq!(
+            config_source(&["other".to_owned(), line]),
+            Some(ConfigSource::File(path))
+        );
+        let none = config_line(&ConfigSource::Defaults).unwrap();
+        assert_eq!(none, "config: none");
+        assert_eq!(config_source(&[none]), Some(ConfigSource::Defaults));
+    }
+
+    #[test]
+    fn only_absolute_single_line_config_paths_are_sent_or_read() {
+        let dir = std::env::temp_dir();
+        for path in [
+            PathBuf::from("gateinto.toml"),
+            PathBuf::new(),
+            dir.join("a\nconfig: none"),
+            dir.join("a\rb"),
+        ] {
+            assert_eq!(
+                config_line(&ConfigSource::File(path.clone())),
+                None,
+                "{path:?}"
+            );
+        }
+        for lines in [
+            vec![],
+            vec!["config: gateinto.toml".to_owned()],
+            vec!["config: ".to_owned()],
+            vec!["config:none".to_owned()],
+            vec!["config: None".to_owned()],
+        ] {
+            assert_eq!(config_source(&lines), None, "{lines:?}");
+        }
+    }
+
+    #[test]
     fn credential_lines_are_stripped_from_what_is_shown() {
         let credentials = issued();
         let mut lines = vec!["session: 1".to_owned()];
@@ -1351,6 +1423,9 @@ mod tests {
             "log 1 2",
             "log  1",
             "log 18446744073709551616",
+            "config ",
+            "config x",
+            "CONFIG",
             "open gateinto://connect?profile=office",
         ] {
             assert!(line.parse::<Request>().is_err(), "{line:?}");

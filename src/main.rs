@@ -18,7 +18,9 @@ use gateinto::identity::client_cert::{
 use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
-use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
+use gateinto::ipc::{
+    self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
+};
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
 use gateinto::link::{
@@ -802,9 +804,20 @@ impl Profiles for ConfigProfiles {
     }
 }
 
+fn agent_config(path: Option<PathBuf>) -> std::io::Result<ConfigSource> {
+    Ok(match path {
+        Some(path) => ConfigSource::File(std::path::absolute(path)?),
+        None => ConfigSource::Defaults,
+    })
+}
+
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
-    let file = args.load()?;
+    let config = agent_config(args.path().map(|(path, _)| path))?;
+    let file = match &config {
+        ConfigSource::File(path) => ConfigFile::load(path)?,
+        ConfigSource::Defaults => ConfigFile::default(),
+    };
     let logbook = Logbook::default();
     init_logging_into("info", Some(&logbook));
     args.log_default();
@@ -817,6 +830,7 @@ async fn agent(args: ConfigArg) -> Result {
         profiles_root,
         limits: AgentLimits::default(),
         logbook,
+        config,
     };
     let profiles = ConfigProfiles {
         file: file.clone(),
@@ -1464,6 +1478,17 @@ async fn reset(args: ResetArgs) -> Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_agent_config_is_resolved_to_one_absolute_path_before_loading() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            agent_config(Some(PathBuf::from("gateinto.toml"))).unwrap(),
+            ConfigSource::File(cwd.join("gateinto.toml"))
+        );
+        assert_eq!(agent_config(None).unwrap(), ConfigSource::Defaults);
+        assert!(agent_config(Some(PathBuf::new())).is_err());
+    }
+
     use super::*;
 
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;

@@ -827,6 +827,16 @@ comes up depends on how far it got. If `gateinto.exe` is missing it shows a fixe
 message and starts nothing. The demo never starts an agent. This is
 unit-tested but has not been tried on a real Windows desktop.
 
+## Which config file the GUI reads
+
+While an agent runs, the GUI asks it on every refresh (every 2 seconds)
+which config file it loaded, and reads gateways, agent settings and the
+device key name from that file. When no agent runs, or the agent is too old
+to answer, the GUI reads the default config file. If the running agent uses
+another file, Settings shows its path marked as used by the running agent; if
+it runs without one, Settings says so. The GUI never writes the config file.
+This is unit-tested but has not been tried on a real Windows desktop.
+
 ## Verification status
 
 [docs/verification.md](docs/verification.md) lists each capability (relay,

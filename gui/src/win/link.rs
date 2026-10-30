@@ -13,6 +13,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use super::device::system;
+use crate::agent::Config;
 use crate::demo;
 use crate::device::{self, Probe};
 use crate::gateways;
@@ -33,8 +34,8 @@ fn open(mailbox: &Mutex<Mailbox>) -> MutexGuard<'_, Mailbox> {
     mailbox.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn load() -> Loaded {
-    let file = gateways::read(config::default_path());
+fn load(reported: &Config) -> Loaded {
+    let file = gateways::read(reported.path(config::default_path));
     let known = file
         .as_ref()
         .map(|file| gateways::catalog(file, store::default_dir()))
@@ -51,8 +52,8 @@ fn load() -> Loaded {
     }
 }
 
-fn probe() -> Probe {
-    let file = gateways::read(config::default_path());
+fn probe(reported: &Config) -> Probe {
+    let file = gateways::read(reported.path(config::default_path));
     device::probe(&file, gateinto::identity::system_store, system())
 }
 
@@ -95,7 +96,11 @@ impl Link {
                 let runtime = match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => runtime,
                     Err(error) => {
-                        let loaded = if demo { demo::loaded() } else { load() };
+                        let loaded = if demo {
+                            demo::loaded(&Config::Unreported)
+                        } else {
+                            load(&Config::Unreported)
+                        };
                         deliver(stalled(error.to_string(), loaded));
                         return;
                     }

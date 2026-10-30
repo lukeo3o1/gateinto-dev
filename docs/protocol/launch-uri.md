@@ -485,6 +485,7 @@ they never contain spaces or line breaks.
 | `close <id>` | none |
 | `credentials <id>` | `listen: 127.0.0.1:<port>`, `username: <user name>`, `password: <password>`; `error: no session <id>` once the session is closed |
 | `stop` | none; the agent closes every session, then exits |
+| `config` | `config: <absolute path>` of the config file the agent loaded, or `config: none` when it runs without one; an agent whose path is not UTF-8 or contains a line break answers an error instead |
 
 Mixed launches and their first-time confirmations also include `route: mixed`.
 The token retains the optional selector, portal and route through approval;
@@ -496,7 +497,9 @@ remains `launch session_credentials session_credentials`. A request with the
 removed `basic_tofu` gets `error: the basic_tofu local proxy authentication was
 removed; use session_credentials`. Credentials appear only in the answers to a
 started `launch`, `approve` and `credentials`, never in an error, in `list` or
-in what the command line prints. Canonical optional fields remain ordered
+in what the command line prints. `config` changes nothing and answers only
+the path, never the file's contents. An agent older than `config` answers it
+with `error: invalid request`. Canonical optional fields remain ordered
 `route`, `url`, `gateway`, `portal`. Older agents reject the new address-only
 form; stop the old agent after upgrading.
 

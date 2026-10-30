@@ -15,8 +15,8 @@ use gateinto::browser::ProfileDir;
 use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::{
-    self, BindError, ConfirmToken, Endpoint, LogPage, Request, RequestError, Response, Server,
-    SessionAuth, SessionInfo, SessionKind, SessionRoute,
+    self, BindError, ConfigSource, ConfirmToken, Endpoint, LogPage, Request, RequestError,
+    Response, Server, SessionAuth, SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
 use gateinto::logbook::Logbook;
@@ -163,6 +163,7 @@ impl TestAgent {
                 profiles_root: profiles_root.clone(),
                 limits,
                 logbook: Default::default(),
+                config: ConfigSource::Defaults,
             },
             TestProfiles {
                 plans,
@@ -751,6 +752,7 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
             profiles_root: root,
             limits: limits(),
             logbook: Default::default(),
+            config: ConfigSource::Defaults,
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -789,6 +791,7 @@ async fn the_agent_answers_log_requests_from_its_logbook() {
             profiles_root: dir.join("profiles"),
             limits: limits(),
             logbook,
+            config: ConfigSource::Defaults,
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -821,6 +824,60 @@ async fn the_agent_answers_log_requests_from_its_logbook() {
 
     ipc::send(&endpoint, &Request::Stop).await.unwrap();
     tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_reports_only_the_config_path_it_was_given() {
+    let dir = temp_dir("config-path");
+    let config = dir.join("gateinto.toml");
+    let agent = Agent::new(
+        AgentOptions {
+            browser: None,
+            profiles_root: dir.join("profiles"),
+            limits: limits(),
+            logbook: Logbook::default(),
+            config: ConfigSource::File(config.clone()),
+        },
+        TestProfiles {
+            plans: BTreeMap::new(),
+            template: agent_config(
+                SocketAddr::from((LOOPBACK, 1)),
+                rustls::RootCertStore::empty(),
+                PROXY_NAME,
+            ),
+            linked: Linked::default(),
+        },
+    );
+    let endpoint = endpoint(&dir);
+    let server = Server::bind(&endpoint).unwrap();
+    let serving = tokio::spawn(async move { agent.serve(server, std::future::pending()).await });
+
+    let reply = ipc::send(&endpoint, &Request::Config).await.unwrap();
+
+    assert_eq!(
+        reply,
+        Response::Ok(vec![format!("config: {}", config.display())])
+    );
+    let Response::Ok(lines) = reply else {
+        unreachable!()
+    };
+    assert_eq!(ipc::config_source(&lines), Some(ConfigSource::File(config)));
+    ipc::send(&endpoint, &Request::Stop).await.unwrap();
+    tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_the_agent_does_not_know_is_answered_as_invalid() {
+    let agent = TestAgent::start(limits()).await;
+
+    let response = agent.raw(b"config-file\n").await;
+
+    assert_eq!(response, format!("error: {}\n", ipc::INVALID_REQUEST));
+    assert_eq!(
+        Response::decode(&response),
+        Ok(Response::Error(ipc::INVALID_REQUEST.to_owned()))
+    );
+    agent.stop().await;
 }
 
 #[cfg(windows)]

@@ -1,4 +1,6 @@
-use gateinto::ipc::{RequestError, Response, SessionInfo};
+use std::path::PathBuf;
+
+use gateinto::ipc::{self, ConfigSource, RequestError, Response, SessionInfo};
 
 use crate::i18n::{Note, Text};
 
@@ -39,10 +41,36 @@ impl AgentState {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Config {
+    #[default]
+    Unreported,
+    Reported(ConfigSource),
+}
+
+impl Config {
+    pub fn from_reply(reply: Result<Response, RequestError>) -> Self {
+        match reply {
+            Ok(Response::Ok(lines)) => {
+                ipc::config_source(&lines).map_or(Self::Unreported, Self::Reported)
+            }
+            Ok(Response::Error(_)) | Err(_) => Self::Unreported,
+        }
+    }
+
+    pub fn path(&self, default: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+        match self {
+            Self::Unreported => default(),
+            Self::Reported(ConfigSource::File(path)) => Some(path.clone()),
+            Self::Reported(ConfigSource::Defaults) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gateinto::ipc::{SessionAuth, SessionKind, SessionRoute};
+    use gateinto::ipc::{ConfigSource, SessionAuth, SessionKind, SessionRoute};
 
     fn session(id: u64) -> SessionInfo {
         SessionInfo {
@@ -112,6 +140,57 @@ mod tests {
             AgentState::from_list(Err(RequestError::NotRunning)),
             AgentState::Stopped
         );
+    }
+
+    fn reported(lines: &[&str]) -> Config {
+        Config::from_reply(Ok(Response::Ok(
+            lines.iter().map(|line| (*line).to_owned()).collect(),
+        )))
+    }
+
+    fn absolute(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    #[test]
+    fn the_running_agent_reports_its_config_file_or_none() {
+        let file = absolute("agent.toml");
+        assert_eq!(
+            reported(&[&format!("config: {}", file.display())]),
+            Config::Reported(ConfigSource::File(file))
+        );
+        assert_eq!(
+            reported(&["config: none"]),
+            Config::Reported(ConfigSource::Defaults)
+        );
+    }
+
+    #[test]
+    fn an_agent_that_does_not_report_its_config_is_unreported() {
+        let older = Ok(Response::Error(gateinto::ipc::INVALID_REQUEST.to_owned()));
+        assert_eq!(Config::from_reply(older), Config::Unreported);
+        assert_eq!(
+            Config::from_reply(Err(RequestError::NotRunning)),
+            Config::Unreported
+        );
+        assert_eq!(
+            Config::from_reply(Err(RequestError::TimedOut)),
+            Config::Unreported
+        );
+        assert_eq!(reported(&[]), Config::Unreported);
+        assert_eq!(reported(&["config: relative.toml"]), Config::Unreported);
+    }
+
+    #[test]
+    fn only_a_reported_config_replaces_the_default_path() {
+        let default = absolute("default.toml");
+        let ours = || Some(default.clone());
+        assert_eq!(Config::Unreported.path(ours), Some(default.clone()));
+        let file = absolute("agent.toml");
+        let agent = Config::Reported(ConfigSource::File(file.clone()));
+        assert_eq!(agent.path(|| panic!("read the default")), Some(file));
+        let none = Config::Reported(ConfigSource::Defaults);
+        assert_eq!(none.path(|| panic!("read the default")), None);
     }
 
     #[test]
