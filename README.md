@@ -837,6 +837,22 @@ another file, Settings shows its path marked as used by the running agent; if
 it runs without one, Settings says so. The GUI never writes the config file.
 This is unit-tested but has not been tried on a real Windows desktop.
 
+## Agent at sign-in in the GUI
+
+Settings shows, read-only, whether the agent starts at sign-in: **On** when
+the installer's `Gateinto` value in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` runs
+`gateinto.exe agent --detach`, **Off** when that value is absent, and **Unknown** when it holds
+any other command or cannot be read. Only that fixed text is shown, never the
+value itself. A note says the installer sets it; the MSI writes it when
+installed with `AUTOSTART=1` (see [docs/install.md](docs/install.md)). The GUI
+never writes, creates or deletes that value and never starts the agent on its
+own. It reads the value when Settings opens and at most once per 2-second
+refresh while Settings is shown. The separate **Start the app at sign-in**
+switch only controls the GUI's own `Gateinto App` value, which opens the app,
+not the agent. The demo shows **On** without reading the registry. This is
+unit-tested but has not been tried on a real Windows desktop.
+
 ## Removing a gateway in the GUI
 
 The gateway details in the GUI offer **Remove** only for a gateway added on

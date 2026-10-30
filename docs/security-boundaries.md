@@ -69,6 +69,14 @@ These are limits of the design, not open defects:
   within its existing 2-second poll and never writes the file. This is
   unit-tested but has not been tried on a real Windows desktop. See
   [architecture.md](architecture.md).
+- The GUI only reads the installer's `Gateinto` value in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, to show whether the
+  agent starts at sign-in as a fixed On, Off or Unknown text. It never
+  writes, creates or deletes that value, never shows its contents and never
+  starts the agent because of it. The only Run value the GUI writes is its
+  own `Gateinto App`, through the app's sign-in switch. This is unit-tested
+  but has not been tried on a real Windows desktop. See
+  [architecture.md](architecture.md).
 - The GUI deletes a file only when the user confirms Remove for a gateway
   added on this device, and then only that gateway's file in `gateways/`,
   with the same checks as `gateinto gateway forget`. It never writes the
