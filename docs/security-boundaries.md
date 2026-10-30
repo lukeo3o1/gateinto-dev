@@ -60,6 +60,15 @@ These are limits of the design, not open defects:
   It trusts whatever `gateinto.exe` is in that directory. This is
   unit-tested but has not been tried on a real Windows desktop. See
   [architecture.md](architecture.md).
+- The GUI reads config from only two places: the default config file, or the
+  absolute path that the running agent answers to the read-only `config`
+  request on the per-user IPC endpoint. It trusts that agent as it trusts its
+  session list; a program that can serve that endpoint as the user can point
+  the GUI at another file the user can read. The answer carries only the
+  path, never session credentials or the file's contents. The GUI asks
+  within its existing 2-second poll and never writes the file. This is
+  unit-tested but has not been tried on a real Windows desktop. See
+  [architecture.md](architecture.md).
 
 ## Routing selection
 

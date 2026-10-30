@@ -326,6 +326,21 @@ The full protocol, limits and guarantees are in
   `gateinto.exe` is not a file next to the GUI, it shows a fixed message and
   starts nothing. Demo mode never starts an agent. This is unit-tested but has
   not been tried on a real Windows desktop.
+- The agent remembers which config file it loaded (`ipc::ConfigSource`): the
+  absolute form of `--config`, the default file when it existed at start, or
+  none. The `config` request answers `config: <path>` or `config: none` and
+  nothing else (`ipc::config_line`, `ipc::config_source`, which accepts only
+  an absolute path). The GUI worker sends it right after each `list` that
+  finds the agent running, in the same 2-second poll, and passes the answer
+  (`gui/src/agent.rs` `Config`) to the loaders. An absolute path from the
+  agent replaces the default path; `none` means no file; a stopped or
+  unreachable agent, an error such as `invalid request` from an older agent,
+  or any other answer leaves the default path in use. Gateways, agent
+  settings, the device key name, the add-gateway name check and Open config
+  file use that path. Settings shows the path, with a fixed note when it is
+  not the default one or when the agent loaded no file. The GUI only reads
+  the file and opens it in the system's editor on request; it never writes
+  it. This is unit-tested but has not been tried on a real Windows desktop.
 
 ## Modules
 
