@@ -16,6 +16,7 @@ pub enum Zone {
     Close,
     Nav(Page),
     StopAgent,
+    StartAgent,
     Revoke(u64),
     More(u64),
     StartBrowser(usize),

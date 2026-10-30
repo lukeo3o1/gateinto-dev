@@ -19,6 +19,7 @@ use crate::device::{KeyState, Probe, System};
 use crate::i18n::{Note, Text};
 use crate::log::Journal;
 use crate::settings::Agent;
+use crate::start::Starting;
 
 pub const POLL: Duration = Duration::from_secs(2);
 const LOG_PAGES: usize = 16;
@@ -28,6 +29,7 @@ pub const CONFIRMATION: Text = Text::Confirmation;
 pub enum Command {
     Close(u64),
     Stop,
+    Start,
     Launch(GatewayName),
     Probe,
     Watch(bool),
@@ -51,6 +53,7 @@ impl Command {
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
                     .map_err(|error| error.to_string())?,
             ),
+            Command::Start => return Err("starting the agent is not an agent request".to_owned()),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
             Command::Watch(_) => {
                 return Err("watching the log is not an agent request".to_owned());
@@ -82,6 +85,7 @@ pub struct Update {
     pub launched: u64,
     pub device: Option<Probe>,
     pub log: Journal,
+    pub starting: Starting,
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +156,7 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
             system: System::default(),
         }),
         log: Journal::default(),
+        starting: Starting::Idle,
     }
 }
 
@@ -238,9 +243,12 @@ fn refused(error: ApprovalError) -> Option<Note> {
     }
 }
 
-async fn finish(linking: &mut Option<Linking<'_>>) -> Option<Note> {
-    match linking {
-        Some(linking) => linking.await,
+async fn finish<T>(pending: &mut Option<Pin<Box<T>>>) -> Option<Note>
+where
+    T: Future<Output = Option<Note>> + ?Sized,
+{
+    match pending {
+        Some(pending) => pending.await,
         None => std::future::pending().await,
     }
 }
@@ -259,6 +267,7 @@ pub async fn serve<F, R>(
 {
     serve_with(
         |_| None,
+        crate::start::agent,
         commands,
         send,
         load,
@@ -274,8 +283,9 @@ pub async fn serve<F, R>(
     clippy::too_many_arguments,
     reason = "each callback reaches a different part of the window"
 )]
-pub async fn serve_with<F, R>(
+pub async fn serve_with<F, R, S>(
     refuse: impl Fn(&Command) -> Option<Text>,
+    start: impl Fn() -> S,
     mut commands: UnboundedReceiver<Command>,
     send: F,
     mut load: impl FnMut() -> Loaded,
@@ -286,6 +296,7 @@ pub async fn serve_with<F, R>(
 ) where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
+    S: Future<Output = Option<Note>>,
 {
     let mut failure = None;
     let mut launched = 0;
@@ -294,6 +305,8 @@ pub async fn serve_with<F, R>(
     let mut journal = Journal::default();
     let answers = Answers::default();
     let mut linking: Option<Linking<'_>> = None;
+    let mut starting: Option<Pin<Box<S>>> = None;
+    let mut unstarted: Option<Note> = None;
     loop {
         let state = AgentState::from_list(send(Request::List).await);
         match state {
@@ -310,6 +323,10 @@ pub async fn serve_with<F, R>(
             }
             AgentState::Running(_) | AgentState::Unreachable(_) => {}
         }
+        let stopped = state == AgentState::Stopped;
+        if !stopped {
+            unstarted = None;
+        }
         let Loaded {
             gateways,
             sections,
@@ -324,6 +341,11 @@ pub async fn serve_with<F, R>(
             launched,
             device: device.clone(),
             log: journal.clone(),
+            starting: match (&starting, &unstarted) {
+                (Some(_), _) => Starting::InFlight,
+                (None, Some(note)) => Starting::Failed(note.clone()),
+                (None, None) => Starting::Idle,
+            },
         });
         tokio::select! {
             biased;
@@ -375,6 +397,13 @@ pub async fn serve_with<F, R>(
                         )));
                         continue;
                     }
+                    Command::Start => {
+                        if stopped && starting.is_none() {
+                            starting = Some(Box::pin(start()));
+                            unstarted = None;
+                        }
+                        continue;
+                    }
                     Command::Close(_) | Command::Stop | Command::Launch(_) => {}
                 }
                 failure = run(command, &send).await;
@@ -383,6 +412,10 @@ pub async fn serve_with<F, R>(
             note = finish(&mut linking) => {
                 linking = None;
                 failure = note;
+            }
+            note = finish(&mut starting) => {
+                starting = None;
+                unstarted = note;
             }
             () = tokio::time::sleep(POLL) => {}
         }
@@ -431,6 +464,7 @@ mod tests {
             launched: 0,
             device: None,
             log: Journal::default(),
+            starting: Starting::Idle,
         }
     }
 
@@ -1377,5 +1411,207 @@ mod tests {
             refused(ApprovalError::Denied("newco".parse().unwrap())),
             None
         );
+    }
+
+    fn listing(
+        log: &RefCell<Vec<Request>>,
+        reply: fn() -> Result<Response, RequestError>,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request);
+            std::future::ready(reply())
+        }
+    }
+
+    type Seen = (u64, Starting, Option<Note>);
+
+    async fn starts(
+        send: impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>>,
+        commands: Vec<(u64, Command)>,
+        took: Duration,
+        note: Option<Note>,
+        wait: Duration,
+    ) -> (u32, Vec<Seen>) {
+        let (tx, rx) = unbounded_channel();
+        let calls = RefCell::new(0);
+        let start = || {
+            *calls.borrow_mut() += 1;
+            let note = note.clone();
+            async move {
+                tokio::time::sleep(took).await;
+                note
+            }
+        };
+        let begun = tokio::time::Instant::now();
+        let mut seen = Vec::new();
+        let run = serve_with(
+            |_| None,
+            start,
+            rx,
+            send,
+            loaded,
+            unprobed,
+            |u| {
+                let at = begun.elapsed().as_millis() as u64;
+                seen.push((at, u.starting, u.failure));
+            },
+            unrevealed,
+            unprompted,
+        );
+        let feed = async {
+            for (at, command) in commands {
+                tokio::time::sleep_until(begun + Duration::from_millis(at)).await;
+                tx.send(command).unwrap();
+            }
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            timeout(wait, async { tokio::join!(run, feed) })
+                .await
+                .is_err()
+        );
+        (calls.into_inner(), seen)
+    }
+
+    fn stopped() -> Result<Response, RequestError> {
+        Err(RequestError::NotRunning)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_agent_is_started_once_and_refreshed_as_soon_as_it_runs() {
+        let log = RefCell::new(Vec::new());
+        let (calls, seen) = starts(
+            listing(&log, stopped),
+            vec![(0, Command::Start), (0, Command::Start)],
+            Duration::from_secs(9),
+            None,
+            Duration::from_millis(12_500),
+        )
+        .await;
+        assert_eq!(calls, 1);
+        let (idle, busy) = (Starting::Idle, Starting::InFlight);
+        assert_eq!(
+            seen,
+            [
+                (0, idle.clone(), None),
+                (0, busy.clone(), None),
+                (0, busy.clone(), None),
+                (2_000, busy.clone(), None),
+                (4_000, busy.clone(), None),
+                (6_000, busy.clone(), None),
+                (8_000, busy, None),
+                (9_000, idle.clone(), None),
+                (11_000, idle, None),
+            ]
+        );
+        assert!(log.borrow().iter().all(|r| *r == Request::List));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_start_stays_shown_while_the_agent_stays_stopped() {
+        let log = RefCell::new(Vec::new());
+        let failed = Starting::Failed(crate::start::FAILED.into());
+        let (calls, seen) = starts(
+            listing(&log, stopped),
+            vec![(0, Command::Start)],
+            Duration::from_secs(1),
+            Some(crate::start::FAILED.into()),
+            Duration::from_millis(5_500),
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(
+            seen,
+            [
+                (0, Starting::Idle, None),
+                (0, Starting::InFlight, None),
+                (1_000, failed.clone(), None),
+                (3_000, failed.clone(), None),
+                (5_000, failed, None),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_next_start_replaces_a_failed_one() {
+        let log = RefCell::new(Vec::new());
+        let failed = Starting::Failed(crate::start::MISSING.into());
+        let (calls, seen) = starts(
+            listing(&log, stopped),
+            vec![(0, Command::Start), (2_500, Command::Start)],
+            Duration::from_secs(1),
+            Some(crate::start::MISSING.into()),
+            Duration::from_millis(4_500),
+        )
+        .await;
+        assert_eq!(calls, 2);
+        assert_eq!(
+            seen,
+            [
+                (0, Starting::Idle, None),
+                (0, Starting::InFlight, None),
+                (1_000, failed.clone(), None),
+                (2_500, Starting::InFlight, None),
+                (3_500, failed, None),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_start_is_forgotten_once_the_agent_is_no_longer_stopped() {
+        let begun = tokio::time::Instant::now();
+        let send = move |_| {
+            std::future::ready(if begun.elapsed() < Duration::from_millis(2_500) {
+                stopped()
+            } else {
+                Ok(Response::Ok(Vec::new()))
+            })
+        };
+        let (calls, seen) = starts(
+            send,
+            vec![(0, Command::Start)],
+            Duration::from_secs(1),
+            Some(crate::start::FAILED.into()),
+            Duration::from_millis(5_500),
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(
+            seen,
+            [
+                (0, Starting::Idle, None),
+                (0, Starting::InFlight, None),
+                (1_000, Starting::Failed(crate::start::FAILED.into()), None),
+                (3_000, Starting::Idle, None),
+                (5_000, Starting::Idle, None),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_stopped_agent_is_started() {
+        let running = || Ok(Response::Ok(Vec::new()));
+        let unreachable = || Err(RequestError::TimedOut);
+        for reply in [running as fn() -> _, unreachable] {
+            let log = RefCell::new(Vec::new());
+            let (calls, seen) = starts(
+                listing(&log, reply),
+                vec![(0, Command::Start)],
+                Duration::from_secs(1),
+                None,
+                Duration::from_millis(500),
+            )
+            .await;
+            assert_eq!(calls, 0);
+            assert!(
+                seen.iter()
+                    .all(|(_, starting, failure)| *starting == Starting::Idle && failure.is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn starting_is_not_an_agent_request() {
+        assert!(Command::Start.request().is_err());
     }
 }

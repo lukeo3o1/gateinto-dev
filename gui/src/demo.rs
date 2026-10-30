@@ -12,7 +12,7 @@ use gateinto::link::{Known, KnownGateway, Source};
 
 use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
-use crate::i18n::Text;
+use crate::i18n::{Note, Text};
 use crate::settings;
 use crate::worker::{Command, Loaded};
 
@@ -21,6 +21,7 @@ pub const TITLE: Text = Text::DemoTitle;
 pub const NOT_STARTED: Text = Text::DemoNotStarted;
 pub const NOT_REVOKED: Text = Text::DemoNotRevoked;
 pub const NOT_STOPPED: Text = Text::DemoNotStopped;
+pub const AGENT_NOT_STARTED: Text = Text::DemoAgentNotStarted;
 pub const NOT_SAVED: Text = Text::DemoNotSaved;
 pub const NOT_OPENED: Text = Text::DemoNotOpened;
 pub const CONFIG_PATH: &str = r"%APPDATA%\Gateinto\gateinto.toml";
@@ -193,8 +194,13 @@ pub fn refusal(command: &Command) -> Option<Text> {
         Command::Launch(_) | Command::Link(_) => Some(NOT_STARTED),
         Command::Close(_) => Some(NOT_REVOKED),
         Command::Stop => Some(NOT_STOPPED),
+        Command::Start => Some(AGENT_NOT_STARTED),
         Command::Probe | Command::Watch(_) | Command::Credentials(..) | Command::Answer(..) => None,
     }
+}
+
+pub async fn start() -> Option<Note> {
+    Some(AGENT_NOT_STARTED.into())
 }
 
 pub fn send(request: Request) -> std::future::Ready<Result<Response, RequestError>> {
@@ -282,6 +288,7 @@ mod tests {
     use crate::device::KeyState;
     use crate::gateways;
     use crate::sessions;
+    use crate::start::Starting;
     use crate::worker::{Update, serve_with};
 
     const NOW: u64 = 1_800_000_000;
@@ -352,6 +359,7 @@ mod tests {
         assert_eq!(refusal(&launch), Some(NOT_STARTED));
         assert_eq!(refusal(&Command::Close(3)), Some(NOT_REVOKED));
         assert_eq!(refusal(&Command::Stop), Some(NOT_STOPPED));
+        assert_eq!(refusal(&Command::Start), Some(AGENT_NOT_STARTED));
         let link = "gateinto://connect?profile=newco&gateway=proxy.newco.example";
         assert_eq!(
             refusal(&Command::Link(link.parse().unwrap())),
@@ -428,6 +436,7 @@ mod tests {
         let reveals = RefCell::new(Vec::new());
         let run = serve_with(
             refusal,
+            start,
             rx,
             agent,
             loaded,
@@ -461,6 +470,33 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn the_demo_never_starts_an_agent_and_says_so() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Start).unwrap();
+        let failures = RefCell::new(Vec::new());
+        let run = serve_with(
+            refusal,
+            || async { panic!("the demo started an agent") },
+            rx,
+            |_| std::future::ready(Err(RequestError::NotRunning)),
+            loaded,
+            probe,
+            |u: Update| failures.borrow_mut().push((u.starting, u.failure)),
+            |_| panic!("the demo revealed credentials"),
+            |_| panic!("the demo prompted for a link"),
+        );
+        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        assert_eq!(
+            *failures.borrow(),
+            [
+                (Starting::Idle, None),
+                (Starting::Idle, Some(AGENT_NOT_STARTED.into()))
+            ]
+        );
+        assert_eq!(start().await, Some(AGENT_NOT_STARTED.into()));
+    }
+
     #[test]
     fn demo_refusals_and_the_title_read_in_chinese_when_shown() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
@@ -469,6 +505,7 @@ mod tests {
         assert_eq!(shown(launch), Some("示範：未啟動任何項目"));
         assert_eq!(shown(Command::Close(3)), Some("示範：未撤銷任何項目"));
         assert_eq!(shown(Command::Stop), Some("示範：未停止代理程式"));
+        assert_eq!(shown(Command::Start), Some("示範：未啟動代理程式"));
         assert_eq!(shown(Command::Probe), None);
         assert_eq!(shown(Command::Credentials(3, 1)), None);
         assert_eq!(crate::i18n::tr(NOT_SAVED), "示範：未儲存任何項目");

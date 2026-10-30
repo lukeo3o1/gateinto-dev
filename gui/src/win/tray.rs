@@ -168,6 +168,7 @@ impl App {
                 &u.gateways,
                 &u.state,
                 self.launches.busy(),
+                &u.starting,
                 panel.notice.text(),
             ),
             None => tray::waiting(),
@@ -489,6 +490,9 @@ fn act(main: HWND, action: Option<Action>) {
         }
         Some(Action::StopAgent) => {
             with_app(main, |app| app.link.send(Command::Stop));
+        }
+        Some(Action::StartAgent) => {
+            with_app(main, |app| app.link.send(Command::Start));
         }
         Some(Action::AddGateway) => {
             open_main(main);
