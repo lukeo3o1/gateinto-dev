@@ -54,6 +54,7 @@ use gateinto::uri::LaunchRequest;
 use self::approval::Approval;
 use self::icon::Owned;
 use crate::add::{self, Form, Keyed, Units};
+use crate::agent::Config;
 use crate::board::{self, Board, board, tips};
 use crate::credentials::{self, Dialog, Field};
 use crate::demo;
@@ -206,7 +207,7 @@ impl App {
                 Link::start(hwnd)
             },
             tips: Tips::new(hwnd),
-            config: config_line(demo),
+            config: config_line(demo, &Config::Unreported),
             sign_in: false,
             theme,
             language,
@@ -587,6 +588,7 @@ impl App {
     }
 
     fn confirm_add(&mut self) -> bool {
+        let path = self.config_path();
         let Some(form) = &mut self.adding else {
             return false;
         };
@@ -601,8 +603,8 @@ impl App {
             self.invalidate();
             return true;
         }
-        let listing = gateways::read(config::default_path())
-            .map(|file| gateways::catalog(&file, store::default_dir()));
+        let listing =
+            gateways::read(path).map(|file| gateways::catalog(&file, store::default_dir()));
         if add::commit(form, &listing, store::default_dir(), unix_now()) {
             self.adding = None;
         }
@@ -690,7 +692,7 @@ impl App {
         }
         self.panel.reshape(&self.gfx, self.demo);
         self.approval.reshape(&self.gfx);
-        self.config = config_line(self.demo);
+        self.config = self.config_line();
         let title = wide(window_title(self.demo));
         unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
         self.relayout();
@@ -779,6 +781,20 @@ impl App {
         self.invalidate();
     }
 
+    fn config_path(&self) -> Option<PathBuf> {
+        match &self.update {
+            Some(update) => update.config.path(config::default_path),
+            None => config::default_path(),
+        }
+    }
+
+    fn config_line(&self) -> String {
+        match &self.update {
+            Some(update) => config_line(self.demo, &update.config),
+            None => config_line(self.demo, &Config::Unreported),
+        }
+    }
+
     fn fail(&mut self, failure: Text) {
         if let Some(update) = &mut self.update {
             update.failure = Some(failure.into());
@@ -811,8 +827,8 @@ impl App {
     }
 }
 
-fn config_line(demo: bool) -> String {
-    settings::config_line(demo, config::default_path, || {
+fn config_line(demo: bool, reported: &Config) -> String {
+    settings::config_line(demo, reported, config::default_path, || {
         std::env::var_os("APPDATA").map(PathBuf::from)
     })
 }
@@ -990,7 +1006,8 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 });
                 return;
             }
-            let opened = config::default_path()
+            let opened = with_app(hwnd, |app| app.config_path())
+                .flatten()
                 .filter(|path| path.is_file())
                 .is_some_and(|path| sys::open_file(hwnd, &path));
             if !opened {
@@ -1166,6 +1183,7 @@ fn on_agent(hwnd: HWND) {
             app.close_dialog();
         }
         app.update = Some(update);
+        app.config = app.config_line();
         if app.details.is_some() && app.gateway_details().is_none() {
             app.details = None;
         }

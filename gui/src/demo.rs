@@ -10,6 +10,7 @@ use gateinto::ipc::{
 };
 use gateinto::link::{Known, KnownGateway, Source};
 
+use crate::agent::Config;
 use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
 use crate::i18n::{Note, Text};
@@ -226,7 +227,7 @@ fn gateway(
     }
 }
 
-pub fn loaded() -> Loaded {
+pub fn loaded(_: &Config) -> Loaded {
     let file = ConfigFile::parse(CONFIG).expect("the sample config parses");
     let browser = PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe");
     Loaded {
@@ -249,7 +250,7 @@ pub fn loaded() -> Loaded {
     }
 }
 
-pub fn probe() -> Probe {
+pub fn probe(_: &Config) -> Probe {
     Probe {
         key: KeyState::Present(Key {
             backend: Backend::Tpm,
@@ -312,10 +313,13 @@ mod tests {
     #[test]
     fn the_settings_page_shows_the_sample_config_path_without_looking_up_the_real_one() {
         let unasked = || -> Option<PathBuf> { panic!("the demo looked up a real path") };
-        assert_eq!(settings::config_line(true, unasked, unasked), CONFIG_PATH);
+        assert_eq!(
+            settings::config_line(true, &Config::Unreported, unasked, unasked),
+            CONFIG_PATH
+        );
         let real = PathBuf::from("/home/me/.config/gateinto/gateinto.toml");
         assert_eq!(
-            settings::config_line(false, || Some(real.clone()), || None),
+            settings::config_line(false, &Config::Unreported, || Some(real.clone()), || None),
             real.display().to_string()
         );
     }
@@ -387,7 +391,7 @@ mod tests {
 
     #[test]
     fn the_sample_shows_hosts_and_never_profile_names() {
-        let loaded = loaded();
+        let loaded = loaded(&Config::Unreported);
         let known = loaded.gateways.as_ref().unwrap();
         assert!(known.gateways.len() >= 3);
         assert!(
@@ -411,7 +415,7 @@ mod tests {
 
     #[test]
     fn the_sample_device_has_a_key_and_a_named_computer() {
-        let probe = probe();
+        let probe = probe(&Config::Unreported);
         let KeyState::Present(key) = &probe.key else {
             panic!("the sample device has no key");
         };
@@ -452,6 +456,7 @@ mod tests {
         assert!(matches!(&last.state, AgentState::Running(s) if !s.is_empty()));
         assert!(last.device.is_some());
         assert!(!last.log.events().is_empty());
+        assert!(updates.iter().all(|u| u.config == Config::Unreported));
         assert!(
             updates
                 .iter()

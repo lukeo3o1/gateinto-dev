@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 
 use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
+use gateinto::ipc::ConfigSource;
 
+use crate::agent::Config;
 use crate::i18n::{Choice as Language, Text, fill, tr};
 use crate::sessions::browser_title;
 use crate::theme::Choice;
 
 pub const NOT_FOUND: Text = Text::NotFound;
 pub const NO_PATH: Text = Text::NoConfigPath;
+pub const AGENT_CONFIG: Text = Text::AgentConfig;
+pub const AGENT_NO_CONFIG: Text = Text::AgentNoConfig;
 pub const OPEN: Text = Text::OpenConfig;
 pub const OPEN_FAILED: Text = Text::OpenConfigFailed;
 pub const APP: Text = Text::App;
@@ -157,13 +161,21 @@ pub fn shown(path: Option<&Path>, appdata: Option<&Path>) -> String {
 
 pub fn config_line(
     demo: bool,
-    path: impl FnOnce() -> Option<PathBuf>,
+    config: &Config,
+    default: impl FnOnce() -> Option<PathBuf>,
     appdata: impl FnOnce() -> Option<PathBuf>,
 ) -> String {
     if demo {
         return crate::demo::CONFIG_PATH.to_owned();
     }
-    shown(path().as_deref(), appdata().as_deref())
+    let default = default();
+    let path = config.path(|| default.clone());
+    let line = shown(path.as_deref(), appdata().as_deref());
+    match config {
+        Config::Reported(ConfigSource::Defaults) => tr(AGENT_NO_CONFIG).to_owned(),
+        Config::Reported(_) if path != default => fill(AGENT_CONFIG, &[&line]),
+        Config::Reported(_) | Config::Unreported => line,
+    }
 }
 
 pub fn command(exe: &Path) -> Option<String> {
@@ -372,6 +384,55 @@ mod tests {
         );
         assert_eq!(shown(Some(path), None), "/etc/gateinto/gateinto.toml");
         assert_eq!(shown(None, None), NO_PATH.english());
+    }
+
+    fn file(path: &Path) -> Config {
+        Config::Reported(ConfigSource::File(path.to_owned()))
+    }
+
+    #[test]
+    fn the_config_line_names_the_file_the_running_agent_loaded() {
+        let appdata = Path::new("/users/me/appdata");
+        let default = appdata.join("gateinto.toml");
+        let line = |config: &Config| {
+            config_line(
+                false,
+                config,
+                || Some(default.clone()),
+                || Some(appdata.to_owned()),
+            )
+        };
+        let ours = ["%APPDATA%", "gateinto.toml"].join(MAIN_SEPARATOR_STR);
+        assert_eq!(line(&Config::Unreported), ours);
+        assert_eq!(line(&file(&default)), ours);
+        let other = Path::new("/srv/gateinto/agent.toml");
+        assert_eq!(
+            line(&file(other)),
+            "/srv/gateinto/agent.toml (used by the running agent)"
+        );
+        assert_eq!(
+            line(&Config::Reported(ConfigSource::Defaults)),
+            "None, the running agent loaded no config file"
+        );
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(
+            line(&file(other)),
+            "/srv/gateinto/agent.toml（執行中的代理程式所用）"
+        );
+        assert_eq!(
+            line(&Config::Reported(ConfigSource::Defaults)),
+            "無，執行中的代理程式未載入設定檔"
+        );
+    }
+
+    #[test]
+    fn the_demo_config_line_ignores_what_the_agent_reports() {
+        let unasked = || -> Option<PathBuf> { panic!("the demo looked up a real path") };
+        let other = file(Path::new("/srv/gateinto/agent.toml"));
+        assert_eq!(
+            config_line(true, &other, unasked, unasked),
+            crate::demo::CONFIG_PATH
+        );
     }
 
     #[test]
