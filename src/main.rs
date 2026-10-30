@@ -804,13 +804,20 @@ impl Profiles for ConfigProfiles {
     }
 }
 
+fn agent_config(path: Option<PathBuf>) -> std::io::Result<ConfigSource> {
+    Ok(match path {
+        Some(path) => ConfigSource::File(std::path::absolute(path)?),
+        None => ConfigSource::Defaults,
+    })
+}
+
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
-    let path = args.path();
-    let file = path.as_ref().map_or_else(
-        || Ok(ConfigFile::default()),
-        |(path, _)| ConfigFile::load(path),
-    )?;
+    let config = agent_config(args.path().map(|(path, _)| path))?;
+    let file = match &config {
+        ConfigSource::File(path) => ConfigFile::load(path)?,
+        ConfigSource::Defaults => ConfigFile::default(),
+    };
     let logbook = Logbook::default();
     init_logging_into("info", Some(&logbook));
     args.log_default();
@@ -818,10 +825,6 @@ async fn agent(args: ConfigArg) -> Result {
     let server = Server::bind(&endpoint)?;
     let profiles_root = browser::profiles_root()
         .ok_or("cannot find the per-user application data directory for browser profiles")?;
-    let config = match path {
-        Some((path, _)) => ConfigSource::File(std::path::absolute(path)?),
-        None => ConfigSource::Defaults,
-    };
     let options = AgentOptions {
         browser: file.browser.executable.clone(),
         profiles_root,
@@ -1475,6 +1478,17 @@ async fn reset(args: ResetArgs) -> Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_agent_config_is_resolved_to_one_absolute_path_before_loading() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            agent_config(Some(PathBuf::from("gateinto.toml"))).unwrap(),
+            ConfigSource::File(cwd.join("gateinto.toml"))
+        );
+        assert_eq!(agent_config(None).unwrap(), ConfigSource::Defaults);
+        assert!(agent_config(Some(PathBuf::new())).is_err());
+    }
+
     use super::*;
 
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;
