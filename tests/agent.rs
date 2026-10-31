@@ -46,6 +46,7 @@ impl Profiles for TestProfiles {
                 host: Some(plan.proxy.upstream.host.clone()),
                 port: Some(plan.proxy.upstream.port),
                 portal_url: portal.clone(),
+                route: gateinto::proxy::Route::Gateway,
                 source: Source::Config,
             });
         let linked = self.linked.lock().unwrap().clone();
@@ -54,6 +55,7 @@ impl Profiles for TestProfiles {
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
             portal_url: gateway.portal_url,
+            route: gateinto::proxy::Route::Gateway,
             source: Source::Linked,
         });
         Ok(Known {

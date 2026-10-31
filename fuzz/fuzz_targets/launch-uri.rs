@@ -13,6 +13,7 @@ fn known() -> Known {
         host: Some(host.to_owned()),
         port: Some(443),
         portal_url: portal.map(|portal| portal.parse().unwrap()),
+        route: gateinto::proxy::Route::Gateway,
         source: Source::Config,
     };
     Known {

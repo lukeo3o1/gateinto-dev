@@ -234,6 +234,7 @@ pub struct KnownGateway {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub portal_url: Option<PortalUrl>,
+    pub route: Route,
     pub source: Source,
 }
 
@@ -263,6 +264,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
             host: section.host.clone(),
             port: section.port.map(NonZeroU16::get),
             portal_url: section.portal_url.clone(),
+            route: section.route(),
             source: Source::Config,
         })
         .collect();
@@ -273,6 +275,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
                 host: Some(gateway.address.host()),
                 port: Some(gateway.address.port()),
                 portal_url: gateway.portal_url.clone(),
+                route: Route::Gateway,
                 source: Source::Linked,
             });
         }
@@ -670,6 +673,7 @@ mod tests {
             host: Some(host.to_owned()),
             port: Some(port),
             portal_url: portal.map(|portal| portal.parse().unwrap()),
+            route: Route::Gateway,
             source,
         }
     }
@@ -696,6 +700,7 @@ mod tests {
                 host: None,
                 port: None,
                 portal_url: None,
+                route: Route::Gateway,
                 source: Source::Config,
             },
         ]
@@ -834,6 +839,7 @@ mod tests {
             host: Some("newer.example".to_owned()),
             port: Some(443),
             portal_url: Some("https://newer.example/".parse().unwrap()),
+            route: Route::Gateway,
             source: Source::Linked,
         });
         for request in [
@@ -1568,7 +1574,7 @@ mod tests {
     #[test]
     fn known_gateways_list_the_config_first_and_hide_shadowed_links() {
         let config = config_file(
-            "[gateways.corp]\nhost = \"proxy.corp.example\"\nport = 443\n[gateways.empty]\n",
+            "[gateways.corp]\nhost = \"proxy.corp.example\"\nport = 443\nroute = \"mixed\"\n[gateways.empty]\n",
         );
         let known = known_gateways(
             &config,
@@ -1585,6 +1591,7 @@ mod tests {
                     host: Some("proxy.corp.example".to_owned()),
                     port: Some(443),
                     portal_url: None,
+                    route: Route::Mixed,
                     source: Source::Config,
                 },
                 KnownGateway {
@@ -1592,6 +1599,7 @@ mod tests {
                     host: None,
                     port: None,
                     portal_url: None,
+                    route: Route::Gateway,
                     source: Source::Config,
                 },
                 KnownGateway {
@@ -1599,6 +1607,7 @@ mod tests {
                     host: Some("::1".to_owned()),
                     port: Some(8443),
                     portal_url: Some("https://newco.example/".parse().unwrap()),
+                    route: Route::Gateway,
                     source: Source::Linked,
                 },
             ]

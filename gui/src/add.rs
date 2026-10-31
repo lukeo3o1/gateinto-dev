@@ -406,6 +406,7 @@ mod tests {
             host: Some("proxy.example.com".to_owned()),
             port: Some(443),
             portal_url: None,
+            route: gateinto::proxy::Route::Gateway,
             source: Source::Config,
         }
     }

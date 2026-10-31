@@ -37,6 +37,14 @@ impl FromStr for Route {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Route {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 pub(super) async fn resolve(host: String, port: u16) -> io::Result<Vec<SocketAddr>> {
     crate::dns::resolve(&host, port).await
 }

@@ -14,6 +14,7 @@ use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
 use crate::link::LinkedGateway;
+use crate::proxy::Route;
 use crate::tls::TlsMode;
 
 pub const FILE_NAME: &str = "gateinto.toml";
@@ -252,9 +253,14 @@ pub struct GatewaySection {
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: Option<bool>,
     pub portal_url: Option<PortalUrl>,
+    pub route: Option<Route>,
 }
 
 impl GatewaySection {
+    pub fn route(&self) -> Route {
+        self.route.unwrap_or_default()
+    }
+
     fn merge(self, overrides: &Self) -> Self {
         let overrides = overrides.clone();
         Self {
@@ -269,6 +275,7 @@ impl GatewaySection {
                 .self_signed_client_cert
                 .or(self.self_signed_client_cert),
             portal_url: overrides.portal_url.or(self.portal_url),
+            route: overrides.route.or(self.route),
         }
     }
 }
@@ -1055,6 +1062,10 @@ port = 443
             ),
             ("[limits]\nheader_max_bytes = 0\n", "header_max_bytes"),
             ("[gateways.main]\nhost = 1\n", "host"),
+            (
+                "[gateways.main]\nroute = \"direct\"\n",
+                "route must be gateway or mixed",
+            ),
             ("[gateways.main\n", "TOML"),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
@@ -1345,6 +1356,32 @@ port = 443
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_gateway_route_defaults_to_gateway_and_can_be_mixed() {
+        let file = ConfigFile::parse(&format!(
+            "{MINIMAL}route = \"mixed\"\n[gateways.plain]\n[gateways.forced]\nroute = \"gateway\"\n"
+        ))
+        .unwrap();
+        let routes: Vec<(&str, Route)> = file
+            .gateways
+            .iter()
+            .map(|(name, section)| (name.as_str(), section.route()))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                ("forced", Route::Gateway),
+                ("main", Route::Mixed),
+                ("plain", Route::Gateway)
+            ]
+        );
+        let error = ConfigFile::parse("[gateways.main]\nroute = \"Mixed\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+        assert!(error.contains("route must be gateway or mixed"), "{error}");
     }
 
     #[test]

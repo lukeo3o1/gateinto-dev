@@ -176,6 +176,7 @@ mod tests {
             host: Some(host.to_owned()),
             port: Some(443),
             portal_url: None,
+            route: gateinto::proxy::Route::Gateway,
             source: Source::Linked,
         }
     }

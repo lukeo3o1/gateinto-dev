@@ -303,6 +303,7 @@ mod tests {
             host: host.map(str::to_owned),
             port,
             portal_url: None,
+            route: gateinto::proxy::Route::Gateway,
             source,
         }
     }
