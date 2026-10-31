@@ -149,7 +149,10 @@ Every session listens on a loopback address only; there is no option to
 listen on any other address.
 
 Logging goes to stderr and is filtered with `RUST_LOG` (default `info`). Tunnel
-payload is never logged; target `host:port` is logged only at `debug`.
+payload is never logged. The target `host:port` of an established tunnel is
+logged only at `debug`; when the gateway or the target refuses a tunnel, the
+`warn` line names the target. Credentials and the `Proxy-Authorization` header
+are never logged.
 
 When more than `max_concurrent_tunnels` connections are open, further connections get a
 `503`. At most 64 such rejections are handled at a time; beyond that, new

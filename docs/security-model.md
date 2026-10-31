@@ -555,8 +555,10 @@ Non-guarantees:
   established and idle-timeout events, and the client certificate's subject,
   SHA-1 thumbprint, NotAfter, source and key backend (for self-signed
   certificates the device key's SPKI SHA-256 and, per session, the SHA-256 of
-  the session's certificate). Target `host:port`, the negotiated TLS version and
-  group, and byte counts are logged only at `debug`. `check-upstream` prints
+  the session's certificate). The target `host:port` of an established tunnel,
+  the negotiated TLS version and group, and byte counts are logged only at
+  `debug`. A refused tunnel is logged at `warn` with its target `host:port` and
+  the cause, never with credentials or the `Proxy-Authorization` header. `check-upstream` prints
   TLS parameters, the server certificate subject and the upstream status line,
   never upstream headers or bodies. The configuration file holds no secrets.
 - **Strict configuration.** Unknown keys are errors and there is no default
