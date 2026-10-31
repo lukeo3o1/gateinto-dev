@@ -411,6 +411,11 @@ following with the Microsoft Software Key Storage Provider (the runners have no 
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
+For manual testing, the CI run of a push or pull request keeps the x64 MSI that this lifecycle
+check installed as the `gateinto-msi-x64` artifact for 14 days. It is not a release: it is built
+from the CI release build without `-Version`, so it has the `Cargo.toml` version like a
+[local build](#releases), and it is not signed.
+
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
 runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
 the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
