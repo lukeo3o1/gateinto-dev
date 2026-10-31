@@ -40,7 +40,12 @@ replaced on a later request. HTTP/1.1, including no ALPN, keeps one TLS
 connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
 
-A launch URI can select `route=mixed` only for its new browser session.
+Each gateway has a saved default route (`KnownGateway::route`), read from
+`route` in its configuration section or linked gateway file and `gateway`
+when missing. `link::resolve` gives a new session the launch's `route` if it
+names one, otherwise the saved default. A launch URI's `route` applies only to
+its new browser session, and a gateway approved from a link is stored with
+`route = "gateway"` whatever the link asked for.
 `proxy::routing` resolves target and gateway concurrently, selects gateway on
 missing/error answers or a canonical IP intersection, and otherwise tries TCP
 to the resolved target addresses. Discovery and direct TCP share half the
@@ -48,8 +53,8 @@ opening deadline; failure falls through to the ordinary gateway pool within
 the original total deadline. A direct success uses the same authenticated
 local CONNECT response and byte relay with no upstream TLS. Gateway failures
 and established tunnels cannot switch routes. The mode is held by the
-session and reported for mixed launches and session listings; gateway files
-never store it. See [session routing](protocol/launch-uri.md#session-routing)
+session and reported for mixed launches and session listings; a launch's
+route is never written to a gateway file. See [session routing](protocol/launch-uri.md#session-routing)
 for the heuristic's limits and DNS/source-IP exposure.
 
 `dns` owns the process-wide budget of 64 queued or running system lookups for

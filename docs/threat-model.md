@@ -144,7 +144,9 @@ meant to protect, against whom, and what it does not protect.
   direct connections, which bypass gateway policy. DNS/IP matching is a
   heuristic: a service on another IP may go direct, and a shared gateway IP
   may send unrelated traffic through it. Only that new session is affected;
-  the stored gateway and other browser sessions are unchanged.
+  the stored gateway and other browser sessions are unchanged. A gateway
+  approved from a mixed link is still saved with the gateway route, so no
+  link can make mixed a gateway's default.
 - A website can open up to 5 browser windows a minute (4 at a time) on
   configured gateways' portals, each with a proxy credential prompt that a
   user might mistake for a real login.

@@ -102,8 +102,11 @@ These are limits of the design, not open defects:
 
 ## Routing selection
 
-Gateway routing is the default. A URI can choose mixed routing for only its
-new browser session; no extra prompt is required for a known gateway. This
+Gateway routing is the default. A gateway's saved default route is
+`gateway` unless the local configuration file or its linked gateway file says
+`mixed`; a gateway approved from a link is always saved with the gateway
+route. A URI can choose a route for only its new browser session, which wins
+over the saved default; no extra prompt is required for a known gateway. This
 is not an enforced gateway policy. Direct connections expose source IP and
 local DNS and bypass gateway authorization; IP matching is a heuristic.
 See [session routing](protocol/launch-uri.md#session-routing).
@@ -115,7 +118,7 @@ answers, overlapping/mapped addresses and a stalled resolver. Loopback
 `tests/mixed_routing.rs` covers direct relay, inner TLS, early data,
 half-close, fallback statuses, authentication, no replay and shutdown.
 `tests/launch.rs` covers the URI-to-binary-to-agent pipeline and concurrent
-session isolation; `tests/agent.rs` covers retention through approval without
-saving the mode; `tests/h2_connect.rs` covers mixed gateway routes sharing
+session isolation; `tests/agent.rs` covers retention through approval while
+saving the gateway route; `tests/h2_connect.rs` covers mixed gateway routes sharing
 HTTP/2. These tests run in CI; real browser routing remains Manual in
 [browser-verification.md](browser-verification.md#mixed-routing-launch-links).

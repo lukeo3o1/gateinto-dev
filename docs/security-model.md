@@ -12,9 +12,12 @@ item to its code, its tests and where they run.
 
 ### Routing scope
 
-All traffic received by a session uses the gateway by default. A launch URI
-may opt its new browser session into `route=mixed` without changing any other
-session or saved gateway. Mixed routing is an IP heuristic, not a policy or
+All traffic received by a session uses the gateway by default. A gateway
+can be saved with `route = "mixed"` only by a local edit of the configuration
+file or its linked gateway file; a gateway approved from a link is always
+saved with the gateway route. A launch URI without `route` uses the saved
+default. A launch URI may opt its new browser session into `route=mixed` or
+`route=gateway` without changing any other session or saved gateway. Mixed routing is an IP heuristic, not a policy or
 scope guarantee: locally resolved target addresses matching any gateway IP,
 empty answers and DNS errors use the gateway; other targets try direct TCP.
 Direct opening and DNS share half the total opening timeout before gateway
@@ -35,8 +38,11 @@ Mixed mode exposes local DNS queries and the user's source IP, and direct
 connections bypass gateway authorization and inspection. Different service
 and gateway IPs or shared hosting can misclassify traffic. Any website can
 select mixed mode in a link for a known gateway; there is no additional
-routing confirmation or locally enforced gateway-only policy. The existing
-first-time gateway confirmation discloses mixed routing when requested.
+routing confirmation or locally enforced gateway-only policy. The
+first-time gateway confirmation discloses mixed routing when requested and
+says that the gateway is saved with the gateway route. Clients that send no
+route, including older ones, get a gateway's saved default, so a gateway
+saved as `mixed` starts mixed sessions for them.
 Operators needing all traffic through the gateway must use gateway-mode
 links and must not treat this client as an enforcement boundary. Full rules
 are in [session routing](protocol/launch-uri.md#session-routing).

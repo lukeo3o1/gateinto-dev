@@ -348,9 +348,22 @@ Not verified with real Chrome or Edge. On an isolated test deployment:
 4. Check `gateinto session list` and `gateinto status` identify only the mixed
    session with `route=mixed`. A subsequent link without a mode, the device
    session and any already-open session keep their original routes.
-5. Add an unknown gateway using a mixed link. Verify the existing confirmation
-   discloses direct connections and local DNS/IP exposure, and approval starts
-   a mixed session. A subsequent mode-free link must use the gateway route.
+5. Add an unknown gateway using a mixed link. Verify the confirmation
+   discloses direct connections and local DNS/IP exposure and says the
+   gateway is saved with the gateway route, and approval starts a mixed
+   session. Verify `gateinto gateway list` shows `route gateway` for it and a
+   subsequent mode-free link uses the gateway route.
+
+Saved default route, manual and not executed:
+
+6. Set `route = "mixed"` on a configured gateway. Verify `gateinto status`
+   and `gateinto gateway list` show `route mixed` for it, a link without
+   `route` starts a mixed session (`route=mixed` in `gateinto session list`),
+   and a link with `route=gateway` starts a gateway session. Other gateways
+   keep `route gateway`.
+7. Set `route = "direct"` and verify the configuration is refused with an
+   error naming the gateway. Put `route = "direct"` in a linked gateway file
+   and verify only that gateway is reported as invalid.
 
 ## Gateway-address launch selectors
 

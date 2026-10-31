@@ -100,7 +100,7 @@ be uninstalled before a release MSI is installed.
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped, its profile deleted and its credentials revoked). |
 | `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
 | `gateinto stop` | Close all of the agent's sessions and stop it. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
-| `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
+| `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their default route and their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
@@ -367,15 +367,19 @@ The format, its limits and everything it can never do are specified in
   portal and applies to that launch only; a gateway without a portal refuses
   it.
 - Routing defaults to `gateway`: every CONNECT goes through the gateway.
-  `gateinto://connect?profile=office&route=mixed` selects mixed routing for only
-  that new browser session. Target and gateway DNS answers are compared by IP;
+  Each gateway has a saved default route, `gateway` unless its `route` in the
+  configuration file or its gateway file says `mixed`. A link without `route`
+  uses that saved default; `route=gateway` or `route=mixed` applies to only
+  that new browser session and changes nothing saved. In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
   Other targets try direct TCP, falling back to the gateway on TCP error or
   timeout before local `200`. Gateway errors and established tunnels never
   switch routes. DNS and direct opening get at most half the existing total
   opening deadline. This heuristic can misclassify services with different or
   shared IPs; mixed mode exposes local DNS and the user's source IP and can
-  bypass gateway policy. It is not saved to the gateway. See
+  bypass gateway policy. A gateway added from a link is always saved with the
+  `gateway` route, even when the link asks for `mixed`, so no link can make
+  `mixed` a saved default. See
   [session routing](docs/protocol/launch-uri.md#session-routing).
 - System DNS work is limited to 64 queued or running lookups per process,
   shared by discovery and gateway connections. Timeouts do not release a
@@ -590,6 +594,7 @@ client_certificate = "optional"  # optional | required | off
 client_cert_file = "client.pem"
 self_signed_client_cert = false  # true: issue self-signed certificates instead of client_cert_file
 portal_url = "https://portal.example.invalid/"  # start page of browser sessions; https only
+route = "gateway"                # gateway | mixed: default route of its browser sessions
 
 [browser]
 executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # default: Chrome, then Edge
@@ -626,7 +631,7 @@ table, the flags alone describe the upstream, as an unnamed gateway
 | `[device_key] name` | `--key-name` (`check-upstream`, `session browser`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
-| `[gateways.<name>] portal_url`, `[browser] executable` | none |
+| `[gateways.<name>] portal_url`, `route`, `[browser] executable` | none |
 | `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | none |
 
 Rules:
@@ -649,6 +654,12 @@ Rules:
   of at most 2048 printable ASCII characters without spaces, quotes or
   backslashes. A launch URI cannot change it; a gateway added from a link
   brings its own portal, checked by the same rules.
+- `route` is `gateway` (the default) or `mixed`; any other value is an error
+  naming the gateway. It is the route of the gateway's browser sessions when
+  a launch does not choose one (see
+  [session routing](docs/protocol/launch-uri.md#session-routing)). `mixed`
+  exposes your local DNS lookups and source IP address to the sites reached
+  directly, and those connections bypass the gateway's policy.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.

@@ -29,6 +29,11 @@ client_certificate = "optional"
 # gateinto:// link. Must be an https:// URL. It is never taken from the link.
 # Without it the browser opens about:blank.
 # portal_url = "https://portal.example.invalid/"
+# Default route of this gateway's browser sessions when a launch does not choose
+# one: gateway (everything through the gateway) or mixed (direct TCP to targets
+# that share no IP with the gateway).
+# Mixed exposes local DNS and your source IP and can bypass gateway policy.
+# route = "gateway"
 
 [device_key]
 name = "gateinto-device-v1"
