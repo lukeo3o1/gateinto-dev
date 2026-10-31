@@ -20,6 +20,10 @@ $guiValue = 'Gateinto App'
 $probe = 'Gateinto Lifecycle Probe'
 $probeData = '"C:\gateinto-lifecycle-probe.exe"'
 $approvedOn = [byte[]] (2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+$configFile = "$env:APPDATA\Gateinto\gateinto.toml"
+$template = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\..\packaging\wix\gateinto.toml')
+$edited = "# kept by the lifecycle test`n"
+$installerKey = 'HKCU:\Software\Gateinto\Installer'
 $script:spki = $null
 $script:written = @()
 $script:guis = @()
@@ -96,6 +100,11 @@ function Start-Gui {
   $gui
 }
 
+function Assert-ConfigIs([string] $Expected, [string] $When) {
+  if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { throw "$configFile is missing $When" }
+  if ((Get-Content -Raw -LiteralPath $configFile) -ne $Expected) { throw "$configFile changed $When" }
+}
+
 function Test-UserPathHasInstallDir {
   $userPath = (Get-ItemProperty 'HKCU:\Environment' -ErrorAction SilentlyContinue).Path
   [bool] ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir })
@@ -105,6 +114,7 @@ $touched = @(@($runKey, $guiValue), @($runKey, $probe), @($approvedKey, $guiValu
 foreach ($value in $touched) {
   if ($null -ne (Get-Value $value[0] $value[1])) { throw "$($value[0]) already has a value '$($value[1])'; remove it before running this script" }
 }
+if (Test-Path -LiteralPath $configFile) { throw "$configFile already exists; move it away before running this script" }
 
 try {
   Step 'Install silently per user' {
@@ -136,6 +146,7 @@ try {
     "key info stderr: $keyInfoError"
     if ($code -eq 0) { throw 'a device key exists right after installing; the installer must not create one' }
     if ($keyInfoError -notmatch 'no device key named') { throw 'key info failed for another reason than a missing device key' }
+    Assert-ConfigIs $template 'right after installing'
   }
 
   Step 'gateinto setup (Microsoft Software Key Storage Provider, not a TPM)' {
@@ -161,6 +172,9 @@ try {
       Start-Sleep -Milliseconds 250
     }
     $gui = Start-Gui
+    $created = (Get-Item -LiteralPath $configFile).CreationTime
+    Set-Content -NoNewline -LiteralPath $configFile -Value $edited
+    (Get-Item -LiteralPath $configFile).LastWriteTime = $created
     Set-Value $runKey $guiValue "`"$installedGui`"" String
     Set-Value $approvedKey $guiValue $approvedOn Binary
     Set-Value $runKey $probe $probeData String
@@ -181,6 +195,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "gateinto key info exited with $LASTEXITCODE after uninstall" }
     $out
     if ($out -notmatch "(?m)^spki-sha256: $script:spki\r?$") { throw 'the device key changed or vanished after uninstall' }
+    Assert-ConfigIs $edited 'after uninstall'
   }
 
   Step 'Reinstall with AUTOSTART=1 and set up again (Software KSP)' {
@@ -195,6 +210,9 @@ try {
     $out
     if ($out -notmatch '(?m)^device-key: reused\r?$') { throw 'setup after reinstall did not reuse the key' }
     if ($out -notmatch "(?m)^spki-sha256: $script:spki\r?$") { throw 'setup after reinstall reported another SPKI' }
+    Assert-ConfigIs $edited 'after a reinstall'
+    $null = Invoke-Msiexec '/fa' 'repair-2.log'
+    Assert-ConfigIs $edited 'after a repair'
   }
 
   Step 'Purge the device identity, then setup creates a new one (Software KSP)' {
@@ -241,11 +259,14 @@ try {
     if ((Get-Value $runKey $probe) -ne $probeData) { throw "the uninstaller changed the unrelated Run value $probe" }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
     Assert-GuiRemoved
+    Assert-ConfigIs $edited 'after the second uninstall'
   }
 } finally {
   Step 'Clean up the key, the test values and the installation' {
     $script:guis | Where-Object { -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
     foreach ($value in $script:written) { Remove-Value $value[0] $value[1] }
+    Remove-Item -LiteralPath $configFile -Force -ErrorAction SilentlyContinue
+    Remove-Value $installerKey 'ConfigTemplate'
     if ($script:spki -and (Test-Path $outside)) {
       & $outside reset --purge-device-identity --confirm-spki $script:spki
     }

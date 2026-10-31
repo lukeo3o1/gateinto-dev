@@ -1,0 +1,51 @@
+# Gateinto configuration, created by the installer only when this file did not
+# exist. The installer never overwrites it, and uninstalling keeps it.
+# Every setting below is commented out, so Gateinto uses its built-in defaults.
+# Remove the leading "# " from a setting to use it, then restart the agent.
+# Command line flags override values from this file. Unknown keys are errors.
+# Relative paths are resolved against the directory of this file.
+
+# One table per upstream HTTPS proxy. Names use 1 to 64 characters from A-Z,
+# a-z, 0-9, _ and -.
+# [gateways.default]
+# Placeholder that never resolves. Replace it with your own HTTPS forward proxy.
+# host = "proxy.example.invalid"
+# port = 443
+# Name verified in the upstream certificate. Defaults to host.
+# server_name = "proxy.example.invalid"
+# PEM bundle of CAs trusted for the upstream. Defaults to the Mozilla roots.
+# ca_file = "upstream-ca.pem"
+# hybrid_preferred (X25519MLKEM768, then X25519), hybrid_required
+# (X25519MLKEM768 only) or classical_only (X25519 only).
+# tls_mode = "hybrid_preferred"
+# optional, required or off.
+# client_certificate = "optional"
+# PEM client certificate for the device key. Defaults to searching CurrentUser\My.
+# client_cert_file = "client.pem"
+# Instead of a file or store certificate, issue short-lived self-signed
+# certificates with the device key, a separate one for each session. Cannot be
+# combined with client_cert_file. The upstream must be configured to trust it.
+# self_signed_client_cert = false
+# Start page of browser sessions launched for this gateway, for example by a
+# gateinto:// link. Must be an https:// URL. It is never taken from the link.
+# Without it the browser opens about:blank.
+# portal_url = "https://portal.example.invalid/"
+
+# [device_key]
+# name = "gateinto-device-v1"
+# Where `gateinto key init` creates a new key: tpm or software.
+# preferred = "tpm"
+# Whether `gateinto key init` may create a software key when the TPM cannot be used.
+# software_fallback_on_first_create = true
+
+# Browser used by `gateinto agent` for browser sessions. Defaults to Chrome,
+# then Edge, from their standard install locations on Windows.
+# [browser]
+# executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+
+# Limits apply to each session separately.
+# [limits]
+# max_concurrent_tunnels = 64
+# connect_timeout_seconds = 10
+# idle_timeout_seconds = 300
+# header_max_bytes = 16384

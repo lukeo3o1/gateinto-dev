@@ -538,9 +538,11 @@ delete `Gateinto App` and its StartupApproved entry only when
 `gateinto-gui.exe`. The key is
 created by `gateinto setup` (or `key init`) as the user who will use it;
 `setup` refuses the LocalSystem, LocalService and NetworkService accounts.
-Other commands only open the key. The key and the config file
-(`%APPDATA%\Gateinto\gateinto.toml` by default) are not MSI components, so an
-uninstall keeps them and a reinstall keeps the SPKI. Only
+Other commands only open the key. The key is not an MSI component, so an
+uninstall keeps it and a reinstall keeps the SPKI. The MSI creates the config
+file (`%APPDATA%\Gateinto\gateinto.toml`) from a template with every setting
+commented out only when it does not exist; that component is permanent and
+transitive, so the file is never overwritten or removed by the installer. Only
 `gateinto reset --purge-device-identity` deletes the key: it requires the SPKI
 prefix, stops the agent, reopens the named key with `NCryptOpenKey`, checks
 the SPKI again and deletes that handle with `NCryptDeleteKey`.

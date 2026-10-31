@@ -14,6 +14,11 @@
 
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="AUTOSTART" Secure="yes" />
+    <Property Id="CONFIGEXISTS" Secure="yes">
+      <DirectorySearch Id="ConfigFolderSearch" Path="[AppDataFolder]Gateinto" Depth="0">
+        <FileSearch Id="ConfigFileSearch" Name="gateinto.toml" />
+      </DirectorySearch>
+    </Property>
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="LocalProgramsFolder" Name="Programs">
@@ -21,6 +26,9 @@
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="AppDataFolder">
+      <Directory Id="ConfigFolder" Name="Gateinto" />
+    </StandardDirectory>
 
     <Feature Id="Main" Title="Gateinto" Level="1" AllowAbsent="no">
       <Component Id="Executable" Directory="INSTALLFOLDER" Guid="D0BAAB5A-B9FF-4F34-9BBE-8F2E399F5E34">
@@ -36,6 +44,14 @@
           <Shortcut Id="GuiShortcut" Name="Gateinto" Directory="ProgramMenuFolder" Description="Gateinto desktop window" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
         </File>
         <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="Gui" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- Permanent keeps the user's file on uninstall. Transitive re-evaluates the condition on a
+           repair, so a file that exists by then is left alone instead of being reinstalled. -->
+      <Component Id="ConfigTemplate" Directory="ConfigFolder" Guid="9198974C-56EF-465F-9ACC-55AC28F33369" Permanent="yes" Transitive="yes" Condition="NOT CONFIGEXISTS">
+        <File Id="ConfigTemplateToml" Name="gateinto.toml" Source="$(sys.SOURCEFILEDIR)gateinto.toml" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="ConfigTemplate" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveConfigFolder" Directory="ConfigFolder" On="uninstall" />
       </Component>
 
       <Component Id="UriHandler" Directory="INSTALLFOLDER" Guid="7AFE4CDF-3B66-4F54-88E4-A3929B2B22E6">

@@ -1348,6 +1348,27 @@ port = 443
     }
 
     #[test]
+    fn the_installer_template_comments_out_every_example_setting() {
+        let template = include_str!("../packaging/wix/gateinto.toml");
+        assert_eq!(ConfigFile::parse(template).unwrap(), ConfigFile::default());
+        assert!(
+            template
+                .lines()
+                .all(|line| line.is_empty() || line.starts_with('#')),
+            "{template}"
+        );
+        let commented: Vec<&str> = template.lines().collect();
+        let example = include_str!("../config.example.toml");
+        for line in example
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let wanted = format!("# {line}");
+            assert!(commented.contains(&wanted.as_str()), "{line}");
+        }
+    }
+
+    #[test]
     fn example_file_parses() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let file = ConfigFile::load(&path).unwrap();

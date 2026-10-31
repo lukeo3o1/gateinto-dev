@@ -6,8 +6,8 @@ Settings → Apps → Installed apps, and Windows Installer writes the uninstall
 ## Per-user scope
 
 The package is `Scope="perUser"`. It installs without elevation to
-`%LOCALAPPDATA%\Programs\Gateinto` and writes only to `HKEY_CURRENT_USER` and the user's own
-Start Menu.
+`%LOCALAPPDATA%\Programs\Gateinto` and writes only to `HKEY_CURRENT_USER`, the user's own
+Start Menu and, when it does not exist yet, the config file in the user's own `%APPDATA%`.
 This scope fits the rest of Gateinto:
 
 - The `gateinto://` handler goes in `HKCU\Software\Classes\gateinto`, the same per-user scope
@@ -30,12 +30,27 @@ A machine-wide install for several users is not provided.
 | `gateinto://` handler | `HKCU\Software\Classes\gateinto`, command `"<INSTALLFOLDER>gateinto.exe" open -- "%1"` | yes, the whole key |
 | Logon autostart (optional, off by default) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Gateinto` = `"<INSTALLFOLDER>gateinto.exe" agent --detach` | yes |
 | Install markers (`InstallFolder`, `Gui`), the key paths of the components | `HKCU\Software\Gateinto\Installer` | yes |
+| Config template `gateinto.toml`, only when no file of that name exists | `%APPDATA%\Gateinto\gateinto.toml` | no, permanent |
+| Marker `ConfigTemplate`, the key path of the template's component | `HKCU\Software\Gateinto\Installer` | no, permanent |
 | Uninstall entry | written by Windows Installer | yes |
 
 The handler command uses the same format that `gateinto uri register` writes for an executable
 without `--config`, so `gateinto uri unregister` and `gateinto status` recognise it as
 Gateinto's. Without `--config`, `gateinto open` and the agent read the per-user default config
 file `%APPDATA%\Gateinto\gateinto.toml`.
+
+The config template is [gateinto.toml](gateinto.toml): [config.example.toml](../../config.example.toml)
+with every setting commented out, so it parses to the built-in defaults (a unit test in
+`src/config.rs` checks both). `AppSearch` sets `CONFIGEXISTS` when
+`%APPDATA%\Gateinto\gateinto.toml` exists, and the `ConfigTemplate` component's condition is
+`NOT CONFIGEXISTS`, so an existing file is never overwritten. The component is `Permanent`, so
+an uninstall keeps the file even when the user never changed it, and `Transitive`, so a repair
+or reinstall re-evaluates the condition and leaves a file that exists by then alone instead of
+reinstalling it over the user's edits under the rules for unversioned files. A per-user
+package runs as the installing user, so `AppDataFolder` is that user's roaming `%APPDATA%`, the
+folder `gateinto::config::default_path` reads. The component is separate from the device key:
+no custom action runs `gateinto`, and `gateinto setup` still creates the key. Its folder has a
+`RemoveFolder` entry for ICE64; as the component is permanent it never runs.
 
 The shortcut is not advertised and sits directly in the Start Menu's `Programs` folder, so the
 package creates no Start Menu folder of its own. It belongs to the GUI's component, whose key path
@@ -124,8 +139,9 @@ The uninstall keeps:
 - the config file `%APPDATA%\Gateinto\gateinto.toml` and any other config file;
 - the user's own Chrome and Edge profiles, which Gateinto never touches.
 
-The device key and the config file are not MSI components. Windows Installer neither installs
-nor removes them.
+The device key is not an MSI component. The config file is one only when the installer created
+it from the template, and that component is permanent, so Windows Installer never removes the
+file; a file the user created is not part of the package at all.
 
 ## Purge
 
@@ -149,7 +165,9 @@ CI (`windows-latest`, Microsoft Software Key Storage Provider) builds an x64 MSI
 checks that the GUI and its Start Menu shortcut are installed and removed and that installing
 starts nothing, that uninstalling closes a running GUI (when the runner shows its window) and
 removes only the GUI's own `Gateinto App` sign-in value, and checks that the SPKI survives a reinstall and changes only after a
-purge. The following are not verified by CI and need manual testing: opening the GUI from the
+purge. The config template checks in that script (created on the first install, kept with an
+edited content across both uninstalls, a reinstall and `msiexec /fa`) were added after the last
+recorded CI run and have not run on Windows yet. The following are not verified by CI and need manual testing: opening the GUI from the
 shortcut, closing the GUI during an interactive uninstall or an upgrade, keeping `Gateinto App`
 across an upgrade between two versions, TPM keys, interactive
 install, the Windows 10/11 matrix, the x86 MSI on real 32-bit Windows (it is untested on Windows
