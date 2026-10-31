@@ -316,12 +316,18 @@ mod tests {
     fn the_settings_page_shows_the_sample_config_path_without_looking_up_the_real_one() {
         let unasked = || -> Option<PathBuf> { panic!("the demo looked up a real path") };
         assert_eq!(
-            settings::config_line(true, &Config::Unreported, unasked, unasked),
+            settings::config_line(true, &Config::Unreported, unasked, unasked, |_| false),
             CONFIG_PATH
         );
         let real = PathBuf::from("/home/me/.config/gateinto/gateinto.toml");
         assert_eq!(
-            settings::config_line(false, &Config::Unreported, || Some(real.clone()), || None),
+            settings::config_line(
+                false,
+                &Config::Unreported,
+                || Some(real.clone()),
+                || None,
+                |_| false
+            ),
             real.display().to_string()
         );
     }

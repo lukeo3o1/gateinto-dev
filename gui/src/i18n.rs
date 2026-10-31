@@ -237,7 +237,8 @@ table! {
     NotFound => "Not found", "找不到";
     NoConfigPath => "No config file location", "沒有設定檔位置";
     AgentConfig => "{0} (used by the running agent)", "{0}（執行中的代理程式所用）";
-    AgentNoConfig => "None, the running agent loaded no config file", "無，執行中的代理程式未載入設定檔";
+    ConfigNotCreated => "{0} (not created yet)", "{0}（尚未建立）";
+    ConfigRestart => "{0} (restart the agent to use it)", "{0}（請重新啟動代理程式以使用）";
     OpenConfig => "Open config file", "開啟設定檔";
     OpenConfigFailed => "Could not open the config file", "無法開啟設定檔";
     App => "App", "應用程式";
@@ -250,6 +251,7 @@ table! {
     SignInUnread => "Could not read the sign-in setting", "無法讀取登入時啟動設定";
     SignInFailed => "Could not change the sign-in setting", "無法變更登入時啟動設定";
     FromConfig => "From the config file", "來自設定檔";
+    BuiltInDefaults => "Built-in defaults", "內建預設值";
     Detected => "{0} (detected)", "{0}（已偵測）";
     Kilobytes => "{0} KB", "{0} KB";
     Bytes => "{0} bytes", "{0} 位元組";

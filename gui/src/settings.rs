@@ -14,7 +14,8 @@ use crate::theme::Choice;
 pub const NOT_FOUND: Text = Text::NotFound;
 pub const NO_PATH: Text = Text::NoConfigPath;
 pub const AGENT_CONFIG: Text = Text::AgentConfig;
-pub const AGENT_NO_CONFIG: Text = Text::AgentNoConfig;
+pub const NOT_CREATED: Text = Text::ConfigNotCreated;
+pub const RESTART: Text = Text::ConfigRestart;
 pub const OPEN: Text = Text::OpenConfig;
 pub const OPEN_FAILED: Text = Text::OpenConfigFailed;
 pub const APP: Text = Text::App;
@@ -32,20 +33,28 @@ pub const AGENT_SIGN_IN: Text = Text::AgentSignIn;
 pub const AGENT_SIGN_IN_NOTE: Text = Text::AgentSignInNote;
 pub const AGENT: Text = Text::Agent;
 pub const FROM_CONFIG: Text = Text::FromConfig;
+pub const BUILT_IN: Text = Text::BuiltInDefaults;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
     pub line: String,
     pub failed: bool,
     pub agent: Result<Vec<(&'static str, String)>, String>,
+    pub source: Text,
     pub sign_in: bool,
     pub agent_start: AgentStart,
     pub theme: Choice,
     pub language: Language,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigView {
+    pub line: String,
+    pub source: Text,
+}
+
 pub fn page(
-    path: &str,
+    config: &ConfigView,
     agent: &Result<Agent, String>,
     failure: Option<&str>,
     sign_in: bool,
@@ -54,12 +63,13 @@ pub fn page(
     language: Language,
 ) -> Page {
     Page {
-        line: failure.unwrap_or(path).to_owned(),
+        line: failure.unwrap_or(&config.line).to_owned(),
         failed: failure.is_some(),
         agent: match agent {
             Ok(agent) => Ok(rows(agent)),
             Err(error) => Err(error.lines().next().unwrap_or_default().to_owned()),
         },
+        source: config.source,
         sign_in,
         agent_start,
         theme,
@@ -171,18 +181,54 @@ pub fn config_line(
     config: &Config,
     default: impl FnOnce() -> Option<PathBuf>,
     appdata: impl FnOnce() -> Option<PathBuf>,
+    exists: impl FnOnce(&Path) -> bool,
 ) -> String {
     if demo {
         return crate::demo::CONFIG_PATH.to_owned();
     }
     let default = default();
+    if let Config::Reported(ConfigSource::Defaults) = config {
+        let line = shown(default.as_deref(), appdata().as_deref());
+        return match default {
+            Some(path) if exists(&path) => fill(RESTART, &[&line]),
+            Some(_) => fill(NOT_CREATED, &[&line]),
+            None => line,
+        };
+    }
     let path = config.path(|| default.clone());
     let line = shown(path.as_deref(), appdata().as_deref());
     match config {
-        Config::Reported(ConfigSource::Defaults) => tr(AGENT_NO_CONFIG).to_owned(),
         Config::Reported(_) if path != default => fill(AGENT_CONFIG, &[&line]),
         Config::Reported(_) | Config::Unreported => line,
     }
+}
+
+pub fn source(
+    demo: bool,
+    config: &Config,
+    default: impl FnOnce() -> Option<PathBuf>,
+    exists: impl FnOnce(&Path) -> bool,
+) -> Text {
+    if demo {
+        return FROM_CONFIG;
+    }
+    match config.path(default) {
+        Some(path) if exists(&path) => FROM_CONFIG,
+        _ => BUILT_IN,
+    }
+}
+
+pub fn opened(
+    path: Option<PathBuf>,
+    is_file: impl Fn(&Path) -> bool,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let path = path?;
+    if is_file(&path) {
+        return Some(path);
+    }
+    let folder = path.parent().filter(|dir| !dir.as_os_str().is_empty())?;
+    is_dir(folder).then(|| folder.to_owned())
 }
 
 pub fn command(exe: &Path) -> Option<String> {
@@ -507,10 +553,21 @@ mod tests {
         None
     }
 
+    fn view(line: &str) -> ConfigView {
+        ConfigView {
+            line: line.to_owned(),
+            source: FROM_CONFIG,
+        }
+    }
+
     #[test]
     fn the_page_shows_the_path_rows_and_both_sign_in_states() {
+        let config = ConfigView {
+            line: "%APPDATA%\\g.toml".to_owned(),
+            source: BUILT_IN,
+        };
         let page = page(
-            "%APPDATA%\\g.toml",
+            &config,
             &Ok(Agent::default()),
             None,
             true,
@@ -524,6 +581,7 @@ mod tests {
                 line: "%APPDATA%\\g.toml".to_owned(),
                 failed: false,
                 agent: Ok(rows(&Agent::default())),
+                source: BUILT_IN,
                 sign_in: true,
                 agent_start: AgentStart::On,
                 theme: Choice::Dark,
@@ -536,7 +594,7 @@ mod tests {
     fn a_failure_replaces_the_path_line_in_the_current_language() {
         let failed = || {
             page(
-                "p",
+                &view("p"),
                 &Ok(Agent::default()),
                 Some(crate::i18n::Note::from(OPEN_FAILED).shown()),
                 false,
@@ -558,7 +616,7 @@ mod tests {
     fn a_config_error_shows_its_first_line_instead_of_values() {
         let error = Err("config file c.toml: TOML parse error\n  |\n1 | x".to_owned());
         let page = page(
-            "p",
+            &view("p"),
             &error,
             None,
             false,
@@ -692,6 +750,7 @@ mod tests {
                 config,
                 || Some(default.clone()),
                 || Some(appdata.to_owned()),
+                |_| panic!("checked whether a reported file exists"),
             )
         };
         let ours = ["%APPDATA%", "gateinto.toml"].join(MAIN_SEPARATOR_STR);
@@ -702,18 +761,71 @@ mod tests {
             line(&file(other)),
             "/srv/gateinto/agent.toml (used by the running agent)"
         );
-        assert_eq!(
-            line(&Config::Reported(ConfigSource::Defaults)),
-            "None, the running agent loaded no config file"
-        );
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         assert_eq!(
             line(&file(other)),
             "/srv/gateinto/agent.toml（執行中的代理程式所用）"
         );
+    }
+
+    #[test]
+    fn with_built_in_defaults_the_config_line_shows_the_default_path_and_its_state() {
+        let appdata = Path::new("/users/me/appdata");
+        let default = appdata.join("Gateinto").join("gateinto.toml");
+        let line = |exists: bool| {
+            config_line(
+                false,
+                &Config::Reported(ConfigSource::Defaults),
+                || Some(default.clone()),
+                || Some(appdata.to_owned()),
+                |path| {
+                    assert_eq!(path, default);
+                    exists
+                },
+            )
+        };
+        let ours = ["%APPDATA%", "Gateinto", "gateinto.toml"].join(MAIN_SEPARATOR_STR);
+        assert_eq!(line(false), format!("{ours} (not created yet)"));
+        assert_eq!(line(true), format!("{ours} (restart the agent to use it)"));
+        let none = config_line(
+            false,
+            &Config::Reported(ConfigSource::Defaults),
+            || None,
+            || Some(appdata.to_owned()),
+            |_| panic!("checked a missing path"),
+        );
+        assert_eq!(none, NO_PATH.english());
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(line(false), format!("{ours}（尚未建立）"));
+        assert_eq!(line(true), format!("{ours}（請重新啟動代理程式以使用）"));
+    }
+
+    #[test]
+    fn the_agent_card_names_where_its_values_come_from() {
+        let default = PathBuf::from("/users/me/appdata/Gateinto/gateinto.toml");
+        let other = Path::new("/srv/gateinto/agent.toml");
+        let source = |config: &Config, exists: bool| {
+            super::source(false, config, || Some(default.clone()), |_| exists)
+        };
+        assert_eq!(source(&file(other), true), FROM_CONFIG);
+        assert_eq!(source(&Config::Unreported, true), FROM_CONFIG);
+        assert_eq!(source(&Config::Unreported, false), BUILT_IN);
         assert_eq!(
-            line(&Config::Reported(ConfigSource::Defaults)),
-            "無，執行中的代理程式未載入設定檔"
+            source(&Config::Reported(ConfigSource::Defaults), true),
+            BUILT_IN
+        );
+        assert_eq!(
+            super::source(false, &Config::Unreported, || None, |_| true),
+            BUILT_IN
+        );
+        let unasked = || -> Option<PathBuf> { panic!("the demo looked up a real path") };
+        assert_eq!(
+            super::source(true, &Config::Unreported, unasked, |_| false),
+            FROM_CONFIG
+        );
+        assert_eq!(
+            (BUILT_IN.english(), BUILT_IN.chinese()),
+            ("Built-in defaults", "內建預設值")
         );
     }
 
@@ -722,8 +834,32 @@ mod tests {
         let unasked = || -> Option<PathBuf> { panic!("the demo looked up a real path") };
         let other = file(Path::new("/srv/gateinto/agent.toml"));
         assert_eq!(
-            config_line(true, &other, unasked, unasked),
+            config_line(true, &other, unasked, unasked, |_| panic!("probed a file")),
             crate::demo::CONFIG_PATH
+        );
+    }
+
+    #[test]
+    fn open_config_falls_back_to_the_folder_of_a_missing_file() {
+        let dir = Path::new("/users/me/appdata/Gateinto");
+        let path = dir.join("gateinto.toml");
+        fn is(wanted: &Path) -> impl Fn(&Path) -> bool + '_ {
+            move |p| p == wanted
+        }
+        let never = |_: &Path| false;
+        assert_eq!(
+            opened(Some(path.clone()), is(&path), is(dir)),
+            Some(path.clone())
+        );
+        assert_eq!(
+            opened(Some(path.clone()), never, is(dir)),
+            Some(dir.to_owned())
+        );
+        assert_eq!(opened(Some(path.clone()), never, never), None);
+        assert_eq!(opened(None, |_: &Path| true, |_: &Path| true), None);
+        assert_eq!(
+            opened(Some(PathBuf::from("gateinto.toml")), never, |_: &Path| true),
+            None
         );
     }
 

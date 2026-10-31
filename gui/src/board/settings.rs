@@ -9,8 +9,8 @@ use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::settings::{
-    AGENT, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, APP, FROM_CONFIG, LANGUAGE, OPEN, Page, SIGN_IN,
-    SIGN_IN_NOTE, THEME,
+    AGENT, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, APP, LANGUAGE, OPEN, Page, SIGN_IN, SIGN_IN_NOTE,
+    THEME,
 };
 use crate::theme::{Choice, Theme};
 
@@ -48,7 +48,7 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let app = Rect::new(content.x, top - offset, content.w, app_h);
     p.app(app, page);
     let agent = Rect::new(content.x, app.bottom() + gap, content.w, agent_h);
-    p.agent(agent, &page.agent);
+    p.agent(agent, &page.agent, page.source);
     p.finish()
 }
 
@@ -189,15 +189,20 @@ impl<M: Measure> Painter<'_, M> {
         self.text(font, value, value_r, t.muted);
     }
 
-    fn agent(&mut self, card: Rect, agent: &Result<Vec<(&'static str, String)>, String>) {
+    fn agent(
+        &mut self,
+        card: Rect,
+        agent: &Result<Vec<(&'static str, String)>, String>,
+        source: Text,
+    ) {
         let (s, t) = (self.s, self.t);
         let heading = self.section(card, AGENT);
-        let w = self.m.width(Font::Small, tr(FROM_CONFIG)).min(heading.w);
-        let source = Rect::new(heading.right() - w, heading.y, w, heading.h);
+        let w = self.m.width(Font::Small, tr(source)).min(heading.w);
+        let label = Rect::new(heading.right() - w, heading.y, w, heading.h);
         let glyph = s.px(13.0);
-        let glyph = Rect::new(source.x - s.px(6.0) - glyph, heading.y, glyph, heading.h);
+        let glyph = Rect::new(label.x - s.px(6.0) - glyph, heading.y, glyph, heading.h);
         self.icon(icons::LOCK, glyph, 13.0, t.muted);
-        self.text(Font::Small, FROM_CONFIG, source, t.muted);
+        self.text(Font::Small, source, label, t.muted);
         match agent {
             Ok(rows) => {
                 for (i, (label, value)) in rows.iter().enumerate() {
@@ -226,8 +231,8 @@ mod tests {
     use crate::scene::{Op, stroke};
     use crate::scroll::Pane;
     use crate::settings::{
-        AGENT, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, APP, AgentStart, FROM_CONFIG, LANGUAGE, OPEN,
-        SIGN_IN, SIGN_IN_NOTE, THEME,
+        AGENT, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, APP, AgentStart, BUILT_IN, FROM_CONFIG, LANGUAGE,
+        OPEN, SIGN_IN, SIGN_IN_NOTE, THEME,
     };
     use crate::theme::Choice;
 
@@ -254,6 +259,7 @@ mod tests {
                 ("Idle timeout", "300 s".to_owned()),
                 ("Request header limit", "16 KB".to_owned()),
             ]),
+            source: FROM_CONFIG,
             sign_in,
             agent_start: AgentStart::On,
             theme: Choice::System,
@@ -540,6 +546,31 @@ mod tests {
             ]
         );
         assert_eq!(card.len(), 5 + 5 * 3);
+    }
+
+    #[test]
+    fn the_agent_card_says_when_its_values_are_the_built_in_defaults() {
+        let mut p = page(true);
+        p.source = BUILT_IN;
+        let ops = draw(&p).ops;
+        let y = AGENT_Y;
+        let w = 7 * BUILT_IN.english().len() as i32;
+        assert!(ops.contains(&text(
+            Font::Small,
+            BUILT_IN,
+            Rect::new(992 - w, y + 4, w, 44),
+            T.muted
+        )));
+        assert!(ops.contains(&Op::Icon(
+            icons::LOCK,
+            Rect::new(992 - w - 19, y + 19, 13, 13),
+            stroke(S, &icons::LOCK, 13.0),
+            T.muted
+        )));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, Op::Text(_, t, ..) if t == tr(FROM_CONFIG)))
+        );
     }
 
     #[test]

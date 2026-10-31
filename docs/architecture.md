@@ -338,9 +338,15 @@ The full protocol, limits and guarantees are in
   or any other answer leaves the default path in use. Gateways, agent
   settings, the device key name, the add-gateway name check and Open config
   file use that path. Settings shows the path, with a fixed note when it is
-  not the default one or when the agent loaded no file. The GUI only reads
-  the file and opens it in the system's editor on request; it never writes
-  it. This is unit-tested but has not been tried on a real Windows desktop.
+  not the default one. When the agent loaded no file, it shows the default
+  path with "not created yet", or "restart the agent to use it" when a file
+  exists there now. The agent card says "From the config file" when the
+  values come from an existing file and "Built-in defaults" otherwise. The
+  GUI only reads the file and opens it in the system's editor on request;
+  when the file is missing, Open config file opens its folder in Explorer
+  if the folder exists, and shows a fixed failure message otherwise. It
+  never creates or writes the file. This is unit-tested but has not been
+  tried on a real Windows desktop.
 - Settings shows whether the agent starts at sign-in, read-only. On Windows
   `gui/src/win/run.rs` reads, with `RegGetValueW` and no expansion, the
   installer's `Gateinto` value in

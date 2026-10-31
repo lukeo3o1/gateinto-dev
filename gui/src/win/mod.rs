@@ -12,7 +12,7 @@ mod tips;
 mod tray;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::time::Instant;
 
@@ -155,7 +155,7 @@ struct App {
     launches: Launches,
     link: Link,
     tips: Tips,
-    config: String,
+    config: settings::ConfigView,
     sign_in: bool,
     agent_start: AgentStart,
     agent_read: Option<Instant>,
@@ -191,6 +191,7 @@ impl App {
         let layout = measure(hwnd, s, frame);
         let demo = demo::requested(std::env::args_os());
         let (theme, language) = (appearance::choice(), appearance::language());
+        let config = config_view(demo, &Config::Unreported);
         Some(Self {
             hwnd,
             s,
@@ -213,7 +214,7 @@ impl App {
                 Link::start(hwnd)
             },
             tips: Tips::new(hwnd),
-            config: config_line(demo, &Config::Unreported),
+            config,
             sign_in: false,
             agent_start: AgentStart::default(),
             agent_read: None,
@@ -758,7 +759,7 @@ impl App {
         }
         self.panel.reshape(&self.gfx, self.demo);
         self.approval.reshape(&self.gfx);
-        self.config = self.config_line();
+        self.config = self.config_view();
         let title = wide(window_title(self.demo));
         unsafe { SetWindowTextW(self.hwnd, title.as_ptr()) };
         self.relayout();
@@ -854,10 +855,10 @@ impl App {
         }
     }
 
-    fn config_line(&self) -> String {
+    fn config_view(&self) -> settings::ConfigView {
         match &self.update {
-            Some(update) => config_line(self.demo, &update.config),
-            None => config_line(self.demo, &Config::Unreported),
+            Some(update) => config_view(self.demo, &update.config),
+            None => config_view(self.demo, &Config::Unreported),
         }
     }
 
@@ -893,10 +894,16 @@ impl App {
     }
 }
 
-fn config_line(demo: bool, reported: &Config) -> String {
-    settings::config_line(demo, reported, config::default_path, || {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    })
+fn config_view(demo: bool, reported: &Config) -> settings::ConfigView {
+    let line = settings::config_line(
+        demo,
+        reported,
+        config::default_path,
+        || std::env::var_os("APPDATA").map(PathBuf::from),
+        |path| path.is_file(),
+    );
+    let source = settings::source(demo, reported, config::default_path, |path| path.is_file());
+    settings::ConfigView { line, source }
 }
 
 fn measure(hwnd: HWND, s: Scale, frame: Frame) -> Layout {
@@ -1074,10 +1081,9 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 });
                 return;
             }
-            let opened = with_app(hwnd, |app| app.config_path())
-                .flatten()
-                .filter(|path| path.is_file())
-                .is_some_and(|path| sys::open_file(hwnd, &path));
+            let path = with_app(hwnd, |app| app.config_path()).flatten();
+            let opened = settings::opened(path, Path::is_file, Path::is_dir)
+                .is_some_and(|target| sys::open_file(hwnd, &target));
             if !opened {
                 with_app(hwnd, |app| {
                     app.fail(settings::OPEN_FAILED);
@@ -1261,7 +1267,7 @@ fn on_agent(hwnd: HWND) {
             app.close_dialog();
         }
         app.update = Some(update);
-        app.config = app.config_line();
+        app.config = app.config_view();
         if app.view.nav.selected() == NavPage::Settings
             && settings::reread(app.agent_read, Instant::now())
         {
