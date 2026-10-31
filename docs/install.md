@@ -411,8 +411,8 @@ following with the Microsoft Software Key Storage Provider (the runners have no 
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
   prefix, keeps the handler, and the next `setup` creates a different SPKI.
 
-For manual testing, CI runs on a push to `master` and on pull requests that change a file other
-than Markdown and `docs/` files, or `README.md` or `docs/quickstart.md`; when the x64
+For manual testing, CI runs on a push to `master` and on pull requests, unless they change only
+Markdown or `docs/` files other than `README.md` and `docs/quickstart.md`; when the x64
 lifecycle check passes, the run keeps the MSI it installed as the `gateinto-msi-x64` artifact for
 14 days. It is not a release: it is built
 from the CI release build without `-Version`, so it has the `Cargo.toml` version like a
