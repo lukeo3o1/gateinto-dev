@@ -242,8 +242,11 @@ Windows SDK):
 - Reading every `GetProcAddress` lookup in `gui/src/win/sys.rs` and the COM
   interfaces used in `gui/src/win/d2d.rs` and `gui/src/win/text.rs`.
 
-Not executed: the `dumpbin` audit in CI (the workflow has not run with the GUI
-yet), and anything on Windows 7.
+Executed in CI: the `dumpbin` audit of the GUI job in
+[windows7.yml](../.github/workflows/windows7.yml) passed on PR #68 (merged as
+`0e30bf7`) and on `f4661ea` (PR #69).
+
+Not executed: anything on Windows 7.
 
 The `i686-win7-windows-msvc` `gateinto-gui.exe` has 247 static imports from 13
 DLLs: `advapi32`, `bcrypt`, `comctl32`, `d2d1`, `dwrite`, `gdi32`, `kernel32`,

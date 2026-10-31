@@ -420,5 +420,6 @@ Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 cli
 runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
 the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
 keeping `Gateinto App` across an upgrade between two versions. The checks that close the GUI and
-remove or keep `Gateinto App` on uninstall are in the script but have not run on Windows yet. See
+remove or keep `Gateinto App` on uninstall passed in CI for x64 and x86; closing the GUI was
+confirmed in the x64 log, the x86 log was not checked for it. See
 [verification.md](verification.md).
