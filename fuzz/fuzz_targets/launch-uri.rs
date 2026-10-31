@@ -8,19 +8,24 @@ use gateinto::uri::{LaunchRequest, MAX_LEN, UriError};
 use libfuzzer_sys::fuzz_target;
 
 fn known() -> Known {
-    let gateway = |name: &str, host: &str, portal: Option<&str>| KnownGateway {
+    let gateway = |name: &str, host: &str, portal: Option<&str>, route| KnownGateway {
         name: name.parse().unwrap(),
         host: Some(host.to_owned()),
         port: Some(443),
         portal_url: portal.map(|portal| portal.parse().unwrap()),
-        route: gateinto::proxy::Route::Gateway,
+        route,
         source: Source::Config,
     };
     Known {
         gateways: vec![
-            gateway("a", "proxy.example", Some("https://portal.example/start")),
-            gateway("b", "10.0.0.1", None),
-            gateway("c", "::1", Some("https://[::1]:8443/")),
+            gateway(
+                "a",
+                "proxy.example",
+                Some("https://portal.example/start"),
+                Route::Gateway,
+            ),
+            gateway("b", "10.0.0.1", None, Route::Mixed),
+            gateway("c", "::1", Some("https://[::1]:8443/"), Route::Gateway),
         ],
         ..Known::default()
     }
@@ -94,15 +99,18 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(decision, Decision::Defer);
             continue;
         };
-        assert_eq!(launch.route, request.route);
-        let portal = known
+        let local = known
             .gateways
             .iter()
-            .find(|known| known.name == launch.profile)
+            .find(|known| known.name == launch.profile);
+        let saved = local.map_or(Route::Gateway, |known| known.route);
+        assert_eq!(launch.route, request.route.unwrap_or(saved));
+        let portal = local
             .map(|known| known.portal_url.clone())
             .unwrap_or_else(|| request.portal.clone());
-        if launch.add.is_some() {
+        if let Some(add) = &launch.add {
             assert_eq!(decision, Decision::Approve);
+            assert_eq!(add.route, Route::Gateway);
         }
         if let Some(start) = &launch.start_page {
             let portal = portal.expect("a start page needs a portal");
@@ -117,7 +125,7 @@ fuzz_target!(|data: &[u8]| {
         .flatten()
         .count()
         + usize::from(request.gateway.is_some())
-        + usize::from(request.route != Route::Gateway);
+        + usize::from(request.route.is_some());
     assert_eq!(
         line.split(' ').count(),
         2 + usize::from(request.profile.is_some()) + fields

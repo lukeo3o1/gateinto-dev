@@ -66,7 +66,7 @@ where
         return deny(ApprovalError::UnnamedGateway).await;
     };
     let confirmation = Confirmation {
-        route: launch.route,
+        route: launch.route.unwrap_or_default(),
         profile: profile.clone(),
         gateway,
         portal: launch.portal.clone(),
@@ -105,7 +105,7 @@ mod tests {
 
     fn confirmation(launch: &LaunchRequest) -> Confirmation {
         Confirmation {
-            route: launch.route,
+            route: launch.route.unwrap_or_default(),
             profile: launch.proposed_profile().unwrap(),
             gateway: launch.gateway.clone().unwrap(),
             portal: launch.portal.clone(),

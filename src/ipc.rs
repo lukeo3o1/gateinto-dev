@@ -115,8 +115,8 @@ impl fmt::Display for Request {
                     write!(f, "{profile} ")?;
                 }
                 write!(f, "{}", request.auth)?;
-                if request.route != crate::proxy::Route::Gateway {
-                    write!(f, " route={}", request.route)?;
+                if let Some(route) = request.route {
+                    write!(f, " route={route}")?;
                 }
                 if let Some(url) = &request.url {
                     write!(f, " url={url}")?;
@@ -194,11 +194,12 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
         next = index + 1;
     }
     let [route, url, gateway, portal] = values;
-    LaunchRequest::from_fields(profile, auth, url, gateway, portal)
-        .ok()?
-        .with_route(route.unwrap_or("gateway"))
-        .ok()
-        .map(Request::Launch)
+    let request = LaunchRequest::from_fields(profile, auth, url, gateway, portal).ok()?;
+    match route {
+        Some(route) => request.with_route(route).ok(),
+        None => Some(request),
+    }
+    .map(Request::Launch)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1018,6 +1019,7 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::Route;
     use std::collections::HashMap;
 
     fn launch(profile: &str) -> Request {
@@ -1143,25 +1145,31 @@ mod tests {
     }
 
     #[test]
-    fn mixed_launch_route_round_trips_without_changing_legacy_requests() {
-        let line = "launch corp session_credentials route=mixed";
-        let parsed: Request = line.parse().unwrap();
-        assert_eq!(parsed.to_string(), line);
-        let Request::Launch(link) = parsed else {
-            panic!("not a launch")
-        };
-        assert!(link.to_string().contains("&route=mixed"));
-        assert_eq!(
-            "launch corp session_credentials"
-                .parse::<Request>()
-                .unwrap()
-                .to_string(),
-            "launch corp session_credentials"
-        );
+    fn launch_routes_round_trip_and_a_request_without_one_names_none() {
+        for (line, route) in [
+            ("launch corp session_credentials", None),
+            (
+                "launch corp session_credentials route=gateway",
+                Some(Route::Gateway),
+            ),
+            (
+                "launch corp session_credentials route=mixed",
+                Some(Route::Mixed),
+            ),
+        ] {
+            let parsed: Request = line.parse().unwrap();
+            assert_eq!(parsed.to_string(), line);
+            let Request::Launch(link) = parsed else {
+                panic!("not a launch")
+            };
+            assert_eq!(link.route, route, "{line}");
+        }
         for invalid in [
             "launch corp session_credentials route=direct",
             "launch corp session_credentials route=mixed route=mixed",
-            "launch corp session_credentials route=gateway",
+            "launch corp session_credentials route=gateway route=mixed",
+            "launch corp session_credentials route=",
+            "launch corp session_credentials gateway=proxy.example:443 route=mixed",
         ] {
             assert!(invalid.parse::<Request>().is_err());
         }

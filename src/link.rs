@@ -373,18 +373,19 @@ impl Confirmation {
         } else {
             String::new()
         };
-        let traffic = match self.route {
-            Route::Gateway => "all traffic of the isolated browser",
-            Route::Mixed => {
-                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups"
-            }
+        let (traffic, saved) = match self.route {
+            Route::Gateway => ("all traffic of the isolated browser", ""),
+            Route::Mixed => (
+                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups",
+                " Only this session uses mixed mode; the gateway is saved with the gateway route.",
+            ),
         };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
-             {IDENTITY} and {traffic}. Allow it {TRUST}",
+             {IDENTITY} and {traffic}.{saved} Allow it {TRUST}",
             self.profile,
             self.gateway,
             self.portal_origin()
@@ -566,7 +567,7 @@ pub fn resolve(
             (Some(_), Some(_)) => return Err(LinkError::UrlOutsidePortal(local.name.clone())),
         };
         return Ok(Resolution::Launch(Launch {
-            route: link.route,
+            route: link.route.unwrap_or(local.route),
             profile: local.name.clone(),
             start_page,
             add: None,
@@ -628,8 +629,9 @@ pub fn resolve(
             reason: error.to_string(),
         });
     }
+    let route = link.route.unwrap_or_default();
     let confirmation = Confirmation {
-        route: link.route,
+        route,
         profile: profile.clone(),
         gateway: gateway.clone(),
         portal: link.portal.clone(),
@@ -638,7 +640,7 @@ pub fn resolve(
         Decision::Defer => Ok(Resolution::Confirm(confirmation)),
         Decision::Deny => Err(LinkError::Denied(profile.clone())),
         Decision::Approve => Ok(Resolution::Launch(Launch {
-            route: link.route,
+            route,
             profile: profile.clone(),
             start_page: link.url.clone().or_else(|| link.portal.clone()),
             add: Some(LinkedGateway {
@@ -1290,6 +1292,54 @@ mod tests {
         assert!(mixed.echoed_by(&mixed.echo()));
         assert!(!mixed.echoed_by(&confirmation().echo()));
         assert!(!confirmation().echoed_by(&mixed.echo()));
+    }
+
+    #[test]
+    fn a_launch_without_a_route_uses_the_saved_route_and_an_explicit_route_wins() {
+        let mut known = Known {
+            gateways: profiles(),
+            ..Known::default()
+        };
+        known.gateways[1].route = Route::Mixed;
+        for (route, saved, expected) in [
+            (None, "corp", Route::Gateway),
+            (None, "bare", Route::Mixed),
+            (Some("gateway"), "bare", Route::Gateway),
+            (Some("mixed"), "corp", Route::Mixed),
+            (Some("mixed"), "bare", Route::Mixed),
+        ] {
+            let mut request = link(saved, None, None, None);
+            if let Some(route) = route {
+                request = request.with_route(route).unwrap();
+            }
+            let Ok(Resolution::Launch(launch)) =
+                resolve(&request, &known, &mut Decision::Deny, NOW)
+            else {
+                panic!("{route:?} {saved}: not a launch")
+            };
+            assert_eq!(launch.route, expected, "{route:?} {saved}");
+            assert_eq!(launch.add, None);
+        }
+    }
+
+    #[test]
+    fn a_gateway_approved_from_a_mixed_link_is_saved_with_the_gateway_route() {
+        let request = new_link(None).with_route("mixed").unwrap();
+        let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
+        assert_eq!(asked[0].route, Route::Mixed);
+        let Ok(Resolution::Launch(launch)) = resolution else {
+            panic!("not a launch")
+        };
+        assert_eq!(launch.route, Route::Mixed);
+        assert_eq!(launch.add.unwrap().route, Route::Gateway);
+        let message = asked[0].message();
+        assert!(
+            message.contains(
+                "Only this session uses mixed mode; the gateway is saved with the gateway route."
+            ),
+            "{message}"
+        );
+        assert!(!confirmation().message().contains("saved"));
     }
 
     #[test]

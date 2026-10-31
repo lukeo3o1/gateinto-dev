@@ -55,7 +55,7 @@ impl Profiles for TestProfiles {
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
             portal_url: gateway.portal_url,
-            route: gateinto::proxy::Route::Gateway,
+            route: gateway.route,
             source: Source::Linked,
         });
         Ok(Known {
@@ -338,6 +338,7 @@ async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
         b"mixed approval"
     );
     assert!(agent._upstream.requests().is_empty());
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Gateway);
     let (plain, plain_browser) = agent
         .opened(Request::Launch(
             LaunchRequest::new("newco", "session_credentials").unwrap(),

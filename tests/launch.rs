@@ -452,6 +452,7 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
         .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
     let stored = std::fs::read_to_string(&file).unwrap();
     assert!(!stored.contains("portal_url"));
+    assert!(stored.contains("\nroute = \"gateway\"\n"), "{stored}");
     assert!(stored.contains(generated.as_str()));
     launcher.run(&["stop"]).await.success();
     let request = request.with_route("gateway").unwrap();
@@ -500,6 +501,52 @@ async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_
         output.stderr
     );
     assert!(!launcher.linked_store().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_without_a_route_uses_the_gateway_route_saved_in_the_config_file() {
+    let launcher = Launcher::new("").await;
+    let text = std::fs::read_to_string(&launcher.config).unwrap().replace(
+        &format!("portal_url = \"{PORTAL}\"\n"),
+        &format!("portal_url = \"{PORTAL}\"\nroute = \"mixed\"\n"),
+    );
+    std::fs::write(&launcher.config, &text).unwrap();
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let saved = launcher
+        .open("gateinto://connect?profile=main")
+        .await
+        .success()
+        .lines();
+    assert_eq!(field(&saved, "route"), "mixed");
+    let forced = launcher
+        .open("gateinto://connect?profile=main&route=gateway")
+        .await
+        .success()
+        .lines();
+    assert!(!forced.iter().any(|line| line.starts_with("route:")));
+    let mut browsers = Vec::new();
+    for lines in [&saved, &forced] {
+        let listen: SocketAddr = field(lines, "listen").parse().unwrap();
+        let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+        let auth = launcher.session_auth(browser.proxy()).await;
+        let (mut stream, response) = send(
+            browser.proxy(),
+            &connect_with(&target.to_string(), Some(&auth)),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        stream.shutdown().await.unwrap();
+        let _ = read_to_end_within(&mut stream, WAIT).await;
+        browsers.push(browser);
+    }
+    assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
+    let list = launcher.list().await;
+    let route = |lines: &[String]| listed_session(&list, lines).map(|session| session.route);
+    assert_eq!(route(&saved), Some(SessionRoute::Mixed), "{list:?}");
+    assert_eq!(route(&forced), Some(SessionRoute::All), "{list:?}");
+    for browser in browsers {
+        browser.exit();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
