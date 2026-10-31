@@ -133,8 +133,8 @@ It installs:
   yet. It is a template ([packaging/wix/gateinto.toml](../packaging/wix/gateinto.toml)) based on
   [config.example.toml](../config.example.toml) in which every setting is commented out, so
   it changes nothing until a line is uncommented: Gateinto behaves as with no config file.
-  The installer never overwrites an existing file, and an uninstall keeps it (see
-  [Config file location](#config-file-location));
+  The installer is designed never to overwrite an existing file and to keep it on uninstall
+  (see [Config file location](#config-file-location)); this is not yet verified on Windows;
 - the uninstall entry under Settings → Apps → Installed apps, written by Windows Installer.
 
 The package creates no other shortcuts. Installing starts neither the GUI nor the agent, and does
@@ -214,11 +214,12 @@ Without `--config`, every command reads `%APPDATA%\Gateinto\gateinto.toml` when 
 exists (`$XDG_CONFIG_HOME/gateinto/gateinto.toml`, or `~/.config/gateinto/gateinto.toml`, on
 Linux for development). The installed handler and the autostart entry pass no `--config`, so
 this is where an installed Gateinto finds its gateways. The installer creates this file from a
-template with every setting commented out, only if it does not exist yet; it never overwrites
-or removes it. A file present when installing, upgrading or repairing is left as it is, and a
-deleted file comes back as the template only with the next install, upgrade or repair. The
-installer records this in the value `ConfigTemplate` under `HKCU\Software\Gateinto\Installer`,
-which an uninstall keeps too. Uncomment a setting, then restart the agent: it reads the file
+template with every setting commented out, only if it does not exist yet, and records this in
+the value `ConfigTemplate` under `HKCU\Software\Gateinto\Installer`. The design intent, not yet verified on Windows,
+is that Windows Installer never overwrites or removes the file afterwards: a repair or an
+upgrade skips the template while that value exists, and an uninstall keeps both the file and the
+value. A deleted file therefore does not come back as the template, not even after an uninstall
+and a new install, unless the `ConfigTemplate` value is deleted too. Uncomment a setting, then restart the agent: it reads the file
 only when it starts. `gateinto reset --purge-device-identity --purge-config` deletes the file;
 see [Purge](#purge-gateinto-reset---purge-device-identity).
 
@@ -289,8 +290,8 @@ msiexec /x gateinto.msi /qn
 | Running agent, its listeners, tunnels and sessions | closed (see below) |
 | Gateinto browser profiles in `%LOCALAPPDATA%\Gateinto\profiles` | deleted |
 | Device key | **kept** |
-| Config file(s), including `%APPDATA%\Gateinto\gateinto.toml`, also when the installer created it | **kept** |
-| The installer's `ConfigTemplate` marker in `HKCU\Software\Gateinto\Installer` | **kept** |
+| Config file(s), including `%APPDATA%\Gateinto\gateinto.toml`, also when the installer created it | **kept** (by design for the template, not yet verified on Windows) |
+| The installer's `ConfigTemplate` marker in `HKCU\Software\Gateinto\Installer` | **kept** (by design, not yet verified on Windows) |
 | Gateways added from links, `%APPDATA%\Gateinto\gateways\*.toml` | **kept** |
 | The user's own Chrome and Edge profiles, other programs' keys | never touched |
 
@@ -438,8 +439,10 @@ following with the Microsoft Software Key Storage Provider (the runners have no 
   prefix, keeps the handler, and the next `setup` creates a different SPKI;
 - the script also checks the config template: the first install creates
   `%APPDATA%\Gateinto\gateinto.toml` with exactly the template's content; the file is then
-  edited with its write time set back to its creation time, and both uninstalls, the reinstall
-  and a forced repair (`msiexec /fa`) keep the edited content. These checks were added after the
+  edited with its write time set back to its creation time, and a forced repair
+  (`msiexec /fa`), a default repair (`msiexec /f`), a same-version major upgrade to a second
+  build and back, both uninstalls, the reinstall and another `msiexec /fa` keep the edited
+  content. These checks were added after the
   last recorded CI run and have not run on Windows yet. A unit test checks that the template
   parses to the built-in defaults and comments out every setting of `config.example.toml`.
 

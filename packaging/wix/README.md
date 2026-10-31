@@ -43,10 +43,16 @@ The config template is [gateinto.toml](gateinto.toml): [config.example.toml](../
 with every setting commented out, so it parses to the built-in defaults (a unit test in
 `src/config.rs` checks both). `AppSearch` sets `CONFIGEXISTS` when
 `%APPDATA%\Gateinto\gateinto.toml` exists, and the `ConfigTemplate` component's condition is
-`NOT CONFIGEXISTS`, so an existing file is never overwritten. The component is `Permanent`, so
-an uninstall keeps the file even when the user never changed it, and `Transitive`, so a repair
-or reinstall re-evaluates the condition and leaves a file that exists by then alone instead of
-reinstalling it over the user's edits under the rules for unversioned files. A per-user
+`NOT CONFIGEXISTS`, so a file that exists at the first install is left alone. The design intent
+below is not yet verified on Windows. The condition is not `Transitive`, so Windows Installer
+evaluates it only when it first installs the component; a transitive condition that turns false
+on a repair would ask Windows Installer to remove the component, which is the case to avoid. The
+component is `NeverOverwrite`, so a repair (including `msiexec /fa`) or an upgrade skips it while
+its key path, the `ConfigTemplate` value, exists, instead of reinstalling the file over the
+user's edits. It is `Permanent`, so an uninstall keeps the file and the value even when the user
+never changed the file. As the value stays, a deleted file is not recreated by a later install
+unless the value is deleted too. A unit test in `src/config.rs` checks the condition, `NeverOverwrite`
+and `Permanent`, and that `Transitive` is absent. A per-user
 package runs as the installing user, so `AppDataFolder` is that user's roaming `%APPDATA%`, the
 folder `gateinto::config::default_path` reads. The component is separate from the device key:
 no custom action runs `gateinto`, and `gateinto setup` still creates the key. Its folder has a
@@ -140,8 +146,8 @@ The uninstall keeps:
 - the user's own Chrome and Edge profiles, which Gateinto never touches.
 
 The device key is not an MSI component. The config file is one only when the installer created
-it from the template, and that component is permanent, so Windows Installer never removes the
-file; a file the user created is not part of the package at all.
+it from the template, and that component is permanent, so Windows Installer is designed never to
+remove the file (not yet verified on Windows); a file the user created is not part of the package at all.
 
 ## Purge
 
@@ -166,7 +172,8 @@ checks that the GUI and its Start Menu shortcut are installed and removed and th
 starts nothing, that uninstalling closes a running GUI (when the runner shows its window) and
 removes only the GUI's own `Gateinto App` sign-in value, and checks that the SPKI survives a reinstall and changes only after a
 purge. The config template checks in that script (created on the first install, kept with an
-edited content across both uninstalls, a reinstall and `msiexec /fa`) were added after the last
+edited content across `msiexec /fa`, `msiexec /f`, a same-version major upgrade to a second build
+and back, both uninstalls, a reinstall and another `msiexec /fa`) were added after the last
 recorded CI run and have not run on Windows yet. The following are not verified by CI and need manual testing: opening the GUI from the
 shortcut, closing the GUI during an interactive uninstall or an upgrade, keeping `Gateinto App`
 across an upgrade between two versions, TPM keys, interactive

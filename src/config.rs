@@ -1369,6 +1369,23 @@ port = 443
     }
 
     #[test]
+    fn the_installer_never_reinstalls_or_removes_the_config_template() {
+        let wxs = include_str!("../packaging/wix/gateinto.wxs");
+        let component = wxs
+            .lines()
+            .find(|line| line.contains(r#"<Component Id="ConfigTemplate""#))
+            .unwrap();
+        for wanted in [
+            r#"Permanent="yes""#,
+            r#"NeverOverwrite="yes""#,
+            r#"Condition="NOT CONFIGEXISTS""#,
+        ] {
+            assert!(component.contains(wanted), "{wanted}");
+        }
+        assert!(!component.contains("Transitive"), "{component}");
+    }
+
+    #[test]
     fn example_file_parses() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let file = ConfigFile::load(&path).unwrap();

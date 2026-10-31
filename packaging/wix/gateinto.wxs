@@ -46,9 +46,9 @@
         <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="Gui" Type="integer" Value="1" KeyPath="yes" />
       </Component>
 
-      <!-- Permanent keeps the user's file on uninstall. Transitive re-evaluates the condition on a
-           repair, so a file that exists by then is left alone instead of being reinstalled. -->
-      <Component Id="ConfigTemplate" Directory="ConfigFolder" Guid="9198974C-56EF-465F-9ACC-55AC28F33369" Permanent="yes" Transitive="yes" Condition="NOT CONFIGEXISTS">
+      <!-- The condition is evaluated only on first install. NeverOverwrite skips a repair or an
+           upgrade while the marker value exists, and Permanent keeps the file on uninstall. -->
+      <Component Id="ConfigTemplate" Directory="ConfigFolder" Guid="9198974C-56EF-465F-9ACC-55AC28F33369" Permanent="yes" NeverOverwrite="yes" Condition="NOT CONFIGEXISTS">
         <File Id="ConfigTemplateToml" Name="gateinto.toml" Source="$(sys.SOURCEFILEDIR)gateinto.toml" KeyPath="no" />
         <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="ConfigTemplate" Type="integer" Value="1" KeyPath="yes" />
         <RemoveFolder Id="RemoveConfigFolder" Directory="ConfigFolder" On="uninstall" />
