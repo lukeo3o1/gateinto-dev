@@ -567,7 +567,7 @@ mod tests {
         assert!(!page.footnote);
         assert_eq!(
             tr(EMPTY),
-            "No gateways. Open a gateinto:// link or add one to the config file."
+            "No gateways. Use Add gateway, or add one to the config file."
         );
         assert_eq!(tr(FOOTNOTE), "From the config file, read-only here.");
         assert_eq!(START.english(), "Start browser");

@@ -159,7 +159,7 @@ table! {
     Minutes => "{0} min", "{0} 分鐘";
     Hours => "{0} h", "{0} 小時";
     Days => "{0} d", "{0} 天";
-    NoSessionsHint => "No sessions. Start one from a gateinto:// link.", "沒有工作階段。請從 gateinto:// 連結啟動。";
+    NoSessionsHint => "No sessions. Start one with Start browser on the Gateways page.", "沒有工作階段。請在「閘道」頁面使用「啟動瀏覽器」啟動。";
     StopAgent => "Stop agent", "停止代理程式";
     StartAgent => "Start agent", "啟動代理程式";
     StartingAgent => "Starting the agent…", "正在啟動代理程式…";
@@ -175,7 +175,7 @@ table! {
     Activity => "Activity", "活動";
     Active => "Active", "使用中";
     GatewaysSubtitle => "Remote HTTPS proxies this device can relay through", "這部裝置可透過其轉送的遠端 HTTPS 代理";
-    NoGatewaysHint => "No gateways. Open a gateinto:// link or add one to the config file.", "沒有閘道。請開啟 gateinto:// 連結，或在設定檔中新增。";
+    NoGatewaysHint => "No gateways. Use Add gateway, or add one to the config file.", "沒有閘道。請使用「新增閘道」，或在設定檔中新增。";
     ConfigReadOnly => "From the config file, read-only here.", "來自設定檔，此處為唯讀。";
     AddGateway => "Add gateway", "新增閘道";
     RoutePerStart => "Set per browser start; Start browser uses Gateway", "每次啟動瀏覽器時設定；「啟動瀏覽器」使用閘道";
@@ -341,7 +341,7 @@ table! {
     AllowIn => "Allow ({0})", "允許（{0}）";
     AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
     AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
-    Confirmation => "the agent asked to confirm this gateway; open its gateinto:// link to confirm it", "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認";
+    Confirmation => "the agent asked to confirm this gateway; open the gateway's link again to confirm it", "代理程式要求確認此閘道；請重新開啟該閘道的連結以確認";
 }
 
 impl Text {
@@ -486,6 +486,15 @@ mod tests {
                 placeholders(text.chinese()),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn no_text_names_the_launch_uri() {
+        for &text in Text::ALL {
+            for shown in [text.english(), text.chinese()] {
+                assert!(!shown.contains("gateinto:"), "{text:?}: {shown}");
+            }
         }
     }
 
