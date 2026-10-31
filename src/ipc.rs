@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::proxy::SessionCredentials;
+use crate::proxy::{Route, SessionCredentials};
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
@@ -115,8 +115,10 @@ impl fmt::Display for Request {
                     write!(f, "{profile} ")?;
                 }
                 write!(f, "{}", request.auth)?;
-                if let Some(route) = request.route {
-                    write!(f, " route={route}")?;
+                match request.route {
+                    None => f.write_str(" route=saved")?,
+                    Some(Route::Gateway) => {}
+                    Some(route) => write!(f, " route={route}")?,
                 }
                 if let Some(url) = &request.url {
                     write!(f, " url={url}")?;
@@ -196,8 +198,12 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
     let [route, url, gateway, portal] = values;
     let request = LaunchRequest::from_fields(profile, auth, url, gateway, portal).ok()?;
     match route {
+        Some("saved") => Some(request),
         Some(route) => request.with_route(route).ok(),
-        None => Some(request),
+        None => Some(LaunchRequest {
+            route: Some(Route::Gateway),
+            ..request
+        }),
     }
     .map(Request::Launch)
 }
@@ -1145,13 +1151,10 @@ mod tests {
     }
 
     #[test]
-    fn launch_routes_round_trip_and_a_request_without_one_names_none() {
+    fn a_launch_line_without_a_route_means_gateway_and_saved_names_the_saved_route() {
         for (line, route) in [
-            ("launch corp session_credentials", None),
-            (
-                "launch corp session_credentials route=gateway",
-                Some(Route::Gateway),
-            ),
+            ("launch corp session_credentials", Some(Route::Gateway)),
+            ("launch corp session_credentials route=saved", None),
             (
                 "launch corp session_credentials route=mixed",
                 Some(Route::Mixed),
@@ -1166,8 +1169,10 @@ mod tests {
         }
         for invalid in [
             "launch corp session_credentials route=direct",
+            "launch corp session_credentials route=gateway",
+            "launch corp session_credentials route=Saved",
             "launch corp session_credentials route=mixed route=mixed",
-            "launch corp session_credentials route=gateway route=mixed",
+            "launch corp session_credentials route=saved route=mixed",
             "launch corp session_credentials route=",
             "launch corp session_credentials gateway=proxy.example:443 route=mixed",
         ] {
@@ -1178,7 +1183,10 @@ mod tests {
     #[test]
     fn requests_round_trip_as_single_lines() {
         for (request, line) in [
-            (launch("office"), "launch office session_credentials"),
+            (
+                launch("office"),
+                "launch office session_credentials route=saved",
+            ),
             (Request::List, "list"),
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
@@ -1218,12 +1226,12 @@ mod tests {
         for (request, line) in [
             (
                 linked_launch(),
-                "launch corp session_credentials url=https://p.example/app?a=b&c=d \
+                "launch corp session_credentials route=saved url=https://p.example/app?a=b&c=d \
                  gateway=proxy.example:443 portal=https://p.example/",
             ),
             (
                 start,
-                "launch corp session_credentials url=https://p.example/",
+                "launch corp session_credentials route=saved url=https://p.example/",
             ),
             (
                 Request::Approve(TOKEN.parse().unwrap()),

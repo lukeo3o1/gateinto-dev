@@ -125,7 +125,7 @@ fuzz_target!(|data: &[u8]| {
         .flatten()
         .count()
         + usize::from(request.gateway.is_some())
-        + usize::from(request.route.is_some());
+        + usize::from(request.route != Some(Route::Gateway));
     assert_eq!(
         line.split(' ').count(),
         2 + usize::from(request.profile.is_some()) + fields
