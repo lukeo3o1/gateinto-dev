@@ -597,6 +597,7 @@ async fn session_browser_uses_the_gateway_route_even_when_the_gateway_is_saved_a
     session.stop();
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
 async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_port() {
     let fixture = Fixture::new().await;
