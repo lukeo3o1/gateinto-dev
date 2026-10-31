@@ -366,6 +366,7 @@ mod tests {
                     .unwrap(),
             ),
             approved_at: Some(1),
+            route: crate::proxy::Route::Gateway,
         };
         link::known_gateways(&file, &[linked])
     }

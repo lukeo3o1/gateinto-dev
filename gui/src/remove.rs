@@ -133,6 +133,7 @@ mod tests {
             address: host.parse().unwrap(),
             portal_url: None,
             approved_at: Some(1),
+            route: gateinto::proxy::Route::Gateway,
         }
     }
 

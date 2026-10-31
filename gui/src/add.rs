@@ -252,6 +252,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
                 address: confirmation.gateway,
                 portal_url: confirmation.portal,
                 approved_at: None,
+                route: gateinto::proxy::Route::Gateway,
             },
         }),
         Ok(Resolution::Launch(launch)) => Verdict::Invalid(
@@ -872,6 +873,7 @@ mod tests {
             address: host.parse().unwrap(),
             portal_url: None,
             approved_at: None,
+            route: gateinto::proxy::Route::Gateway,
         }
     }
 

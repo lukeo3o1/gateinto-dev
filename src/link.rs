@@ -253,6 +253,7 @@ pub struct LinkedGateway {
     pub address: GatewayAddress,
     pub portal_url: Option<PortalUrl>,
     pub approved_at: Option<u64>,
+    pub route: Route,
 }
 
 pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<KnownGateway> {
@@ -275,7 +276,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
                 host: Some(gateway.address.host()),
                 port: Some(gateway.address.port()),
                 portal_url: gateway.portal_url.clone(),
-                route: Route::Gateway,
+                route: gateway.route,
                 source: Source::Linked,
             });
         }
@@ -645,6 +646,7 @@ pub fn resolve(
                 address: gateway.clone(),
                 portal_url: link.portal.clone(),
                 approved_at: Some(now),
+                route: Route::Gateway,
             }),
         })),
     }
@@ -1319,6 +1321,7 @@ mod tests {
                         address: "proxy.newco.example:443".parse().unwrap(),
                         portal_url: Some("https://portal.newco.example/home".parse().unwrap()),
                         approved_at: Some(NOW),
+                        route: Route::Gateway,
                     }),
                 }))
             );
@@ -1568,6 +1571,7 @@ mod tests {
             address: host.parse().unwrap(),
             portal_url: Some(format!("https://{text}.example/").parse().unwrap()),
             approved_at: None,
+            route: Route::Gateway,
         }
     }
 
@@ -1580,7 +1584,10 @@ mod tests {
             &config,
             &[
                 linked("corp", "evil.example"),
-                linked("newco", "[::1]:8443"),
+                LinkedGateway {
+                    route: Route::Mixed,
+                    ..linked("newco", "[::1]:8443")
+                },
             ],
         );
         assert_eq!(
@@ -1607,7 +1614,7 @@ mod tests {
                     host: Some("::1".to_owned()),
                     port: Some(8443),
                     portal_url: Some("https://newco.example/".parse().unwrap()),
-                    route: Route::Gateway,
+                    route: Route::Mixed,
                     source: Source::Linked,
                 },
             ]
