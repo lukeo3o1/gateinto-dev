@@ -1,5 +1,5 @@
 # Gateinto configuration, created by the installer only when this file did not
-# exist. The installer never overwrites it, and uninstalling keeps it.
+# exist. The installer is designed never to overwrite or remove it.
 # Every setting below is commented out, so Gateinto uses its built-in defaults.
 # Remove the leading "# " from a setting to use it, then restart the agent.
 # Command line flags override values from this file. Unknown keys are errors.
