@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn committing_stores_the_gateway_with_its_approval_time() {
+    fn committing_stores_the_gateway_with_its_approval_time_and_the_gateway_route() {
         let dir = scratch();
         let mut first = form(
             "proxy.example.net:8443",
@@ -835,6 +835,7 @@ mod tests {
             "proxy.example.net:8443"
         );
         assert_eq!(stored.gateways[0].approved_at, Some(42));
+        assert_eq!(stored.gateways[0].route, gateinto::proxy::Route::Gateway);
         let again = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
         let mut twin = form("proxy.example.org", "lab", "");
         assert!(!commit(&mut twin, &again, Some(dir.clone()), 43));
