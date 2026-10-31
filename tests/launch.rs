@@ -504,11 +504,11 @@ async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_launch_without_a_route_uses_the_gateway_route_saved_in_the_config_file() {
+async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
     let launcher = Launcher::new("").await;
     let text = std::fs::read_to_string(&launcher.config).unwrap().replace(
         &format!("portal_url = \"{PORTAL}\"\n"),
-        &format!("portal_url = \"{PORTAL}\"\nroute = \"mixed\"\n"),
+        &format!("portal_url = \"{PORTAL}\"\nroute = \"gateway\"\n"),
     );
     std::fs::write(&launcher.config, &text).unwrap();
     let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
@@ -517,13 +517,13 @@ async fn a_launch_without_a_route_uses_the_gateway_route_saved_in_the_config_fil
         .await
         .success()
         .lines();
-    assert_eq!(field(&saved, "route"), "mixed");
+    assert!(!saved.iter().any(|line| line.starts_with("route:")));
     let forced = launcher
-        .open("gateinto://connect?profile=main&route=gateway")
+        .open("gateinto://connect?profile=main&route=mixed")
         .await
         .success()
         .lines();
-    assert!(!forced.iter().any(|line| line.starts_with("route:")));
+    assert_eq!(field(&forced, "route"), "mixed");
     let mut browsers = Vec::new();
     for lines in [&saved, &forced] {
         let listen: SocketAddr = field(lines, "listen").parse().unwrap();
@@ -542,11 +542,31 @@ async fn a_launch_without_a_route_uses_the_gateway_route_saved_in_the_config_fil
     assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
     let list = launcher.list().await;
     let route = |lines: &[String]| listed_session(&list, lines).map(|session| session.route);
-    assert_eq!(route(&saved), Some(SessionRoute::Mixed), "{list:?}");
-    assert_eq!(route(&forced), Some(SessionRoute::All), "{list:?}");
+    assert_eq!(route(&saved), Some(SessionRoute::All), "{list:?}");
+    assert_eq!(route(&forced), Some(SessionRoute::Mixed), "{list:?}");
     for browser in browsers {
         browser.exit();
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_without_a_route_for_a_gateway_saved_without_one_is_mixed() {
+    let launcher = Launcher::new("").await;
+    let lines = launcher
+        .open("gateinto://connect?profile=main")
+        .await
+        .success()
+        .lines();
+    assert_eq!(field(&lines, "route"), "mixed");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    let list = launcher.list().await;
+    assert_eq!(
+        listed_session(&list, &lines).map(|session| session.route),
+        Some(SessionRoute::Mixed),
+        "{list:?}"
+    );
+    browser.exit();
 }
 
 #[tokio::test(flavor = "multi_thread")]
