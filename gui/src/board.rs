@@ -57,6 +57,14 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
         .collect()
 }
 
+pub fn unpinned(
+    mut tips: Vec<(Rect, &'static str)>,
+    pinned: Option<(Rect, &'static str)>,
+) -> Vec<(Rect, &'static str)> {
+    tips.retain(|&tip| Some(tip) != pinned);
+    tips
+}
+
 pub fn focused_tip(stops: &[Stop], ring: Option<Zone>) -> Option<(Rect, &'static str)> {
     let stop = stops.iter().find(|s| Some(s.zone) == ring && s.seen())?;
     match stop.zone {
@@ -589,6 +597,22 @@ mod tests {
         let r = Rect::new(1, 2, 3, 4);
         let targets = [(r, Zone::Info(Text::SignInNote)), (r, Zone::SignIn)];
         assert_eq!(tips(&targets), [(r, tr(Text::SignInNote))]);
+    }
+
+    #[test]
+    fn a_pinned_info_icon_gets_no_second_tip_on_hover() {
+        let r = Rect::new(1, 2, 3, 4);
+        let other = Rect::new(5, 6, 7, 8);
+        let targets = [
+            (r, Zone::Info(Text::SignInNote)),
+            (other, Zone::Info(Text::AgentSignInNote)),
+        ];
+        let pinned = Some((r, tr(Text::SignInNote)));
+        assert_eq!(
+            unpinned(tips(&targets), pinned),
+            [(other, tr(Text::AgentSignInNote))]
+        );
+        assert_eq!(unpinned(tips(&targets), None), tips(&targets));
     }
 
     #[test]

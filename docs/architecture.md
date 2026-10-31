@@ -374,7 +374,9 @@ The full protocol, limits and guarantees are in
   with no action. Hovering it shows the sentence in the window's standard
   tooltip; focusing it with the keyboard shows the same sentence in a second,
   tracked tooltip placed below the icon while the window is active
-  (`board::focused_tip`, `win/tips.rs`). The GUI has no accessibility tree of
+  (`board::focused_tip`, `win/tips.rs`); while that tooltip is shown, the
+  icon has no hover tooltip, so only one appears (`board::unpinned`). The
+  GUI has no accessibility tree of
   its own, so a screen reader gets the sentence only if it reads tooltip
   windows; this has not been tried. It reads it when Settings is
   selected and, while Settings stays selected, on worker updates at most once

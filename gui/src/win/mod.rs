@@ -1230,7 +1230,8 @@ fn on_paint(hwnd: HWND) {
         let pin = app
             .tips
             .pin(focused.map(|(r, text)| (below(hwnd, r, app.s), text)));
-        (app.tips.replace(tips(&app.targets)), pin)
+        let hover = board::unpinned(tips(&app.targets), focused);
+        (app.tips.replace(hover), pin)
     });
     unsafe { EndPaint(hwnd, &ps) };
     if let Some((change, pin)) = change {
