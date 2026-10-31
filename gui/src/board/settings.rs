@@ -96,24 +96,30 @@ impl<M: Measure> Painter<'_, M> {
         let row = self.line(heading, 2);
         let (w, h) = (s.px(40.0), s.px(22.0));
         let switch = Rect::new(row.right() - w, row.y + (row.h - h) / 2, w, h);
-        self.noted(row, switch.x, SIGN_IN, SIGN_IN_NOTE);
+        self.explained(row, switch.x, SIGN_IN, SIGN_IN_NOTE);
         self.switch(switch, page.sign_in);
         let row = self.line(heading, 3);
         let state = tr(page.agent_start.text());
         let w = self.m.width(Font::Body, state).min(row.w);
         let value = Rect::new(row.right() - w, row.y, w, row.h);
-        self.noted(row, value.x, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE);
+        self.explained(row, value.x, AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE);
         self.text(Font::Body, state, value, t.muted);
     }
 
-    fn noted(&mut self, row: Rect, right: i32, label: Text, note: Text) {
+    fn explained(&mut self, row: Rect, right: i32, label: Text, note: Text) {
         let (s, t) = (self.s, self.t);
-        let (label_h, note_h) = (s.px(18.0), s.px(16.0));
-        let y = row.y + (row.h - label_h - s.px(2.0) - note_h) / 2;
-        let text = Rect::new(row.x, y, right - s.px(16.0) - row.x, label_h);
-        self.text(Font::Body, label, text, t.text);
-        let below = Rect::new(row.x, text.bottom() + s.px(2.0), text.w, note_h);
-        self.text(Font::Small, note, below, t.muted);
+        let (gap, side) = (s.px(4.0), s.px(24.0));
+        let room = (right - s.px(16.0) - gap - side - row.x).max(0);
+        let w = self.m.width(Font::Body, tr(label)).min(room);
+        self.text(Font::Body, label, Rect::new(row.x, row.y, w, row.h), t.text);
+        let zone = Zone::Info(note);
+        let icon = Rect::new(row.x + w + gap, row.y + (row.h - side) / 2, side, side);
+        let ink = match self.v.pointer.look(zone) {
+            Look::Rest => t.muted,
+            Look::Hover | Look::Pressed => t.text,
+        };
+        self.icon(icons::INFO, icon, 14.0, ink);
+        self.target(icon, zone);
     }
 
     fn segments(&mut self, row: Rect, title: Text, parts: &[(&'static str, Zone, bool)]) {
@@ -241,6 +247,8 @@ mod tests {
     const BUTTON: Rect = Rect::new(848, 66, 164, 32);
     const SWITCH: Rect = Rect::new(952, 259, 40, 22);
     const AGENT_Y: i32 = 358;
+    const SIGN_IN_INFO: Rect = Rect::new(440, 258, 24, 24);
+    const AGENT_SIGN_IN_INFO: Rect = Rect::new(433, 302, 24, 24);
     const SYSTEM: Rect = Rect::new(808, 169, 66, 26);
     const LIGHT: Rect = Rect::new(876, 169, 59, 26);
     const DARK: Rect = Rect::new(937, 169, 52, 26);
@@ -265,6 +273,10 @@ mod tests {
             theme: Choice::System,
             language: Language::System,
         }
+    }
+
+    fn info(r: Rect, c: crate::theme::Rgb) -> Op {
+        Op::Icon(icons::INFO, r, stroke(S, &icons::INFO, 14.0), c)
     }
 
     fn view() -> View {
@@ -365,13 +377,8 @@ mod tests {
             card[card.len() - 9..card.len() - 4],
             [
                 Op::Fill(Rect::new(268, 248, 724, 1), T.border),
-                text(Font::Body, SIGN_IN, Rect::new(268, 252, 668, 18), T.text),
-                text(
-                    Font::Small,
-                    SIGN_IN_NOTE,
-                    Rect::new(268, 272, 668, 16),
-                    T.muted
-                ),
+                text(Font::Body, SIGN_IN, Rect::new(268, 248, 168, 44), T.text),
+                info(Rect::new(445, 263, 14, 14), T.muted),
                 Op::Round(SWITCH, 11.0, T.button),
                 Op::Round(Rect::new(973, 262, 16, 16), 8.0, T.button_glyph),
             ]
@@ -431,9 +438,7 @@ mod tests {
             "English",
             "繁體中文",
             "登入時啟動應用程式",
-            "登入時開啟此應用程式，不會啟動代理程式",
             "代理程式於登入時啟動",
-            "由安裝程式設定（例如 AUTOSTART=1），此處僅供檢視",
             "開啟",
             "代理程式",
             "來自設定檔",
@@ -485,7 +490,9 @@ mod tests {
                 (BY_SYSTEM, Zone::Language(Language::System)),
                 (ENGLISH, Zone::Language(Language::English)),
                 (CHINESE, Zone::Language(Language::Chinese)),
+                (SIGN_IN_INFO, Zone::Info(SIGN_IN_NOTE)),
                 (SWITCH, Zone::SignIn),
+                (AGENT_SIGN_IN_INFO, Zone::Info(AGENT_SIGN_IN_NOTE)),
             ]
         );
     }
@@ -627,7 +634,7 @@ mod tests {
                 .contains(&Op::Round(Rect::new(248, 62, 764, 232), 12.0, T.border))
         );
         assert_eq!(b.targets[0], (BUTTON, Zone::OpenConfig));
-        assert_eq!(b.targets[7], (Rect::new(952, 209, 40, 22), Zone::SignIn));
+        assert_eq!(b.targets[8], (Rect::new(952, 209, 40, 22), Zone::SignIn));
     }
 
     #[test]
@@ -669,15 +676,10 @@ mod tests {
                 text(
                     Font::Body,
                     AGENT_SIGN_IN,
-                    Rect::new(268, 296, 694, 18),
+                    Rect::new(268, 292, 161, 44),
                     T.text
                 ),
-                text(
-                    Font::Small,
-                    AGENT_SIGN_IN_NOTE,
-                    Rect::new(268, 316, 694, 16),
-                    T.muted
-                ),
+                info(Rect::new(438, 307, 14, 14), T.muted),
                 text(Font::Body, "On", Rect::new(978, 292, 14, 44), T.muted),
             ]
         );
@@ -709,12 +711,43 @@ mod tests {
     #[test]
     fn the_agent_sign_in_state_is_not_a_target() {
         let targets = draw(&page(true)).targets;
-        assert_eq!(targets.len(), 8);
-        assert!(
-            targets
-                .iter()
-                .all(|&(r, _)| r.bottom() <= 292 || r.y >= 344)
-        );
+        assert_eq!(targets.len(), 10);
+        assert!(targets.iter().all(|&(r, zone)| r.bottom() <= 292
+            || r.y >= 344
+            || r == AGENT_SIGN_IN_INFO && zone == Zone::Info(AGENT_SIGN_IN_NOTE)));
+    }
+
+    #[test]
+    fn the_sign_in_notes_are_info_icons_instead_of_text() {
+        let b = draw(&page(true));
+        for note in [SIGN_IN_NOTE, AGENT_SIGN_IN_NOTE] {
+            assert!(
+                !b.ops
+                    .iter()
+                    .any(|op| matches!(op, Op::Text(_, t, ..) if t == tr(note))),
+                "{note:?}"
+            );
+        }
+        for (target, zone) in [
+            (SIGN_IN_INFO, Zone::Info(SIGN_IN_NOTE)),
+            (AGENT_SIGN_IN_INFO, Zone::Info(AGENT_SIGN_IN_NOTE)),
+        ] {
+            assert!(b.targets.contains(&(target, zone)));
+            assert!(
+                b.order
+                    .iter()
+                    .any(|stop| stop.rect == target && stop.zone == zone)
+            );
+        }
+    }
+
+    #[test]
+    fn an_info_icon_brightens_on_hover() {
+        let mut v = view();
+        v.pointer.moved(Zone::Info(SIGN_IN_NOTE));
+        let ops = draw_with(&page(true), &v).ops;
+        assert!(ops.contains(&info(Rect::new(445, 263, 14, 14), T.text)));
+        assert!(ops.contains(&info(Rect::new(438, 307, 14, 14), T.muted)));
     }
 
     struct Wide;
@@ -744,7 +777,14 @@ mod tests {
                 let mut p = page(true);
                 p.agent_start = state;
                 let b = board(&l, S, &T, &view(), &p, &Wide);
-                let switch = b.targets.last().unwrap().0;
+                let find = |wanted: Zone| {
+                    b.targets
+                        .iter()
+                        .find(|&&(_, zone)| zone == wanted)
+                        .map(|&(r, _)| r)
+                        .unwrap()
+                };
+                let switch = find(Zone::SignIn);
                 let rect = |wanted: &str| {
                     let found = b.ops.iter().find_map(|op| match op {
                         Op::Text(_, shown, r, _) if shown == wanted => Some(*r),
@@ -756,14 +796,14 @@ mod tests {
                 };
                 let value = rect(tr(state.text()));
                 assert!(value.right() <= l.content.right() - S.px(20.0));
-                for (label, right) in [
-                    (SIGN_IN, switch.x),
-                    (SIGN_IN_NOTE, switch.x),
-                    (AGENT_SIGN_IN, value.x),
-                    (AGENT_SIGN_IN_NOTE, value.x),
+                for (label, note, right) in [
+                    (SIGN_IN, SIGN_IN_NOTE, switch.x),
+                    (AGENT_SIGN_IN, AGENT_SIGN_IN_NOTE, value.x),
                 ] {
                     let r = rect(tr(label));
-                    assert!(r.right() < right, "{label:?} {r:?}");
+                    let icon = find(Zone::Info(note));
+                    assert!(r.right() <= icon.x, "{label:?} {r:?} {icon:?}");
+                    assert!(icon.right() < right, "{note:?} {icon:?}");
                 }
             }
         }

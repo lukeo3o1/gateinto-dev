@@ -51,9 +51,18 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
             Zone::More(_) => Some((r, tr(MORE_TIP))),
             Zone::TogglePassword(false) => Some((r, tr(Text::ShowPassword))),
             Zone::TogglePassword(true) => Some((r, tr(Text::HidePassword))),
+            Zone::Info(text) => Some((r, tr(text))),
             _ => None,
         })
         .collect()
+}
+
+pub fn focused_tip(stops: &[Stop], ring: Option<Zone>) -> Option<(Rect, &'static str)> {
+    let stop = stops.iter().find(|s| Some(s.zone) == ring && s.seen())?;
+    match stop.zone {
+        Zone::Info(text) => Some((stop.rect, tr(text))),
+        _ => None,
+    }
 }
 
 struct Columns {
@@ -573,6 +582,35 @@ mod tests {
         let r = Rect::new(1, 2, 3, 4);
         let targets = [(r, Zone::Entry(0)), (r, Zone::Menu), (r, Zone::Revoke(9))];
         assert_eq!(tips(&targets), []);
+    }
+
+    #[test]
+    fn an_info_icon_shows_its_sentence_as_a_tip() {
+        let r = Rect::new(1, 2, 3, 4);
+        let targets = [(r, Zone::Info(Text::SignInNote)), (r, Zone::SignIn)];
+        assert_eq!(tips(&targets), [(r, tr(Text::SignInNote))]);
+    }
+
+    #[test]
+    fn a_focused_info_icon_shows_its_sentence_while_it_is_in_view() {
+        let r = Rect::new(10, 20, 24, 24);
+        let stop = |zone, clip| Stop {
+            rect: r,
+            zone,
+            scrolls: true,
+            clip,
+        };
+        let view = Rect::new(0, 0, 100, 100);
+        let note = Zone::Info(Text::AgentSignInNote);
+        let stops = [stop(Zone::SignIn, view), stop(note, view)];
+        assert_eq!(
+            focused_tip(&stops, Some(note)),
+            Some((r, tr(Text::AgentSignInNote)))
+        );
+        assert_eq!(focused_tip(&stops, Some(Zone::SignIn)), None);
+        assert_eq!(focused_tip(&stops, None), None);
+        let hidden = [stop(note, Rect::new(0, 60, 100, 40))];
+        assert_eq!(focused_tip(&hidden, Some(note)), None);
     }
 
     fn running(rows: Vec<Row>) -> Page {

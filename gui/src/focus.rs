@@ -14,7 +14,7 @@ pub struct Stop {
 }
 
 impl Stop {
-    fn seen(&self) -> bool {
+    pub fn seen(&self) -> bool {
         let (r, c) = (self.rect, self.clip);
         r.x.max(c.x) < r.right().min(c.right()) && r.y.max(c.y) < r.bottom().min(c.bottom())
     }

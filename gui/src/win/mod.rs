@@ -18,16 +18,16 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
+    BeginPaint, ClientToScreen, EndPaint, GetMonitorInfoW, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
 };
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
-    TrackMouseEvent, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_TAB,
-    VK_UP,
+    GetActiveWindow, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT,
+    TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU, VK_RIGHT,
+    VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
@@ -41,7 +41,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE,
     WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_CREATE, WM_DESTROY,
     WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
     WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
     WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETICON, WM_SETTINGCHANGE,
     WM_SIZE, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
@@ -969,6 +969,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::Entry(_)
         | Zone::OpenConfig
         | Zone::SignIn
+        | Zone::Info(_)
         | Zone::Theme(_)
         | Zone::Language(_)
         | Zone::CopyId
@@ -1168,6 +1169,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             show_main(hwnd);
             return;
         }
+        Some(Action::Explain) => return,
         Some(Action::Minimize) => SC_MINIMIZE,
         Some(Action::ToggleMaximize) if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
         Some(Action::ToggleMaximize) => SC_MAXIMIZE,
@@ -1220,11 +1222,36 @@ fn on_paint(hwnd: HWND) {
         if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
             app.invalidate();
         }
-        app.tips.replace(tips(&app.targets))
+        let active = unsafe { GetActiveWindow() } == hwnd;
+        let focused = board::focused_tip(&app.stops, app.focus.ring()).filter(|_| active);
+        let pin = app
+            .tips
+            .pin(focused.map(|(r, text)| (below(hwnd, r, app.s), text)));
+        (app.tips.replace(tips(&app.targets)), pin)
     });
     unsafe { EndPaint(hwnd, &ps) };
-    if let Some(change) = change.flatten() {
-        change.apply();
+    if let Some((change, pin)) = change {
+        if let Some(change) = change {
+            change.apply();
+        }
+        if let Some(pin) = pin {
+            pin.apply();
+        }
+    }
+}
+
+fn below(hwnd: HWND, r: Rect, s: Scale) -> (i32, i32) {
+    let mut at = POINT {
+        x: r.x,
+        y: r.bottom() + s.px(4.0),
+    };
+    unsafe { ClientToScreen(hwnd, &mut at) };
+    (at.x, at.y)
+}
+
+fn unpin(hwnd: HWND) {
+    if let Some(pin) = with_app(hwnd, |app| app.tips.pin(None)).flatten() {
+        pin.apply();
     }
 }
 
@@ -1582,7 +1609,7 @@ fn apply_theme(hwnd: HWND) {
             app.dark,
             app.theme,
             app.build,
-            app.tips.window(),
+            app.tips.windows(),
             app.approval.window(),
         )
     }) else {
@@ -1590,7 +1617,9 @@ fn apply_theme(hwnd: HWND) {
     };
     sys::dark_title_bar(hwnd, dark, build);
     sys::dark_title_bar(asking, dark, build);
-    sys::dark_controls(tips, dark, build);
+    for tips in tips {
+        sys::dark_controls(tips, dark, build);
+    }
     sys::menu_mode(choice, build);
 }
 
@@ -1645,6 +1674,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_ACTIVATE | WM_KILLFOCUS => {
             if msg == WM_KILLFOCUS || (wp & 0xFFFF) as u32 == WA_INACTIVE {
                 with_app(hwnd, App::dismiss);
+                unpin(hwnd);
+            } else {
+                with_app(hwnd, |app| app.invalidate());
             }
             None
         }
@@ -1675,6 +1707,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             Some(0)
         }
         WM_ERASEBKGND => Some(1),
+        WM_MOVE => {
+            with_app(hwnd, |app| {
+                if app.tips.pinned() {
+                    app.invalidate();
+                }
+            });
+            None
+        }
         WM_SIZE => {
             on_size(hwnd, wp);
             Some(0)

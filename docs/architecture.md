@@ -366,7 +366,15 @@ The full protocol, limits and guarantees are in
   state is a fixed translated text; the values and their paths are never
   shown. A fixed note says the installer sets it, for example with
   `AUTOSTART=1`. The GUI has no control for it and never writes, creates or
-  deletes either value. It reads it when Settings is
+  deletes either value. This note, and the one saying the app's own switch
+  opens the app and not the agent, are not drawn as text: each sits behind a
+  small info icon after the row's label. The icon is a keyboard focus stop
+  with no action. Hovering it shows the sentence in the window's standard
+  tooltip; focusing it with the keyboard shows the same sentence in a second,
+  tracked tooltip placed below the icon while the window is active
+  (`board::focused_tip`, `win/tips.rs`). The GUI has no accessibility tree of
+  its own, so a screen reader gets the sentence only if it reads tooltip
+  windows; this has not been tried. It reads it when Settings is
   selected and, while Settings stays selected, on worker updates at most once
   per 2-second poll (`settings::reread`); there is no extra timer. Demo mode
   shows a fixed On and never reads the registry. The app's own switch is
