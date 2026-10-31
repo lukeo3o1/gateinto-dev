@@ -572,6 +572,32 @@ fn shown_credentials(prompt: &Path) -> (String, String) {
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
+async fn session_browser_uses_the_gateway_route_even_when_the_gateway_is_saved_as_mixed() {
+    let fixture = Fixture::new().await;
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2))
+        .await
+        .to_string();
+    let config = fixture.config("client_certificate = \"off\"\nroute = \"mixed\"\n");
+    let prompt = temp_dir().join("prompt");
+    let session = spawn_browser_session(config, &["--gateway", "main"], &prompt).await;
+    let (username, password) = shown_credentials(&prompt);
+    let (mut stream, response) = send(
+        session.agent,
+        &connect_with(&target, Some(&basic(&username, &password))),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    stream.write_all(b"gateway").await.unwrap();
+    stream.shutdown().await.unwrap();
+    assert_eq!(
+        read_to_end_within(&mut stream, std::time::Duration::from_secs(5)).await,
+        b"gateway"
+    );
+    assert_eq!(fixture.upstream.requests().len(), 1);
+    session.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn session_browser_issues_session_credentials_on_an_ephemeral_loopback_port() {
     let fixture = Fixture::new().await;
     let target = echo_server().await.to_string();
