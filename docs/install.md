@@ -216,6 +216,18 @@ collision the config file wins. `gateinto gateway list` shows every gateway with
 `gateinto gateway forget <name>` removes one added from a link. See
 [protocol/launch-uri.md](protocol/launch-uri.md#linked-gateways).
 
+## Where settings are stored
+
+- The config file (above) holds the gateways and the `[limits]`, `[browser]` and
+  `[device_key]` settings. The agent reads it when it starts. The GUI only reads it and opens
+  it in the system's editor on request; it never writes it.
+- The GUI's own preferences are stored per user as the values `Theme` and `Language` in
+  `HKCU\Software\Gateinto\App`. They apply when chosen in Settings and do not involve the agent.
+- **Start the app at sign-in** is the GUI's value `Gateinto App` in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The agent's own start at sign-in is the
+  installer's value `Gateinto` in the same key (see [Install](#install)); the GUI only reads it
+  and never writes it.
+
 ## Status: `gateinto status`
 
 ```powershell
