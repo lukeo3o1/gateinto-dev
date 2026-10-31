@@ -560,7 +560,12 @@ async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_sessio
     assert_eq!(field(&mixed, "route"), "mixed");
     let listen: SocketAddr = field(&mixed, "listen").parse().unwrap();
     let mixed_browser = wait_for_browser(&launcher.profiles_root, listen).await;
-    let (gateway, gateway_browser) = launcher.opened("main").await;
+    let output = launcher
+        .open("gateinto://connect?profile=main&route=gateway")
+        .await;
+    let gateway = output.success().lines();
+    let listen: SocketAddr = field(&gateway, "listen").parse().unwrap();
+    let gateway_browser = wait_for_browser(&launcher.profiles_root, listen).await;
     for browser in [&mixed_browser, &gateway_browser] {
         let auth = launcher.session_auth(browser.proxy()).await;
         let (mut stream, response) = send(

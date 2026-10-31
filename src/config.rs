@@ -1359,7 +1359,7 @@ port = 443
     }
 
     #[test]
-    fn a_gateway_route_defaults_to_gateway_and_can_be_mixed() {
+    fn a_gateway_route_defaults_to_mixed_and_can_be_gateway() {
         let file = ConfigFile::parse(&format!(
             "{MINIMAL}route = \"mixed\"\n[gateways.plain]\n[gateways.forced]\nroute = \"gateway\"\n"
         ))
@@ -1374,7 +1374,7 @@ port = 443
             [
                 ("forced", Route::Gateway),
                 ("main", Route::Mixed),
-                ("plain", Route::Gateway)
+                ("plain", Route::Mixed)
             ]
         );
         let error = ConfigFile::parse("[gateways.main]\nroute = \"Mixed\"\n")

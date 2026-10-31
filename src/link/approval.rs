@@ -267,10 +267,10 @@ mod tests {
     #[tokio::test]
     async fn an_echo_of_another_gateway_denies_unasked() {
         let other = launch(&LINK.replace("proxy.newco", "proxy.other"));
-        let mixed = launch(&format!("{LINK}&route=mixed"));
+        let gateway = launch(&format!("{LINK}&route=gateway"));
         for reply in [
             asking(&other),
-            asking(&mixed),
+            asking(&gateway),
             Response::Ok(vec![ipc::confirm_line(&token())]),
         ] {
             let agent = Agent::new();

@@ -359,7 +359,7 @@ mod tests {
     fn known_gateways() -> Vec<KnownGateway> {
         let file = ConfigFile::parse(
             "[gateways.office]\nhost = \"proxy.example.com\"\nport = 443\nca_file = \"ca.pem\"\n\
-             [gateways.lab]\nhost = \"10.0.0.1\"\nport = 8443\nroute = \"mixed\"\n\
+             [gateways.lab]\nhost = \"10.0.0.1\"\nport = 8443\nroute = \"gateway\"\n\
              portal_url = \"https://portal.example.com/?token=secret\"\n\
              [gateways.broken]\nhost = \"x.example.com\"\n\
              [gateways.v6]\nhost = \"::1\"\nport = 443\n",
@@ -384,10 +384,10 @@ mod tests {
         assert_eq!(
             gateway_lines(&known_gateways()),
             vec![
-                "broken: no upstream host:port, route gateway (config)",
-                "lab: 10.0.0.1:8443, route mixed (config)",
-                "office: proxy.example.com:443, route gateway (config)",
-                "v6: [::1]:443, route gateway (config)",
+                "broken: no upstream host:port, route mixed (config)",
+                "lab: 10.0.0.1:8443, route gateway (config)",
+                "office: proxy.example.com:443, route mixed (config)",
+                "v6: [::1]:443, route mixed (config)",
                 "newco: proxy.newco.example:8443, route mixed (linked)",
             ]
         );
@@ -398,10 +398,10 @@ mod tests {
         assert_eq!(
             gateway_list(&known_gateways()),
             vec![
-                "broken: no upstream host:port, portal none, route gateway (config)",
-                "lab: 10.0.0.1:8443, portal https://portal.example.com, route mixed (config)",
-                "office: proxy.example.com:443, portal none, route gateway (config)",
-                "v6: [::1]:443, portal none, route gateway (config)",
+                "broken: no upstream host:port, portal none, route mixed (config)",
+                "lab: 10.0.0.1:8443, portal https://portal.example.com, route gateway (config)",
+                "office: proxy.example.com:443, portal none, route mixed (config)",
+                "v6: [::1]:443, portal none, route mixed (config)",
                 "newco: proxy.newco.example:8443, portal https://portal.newco.example:444, route mixed (linked)",
             ]
         );

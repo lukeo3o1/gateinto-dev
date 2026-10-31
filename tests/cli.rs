@@ -459,7 +459,7 @@ fn status_reads_the_config_file_at_the_default_location() {
     assert!(output.status.success(), "{stdout}");
     assert!(
         stdout.contains(&format!(
-            "config: {} (default location)\ngateway: main: proxy.example.com:443, route gateway (config)\n",
+            "config: {} (default location)\ngateway: main: proxy.example.com:443, route mixed (config)\n",
             path.display()
         )),
         "{stdout}"
@@ -626,7 +626,7 @@ impl Home {
         home.plant(
             "10.0.0.1.toml",
             "name = \"other\"\nhost = \"10.0.0.1\"\nport = 443\n\
-             portal_url = \"https://other.example/\"\nroute = \"mixed\"\n",
+             portal_url = \"https://other.example/\"\nroute = \"gateway\"\n",
         );
         home
     }
@@ -671,9 +671,9 @@ fn gateway_list_shows_where_each_gateway_comes_from() {
     assert!(success, "{stderr}");
     assert_eq!(
         stdout,
-        "main: proxy.example.com:443, portal https://portal.example.com, route gateway (config)\n\
-         newco: proxy.newco.example:8443, portal https://portal.newco.example, route gateway (linked)\n\
-         other: 10.0.0.1:443, portal https://other.example, route mixed (linked)\n"
+        "main: proxy.example.com:443, portal https://portal.example.com, route mixed (config)\n\
+         newco: proxy.newco.example:8443, portal https://portal.newco.example, route mixed (linked)\n\
+         other: 10.0.0.1:443, portal https://other.example, route gateway (linked)\n"
     );
 }
 
@@ -684,9 +684,9 @@ fn status_marks_linked_gateways() {
     assert!(success, "{stderr}");
     assert!(
         stdout.contains(&format!(
-            "gateway: main: proxy.example.com:443, route gateway (config)\nlinked-gateways: {}\n\
-             gateway: newco: proxy.newco.example:8443, route gateway (linked)\n\
-             gateway: other: 10.0.0.1:443, route mixed (linked)\n",
+            "gateway: main: proxy.example.com:443, route mixed (config)\nlinked-gateways: {}\n\
+             gateway: newco: proxy.newco.example:8443, route mixed (linked)\n\
+             gateway: other: 10.0.0.1:443, route gateway (linked)\n",
             home.linked().display()
         )),
         "{stdout}"
@@ -717,8 +717,8 @@ fn gateway_forget_removes_only_gateways_added_from_links() {
     let (_, stdout, _) = home.run(&["gateway", "list"]);
     assert_eq!(
         stdout,
-        "main: proxy.example.com:443, portal https://portal.example.com, route gateway (config)\n\
-         other: 10.0.0.1:443, portal https://other.example, route mixed (linked)\n"
+        "main: proxy.example.com:443, portal https://portal.example.com, route mixed (config)\n\
+         other: 10.0.0.1:443, portal https://other.example, route gateway (linked)\n"
     );
     let config = std::fs::read_to_string(default_config(&home.0)).unwrap();
     assert!(config.contains("[gateways.main]"), "{config}");
@@ -735,9 +735,9 @@ fn a_damaged_gateway_file_disables_only_its_own_gateway() {
     assert!(success, "{stderr}");
     assert!(
         stdout.starts_with(
-            "main: proxy.example.com:443, portal https://portal.example.com, route gateway (config)\n\
-             newco: proxy.newco.example:8443, portal https://portal.newco.example, route gateway (linked)\n\
-             other: 10.0.0.1:443, portal https://other.example, route mixed (linked)\n"
+            "main: proxy.example.com:443, portal https://portal.example.com, route mixed (config)\n\
+             newco: proxy.newco.example:8443, portal https://portal.newco.example, route mixed (linked)\n\
+             other: 10.0.0.1:443, portal https://other.example, route gateway (linked)\n"
         ),
         "{stdout}"
     );
@@ -759,8 +759,8 @@ fn status_reports_a_damaged_gateway_file_and_continues() {
     assert!(success, "{stdout}{stderr}");
     assert!(
         stdout.contains(&format!(
-            "linked-gateways: {}\ngateway: newco: proxy.newco.example:8443, route gateway (linked)\n\
-             gateway: other: 10.0.0.1:443, route mixed (linked)\nlinked-gateway: error: {}: ",
+            "linked-gateways: {}\ngateway: newco: proxy.newco.example:8443, route mixed (linked)\n\
+             gateway: other: 10.0.0.1:443, route gateway (linked)\nlinked-gateway: error: {}: ",
             home.linked().display(),
             broken.display()
         )),
@@ -778,7 +778,7 @@ fn an_unusable_gateways_directory_is_reported_by_status_and_refused_by_list() {
     assert!(success, "{stdout}{stderr}");
     assert!(
         stdout.contains(&format!(
-            "gateway: main: proxy.example.com:443, route gateway (config)\nlinked-gateways: error: linked \
+            "gateway: main: proxy.example.com:443, route mixed (config)\nlinked-gateways: error: linked \
              gateways {}: not a directory",
             home.linked().display()
         )),

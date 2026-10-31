@@ -706,12 +706,15 @@ mod tests {
         let listing = load(Some(path), Some(dir.join("gateways")));
         assert_eq!(
             listing,
-            known(vec![gateway(
-                "office",
-                Some("proxy.example.com"),
-                Some(8443),
-                Source::Config
-            )])
+            known(vec![KnownGateway {
+                route: gateinto::proxy::Route::Mixed,
+                ..gateway(
+                    "office",
+                    Some("proxy.example.com"),
+                    Some(8443),
+                    Source::Config
+                )
+            }])
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

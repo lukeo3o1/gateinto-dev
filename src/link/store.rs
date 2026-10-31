@@ -1237,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn the_route_is_stored_and_a_file_without_one_uses_the_gateway_route() {
+    fn the_route_is_stored_and_a_file_without_one_uses_the_mixed_route() {
         let store = store();
         let mixed = LinkedGateway {
             route: Route::Mixed,
@@ -1264,7 +1264,7 @@ mod tests {
             routes,
             [
                 ("mixed", Route::Mixed),
-                ("old", Route::Gateway),
+                ("old", Route::Mixed),
                 ("plain", Route::Gateway)
             ]
         );

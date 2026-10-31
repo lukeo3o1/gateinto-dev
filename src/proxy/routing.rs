@@ -11,8 +11,8 @@ use crate::http::{Authority, Host};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Route {
-    #[default]
     Gateway,
+    #[default]
     Mixed,
 }
 
@@ -107,6 +107,11 @@ mod tests {
 
     fn addr(ip: &str, port: u16) -> SocketAddr {
         SocketAddr::new(ip.parse().unwrap(), port)
+    }
+
+    #[test]
+    fn the_default_route_is_mixed() {
+        assert_eq!(Route::default(), Route::Mixed);
     }
 
     #[tokio::test]

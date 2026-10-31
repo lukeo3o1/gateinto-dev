@@ -1304,6 +1304,7 @@ mod tests {
         for (route, saved, expected) in [
             (None, "corp", Route::Gateway),
             (None, "bare", Route::Mixed),
+            (Some("gateway"), "corp", Route::Gateway),
             (Some("gateway"), "bare", Route::Gateway),
             (Some("mixed"), "corp", Route::Mixed),
             (Some("mixed"), "bare", Route::Mixed),
@@ -1345,8 +1346,12 @@ mod tests {
     #[test]
     fn a_new_gateway_needs_a_decision_naming_it() {
         let (resolution, asked) = resolve_with(&new_link(None), Some(Decision::Defer));
-        assert_eq!(resolution, Ok(Resolution::Confirm(confirmation())));
-        assert_eq!(asked, vec![confirmation()]);
+        let mixed = Confirmation {
+            route: Route::Mixed,
+            ..confirmation()
+        };
+        assert_eq!(resolution, Ok(Resolution::Confirm(mixed.clone())));
+        assert_eq!(asked, vec![mixed]);
     }
 
     #[test]
@@ -1363,7 +1368,7 @@ mod tests {
             assert_eq!(
                 resolution,
                 Ok(Resolution::Launch(Launch {
-                    route: Route::Gateway,
+                    route: Route::Mixed,
                     profile: name("newco"),
                     start_page: Some(start.parse().unwrap()),
                     add: Some(LinkedGateway {
@@ -1656,7 +1661,7 @@ mod tests {
                     host: None,
                     port: None,
                     portal_url: None,
-                    route: Route::Gateway,
+                    route: Route::Mixed,
                     source: Source::Config,
                 },
                 KnownGateway {
