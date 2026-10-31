@@ -473,6 +473,7 @@ mod tests {
                 host: Some("proxy.example.com".to_owned()),
                 port: None,
                 portal_url: None,
+                route: gateinto::proxy::Route::Gateway,
                 source: Source::Linked,
             }]),
             None,
@@ -646,6 +647,7 @@ mod tests {
             host: Some(host.to_owned()),
             port: Some(port),
             portal_url: None,
+            route: gateinto::proxy::Route::Gateway,
             source,
         }
     }

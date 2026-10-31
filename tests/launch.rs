@@ -452,6 +452,7 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
         .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
     let stored = std::fs::read_to_string(&file).unwrap();
     assert!(!stored.contains("portal_url"));
+    assert!(stored.contains("\nroute = \"mixed\"\n"), "{stored}");
     assert!(stored.contains(generated.as_str()));
     launcher.run(&["stop"]).await.success();
     let request = request.with_route("gateway").unwrap();
@@ -503,6 +504,72 @@ async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
+    let launcher = Launcher::new("").await;
+    let text = std::fs::read_to_string(&launcher.config).unwrap().replace(
+        &format!("portal_url = \"{PORTAL}\"\n"),
+        &format!("portal_url = \"{PORTAL}\"\nroute = \"gateway\"\n"),
+    );
+    std::fs::write(&launcher.config, &text).unwrap();
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let saved = launcher
+        .open("gateinto://connect?profile=main")
+        .await
+        .success()
+        .lines();
+    assert!(!saved.iter().any(|line| line.starts_with("route:")));
+    let forced = launcher
+        .open("gateinto://connect?profile=main&route=mixed")
+        .await
+        .success()
+        .lines();
+    assert_eq!(field(&forced, "route"), "mixed");
+    let mut browsers = Vec::new();
+    for lines in [&saved, &forced] {
+        let listen: SocketAddr = field(lines, "listen").parse().unwrap();
+        let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+        let auth = launcher.session_auth(browser.proxy()).await;
+        let (mut stream, response) = send(
+            browser.proxy(),
+            &connect_with(&target.to_string(), Some(&auth)),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        stream.shutdown().await.unwrap();
+        let _ = read_to_end_within(&mut stream, WAIT).await;
+        browsers.push(browser);
+    }
+    assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
+    let list = launcher.list().await;
+    let route = |lines: &[String]| listed_session(&list, lines).map(|session| session.route);
+    assert_eq!(route(&saved), Some(SessionRoute::All), "{list:?}");
+    assert_eq!(route(&forced), Some(SessionRoute::Mixed), "{list:?}");
+    for browser in browsers {
+        browser.exit();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_without_a_route_for_a_gateway_saved_without_one_is_mixed() {
+    let launcher = Launcher::new("").await;
+    let lines = launcher
+        .open("gateinto://connect?profile=main")
+        .await
+        .success()
+        .lines();
+    assert_eq!(field(&lines, "route"), "mixed");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    let list = launcher.list().await;
+    assert_eq!(
+        listed_session(&list, &lines).map(|session| session.route),
+        Some(SessionRoute::Mixed),
+        "{list:?}"
+    );
+    browser.exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_session() {
     let launcher = Launcher::new("").await;
     let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
@@ -513,7 +580,12 @@ async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_sessio
     assert_eq!(field(&mixed, "route"), "mixed");
     let listen: SocketAddr = field(&mixed, "listen").parse().unwrap();
     let mixed_browser = wait_for_browser(&launcher.profiles_root, listen).await;
-    let (gateway, gateway_browser) = launcher.opened("main").await;
+    let output = launcher
+        .open("gateinto://connect?profile=main&route=gateway")
+        .await;
+    let gateway = output.success().lines();
+    let listen: SocketAddr = field(&gateway, "listen").parse().unwrap();
+    let gateway_browser = wait_for_browser(&launcher.profiles_root, listen).await;
     for browser in [&mixed_browser, &gateway_browser] {
         let auth = launcher.session_auth(browser.proxy()).await;
         let (mut stream, response) = send(
@@ -1245,7 +1317,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
         .await;
     assert_eq!(
         output.success().stdout,
-        format!("newco: {gateway}, portal https://portal.newco.example (linked)\n")
+        format!("newco: {gateway}, portal https://portal.newco.example, route mixed (linked)\n")
     );
 }
 

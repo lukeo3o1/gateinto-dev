@@ -448,17 +448,22 @@ fn chinese_notice(confirmation: &Confirmation) -> String {
         .and_then(Origin::of)
         .map_or_else(|| "無".to_owned(), |origin| origin.to_string());
     let traffic = match confirmation.route {
-        Route::Gateway => "隔離瀏覽器的所有流量",
+        Route::Gateway => {
+            "隔離瀏覽器的所有流量：每個連線都會經過閘道。\
+             此閘道將以閘道路由（應用程式中的「全部」）儲存"
+        }
         Route::Mixed => {
-            "混合模式下轉送給它的流量。其他連線會直接使用您的網路，因而暴露您的 IP 位址與本機 \
-             DNS 查詢"
+            "轉送給它的流量。警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+             這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
+             此閘道將以混合路由儲存"
         }
     };
     format!(
         "有網站要求將閘道「{}」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
          閘道：{}{local}\n\
          入口網站：{portal}\n\n\
-         閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及{traffic}。\
+         閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及{traffic}，\
+         之後未指定路由的連結也會使用此路由。\
          只有在您信任營運此閘道的組織時才允許。",
         confirmation.profile, confirmation.gateway,
     )
@@ -674,22 +679,37 @@ mod tests {
             let english = confirmation.message();
             let chinese = chinese_notice(&confirmation);
             let mixed = confirmation.route == Route::Mixed;
-            assert_eq!(
-                english.contains("exposing your IP address and local DNS lookups"),
-                mixed
-            );
-            assert_eq!(
-                chinese.contains(
-                    "混合模式下轉送給它的流量。其他連線會直接使用您的網路，因而暴露您的 IP 位址與本機 DNS 查詢"
+            for (english_part, chinese_part, shown) in [
+                (
+                    "sites may be reached directly instead of through the gateway",
+                    "網站可能會被直接連線，而不經過閘道",
+                    mixed,
                 ),
-                mixed,
-                "{chinese}"
-            );
-            assert_eq!(
-                chinese.contains("隔離瀏覽器的所有流量"),
-                !mixed,
-                "{chinese}"
-            );
+                (
+                    "exposes your local DNS lookups and your IP address",
+                    "暴露您的本機 DNS 查詢與 IP 位址",
+                    mixed,
+                ),
+                ("bypasses the gateway's policy", "繞過閘道的政策", mixed),
+                (
+                    "saved with the mixed route",
+                    "此閘道將以混合路由儲存",
+                    mixed,
+                ),
+                (
+                    "every connection goes through the gateway",
+                    "每個連線都會經過閘道",
+                    !mixed,
+                ),
+                (
+                    "saved with the gateway route (All in the app)",
+                    "此閘道將以閘道路由（應用程式中的「全部」）儲存",
+                    !mixed,
+                ),
+            ] {
+                assert_eq!(english.contains(english_part), shown, "{english}");
+                assert_eq!(chinese.contains(chinese_part), shown, "{chinese}");
+            }
         }
     }
 
@@ -703,8 +723,20 @@ mod tests {
             "有網站要求將閘道「newco」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
              閘道：proxy.newco.example:443\n\
              入口網站：無\n\n\
-             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及混合模式下轉送給它的流量。\
-             其他連線會直接使用您的網路，因而暴露您的 IP 位址與本機 DNS 查詢。\
+             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及轉送給它的流量。\
+             警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+             這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
+             此閘道將以混合路由儲存，之後未指定路由的連結也會使用此路由。\
+             只有在您信任營運此閘道的組織時才允許。"
+        );
+        assert_eq!(
+            chinese_notice(&confirmations()[0]),
+            "有網站要求將閘道「newco」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+             閘道：proxy.newco.example:443\n\
+             入口網站：無\n\n\
+             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及隔離瀏覽器的所有流量：\
+             每個連線都會經過閘道。此閘道將以閘道路由（應用程式中的「全部」）儲存，\
+             之後未指定路由的連結也會使用此路由。\
              只有在您信任營運此閘道的組織時才允許。"
         );
     }

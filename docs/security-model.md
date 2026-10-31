@@ -12,9 +12,17 @@ item to its code, its tests and where they run.
 
 ### Routing scope
 
-All traffic received by a session uses the gateway by default. A launch URI
-may opt its new browser session into `route=mixed` without changing any other
-session or saved gateway. Mixed routing is an IP heuristic, not a policy or
+**Browser sessions use mixed routing by default, which may reach sites
+directly instead of through the gateway: that exposes local DNS lookups and
+the user's source IP to those sites and bypasses gateway policy.** The strict
+option is the `gateway` route ("All" in the GUI), under which all traffic
+received by a session uses the gateway. A gateway's saved default route is
+`mixed` unless its configuration section or linked gateway file says
+`gateway`; a missing `route`, including in files written before the key
+existed, means `mixed`. A gateway approved from a link is saved with the
+route the link named, or `mixed` when it named none. A launch URI without
+`route` uses the saved default. A launch URI may opt its new browser session into `route=mixed` or
+`route=gateway` without changing any other session or saved gateway. Mixed routing is an IP heuristic, not a policy or
 scope guarantee: locally resolved target addresses matching any gateway IP,
 empty answers and DNS errors use the gateway; other targets try direct TCP.
 Direct opening and DNS share half the total opening timeout before gateway
@@ -35,10 +43,26 @@ Mixed mode exposes local DNS queries and the user's source IP, and direct
 connections bypass gateway authorization and inspection. Different service
 and gateway IPs or shared hosting can misclassify traffic. Any website can
 select mixed mode in a link for a known gateway; there is no additional
-routing confirmation or locally enforced gateway-only policy. The existing
-first-time gateway confirmation discloses mixed routing when requested.
-Operators needing all traffic through the gateway must use gateway-mode
-links and must not treat this client as an enforcement boundary. Full rules
+routing confirmation or locally enforced gateway-only policy. The
+first-time gateway confirmation names the route the gateway is saved with;
+for `mixed` it warns that sites may be reached directly instead of through
+the gateway, exposing local DNS lookups and the IP address and bypassing the
+gateway's policy, and for `gateway` it says that every connection goes
+through the gateway. `gateinto open` and the GUI's Launch ask for the
+gateway's saved default when the link names no route (`route=saved` on the
+IPC line), so a gateway without a saved route starts mixed sessions for
+them. An IPC launch line without a route, as older clients send it, keeps
+its old meaning and always uses the `gateway` route; an older agent refuses
+`route=saved` as an invalid launch request and starts nothing. An older
+agent also refuses a configuration file that contains `route` and disables
+a linked gateway file that contains it, so a downgrade fails closed rather
+than ignoring a saved route. `gateinto session browser` always uses the
+`gateway` route, whatever route the gateway is saved with, and a gateway
+added in the GUI's Add dialog is saved with the `gateway` route ("All")
+until the GUI offers a route choice.
+Operators needing all traffic through the gateway must save the gateway with
+`route = "gateway"` or use gateway-mode links, and must not treat this
+client as an enforcement boundary. Full rules
 are in [session routing](protocol/launch-uri.md#session-routing).
 
 The following upstream TLS protections apply to the gateway route. A direct
@@ -127,7 +151,7 @@ format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 What a launch URI can do, at most:
 
 - make the user's agent start a new browser session for a known gateway,
-  selecting default gateway routing or mixed routing, which opens Chrome or Edge with a new, empty profile on that gateway's
+  selecting mixed routing (the default) or gateway routing, which opens Chrome or Edge with a new, empty profile on that gateway's
   portal or on another page of the same origin;
 - for a gateway the device does not know, after the user approves it in a
   dialog that names it: store its host, port and optional portal, then do the above.
@@ -549,8 +573,10 @@ Non-guarantees:
   established and idle-timeout events, and the client certificate's subject,
   SHA-1 thumbprint, NotAfter, source and key backend (for self-signed
   certificates the device key's SPKI SHA-256 and, per session, the SHA-256 of
-  the session's certificate). Target `host:port`, the negotiated TLS version and
-  group, and byte counts are logged only at `debug`. `check-upstream` prints
+  the session's certificate). The target `host:port` of an established tunnel,
+  the negotiated TLS version and group, and byte counts are logged only at
+  `debug`. A refused tunnel is logged at `warn` with its target `host:port` and
+  the cause, never with credentials or the `Proxy-Authorization` header. `check-upstream` prints
   TLS parameters, the server certificate subject and the upstream status line,
   never upstream headers or bodies. The configuration file holds no secrets.
 - **Strict configuration.** Unknown keys are errors and there is no default

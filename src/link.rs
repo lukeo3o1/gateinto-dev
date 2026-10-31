@@ -234,6 +234,7 @@ pub struct KnownGateway {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub portal_url: Option<PortalUrl>,
+    pub route: Route,
     pub source: Source,
 }
 
@@ -252,6 +253,7 @@ pub struct LinkedGateway {
     pub address: GatewayAddress,
     pub portal_url: Option<PortalUrl>,
     pub approved_at: Option<u64>,
+    pub route: Route,
 }
 
 pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<KnownGateway> {
@@ -263,6 +265,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
             host: section.host.clone(),
             port: section.port.map(NonZeroU16::get),
             portal_url: section.portal_url.clone(),
+            route: section.route(),
             source: Source::Config,
         })
         .collect();
@@ -273,6 +276,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
                 host: Some(gateway.address.host()),
                 port: Some(gateway.address.port()),
                 portal_url: gateway.portal_url.clone(),
+                route: gateway.route,
                 source: Source::Linked,
             });
         }
@@ -370,9 +374,15 @@ impl Confirmation {
             String::new()
         };
         let traffic = match self.route {
-            Route::Gateway => "all traffic of the isolated browser",
+            Route::Gateway => {
+                "all traffic of the isolated browser: every connection goes through the gateway. \
+                 The gateway is saved with the gateway route (All in the app)"
+            }
             Route::Mixed => {
-                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups"
+                "the traffic routed to it. Warning: in mixed mode, sites may be reached directly \
+                 instead of through the gateway, which exposes your local DNS lookups and your IP \
+                 address to them and bypasses the gateway's policy. The gateway is saved with \
+                 the mixed route"
             }
         };
         format!(
@@ -380,10 +390,11 @@ impl Confirmation {
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
-             {IDENTITY} and {traffic}. Allow it {TRUST}",
+             {IDENTITY} and {traffic}, which later links without a route also use. Allow it \
+             {TRUST}",
             self.profile,
             self.gateway,
-            self.portal_origin()
+            self.portal_origin(),
         )
     }
 }
@@ -562,7 +573,7 @@ pub fn resolve(
             (Some(_), Some(_)) => return Err(LinkError::UrlOutsidePortal(local.name.clone())),
         };
         return Ok(Resolution::Launch(Launch {
-            route: link.route,
+            route: link.route.unwrap_or(local.route),
             profile: local.name.clone(),
             start_page,
             add: None,
@@ -624,8 +635,9 @@ pub fn resolve(
             reason: error.to_string(),
         });
     }
+    let route = link.route.unwrap_or_default();
     let confirmation = Confirmation {
-        route: link.route,
+        route,
         profile: profile.clone(),
         gateway: gateway.clone(),
         portal: link.portal.clone(),
@@ -634,7 +646,7 @@ pub fn resolve(
         Decision::Defer => Ok(Resolution::Confirm(confirmation)),
         Decision::Deny => Err(LinkError::Denied(profile.clone())),
         Decision::Approve => Ok(Resolution::Launch(Launch {
-            route: link.route,
+            route,
             profile: profile.clone(),
             start_page: link.url.clone().or_else(|| link.portal.clone()),
             add: Some(LinkedGateway {
@@ -642,6 +654,7 @@ pub fn resolve(
                 address: gateway.clone(),
                 portal_url: link.portal.clone(),
                 approved_at: Some(now),
+                route,
             }),
         })),
     }
@@ -670,6 +683,7 @@ mod tests {
             host: Some(host.to_owned()),
             port: Some(port),
             portal_url: portal.map(|portal| portal.parse().unwrap()),
+            route: Route::Gateway,
             source,
         }
     }
@@ -696,6 +710,7 @@ mod tests {
                 host: None,
                 port: None,
                 portal_url: None,
+                route: Route::Gateway,
                 source: Source::Config,
             },
         ]
@@ -834,6 +849,7 @@ mod tests {
             host: Some("newer.example".to_owned()),
             port: Some(443),
             portal_url: Some("https://newer.example/".parse().unwrap()),
+            route: Route::Gateway,
             source: Source::Linked,
         });
         for request in [
@@ -1047,7 +1063,12 @@ mod tests {
         };
         assert_eq!(
             resolve(&request, &all, &mut Decision::Defer, NOW),
-            Ok(super::tests::launch(generated.as_str(), None))
+            Ok(Resolution::Launch(Launch {
+                route: Route::Mixed,
+                profile: generated,
+                start_page: None,
+                add: None,
+            }))
         );
     }
 
@@ -1278,17 +1299,96 @@ mod tests {
         };
         assert_eq!(mixed.route, Route::Mixed);
         assert!(mixed.message().contains("mixed mode"));
-        assert!(mixed.message().contains("IP address and local DNS"));
+        assert!(
+            mixed
+                .message()
+                .contains("local DNS lookups and your IP address")
+        );
         assert!(mixed.echoed_by(&mixed.echo()));
         assert!(!mixed.echoed_by(&confirmation().echo()));
         assert!(!confirmation().echoed_by(&mixed.echo()));
     }
 
     #[test]
+    fn a_launch_without_a_route_uses_the_saved_route_and_an_explicit_route_wins() {
+        let mut known = Known {
+            gateways: profiles(),
+            ..Known::default()
+        };
+        known.gateways[1].route = Route::Mixed;
+        for (route, saved, expected) in [
+            (None, "corp", Route::Gateway),
+            (None, "bare", Route::Mixed),
+            (Some("gateway"), "corp", Route::Gateway),
+            (Some("gateway"), "bare", Route::Gateway),
+            (Some("mixed"), "corp", Route::Mixed),
+            (Some("mixed"), "bare", Route::Mixed),
+        ] {
+            let mut request = link(saved, None, None, None);
+            if let Some(route) = route {
+                request = request.with_route(route).unwrap();
+            }
+            let Ok(Resolution::Launch(launch)) =
+                resolve(&request, &known, &mut Decision::Deny, NOW)
+            else {
+                panic!("{route:?} {saved}: not a launch")
+            };
+            assert_eq!(launch.route, expected, "{route:?} {saved}");
+            assert_eq!(launch.add, None);
+        }
+    }
+
+    #[test]
+    fn a_gateway_approved_from_a_link_is_saved_with_its_route_or_mixed() {
+        for (route, expected) in [
+            (None, Route::Mixed),
+            (Some("gateway"), Route::Gateway),
+            (Some("mixed"), Route::Mixed),
+        ] {
+            let mut request = new_link(None);
+            if let Some(route) = route {
+                request = request.with_route(route).unwrap();
+            }
+            let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
+            assert_eq!(asked[0].route, expected, "{route:?}");
+            let Ok(Resolution::Launch(launch)) = resolution else {
+                panic!("{route:?}: not a launch")
+            };
+            assert_eq!(launch.route, expected, "{route:?}");
+            assert_eq!(launch.add.unwrap().route, expected, "{route:?}");
+        }
+    }
+
+    #[test]
+    fn a_mixed_confirmation_warns_that_sites_may_bypass_the_gateway() {
+        let mixed = Confirmation {
+            route: Route::Mixed,
+            ..confirmation()
+        };
+        assert_eq!(
+            mixed.message(),
+            "A website asks to add the gateway \"newco\" to Gateinto and to open a browser \
+             session through it.\n\n\
+             Gateway: proxy.newco.example:443\n\
+             Portal: https://portal.newco.example\n\n\
+             The gateway will see this device's identity (its client certificate, if one is \
+             installed) and the traffic routed to it. Warning: in mixed mode, sites may be \
+             reached directly instead of through the gateway, which exposes your local DNS \
+             lookups and your IP address to them and bypasses the gateway's policy. The \
+             gateway is saved with the mixed route, which later links without a route also \
+             use. Allow it only if you trust the organisation that runs this gateway."
+        );
+    }
+
+    #[test]
     fn a_new_gateway_needs_a_decision_naming_it() {
         let (resolution, asked) = resolve_with(&new_link(None), Some(Decision::Defer));
-        assert_eq!(resolution, Ok(Resolution::Confirm(confirmation())));
-        assert_eq!(asked, vec![confirmation()]);
+        let mixed = Confirmation {
+            route: Route::Mixed,
+            ..confirmation()
+        };
+        assert_eq!(resolution, Ok(Resolution::Confirm(mixed.clone())));
+        assert_eq!(asked, vec![mixed]);
     }
 
     #[test]
@@ -1305,7 +1405,7 @@ mod tests {
             assert_eq!(
                 resolution,
                 Ok(Resolution::Launch(Launch {
-                    route: Route::Gateway,
+                    route: Route::Mixed,
                     profile: name("newco"),
                     start_page: Some(start.parse().unwrap()),
                     add: Some(LinkedGateway {
@@ -1313,6 +1413,7 @@ mod tests {
                         address: "proxy.newco.example:443".parse().unwrap(),
                         portal_url: Some("https://portal.newco.example/home".parse().unwrap()),
                         approved_at: Some(NOW),
+                        route: Route::Mixed,
                     }),
                 }))
             );
@@ -1544,8 +1645,10 @@ mod tests {
              Gateway: proxy.newco.example:443\n\
              Portal: https://portal.newco.example\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
-             installed) and all traffic of the isolated browser. Allow it only if you trust \
-             the organisation that runs this gateway."
+             installed) and all traffic of the isolated browser: every connection goes \
+             through the gateway. The gateway is saved with the gateway route (All in the \
+             app), which later links without a route also use. Allow it only if you trust the organisation that \
+             runs this gateway."
         );
         let text = confirmation().message();
         assert!(text.contains(&format!("{IDENTITY} and ")), "{text}");
@@ -1562,19 +1665,23 @@ mod tests {
             address: host.parse().unwrap(),
             portal_url: Some(format!("https://{text}.example/").parse().unwrap()),
             approved_at: None,
+            route: Route::Gateway,
         }
     }
 
     #[test]
     fn known_gateways_list_the_config_first_and_hide_shadowed_links() {
         let config = config_file(
-            "[gateways.corp]\nhost = \"proxy.corp.example\"\nport = 443\n[gateways.empty]\n",
+            "[gateways.corp]\nhost = \"proxy.corp.example\"\nport = 443\nroute = \"mixed\"\n[gateways.empty]\n",
         );
         let known = known_gateways(
             &config,
             &[
                 linked("corp", "evil.example"),
-                linked("newco", "[::1]:8443"),
+                LinkedGateway {
+                    route: Route::Mixed,
+                    ..linked("newco", "[::1]:8443")
+                },
             ],
         );
         assert_eq!(
@@ -1585,6 +1692,7 @@ mod tests {
                     host: Some("proxy.corp.example".to_owned()),
                     port: Some(443),
                     portal_url: None,
+                    route: Route::Mixed,
                     source: Source::Config,
                 },
                 KnownGateway {
@@ -1592,6 +1700,7 @@ mod tests {
                     host: None,
                     port: None,
                     portal_url: None,
+                    route: Route::Mixed,
                     source: Source::Config,
                 },
                 KnownGateway {
@@ -1599,6 +1708,7 @@ mod tests {
                     host: Some("::1".to_owned()),
                     port: Some(8443),
                     portal_url: Some("https://newco.example/".parse().unwrap()),
+                    route: Route::Mixed,
                     source: Source::Linked,
                 },
             ]

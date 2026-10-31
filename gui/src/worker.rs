@@ -1212,7 +1212,7 @@ mod tests {
     fn proposed() -> Confirmation {
         let launch = link();
         Confirmation {
-            route: launch.route,
+            route: launch.route.unwrap_or_default(),
             profile: launch.proposed_profile().unwrap(),
             gateway: launch.gateway.clone().unwrap(),
             portal: launch.portal.clone(),

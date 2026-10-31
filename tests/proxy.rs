@@ -676,7 +676,7 @@ async fn session_browser_requires_its_session_credentials() {
 
 #[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread")]
-async fn tunnel_target_is_logged_only_at_debug() {
+async fn an_established_tunnel_target_is_logged_only_at_debug() {
     let setup = Setup::new(Behavior::Tunnel).await;
     let target = echo_server().await;
 

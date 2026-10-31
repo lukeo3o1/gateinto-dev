@@ -225,6 +225,7 @@ fn gateway(
         host: Some(host.to_owned()),
         port: Some(port),
         portal_url: portal.map(|url| url.parse().expect("sample portal URLs are valid")),
+        route: gateinto::proxy::Route::Gateway,
         source,
     }
 }
