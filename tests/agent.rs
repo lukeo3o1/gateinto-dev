@@ -382,6 +382,26 @@ async fn a_launch_line_without_a_route_from_an_older_client_uses_the_gateway_rou
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_approved_from_an_older_client_launch_without_a_route_is_saved_with_the_gateway_route()
+ {
+    let agent = TestAgent::start(limits()).await;
+    let current = Request::Launch(agent.new_link(None)).to_string();
+    assert!(current.contains(" route=saved"), "{current}");
+    let old_line = current.replace(" route=saved", "");
+    let old: Request = old_line.parse().unwrap();
+    assert_eq!(old.to_string(), old_line);
+    let Request::Launch(old) = old else {
+        panic!("{old_line}")
+    };
+    let (echo, token) = agent.asks(old).await;
+    assert!(!echo.iter().any(|line| line.starts_with("route:")));
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Gateway);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_gateway_approved_from_a_gateway_link_is_saved_with_the_gateway_route() {
     let agent = TestAgent::start(limits()).await;
     let request = agent.new_link(None).with_route("gateway").unwrap();
