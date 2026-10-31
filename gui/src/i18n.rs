@@ -448,7 +448,7 @@ fn chinese_notice(confirmation: &Confirmation) -> String {
     let traffic = match confirmation.route {
         Route::Gateway => {
             "隔離瀏覽器的所有流量：每個連線都會經過閘道。\
-             此閘道將以閘道路由儲存"
+             此閘道將以閘道路由（應用程式中的「全部」）儲存"
         }
         Route::Mixed => {
             "轉送給它的流量。警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
@@ -691,8 +691,8 @@ mod tests {
                     !mixed,
                 ),
                 (
-                    "saved with the gateway route",
-                    "此閘道將以閘道路由儲存",
+                    "saved with the gateway route (All in the app)",
+                    "此閘道將以閘道路由（應用程式中的「全部」）儲存",
                     !mixed,
                 ),
             ] {
@@ -716,6 +716,16 @@ mod tests {
              警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
              這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
              此閘道將以混合路由儲存，之後未指定路由的連結也會使用此路由。\
+             只有在您信任營運此閘道的組織時才允許。"
+        );
+        assert_eq!(
+            chinese_notice(&confirmations()[0]),
+            "有網站要求將閘道「newco」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+             閘道：proxy.newco.example:443\n\
+             入口網站：無\n\n\
+             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及隔離瀏覽器的所有流量：\
+             每個連線都會經過閘道。此閘道將以閘道路由（應用程式中的「全部」）儲存，\
+             之後未指定路由的連結也會使用此路由。\
              只有在您信任營運此閘道的組織時才允許。"
         );
     }

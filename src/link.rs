@@ -375,12 +375,14 @@ impl Confirmation {
         };
         let traffic = match self.route {
             Route::Gateway => {
-                "all traffic of the isolated browser: every connection goes through the gateway"
+                "all traffic of the isolated browser: every connection goes through the gateway. \
+                 The gateway is saved with the gateway route (All in the app)"
             }
             Route::Mixed => {
                 "the traffic routed to it. Warning: in mixed mode, sites may be reached directly \
                  instead of through the gateway, which exposes your local DNS lookups and your IP \
-                 address to them and bypasses the gateway's policy"
+                 address to them and bypasses the gateway's policy. The gateway is saved with \
+                 the mixed route"
             }
         };
         format!(
@@ -388,12 +390,11 @@ impl Confirmation {
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
-             {IDENTITY} and {traffic}. The gateway is saved with the {} route, which later \
-             links without a route also use. Allow it {TRUST}",
+             {IDENTITY} and {traffic}, which later links without a route also use. Allow it \
+             {TRUST}",
             self.profile,
             self.gateway,
             self.portal_origin(),
-            self.route
         )
     }
 }
@@ -1645,8 +1646,8 @@ mod tests {
              Portal: https://portal.newco.example\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
              installed) and all traffic of the isolated browser: every connection goes \
-             through the gateway. The gateway is saved with the gateway route, which later \
-             links without a route also use. Allow it only if you trust the organisation that \
+             through the gateway. The gateway is saved with the gateway route (All in the \
+             app), which later links without a route also use. Allow it only if you trust the organisation that \
              runs this gateway."
         );
         let text = confirmation().message();
