@@ -110,7 +110,7 @@ fuzz_target!(|data: &[u8]| {
             .unwrap_or_else(|| request.portal.clone());
         if let Some(add) = &launch.add {
             assert_eq!(decision, Decision::Approve);
-            assert_eq!(add.route, Route::Gateway);
+            assert_eq!(add.route, launch.route);
         }
         if let Some(start) = &launch.start_page {
             let portal = portal.expect("a start page needs a portal");

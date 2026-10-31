@@ -373,22 +373,27 @@ impl Confirmation {
         } else {
             String::new()
         };
-        let (traffic, saved) = match self.route {
-            Route::Gateway => ("all traffic of the isolated browser", ""),
-            Route::Mixed => (
-                "traffic routed to it in mixed mode. Other connections use your network directly, exposing your IP address and local DNS lookups",
-                " Only this session uses mixed mode; the gateway is saved with the gateway route.",
-            ),
+        let traffic = match self.route {
+            Route::Gateway => {
+                "all traffic of the isolated browser: every connection goes through the gateway"
+            }
+            Route::Mixed => {
+                "the traffic routed to it. Warning: in mixed mode, sites may be reached directly \
+                 instead of through the gateway, which exposes your local DNS lookups and your IP \
+                 address to them and bypasses the gateway's policy"
+            }
         };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
              session through it.\n\n\
              Gateway: {}{local}\n\
              Portal: {}\n\n\
-             {IDENTITY} and {traffic}.{saved} Allow it {TRUST}",
+             {IDENTITY} and {traffic}. The gateway is saved with the {} route, which later \
+             links without a route also use. Allow it {TRUST}",
             self.profile,
             self.gateway,
-            self.portal_origin()
+            self.portal_origin(),
+            self.route
         )
     }
 }
@@ -648,7 +653,7 @@ pub fn resolve(
                 address: gateway.clone(),
                 portal_url: link.portal.clone(),
                 approved_at: Some(now),
-                route: Route::Gateway,
+                route,
             }),
         })),
     }
@@ -1057,7 +1062,12 @@ mod tests {
         };
         assert_eq!(
             resolve(&request, &all, &mut Decision::Defer, NOW),
-            Ok(super::tests::launch(generated.as_str(), None))
+            Ok(Resolution::Launch(Launch {
+                route: Route::Mixed,
+                profile: generated,
+                start_page: None,
+                add: None,
+            }))
         );
     }
 
@@ -1288,7 +1298,11 @@ mod tests {
         };
         assert_eq!(mixed.route, Route::Mixed);
         assert!(mixed.message().contains("mixed mode"));
-        assert!(mixed.message().contains("IP address and local DNS"));
+        assert!(
+            mixed
+                .message()
+                .contains("local DNS lookups and your IP address")
+        );
         assert!(mixed.echoed_by(&mixed.echo()));
         assert!(!mixed.echoed_by(&confirmation().echo()));
         assert!(!confirmation().echoed_by(&mixed.echo()));
@@ -1324,23 +1338,45 @@ mod tests {
     }
 
     #[test]
-    fn a_gateway_approved_from_a_mixed_link_is_saved_with_the_gateway_route() {
-        let request = new_link(None).with_route("mixed").unwrap();
-        let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
-        assert_eq!(asked[0].route, Route::Mixed);
-        let Ok(Resolution::Launch(launch)) = resolution else {
-            panic!("not a launch")
+    fn a_gateway_approved_from_a_link_is_saved_with_its_route_or_mixed() {
+        for (route, expected) in [
+            (None, Route::Mixed),
+            (Some("gateway"), Route::Gateway),
+            (Some("mixed"), Route::Mixed),
+        ] {
+            let mut request = new_link(None);
+            if let Some(route) = route {
+                request = request.with_route(route).unwrap();
+            }
+            let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
+            assert_eq!(asked[0].route, expected, "{route:?}");
+            let Ok(Resolution::Launch(launch)) = resolution else {
+                panic!("{route:?}: not a launch")
+            };
+            assert_eq!(launch.route, expected, "{route:?}");
+            assert_eq!(launch.add.unwrap().route, expected, "{route:?}");
+        }
+    }
+
+    #[test]
+    fn a_mixed_confirmation_warns_that_sites_may_bypass_the_gateway() {
+        let mixed = Confirmation {
+            route: Route::Mixed,
+            ..confirmation()
         };
-        assert_eq!(launch.route, Route::Mixed);
-        assert_eq!(launch.add.unwrap().route, Route::Gateway);
-        let message = asked[0].message();
-        assert!(
-            message.contains(
-                "Only this session uses mixed mode; the gateway is saved with the gateway route."
-            ),
-            "{message}"
+        assert_eq!(
+            mixed.message(),
+            "A website asks to add the gateway \"newco\" to Gateinto and to open a browser \
+             session through it.\n\n\
+             Gateway: proxy.newco.example:443\n\
+             Portal: https://portal.newco.example\n\n\
+             The gateway will see this device's identity (its client certificate, if one is \
+             installed) and the traffic routed to it. Warning: in mixed mode, sites may be \
+             reached directly instead of through the gateway, which exposes your local DNS \
+             lookups and your IP address to them and bypasses the gateway's policy. The \
+             gateway is saved with the mixed route, which later links without a route also \
+             use. Allow it only if you trust the organisation that runs this gateway."
         );
-        assert!(!confirmation().message().contains("saved"));
     }
 
     #[test]
@@ -1376,7 +1412,7 @@ mod tests {
                         address: "proxy.newco.example:443".parse().unwrap(),
                         portal_url: Some("https://portal.newco.example/home".parse().unwrap()),
                         approved_at: Some(NOW),
-                        route: Route::Gateway,
+                        route: Route::Mixed,
                     }),
                 }))
             );
@@ -1608,8 +1644,10 @@ mod tests {
              Gateway: proxy.newco.example:443\n\
              Portal: https://portal.newco.example\n\n\
              The gateway will see this device's identity (its client certificate, if one is \
-             installed) and all traffic of the isolated browser. Allow it only if you trust \
-             the organisation that runs this gateway."
+             installed) and all traffic of the isolated browser: every connection goes \
+             through the gateway. The gateway is saved with the gateway route, which later \
+             links without a route also use. Allow it only if you trust the organisation that \
+             runs this gateway."
         );
         let text = confirmation().message();
         assert!(text.contains(&format!("{IDENTITY} and ")), "{text}");

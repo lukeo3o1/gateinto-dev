@@ -452,7 +452,7 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
         .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
     let stored = std::fs::read_to_string(&file).unwrap();
     assert!(!stored.contains("portal_url"));
-    assert!(stored.contains("\nroute = \"gateway\"\n"), "{stored}");
+    assert!(stored.contains("\nroute = \"mixed\"\n"), "{stored}");
     assert!(stored.contains(generated.as_str()));
     launcher.run(&["stop"]).await.success();
     let request = request.with_route("gateway").unwrap();
@@ -1297,7 +1297,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
         .await;
     assert_eq!(
         output.success().stdout,
-        format!("newco: {gateway}, portal https://portal.newco.example, route gateway (linked)\n")
+        format!("newco: {gateway}, portal https://portal.newco.example, route mixed (linked)\n")
     );
 }
 
