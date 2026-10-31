@@ -118,7 +118,14 @@ fn address_line(gateway: &KnownGateway) -> String {
 pub fn gateway_lines(known: &[KnownGateway]) -> Vec<String> {
     known
         .iter()
-        .map(|gateway| format!("{} ({})", address_line(gateway), gateway.source))
+        .map(|gateway| {
+            format!(
+                "{}, route {} ({})",
+                address_line(gateway),
+                gateway.route,
+                gateway.source
+            )
+        })
         .collect()
 }
 
@@ -134,8 +141,9 @@ pub fn gateway_list(known: &[KnownGateway]) -> Vec<String> {
                 ),
             };
             format!(
-                "{}, portal {portal} ({})",
+                "{}, portal {portal}, route {} ({})",
                 address_line(gateway),
+                gateway.route,
                 gateway.source
             )
         })
@@ -351,7 +359,7 @@ mod tests {
     fn known_gateways() -> Vec<KnownGateway> {
         let file = ConfigFile::parse(
             "[gateways.office]\nhost = \"proxy.example.com\"\nport = 443\nca_file = \"ca.pem\"\n\
-             [gateways.lab]\nhost = \"10.0.0.1\"\nport = 8443\n\
+             [gateways.lab]\nhost = \"10.0.0.1\"\nport = 8443\nroute = \"mixed\"\n\
              portal_url = \"https://portal.example.com/?token=secret\"\n\
              [gateways.broken]\nhost = \"x.example.com\"\n\
              [gateways.v6]\nhost = \"::1\"\nport = 443\n",
@@ -366,21 +374,21 @@ mod tests {
                     .unwrap(),
             ),
             approved_at: Some(1),
-            route: crate::proxy::Route::Gateway,
+            route: crate::proxy::Route::Mixed,
         };
         link::known_gateways(&file, &[linked])
     }
 
     #[test]
-    fn gateways_are_listed_with_host_port_and_source_only() {
+    fn gateways_are_listed_with_host_port_route_and_source_only() {
         assert_eq!(
             gateway_lines(&known_gateways()),
             vec![
-                "broken: no upstream host:port (config)",
-                "lab: 10.0.0.1:8443 (config)",
-                "office: proxy.example.com:443 (config)",
-                "v6: [::1]:443 (config)",
-                "newco: proxy.newco.example:8443 (linked)",
+                "broken: no upstream host:port, route gateway (config)",
+                "lab: 10.0.0.1:8443, route mixed (config)",
+                "office: proxy.example.com:443, route gateway (config)",
+                "v6: [::1]:443, route gateway (config)",
+                "newco: proxy.newco.example:8443, route mixed (linked)",
             ]
         );
     }
@@ -390,11 +398,11 @@ mod tests {
         assert_eq!(
             gateway_list(&known_gateways()),
             vec![
-                "broken: no upstream host:port, portal none (config)",
-                "lab: 10.0.0.1:8443, portal https://portal.example.com (config)",
-                "office: proxy.example.com:443, portal none (config)",
-                "v6: [::1]:443, portal none (config)",
-                "newco: proxy.newco.example:8443, portal https://portal.newco.example:444 (linked)",
+                "broken: no upstream host:port, portal none, route gateway (config)",
+                "lab: 10.0.0.1:8443, portal https://portal.example.com, route mixed (config)",
+                "office: proxy.example.com:443, portal none, route gateway (config)",
+                "v6: [::1]:443, portal none, route gateway (config)",
+                "newco: proxy.newco.example:8443, portal https://portal.newco.example:444, route mixed (linked)",
             ]
         );
     }

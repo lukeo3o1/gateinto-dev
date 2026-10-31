@@ -1292,7 +1292,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
         .await;
     assert_eq!(
         output.success().stdout,
-        format!("newco: {gateway}, portal https://portal.newco.example (linked)\n")
+        format!("newco: {gateway}, portal https://portal.newco.example, route gateway (linked)\n")
     );
 }
 
