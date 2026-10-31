@@ -212,9 +212,23 @@ pub fn source(
     if demo {
         return FROM_CONFIG;
     }
-    match config.path(default) {
-        Some(path) if exists(&path) => FROM_CONFIG,
-        _ => BUILT_IN,
+    match config {
+        Config::Reported(ConfigSource::File(_)) => FROM_CONFIG,
+        Config::Reported(ConfigSource::Defaults) => BUILT_IN,
+        Config::Unreported => match default() {
+            Some(path) if exists(&path) => FROM_CONFIG,
+            _ => BUILT_IN,
+        },
+    }
+}
+
+pub fn editable(
+    config: Option<&Config>,
+    default: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    match config {
+        Some(Config::Reported(ConfigSource::File(path))) => Some(path.clone()),
+        _ => default(),
     }
 }
 
@@ -808,6 +822,8 @@ mod tests {
             super::source(false, config, || Some(default.clone()), |_| exists)
         };
         assert_eq!(source(&file(other), true), FROM_CONFIG);
+        assert_eq!(source(&file(other), false), FROM_CONFIG);
+        assert_eq!(source(&file(&default), false), FROM_CONFIG);
         assert_eq!(source(&Config::Unreported, true), FROM_CONFIG);
         assert_eq!(source(&Config::Unreported, false), BUILT_IN);
         assert_eq!(
@@ -860,6 +876,33 @@ mod tests {
         assert_eq!(
             opened(Some(PathBuf::from("gateinto.toml")), never, |_: &Path| true),
             None
+        );
+    }
+
+    #[test]
+    fn open_config_targets_the_default_path_unless_the_agent_loaded_another_file() {
+        let default = PathBuf::from("/users/me/appdata/Gateinto/gateinto.toml");
+        let ours = || Some(default.clone());
+        let other = Path::new("/srv/gateinto/agent.toml");
+        assert_eq!(editable(None, ours), Some(default.clone()));
+        assert_eq!(
+            editable(Some(&Config::Unreported), ours),
+            Some(default.clone())
+        );
+        let defaults = Config::Reported(ConfigSource::Defaults);
+        assert_eq!(editable(Some(&defaults), ours), Some(default.clone()));
+        assert_eq!(
+            editable(Some(&file(other)), || panic!("read the default")),
+            Some(other.to_owned())
+        );
+        let folder = default.parent().unwrap();
+        assert_eq!(
+            opened(editable(Some(&defaults), ours), |_| false, |p| p == folder),
+            Some(folder.to_owned())
+        );
+        assert_eq!(
+            opened(editable(Some(&defaults), ours), |p| p == default, |_| true),
+            Some(default.clone())
         );
     }
 

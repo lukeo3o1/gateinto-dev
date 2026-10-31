@@ -336,17 +336,19 @@ The full protocol, limits and guarantees are in
   agent replaces the default path; `none` means no file; a stopped or
   unreachable agent, an error such as `invalid request` from an older agent,
   or any other answer leaves the default path in use. Gateways, agent
-  settings, the device key name, the add-gateway name check and Open config
-  file use that path. Settings shows the path, with a fixed note when it is
-  not the default one. When the agent loaded no file, it shows the default
-  path with "not created yet", or "restart the agent to use it" when a file
-  exists there now. The agent card says "From the config file" when the
-  values come from an existing file and "Built-in defaults" otherwise. The
-  GUI only reads the file and opens it in the system's editor on request;
-  when the file is missing, Open config file opens its folder in Explorer
-  if the folder exists, and shows a fixed failure message otherwise. It
-  never creates or writes the file. This is unit-tested but has not been
-  tried on a real Windows desktop.
+  settings, the device key name and the add-gateway name check use that path.
+  Open config file uses the file the agent reported, and the default path in
+  every other case, including when the agent loaded no file. Settings shows
+  the path, with a fixed note when it is not the default one. When the agent
+  loaded no file, it shows the default path with "not created yet", or
+  "restart the agent to use it" when a file exists there now. The agent card
+  says "From the config file" when the agent reports a file, "Built-in
+  defaults" when it reports none, and, while it reports nothing, "From the
+  config file" only if the default file exists. The GUI only reads the file
+  and opens it in the system's editor on request; when the file is missing,
+  Open config file opens its folder in Explorer if the folder exists, and
+  shows a fixed failure message otherwise. It never creates or writes the
+  file. This is unit-tested but has not been tried on a real Windows desktop.
 - Settings shows whether the agent starts at sign-in, read-only. On Windows
   `gui/src/win/run.rs` reads, with `RegGetValueW` and no expansion, the
   installer's `Gateinto` value in

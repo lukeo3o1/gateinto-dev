@@ -1082,7 +1082,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 });
                 return;
             }
-            let path = with_app(hwnd, |app| app.config_path()).flatten();
+            let path = with_app(hwnd, |app| {
+                settings::editable(app.update.as_ref().map(|u| &u.config), config::default_path)
+            })
+            .flatten();
             let opened = settings::opened(path, Path::is_file, Path::is_dir)
                 .is_some_and(|target| sys::open_file(hwnd, &target));
             if !opened {
