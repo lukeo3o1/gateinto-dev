@@ -144,15 +144,20 @@ meant to protect, against whom, and what it does not protect.
   direct connections, which bypass gateway policy. DNS/IP matching is a
   heuristic: a service on another IP may go direct, and a shared gateway IP
   may send unrelated traffic through it. Only that new session is affected;
-  the stored gateway and other browser sessions are unchanged. A gateway
-  approved from a mixed link is still saved with the gateway route, so no
-  link can make mixed a gateway's default.
+  the stored gateway and other browser sessions are unchanged.
+- Mixed routing is the default: a gateway without a saved `route`, including
+  one approved from a link that names no route, starts mixed sessions, so
+  sites that share no IP with the gateway see the user's local DNS lookups
+  and source IP and bypass gateway policy unless the gateway is set to the
+  strict `gateway` route ("All" in the GUI). A link approved for a new
+  gateway saves its route; the confirmation names it and warns about mixed
+  mode, but a user can approve without reading it.
 - A website can open up to 5 browser windows a minute (4 at a time) on
   configured gateways' portals, each with a proxy credential prompt that a
   user might mistake for a real login.
 - A user can be talked into approving a hostile gateway from a link
   (phishing). That gateway then sees hosts routed through it (every CONNECT
-  by default), can block or misroute those connections and chooses the start page,
+  with the `gateway` route), can block or misroute those connections and chooses the start page,
   where it can phish credentials. It cannot read end-to-end HTTPS content and
   gets a new, empty browser profile.
 - The confirmation stops accidental approval, not a user who is persuaded:

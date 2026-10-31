@@ -176,7 +176,7 @@ Output (example):
 
 ```text
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443, route gateway (config)
+gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: none (no directory at C:\Users\me\AppData\Roaming\Gateinto\gateways)
 key-name: gateinto-device-v1
 device-key: created
@@ -231,16 +231,16 @@ device-key: present
 provider: Microsoft Platform Crypto Provider
 spki-sha256: 3f0c…
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443, route gateway (config)
+gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: C:\Users\me\AppData\Roaming\Gateinto\gateways
-gateway: corp: proxy.corp.example:443, route gateway (linked)
+gateway: corp: proxy.corp.example:443, route mixed (linked)
 agent: running
 session: 2 browser office 127.0.0.1:50123
 uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1"
 ```
 
 `device-key` is `present`, `absent`, `unavailable` (not Windows) or `error: …`. Gateways show
-only name, host, port, default route (`gateway` or `mixed`) and source (`config` or `linked`); CA files, certificate files, portal
+only name, host, port, default route (`mixed`, the default, or `gateway`) and source (`config` or `linked`); CA files, certificate files, portal
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
 its path or query. Sessions come from the running agent, the same lines as `gateinto session list`.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.

@@ -5,7 +5,7 @@ what does not exist.
 
 ## Data path
 
-The default `gateway` route follows this path:
+The `gateway` route ("All" in the GUI) follows this path:
 
 ```text
  client (browser, curl, ...)
@@ -41,11 +41,12 @@ connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
 
 Each gateway has a saved default route (`KnownGateway::route`), read from
-`route` in its configuration section or linked gateway file and `gateway`
-when missing. `link::resolve` gives a new session the launch's `route` if it
-names one, otherwise the saved default. A launch URI's `route` applies only to
-its new browser session, and a gateway approved from a link is stored with
-`route = "gateway"` whatever the link asked for.
+`route` in its configuration section or linked gateway file and `mixed`
+when missing (`proxy::Route::default`). `link::resolve` gives a new session
+the launch's `route` if it names one, otherwise the saved default. A launch
+URI's `route` applies only to its new browser session; a gateway approved
+from a link is stored with the route the link named, or `mixed` when it named
+none.
 `proxy::routing` resolves target and gateway concurrently, selects gateway on
 missing/error answers or a canonical IP intersection, and otherwise tries TCP
 to the resolved target addresses. Discovery and direct TCP share half the

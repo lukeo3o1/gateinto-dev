@@ -40,22 +40,27 @@ gateinto://connect?profile=office
 
 ## Session routing
 
-Every gateway has a saved default route: `gateway` unless its `route` key
-in the configuration file or in its linked gateway file is `mixed`. A missing
-`route` key means `gateway`. The route of a new browser session is, in this
-order:
+**Mixed is the default route. In mixed mode sites may be reached directly
+instead of through the gateway, which exposes your local DNS lookups and
+your source IP address to them and bypasses the gateway's policy.** The
+strict option is the `gateway` route ("All" in the GUI): every CONNECT goes
+through the gateway.
+
+Every gateway has a saved default route: `mixed` unless its `route` key in
+the configuration file or in its linked gateway file is `gateway`. A missing
+`route` key means `mixed`, also in files written before the key existed. The
+route of a new browser session is, in this order:
 
 1. the `route` of the link (`gateway` or `mixed`), for that session only;
 2. otherwise the gateway's saved default;
-3. otherwise `gateway`.
+3. otherwise `mixed`.
 
-With the `gateway` route every CONNECT goes through that gateway.
-`route=mixed` opts only the new browser session into mixed routing, and
-`route=gateway` keeps a gateway saved as `mixed` on the gateway route for
-that session:
+`route=gateway` keeps only the new browser session on the gateway route, and
+`route=mixed` opts a gateway saved as `gateway` into mixed routing for that
+session:
 
 ```text
-gateinto://connect?profile=office&route=mixed
+gateinto://connect?profile=office&route=gateway
 ```
 
 Mixed routing resolves the target and gateway locally. No target addresses,
@@ -87,14 +92,18 @@ certificate apply only to connections through the gateway.
 
 A link's `route` is never written to the configuration file or to a linked
 gateway file; a subsequent link without `route` uses the saved default again.
-Other browser sessions are unchanged. A gateway approved from a link is
-always saved with `route = "gateway"`, even when the link has `route=mixed`
-and its own session runs in mixed mode, so no link can make `mixed` a saved
-default; that takes a local edit of the configuration file or of the linked
-gateway file. A known gateway requires no new prompt for mixed mode. The
-first-time gateway confirmation discloses mixed routing when the session
-uses it, says that the gateway is saved with the gateway route, and binds
-the confirmation token to that request.
+Other browser sessions are unchanged. The one exception is the approval of
+a new gateway: it is saved with the route its link names, or with `mixed`
+when the link names none, and that route is also the route of its first
+session. Changing the saved route of a known gateway takes a local edit of
+the configuration file or of the linked gateway file, or removing the
+gateway and adding it again. A known gateway requires no new prompt for
+mixed mode. The first-time gateway confirmation names the route the gateway
+is saved with and binds the confirmation token to that request. For `mixed`
+it warns that sites may be reached directly instead of through the gateway,
+exposing local DNS lookups and the IP address and bypassing the gateway's
+policy; for `gateway` it says that every connection goes through the
+gateway.
 
 Mixed launches report `route: mixed`, also when the route comes from the
 saved default; `session list` and `status` append `route=mixed` to that
@@ -103,8 +112,8 @@ session's line. Gateway-mode session output keeps its existing form.
 default as `route gateway` or `route mixed`. Canonical URI and IPC output
 carry `route=` only when the link named one, so a link without `route` still
 means "use the saved default" after it is passed on. Clients that send no
-route, including older ones, get the saved default: a gateway saved as
-`mixed` starts mixed sessions for them. Older agents reject gateway-only
+route, including older ones and the GUI's Launch, get the saved default: a
+gateway without a saved route starts mixed sessions for them. Older agents reject gateway-only
 launches, `route=mixed` and `route=gateway` rather than silently selecting a
 different gateway or mode. After upgrading, run `gateinto stop`
 to close old sessions and restart the agent on the next launch.
@@ -165,7 +174,7 @@ Fields:
 | --- | --- | --- |
 | `profile` | unless `gateway` is present | Gateway name: 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`, not starting with `-`. Case-sensitive. |
 | `auth` | no | `session_credentials`, the only value. Browser sessions always offer it, and on Windows they offer `os_user` too. Default `session_credentials`. The removed `basic_tofu` is refused with an error naming `session_credentials`. |
-| `route` | no | `gateway` or `mixed`; applies only to this browser session. Without it the gateway's saved default applies, as described above. |
+| `route` | no | `gateway` or `mixed`; applies only to this browser session, and for a new gateway also becomes its saved route. Without it the gateway's saved default applies (`mixed` unless saved as `gateway`), as described above. |
 | `v` | no | `1`, the format version. Default `1`. |
 | `url` | no | Start page for this launch: an `https://` URL that passes the `portal_url` checks of the configuration file (at most 2048 characters, a host, no user information, no spaces, quotes, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`) and whose host is a DNS name or an IP address (below). It must have the same origin (scheme, host, port; port 443 when omitted) as the gateway's portal. |
 | `gateway` | unless `profile` is present | `host[:port]` of the gateway's HTTPS proxy, port 443 by default. The host is a DNS name (labels of 1 to 63 letters, digits and `-`, not starting or ending with `-`, at most 253 characters, the last label starting with a letter, no trailing dot; stored in lowercase), an IPv4 address in dotted decimal, or an IPv6 address in brackets without a zone. The port is 1 to 65535 in decimal. No user information, path, query, fragment, wildcard or whitespace. |
@@ -310,11 +319,13 @@ linked entry is ignored.
   coaches the user ("press Tab, then Enter") remains a social-engineering
   risk. The text names the profile, the gateway
   `host:port` and the portal origin (or `none`), warns that the gateway will see this
-  device's identity and the traffic routed to it (all CONNECT traffic by default), so the user
-  should allow it only if they trust the organisation that runs it. Mixed
-  requests additionally disclose direct connections, source IP and local DNS,
-  and say that only this session uses mixed mode while the gateway is saved
-  with the gateway route.
+  device's identity and the traffic routed to it, names the route the
+  gateway is saved with, and says the user should allow it only if they
+  trust the organisation that runs it. For the `gateway` route it says that
+  every connection of the isolated browser goes through the gateway; for
+  `mixed` it warns that sites may be reached directly instead of through the
+  gateway, which exposes local DNS lookups and the IP address to them and
+  bypasses the gateway's policy.
   The text ends
   with `Choose OK to allow this gateway, or Cancel to refuse.`
 - Otherwise, with a terminal on standard input and standard error, the same
@@ -362,8 +373,9 @@ linked entry is ignored.
   (`gateway` or `mixed`, the saved default route), and nothing else.
   A missing portal is omitted rather than replaced with an inferred URL.
   Existing files containing `portal_url` remain valid. A missing `route`
-  means `gateway`; any other value makes the file invalid, disabling only
-  its own entry. An approval always writes `route = "gateway"`.
+  means `mixed`; any other value makes the file invalid, disabling only
+  its own entry. An approval writes the route of its link, or
+  `route = "mixed"` when the link named none.
 - The directory is created owner-only (`0700` on Unix). If it is a link, a
   reparse point or not a directory, it is refused: launches of gateways that
   are not in the configuration file fail, and `gateinto status` reports
@@ -518,7 +530,8 @@ Mixed launches and their first-time confirmations also include `route: mixed`.
 Without `route=` the agent uses the gateway's saved default; with it, the
 named route applies to that session only.
 The token retains the optional selector, portal and route through approval;
-only the gateway entry, optional portal and `route = "gateway"` are stored. Profile-based launches
+only the gateway entry, optional portal and the route (the link's, or
+`mixed`) are stored. Profile-based launches
 retain their previous wire format. Gateway-only launches use
 `launch session_credentials gateway=<host:port>` with no profile placeholder or
 generated name in the request. A legacy profile named `session_credentials`

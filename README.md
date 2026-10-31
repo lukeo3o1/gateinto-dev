@@ -369,9 +369,14 @@ The format, its limits and everything it can never do are specified in
 - `url` must have exactly the origin (https, host, port) of the gateway's
   portal and applies to that launch only; a gateway without a portal refuses
   it.
-- Routing defaults to `gateway`: every CONNECT goes through the gateway.
-  Each gateway has a saved default route, `gateway` unless its `route` in the
-  configuration file or its gateway file says `mixed`. A link without `route`
+- **Browser sessions default to `mixed` routing, which may reach sites
+  directly instead of through the gateway: that exposes your local DNS
+  lookups and your source IP address to those sites and bypasses the
+  gateway's policy.** The strict option is `gateway` ("All" in the GUI):
+  every CONNECT goes through the gateway.
+  Each gateway has a saved default route, `mixed` unless its `route` in the
+  configuration file or its gateway file says `gateway`; gateways already on
+  disk without `route` are `mixed` too. A link without `route`
   uses that saved default; `route=gateway` or `route=mixed` applies to only
   that new browser session and changes nothing saved. In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
@@ -380,9 +385,9 @@ The format, its limits and everything it can never do are specified in
   switch routes. DNS and direct opening get at most half the existing total
   opening deadline. This heuristic can misclassify services with different or
   shared IPs; mixed mode exposes local DNS and the user's source IP and can
-  bypass gateway policy. A gateway added from a link is always saved with the
-  `gateway` route, even when the link asks for `mixed`, so no link can make
-  `mixed` a saved default. See
+  bypass gateway policy. A gateway added from a link is saved with the route
+  the link names, or with `mixed` when it names none; the confirmation names
+  that route and, for `mixed`, warns about the exposure. See
   [session routing](docs/protocol/launch-uri.md#session-routing).
 - System DNS work is limited to 64 queued or running lookups per process,
   shared by discovery and gateway connections. Timeouts do not release a
@@ -396,11 +401,15 @@ The format, its limits and everything it can never do are specified in
   matches canonical host and port without DNS and refuses ambiguous profiles.
   Known trust settings and portals are never changed. A new gateway needs
   approval first: a Windows dialog naming the internal or explicit profile,
-  gateway and portal origin (or `none`), with Cancel as the
-  default button (a `yes` prompt on a terminal elsewhere; no desktop or
-  terminal means refusal). On approval the gateway is stored in its own
+  gateway, portal origin (or `none`) and the route it is saved with, with
+  Cancel as the default button (a `yes` prompt on a terminal elsewhere; no
+  desktop or terminal means refusal). For the `mixed` route the dialog warns
+  that sites may be reached directly instead of through the gateway, exposing
+  local DNS lookups and the IP address and bypassing the gateway's policy; for
+  the `gateway` route it says that all traffic goes through the gateway. On
+  approval the gateway is stored in its own
   file under `%APPDATA%\Gateinto\gateways\`, named after its address, with
-  its name, host, port and optional portal, and later links to it do not ask
+  its name, host, port, optional portal and route, and later links to it do not ask
   again. A damaged file there disables only its own gateway. It uses the default TLS
   settings: public roots, `hybrid_preferred`, `client_certificate =
   "optional"`. The configuration file is never written, and its gateways win
@@ -597,7 +606,7 @@ client_certificate = "optional"  # optional | required | off
 client_cert_file = "client.pem"
 self_signed_client_cert = false  # true: issue self-signed certificates instead of client_cert_file
 portal_url = "https://portal.example.invalid/"  # start page of browser sessions; https only
-route = "gateway"                # gateway | mixed: default route of its browser sessions
+route = "gateway"                # mixed (default) | gateway: default route of its browser sessions
 
 [browser]
 executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # default: Chrome, then Edge
@@ -657,12 +666,15 @@ Rules:
   of at most 2048 printable ASCII characters without spaces, quotes or
   backslashes. A launch URI cannot change it; a gateway added from a link
   brings its own portal, checked by the same rules.
-- `route` is `gateway` (the default) or `mixed`; any other value is an error
-  naming the gateway. It is the route of the gateway's browser sessions when
-  a launch does not choose one (see
-  [session routing](docs/protocol/launch-uri.md#session-routing)). `mixed`
-  exposes your local DNS lookups and source IP address to the sites reached
-  directly, and those connections bypass the gateway's policy.
+- `route` is `mixed` (the default, also when the key is missing) or
+  `gateway` (the strict option, "All" in the GUI); any other value is an
+  error naming the gateway. It is the route of the gateway's browser sessions
+  when a launch does not choose one (see
+  [session routing](docs/protocol/launch-uri.md#session-routing)).
+  **`mixed` may reach sites directly instead of through the gateway: that
+  exposes your local DNS lookups and source IP address to those sites, and
+  those connections bypass the gateway's policy.** Set `route = "gateway"`
+  when all traffic must go through the gateway.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.

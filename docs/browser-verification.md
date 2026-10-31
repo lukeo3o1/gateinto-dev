@@ -336,8 +336,9 @@ expectations above.
 
 Not verified with real Chrome or Edge. On an isolated test deployment:
 
-1. Launch a known profile without `route` and with `route=gateway`; verify
-   both send CONNECTs through the gateway.
+1. Set `route = "gateway"` on a configured profile. Launch it without
+   `route` and with `route=gateway`; verify both send CONNECTs through the
+   gateway.
 2. Launch the same profile with `route=mixed`. Verify a DNS target matching
    a gateway IP uses the gateway, a distinct public target connects directly,
    and missing local DNS answers use the gateway. Observe DNS and network
@@ -348,19 +349,23 @@ Not verified with real Chrome or Edge. On an isolated test deployment:
 4. Check `gateinto session list` and `gateinto status` identify only the mixed
    session with `route=mixed`. A subsequent link without a mode, the device
    session and any already-open session keep their original routes.
-5. Add an unknown gateway using a mixed link. Verify the confirmation
-   discloses direct connections and local DNS/IP exposure and says the
-   gateway is saved with the gateway route, and approval starts a mixed
-   session. Verify `gateinto gateway list` shows `route gateway` for it and a
-   subsequent mode-free link uses the gateway route.
+5. Add an unknown gateway using a link without `route`. Verify the
+   confirmation names the mixed route and warns that sites may be reached
+   directly instead of through the gateway, exposing local DNS lookups and
+   the IP address and bypassing the gateway's policy, and that approval
+   starts a mixed session. Verify `gateinto gateway list` shows
+   `route mixed` for it and a subsequent mode-free link uses mixed routing.
+   Forget it and add it again with `route=gateway`: the confirmation says
+   every connection goes through the gateway, `gateinto gateway list` shows
+   `route gateway` and a mode-free link uses the gateway route.
 
 Saved default route, manual and not executed:
 
-6. Set `route = "mixed"` on a configured gateway. Verify `gateinto status`
+6. Remove `route` from a configured gateway. Verify `gateinto status`
    and `gateinto gateway list` show `route mixed` for it, a link without
    `route` starts a mixed session (`route=mixed` in `gateinto session list`),
-   and a link with `route=gateway` starts a gateway session. Other gateways
-   keep `route gateway`.
+   and a link with `route=gateway` starts a gateway session. Gateways with
+   `route = "gateway"` keep `route gateway`.
 7. Set `route = "direct"` and verify the configuration is refused with an
    error naming the gateway. Put `route = "direct"` in a linked gateway file
    and verify only that gateway is reported as invalid.

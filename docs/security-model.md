@@ -12,11 +12,16 @@ item to its code, its tests and where they run.
 
 ### Routing scope
 
-All traffic received by a session uses the gateway by default. A gateway
-can be saved with `route = "mixed"` only by a local edit of the configuration
-file or its linked gateway file; a gateway approved from a link is always
-saved with the gateway route. A launch URI without `route` uses the saved
-default. A launch URI may opt its new browser session into `route=mixed` or
+**Browser sessions use mixed routing by default, which may reach sites
+directly instead of through the gateway: that exposes local DNS lookups and
+the user's source IP to those sites and bypasses gateway policy.** The strict
+option is the `gateway` route ("All" in the GUI), under which all traffic
+received by a session uses the gateway. A gateway's saved default route is
+`mixed` unless its configuration section or linked gateway file says
+`gateway`; a missing `route`, including in files written before the key
+existed, means `mixed`. A gateway approved from a link is saved with the
+route the link named, or `mixed` when it named none. A launch URI without
+`route` uses the saved default. A launch URI may opt its new browser session into `route=mixed` or
 `route=gateway` without changing any other session or saved gateway. Mixed routing is an IP heuristic, not a policy or
 scope guarantee: locally resolved target addresses matching any gateway IP,
 empty answers and DNS errors use the gateway; other targets try direct TCP.
@@ -39,12 +44,16 @@ connections bypass gateway authorization and inspection. Different service
 and gateway IPs or shared hosting can misclassify traffic. Any website can
 select mixed mode in a link for a known gateway; there is no additional
 routing confirmation or locally enforced gateway-only policy. The
-first-time gateway confirmation discloses mixed routing when requested and
-says that the gateway is saved with the gateway route. Clients that send no
-route, including older ones, get a gateway's saved default, so a gateway
-saved as `mixed` starts mixed sessions for them.
-Operators needing all traffic through the gateway must use gateway-mode
-links and must not treat this client as an enforcement boundary. Full rules
+first-time gateway confirmation names the route the gateway is saved with;
+for `mixed` it warns that sites may be reached directly instead of through
+the gateway, exposing local DNS lookups and the IP address and bypassing the
+gateway's policy, and for `gateway` it says that every connection goes
+through the gateway. Clients that send no route, including older ones and
+the GUI's Launch, get a gateway's saved default, so a gateway without a
+saved route starts mixed sessions for them.
+Operators needing all traffic through the gateway must save the gateway with
+`route = "gateway"` or use gateway-mode links, and must not treat this
+client as an enforcement boundary. Full rules
 are in [session routing](protocol/launch-uri.md#session-routing).
 
 The following upstream TLS protections apply to the gateway route. A direct
@@ -133,7 +142,7 @@ format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 What a launch URI can do, at most:
 
 - make the user's agent start a new browser session for a known gateway,
-  selecting default gateway routing or mixed routing, which opens Chrome or Edge with a new, empty profile on that gateway's
+  selecting mixed routing (the default) or gateway routing, which opens Chrome or Edge with a new, empty profile on that gateway's
   portal or on another page of the same origin;
 - for a gateway the device does not know, after the user approves it in a
   dialog that names it: store its host, port and optional portal, then do the above.

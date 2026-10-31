@@ -102,12 +102,15 @@ These are limits of the design, not open defects:
 
 ## Routing selection
 
-Gateway routing is the default. A gateway's saved default route is
-`gateway` unless the local configuration file or its linked gateway file says
-`mixed`; a gateway approved from a link is always saved with the gateway
-route. A URI can choose a route for only its new browser session, which wins
-over the saved default; no extra prompt is required for a known gateway. This
-is not an enforced gateway policy. Direct connections expose source IP and
+Mixed routing is the default for browser sessions; `gateway` ("All" in the
+GUI) is the strict option. A gateway's saved default route is `mixed` unless
+the local configuration file or its linked gateway file says `gateway`; a
+missing `route` means `mixed`, also in files written before the key existed.
+A gateway approved from a link is saved with the route the link named, or
+`mixed` when it named none, and the confirmation names that route and warns
+about mixed mode. A URI can choose a route for only its new browser session,
+which wins over the saved default; no extra prompt is required for a known
+gateway. Neither route is an enforced gateway policy. Direct connections expose source IP and
 local DNS and bypass gateway authorization; IP matching is a heuristic.
 See [session routing](protocol/launch-uri.md#session-routing).
 
@@ -118,7 +121,7 @@ answers, overlapping/mapped addresses and a stalled resolver. Loopback
 `tests/mixed_routing.rs` covers direct relay, inner TLS, early data,
 half-close, fallback statuses, authentication, no replay and shutdown.
 `tests/launch.rs` covers the URI-to-binary-to-agent pipeline and concurrent
-session isolation; `tests/agent.rs` covers retention through approval while
-saving the gateway route; `tests/h2_connect.rs` covers mixed gateway routes sharing
+session isolation; `tests/agent.rs` covers retention through approval and
+saving the link's route; `tests/h2_connect.rs` covers mixed gateway routes sharing
 HTTP/2. These tests run in CI; real browser routing remains Manual in
 [browser-verification.md](browser-verification.md#mixed-routing-launch-links).
