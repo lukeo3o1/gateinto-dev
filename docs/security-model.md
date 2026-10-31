@@ -48,9 +48,18 @@ first-time gateway confirmation names the route the gateway is saved with;
 for `mixed` it warns that sites may be reached directly instead of through
 the gateway, exposing local DNS lookups and the IP address and bypassing the
 gateway's policy, and for `gateway` it says that every connection goes
-through the gateway. Clients that send no route, including older ones and
-the GUI's Launch, get a gateway's saved default, so a gateway without a
-saved route starts mixed sessions for them.
+through the gateway. `gateinto open` and the GUI's Launch ask for the
+gateway's saved default when the link names no route (`route=saved` on the
+IPC line), so a gateway without a saved route starts mixed sessions for
+them. An IPC launch line without a route, as older clients send it, keeps
+its old meaning and always uses the `gateway` route; an older agent refuses
+`route=saved` as an invalid launch request and starts nothing. An older
+agent also refuses a configuration file that contains `route` and disables
+a linked gateway file that contains it, so a downgrade fails closed rather
+than ignoring a saved route. `gateinto session browser` always uses the
+`gateway` route, whatever route the gateway is saved with, and a gateway
+added in the GUI's Add dialog is saved with the `gateway` route ("All")
+until the GUI offers a route choice.
 Operators needing all traffic through the gateway must save the gateway with
 `route = "gateway"` or use gateway-mode links, and must not treat this
 client as an enforcement boundary. Full rules

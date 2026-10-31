@@ -109,14 +109,40 @@ Mixed launches report `route: mixed`, also when the route comes from the
 saved default; `session list` and `status` append `route=mixed` to that
 session's line. Gateway-mode session output keeps its existing form.
 `gateinto status` and `gateinto gateway list` show each gateway's saved
-default as `route gateway` or `route mixed`. Canonical URI and IPC output
-carry `route=` only when the link named one, so a link without `route` still
-means "use the saved default" after it is passed on. Clients that send no
-route, including older ones and the GUI's Launch, get the saved default: a
-gateway without a saved route starts mixed sessions for them. Older agents reject gateway-only
-launches, `route=mixed` and `route=gateway` rather than silently selecting a
-different gateway or mode. After upgrading, run `gateinto stop`
-to close old sessions and restart the agent on the next launch.
+default as `route gateway` or `route mixed`. The canonical URI carries
+`route=` only when the link named one, so a link without `route` still
+means "use the saved default" after it is passed on.
+
+The IPC launch line encodes the route differently, so that a line from an
+older client keeps its old meaning: a line without a route word means the
+`gateway` route, `route=mixed` means mixed, and `route=saved` means the
+saved default of the gateway (`mixed` when none is saved, and for a new
+gateway). `gateinto open` and the GUI's Launch send `route=saved` when the
+link names no route. `gateinto session browser` is not affected by the saved
+route: it always uses the `gateway` route, also when the gateway is saved
+with `route = "mixed"`. A gateway added in the GUI's Add dialog is saved with
+the `gateway` route, shown as "All" in the app, until the GUI offers a route
+choice.
+
+Between older and newer clients and agents:
+
+- An older client with a newer agent: a launch without a route uses the
+  `gateway` route, whatever route the gateway is saved with, and a new
+  gateway approved from it is saved with the `gateway` route, or with `mixed`
+  when the link named `route=mixed`. The older client's confirmation does not
+  say which route the gateway is saved with.
+- A newer client with an older agent: a launch of a link without a route
+  sends `route=saved`, which the older agent refuses as an invalid launch
+  request; nothing starts and nothing is saved. Links with `route=gateway`
+  or `route=mixed` work as before.
+- Downgrading the agent: an older agent refuses a configuration file that
+  contains `route` and does not start; it disables a linked gateway file
+  that contains `route` and reports it as invalid, leaving the other
+  gateways usable. Remove the `route` lines to use such a gateway with an
+  older agent.
+
+After upgrading, run `gateinto stop` to close old sessions and restart the
+agent on the next launch.
 
 ## For gateway operators: writing links
 
@@ -222,7 +248,7 @@ Error messages say which rule was broken and never repeat the URI.
    command line parser.
 2. `gateinto open` parses the URI. An invalid URI ends here, before any
    process or file is touched.
-3. It sends `launch [<profile>] <auth> [route=<route>] [url=...] [gateway=...] [portal=...]` to
+3. It sends `launch [<profile>] <auth> [route=saved|mixed] [url=...] [gateway=...] [portal=...]` to
    the agent of the current user over a local IPC endpoint, starting the
    agent first if none is running (see [Agent and IPC](#agent-and-ipc)).
 4. The agent validates the request again, counts it against the launch rate
@@ -517,7 +543,7 @@ they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch [<profile>] session_credentials [route=gateway\|mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>` (the last two not on Windows when the browser is in a job and the session offers `os_user`); or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
+| `launch [<profile>] session_credentials [route=saved\|mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>` (the last two not on Windows when the browser is in a job and the session offers `os_user`); or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
 | `approve <token>` | as for a started `launch` |
 | `deny <token>` | none |
 | `list` | `session: <id> <device or browser> <gateway> <listen address>` per session, with ` route=mixed` appended for mixed sessions |
@@ -527,8 +553,10 @@ they never contain spaces or line breaks.
 | `config` | `config: <absolute path>` of the config file the agent loaded, or `config: none` when it runs without one; an agent whose path is not UTF-8 or contains a line break answers an error instead |
 
 Mixed launches and their first-time confirmations also include `route: mixed`.
-Without `route=` the agent uses the gateway's saved default; with it, the
-named route applies to that session only.
+Without a route word the session uses the `gateway` route; `route=mixed`
+uses mixed and `route=saved` the gateway's saved default. A route on the line
+applies to that session only; `route=gateway` is not canonical and is
+refused.
 The token retains the optional selector, portal and route through approval;
 only the gateway entry, optional portal and the route (the link's, or
 `mixed`) are stored. Profile-based launches
@@ -542,8 +570,8 @@ started `launch`, `approve` and `credentials`, never in an error, in `list` or
 in what the command line prints. `config` changes nothing and answers only
 the path, never the file's contents. An agent older than `config` answers it
 with `error: invalid request`. Canonical optional fields remain ordered
-`route`, `url`, `gateway`, `portal`. Older agents reject the new address-only
-form; stop the old agent after upgrading.
+`route`, `url`, `gateway`, `portal`. Older agents reject the new
+address-only form and `route=saved`; stop the old agent after upgrading.
 
 An error is the single line `error: <message>`. Line breaks inside a message
 are replaced by spaces. Answers are at most 64 KiB. The agent serves at most

@@ -387,7 +387,10 @@ The format, its limits and everything it can never do are specified in
   shared IPs; mixed mode exposes local DNS and the user's source IP and can
   bypass gateway policy. A gateway added from a link is saved with the route
   the link names, or with `mixed` when it names none; the confirmation names
-  that route and, for `mixed`, warns about the exposure. See
+  that route and, for `mixed`, warns about the exposure. A gateway added in
+  the GUI's Add dialog is saved with `gateway` ("All") until the GUI offers a
+  route choice, and `gateinto session browser` always uses the `gateway`
+  route. See
   [session routing](docs/protocol/launch-uri.md#session-routing).
 - System DNS work is limited to 64 queued or running lookups per process,
   shared by discovery and gateway connections. Timeouts do not release a
