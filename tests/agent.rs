@@ -46,6 +46,7 @@ impl Profiles for TestProfiles {
                 host: Some(plan.proxy.upstream.host.clone()),
                 port: Some(plan.proxy.upstream.port),
                 portal_url: portal.clone(),
+                route: gateinto::proxy::Route::Gateway,
                 source: Source::Config,
             });
         let linked = self.linked.lock().unwrap().clone();
@@ -54,6 +55,7 @@ impl Profiles for TestProfiles {
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
             portal_url: gateway.portal_url,
+            route: gateway.route,
             source: Source::Linked,
         });
         Ok(Known {
@@ -315,7 +317,7 @@ async fn tunnel_echoes(proxy: SocketAddr, lines: &[String]) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
+async fn a_gateway_approved_from_a_mixed_link_is_saved_with_the_mixed_route() {
     let agent = TestAgent::start(limits()).await;
     let request = agent.new_link(None).with_route("mixed").unwrap();
     let (echo, token) = agent.asks(request).await;
@@ -336,12 +338,85 @@ async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
         b"mixed approval"
     );
     assert!(agent._upstream.requests().is_empty());
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Mixed);
+    let (plain, plain_browser) = agent
+        .opened(Request::Launch(
+            LaunchRequest::new("newco", "session_credentials").unwrap(),
+        ))
+        .await;
+    assert_eq!(field(&plain, "route"), "mixed");
+    let (mut stream, response) = send(
+        plain_browser.proxy(),
+        &connect_with(&target.to_string(), Some(&session_auth(&plain))),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    stream.shutdown().await.unwrap();
+    assert!(read_to_end_within(&mut stream, WAIT).await.is_empty());
+    assert!(agent._upstream.requests().is_empty());
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_line_without_a_route_from_an_older_client_uses_the_gateway_route() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("mixed").unwrap();
+    let (_, token) = agent.asks(request).await;
+    let (_lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Mixed);
+    let old: Request = "launch newco session_credentials".parse().unwrap();
+    assert_eq!(old.to_string(), "launch newco session_credentials");
+    let (lines, browser) = agent.opened(old).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let (mut stream, response) = send(
+        browser.proxy(),
+        &connect_with(&target.to_string(), Some(&session_auth(&lines))),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    stream.shutdown().await.unwrap();
+    let _ = read_to_end_within(&mut stream, WAIT).await;
+    assert_eq!(agent._upstream.requests().len(), 1);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_approved_from_an_older_client_launch_without_a_route_is_saved_with_the_gateway_route()
+ {
+    let agent = TestAgent::start(limits()).await;
+    let current = Request::Launch(agent.new_link(None)).to_string();
+    assert!(current.contains(" route=saved"), "{current}");
+    let old_line = current.replace(" route=saved", "");
+    let old: Request = old_line.parse().unwrap();
+    assert_eq!(old.to_string(), old_line);
+    let Request::Launch(old) = old else {
+        panic!("{old_line}")
+    };
+    let (echo, token) = agent.asks(old).await;
+    assert!(!echo.iter().any(|line| line.starts_with("route:")));
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Gateway);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_approved_from_a_gateway_link_is_saved_with_the_gateway_route() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("gateway").unwrap();
+    let (echo, token) = agent.asks(request).await;
+    assert!(!echo.iter().any(|line| line.starts_with("route:")));
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Gateway);
     let (plain, plain_browser) = agent
         .opened(Request::Launch(
             LaunchRequest::new("newco", "session_credentials").unwrap(),
         ))
         .await;
     assert!(!plain.iter().any(|line| line.starts_with("route:")));
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
     let (mut stream, response) = send(
         plain_browser.proxy(),
         &connect_with(&target.to_string(), Some(&session_auth(&plain))),

@@ -440,7 +440,7 @@ impl Shared {
                 return reject(client, Status::GatewayTimeout, limits.reject_linger).await;
             }
             Ok(Err(error)) => {
-                warn!(%error, "upstream refused tunnel");
+                warn!(%target, %error, "upstream refused tunnel");
                 return reject(client, error.local_status(), limits.reject_linger).await;
             }
             Ok(Ok(opened)) => opened,

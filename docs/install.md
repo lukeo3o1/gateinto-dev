@@ -161,7 +161,7 @@ gateinto setup --config D:\gateinto.toml --backend software
    create a key for the wrong account. When run elevated, it notes on stderr that the key still
    belongs to the current Windows user, not to the machine;
 2. reads the config file, `--config` or the default `%APPDATA%\Gateinto\gateinto.toml`, and
-   prints its path and each gateway as `gateway: <name>: <host>:<port> (config)`, then the
+   prints its path and each gateway as `gateway: <name>: <host>:<port>, route <route> (config)`, then the
    gateways added from `gateinto://` links as `... (linked)`. A config that does not
    parse stops `setup` before any key is touched;
 3. does what `gateinto key init` does. It reuses an existing key named `[device_key] name`
@@ -176,7 +176,7 @@ Output (example):
 
 ```text
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443 (config)
+gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: none (no directory at C:\Users\me\AppData\Roaming\Gateinto\gateways)
 key-name: gateinto-device-v1
 device-key: created
@@ -212,7 +212,7 @@ this file.
 Gateways that the user approved from a `gateinto://` link are kept separately in
 the `gateways` folder next to it, one file per gateway (`%APPDATA%\Gateinto\gateways\proxy.corp.example.toml`), also when
 `--config` names another file. Gateinto writes only that file, never the config file; on a name
-collision the config file wins. `gateinto gateway list` shows every gateway with its source and
+collision the config file wins. `gateinto gateway list` shows every gateway with its default route and source and
 `gateinto gateway forget <name>` removes one added from a link. See
 [protocol/launch-uri.md](protocol/launch-uri.md#linked-gateways).
 
@@ -231,16 +231,16 @@ device-key: present
 provider: Microsoft Platform Crypto Provider
 spki-sha256: 3f0c…
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443 (config)
+gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: C:\Users\me\AppData\Roaming\Gateinto\gateways
-gateway: corp: proxy.corp.example:443 (linked)
+gateway: corp: proxy.corp.example:443, route mixed (linked)
 agent: running
 session: 2 browser office 127.0.0.1:50123
 uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1"
 ```
 
 `device-key` is `present`, `absent`, `unavailable` (not Windows) or `error: …`. Gateways show
-only name, host, port and source (`config` or `linked`); CA files, certificate files, portal
+only name, host, port, default route (`mixed`, the default, or `gateway`) and source (`config` or `linked`); CA files, certificate files, portal
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
 its path or query. Sessions come from the running agent, the same lines as `gateinto session list`.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.

@@ -9,7 +9,7 @@ use crate::proxy::Route;
 pub struct LaunchRequest {
     pub profile: Option<GatewayName>,
     pub auth: LaunchAuth,
-    pub route: Route,
+    pub route: Option<Route>,
     pub url: Option<PortalUrl>,
     pub gateway: Option<GatewayAddress>,
     pub portal: Option<PortalUrl>,
@@ -172,7 +172,7 @@ impl FromStr for LaunchRequest {
         if fields.version.is_some_and(|version| version != VERSION) {
             return Err(UriError::InvalidValue("v"));
         }
-        Self::from_fields(
+        let request = Self::from_fields(
             fields.profile.as_deref(),
             fields
                 .auth
@@ -181,8 +181,11 @@ impl FromStr for LaunchRequest {
             fields.url.as_deref(),
             fields.gateway.as_deref(),
             fields.portal.as_deref(),
-        )?
-        .with_route(fields.route.as_deref().unwrap_or("gateway"))
+        )?;
+        match fields.route {
+            Some(route) => request.with_route(&route),
+            None => Ok(request),
+        }
     }
 }
 
@@ -211,7 +214,7 @@ impl LaunchRequest {
         Self {
             profile,
             auth: auth.parse()?,
-            route: Route::Gateway,
+            route: None,
             url: None,
             gateway: None,
             portal: None,
@@ -226,7 +229,7 @@ impl LaunchRequest {
     }
 
     pub fn with_route(mut self, route: &str) -> Result<Self, UriError> {
-        self.route = route.parse().map_err(|_| UriError::InvalidValue("route"))?;
+        self.route = Some(route.parse().map_err(|_| UriError::InvalidValue("route"))?);
         Ok(self)
     }
 
@@ -277,8 +280,8 @@ impl fmt::Display for LaunchRequest {
             write!(f, "profile={profile}&")?;
         }
         write!(f, "auth={}&v={VERSION}", self.auth)?;
-        if self.route != Route::Gateway {
-            write!(f, "&route={}", self.route)?;
+        if let Some(route) = self.route {
+            write!(f, "&route={route}")?;
         }
         if let Some(url) = &self.url {
             write!(f, "&url={}", Encoded(url.as_str()))?;
@@ -389,15 +392,20 @@ mod tests {
     }
 
     #[test]
-    fn launch_route_defaults_to_gateway_and_mixed_round_trips() {
+    fn a_launch_route_is_absent_unless_named_and_both_routes_round_trip() {
         let default = request("corp");
+        assert_eq!(default.route, None);
         assert_eq!(
-            parse("gateinto://connect?profile=corp&route=gateway"),
-            Ok(default)
+            parse("gateinto://connect?profile=corp"),
+            Ok(default.clone())
         );
-        let mixed = parse("gateinto://connect?profile=corp&route=mixed").unwrap();
-        assert!(mixed.to_string().contains("&route=mixed"));
-        assert_eq!(parse(&mixed.to_string()), Ok(mixed));
+        assert!(!default.to_string().contains("route="));
+        for route in [Route::Gateway, Route::Mixed] {
+            let named = parse(&format!("gateinto://connect?profile=corp&route={route}")).unwrap();
+            assert_eq!(named.route, Some(route));
+            assert!(named.to_string().contains(&format!("&route={route}")));
+            assert_eq!(parse(&named.to_string()), Ok(named));
+        }
     }
 
     #[test]

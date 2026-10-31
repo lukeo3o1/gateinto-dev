@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::{DEFAULT_PORT, GatewayAddress, LinkedGateway, Origin};
 use crate::config::{self, GatewayName, PortalUrl};
 use crate::ipc::ConfirmToken;
+use crate::proxy::Route;
 
 pub const DIR_NAME: &str = "gateways";
 pub const MAX_LINKED: usize = 32;
@@ -201,6 +202,7 @@ struct Entry {
     port: NonZeroU16,
     portal_url: Option<PortalUrl>,
     approved_at: Option<u64>,
+    route: Option<Route>,
 }
 
 fn plain(metadata: &Metadata) -> bool {
@@ -400,6 +402,7 @@ impl LinkedStore {
         if let Some(approved_at) = gateway.approved_at {
             text.push_str(&format!("approved_at = {approved_at}\n"));
         }
+        text.push_str(&format!("route = \"{}\"\n", gateway.route));
         let temp = self.dir.join(format!(
             ".{}.{}.tmp",
             std::process::id(),
@@ -617,6 +620,7 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
         address,
         portal_url: entry.portal_url,
         approved_at: entry.approved_at,
+        route: entry.route.unwrap_or_default(),
     })
 }
 
@@ -760,6 +764,7 @@ mod tests {
             address: address(host),
             portal_url: Some(format!("https://{profile}.example/").parse().unwrap()),
             approved_at: Some(NOW),
+            route: Route::Gateway,
         }
     }
 
@@ -935,7 +940,8 @@ mod tests {
             "# A gateway added from a gateinto:// link after confirmation.\n\
              # Remove it with `gateinto gateway forget newco`.\n\
              name = \"newco\"\nhost = \"proxy.newco.example\"\nport = 8443\n\
-             portal_url = \"https://newco.example/\"\napproved_at = 1760000000\n"
+             portal_url = \"https://newco.example/\"\napproved_at = 1760000000\n\
+             route = \"gateway\"\n"
         );
         assert_eq!(
             store.load().unwrap(),
@@ -1227,6 +1233,50 @@ mod tests {
         assert_eq!(
             files(&store),
             vec!["c.example.toml", "d.example.toml", "e.example.toml"]
+        );
+    }
+
+    #[test]
+    fn the_route_is_stored_and_a_file_without_one_uses_the_mixed_route() {
+        let store = store();
+        let mixed = LinkedGateway {
+            route: Route::Mixed,
+            ..gateway("mixed", "m.example")
+        };
+        store.add(&mixed).unwrap();
+        store.add(&gateway("plain", "p.example")).unwrap();
+        let read = |file: &str| std::fs::read_to_string(store.dir().join(file)).unwrap();
+        assert!(read("m.example.toml").contains("\nroute = \"mixed\"\n"));
+        assert!(read("p.example.toml").contains("\nroute = \"gateway\"\n"));
+        plant(&store, "o.example.toml", &entry("old", "o.example", 443));
+        let bad = plant(
+            &store,
+            "b.example.toml",
+            &format!("{}route = \"direct\"\n", entry("bad", "b.example", 443)),
+        );
+        let loaded = store.load().unwrap();
+        let routes: Vec<(&str, Route)> = loaded
+            .gateways
+            .iter()
+            .map(|gateway| (gateway.name.as_str(), gateway.route))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                ("mixed", Route::Mixed),
+                ("old", Route::Mixed),
+                ("plain", Route::Gateway)
+            ]
+        );
+        assert_eq!(loaded.invalid.len(), 1);
+        assert_eq!(loaded.invalid[0].file, bad);
+        assert_eq!(loaded.invalid[0].name, Some(name("bad")));
+        assert!(
+            loaded.invalid[0]
+                .reason
+                .contains("route must be gateway or mixed"),
+            "{}",
+            loaded.invalid[0].reason
         );
     }
 

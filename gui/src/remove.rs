@@ -101,6 +101,7 @@ mod tests {
             host: Some(host.to_owned()),
             port: Some(443),
             portal_url: None,
+            route: gateinto::proxy::Route::Gateway,
             source,
         }
     }
@@ -132,6 +133,7 @@ mod tests {
             address: host.parse().unwrap(),
             portal_url: None,
             approved_at: Some(1),
+            route: gateinto::proxy::Route::Gateway,
         }
     }
 

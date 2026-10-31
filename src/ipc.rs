@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::proxy::SessionCredentials;
+use crate::proxy::{Route, SessionCredentials};
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
@@ -115,8 +115,10 @@ impl fmt::Display for Request {
                     write!(f, "{profile} ")?;
                 }
                 write!(f, "{}", request.auth)?;
-                if request.route != crate::proxy::Route::Gateway {
-                    write!(f, " route={}", request.route)?;
+                match request.route {
+                    None => f.write_str(" route=saved")?,
+                    Some(Route::Gateway) => {}
+                    Some(route) => write!(f, " route={route}")?,
                 }
                 if let Some(url) = &request.url {
                     write!(f, " url={url}")?;
@@ -194,11 +196,16 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
         next = index + 1;
     }
     let [route, url, gateway, portal] = values;
-    LaunchRequest::from_fields(profile, auth, url, gateway, portal)
-        .ok()?
-        .with_route(route.unwrap_or("gateway"))
-        .ok()
-        .map(Request::Launch)
+    let request = LaunchRequest::from_fields(profile, auth, url, gateway, portal).ok()?;
+    match route {
+        Some("saved") => Some(request),
+        Some(route) => request.with_route(route).ok(),
+        None => Some(LaunchRequest {
+            route: Some(Route::Gateway),
+            ..request
+        }),
+    }
+    .map(Request::Launch)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1018,6 +1025,7 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::Route;
     use std::collections::HashMap;
 
     fn launch(profile: &str) -> Request {
@@ -1143,25 +1151,30 @@ mod tests {
     }
 
     #[test]
-    fn mixed_launch_route_round_trips_without_changing_legacy_requests() {
-        let line = "launch corp session_credentials route=mixed";
-        let parsed: Request = line.parse().unwrap();
-        assert_eq!(parsed.to_string(), line);
-        let Request::Launch(link) = parsed else {
-            panic!("not a launch")
-        };
-        assert!(link.to_string().contains("&route=mixed"));
-        assert_eq!(
-            "launch corp session_credentials"
-                .parse::<Request>()
-                .unwrap()
-                .to_string(),
-            "launch corp session_credentials"
-        );
+    fn a_launch_line_without_a_route_means_gateway_and_saved_names_the_saved_route() {
+        for (line, route) in [
+            ("launch corp session_credentials", Some(Route::Gateway)),
+            ("launch corp session_credentials route=saved", None),
+            (
+                "launch corp session_credentials route=mixed",
+                Some(Route::Mixed),
+            ),
+        ] {
+            let parsed: Request = line.parse().unwrap();
+            assert_eq!(parsed.to_string(), line);
+            let Request::Launch(link) = parsed else {
+                panic!("not a launch")
+            };
+            assert_eq!(link.route, route, "{line}");
+        }
         for invalid in [
             "launch corp session_credentials route=direct",
-            "launch corp session_credentials route=mixed route=mixed",
             "launch corp session_credentials route=gateway",
+            "launch corp session_credentials route=Saved",
+            "launch corp session_credentials route=mixed route=mixed",
+            "launch corp session_credentials route=saved route=mixed",
+            "launch corp session_credentials route=",
+            "launch corp session_credentials gateway=proxy.example:443 route=mixed",
         ] {
             assert!(invalid.parse::<Request>().is_err());
         }
@@ -1170,7 +1183,10 @@ mod tests {
     #[test]
     fn requests_round_trip_as_single_lines() {
         for (request, line) in [
-            (launch("office"), "launch office session_credentials"),
+            (
+                launch("office"),
+                "launch office session_credentials route=saved",
+            ),
             (Request::List, "list"),
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
@@ -1210,12 +1226,12 @@ mod tests {
         for (request, line) in [
             (
                 linked_launch(),
-                "launch corp session_credentials url=https://p.example/app?a=b&c=d \
+                "launch corp session_credentials route=saved url=https://p.example/app?a=b&c=d \
                  gateway=proxy.example:443 portal=https://p.example/",
             ),
             (
                 start,
-                "launch corp session_credentials url=https://p.example/",
+                "launch corp session_credentials route=saved url=https://p.example/",
             ),
             (
                 Request::Approve(TOKEN.parse().unwrap()),

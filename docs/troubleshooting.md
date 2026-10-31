@@ -19,7 +19,7 @@ proxy's status line.
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
 | `408` | The request head was not complete within `[limits] connect_timeout_seconds`. | A client that opens the connection but does not send a request, or a very slow client. |
 | `431` | The request header block was larger than `[limits] header_max_bytes`. | Clients that send many or large headers with `CONNECT`. |
-| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
+| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the target `host:port` and the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
 | `503` | `[limits] max_concurrent_tunnels` connections are already open in this session. | Raise `max_concurrent_tunnels` in the configuration file, or find the client holding connections open. |
 | `504` | The upstream TCP connect, TLS handshake and `CONNECT` reply did not finish within `[limits] connect_timeout_seconds`. | Network reachability of the upstream proxy, firewalls that drop instead of reject, or a slow upstream. |
 
@@ -65,7 +65,7 @@ With `--tls-mode hybrid_required` (or `tls_mode = "hybrid_required"` in the gate
 complete the handshake: every tunnel gets `502`, and the log shows
 
 ```text
-WARN ... upstream refused tunnel error=TLS handshake failed: received fatal alert: HandshakeFailure
+WARN ... upstream refused tunnel target=example.com:443 error=TLS handshake failed: received fatal alert: HandshakeFailure
 ```
 
 or a similar handshake error. Gateinto never falls back to `X25519` in this

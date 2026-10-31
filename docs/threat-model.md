@@ -85,7 +85,7 @@ meant to protect, against whom, and what it does not protect.
 | Profile cleanup deletes the wrong directory. | Only directories directly in the profiles directory, with Gateinto's name pattern and marker file, are deleted; links are not followed. |
 | Another user or a remote machine controls the agent. | Per-user named pipe (named after the SID, first instance, remote clients rejected, owned by the user, DACL granting access only to the user and SYSTEM); clients refuse a pipe owned by another user; `0600` socket in a `0700` directory owned by the user on Unix. |
 | URI registration clobbers another application's handler or leaves a broken one. | Only `HKCU\Software\Classes\gateinto` is written; an existing non-Gateinto handler is refused; a failed first registration is rolled back; unregistration removes only a Gateinto handler. |
-| Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level. Session credentials exist only in memory and are never written to disk, part of an IPC error message or shown by `gateinto status`; the session verifies against an HMAC tag of them. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. Target `host:port`, the negotiated key exchange group and byte counts are logged at `debug`. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
+| Logs leak secrets or traffic. | Tunnel payload and local proxy credentials are never logged, at any level. Session credentials exist only in memory and are never written to disk, part of an IPC error message or shown by `gateinto status`; the session verifies against an HMAC tag of them. Private keys are never logged; the client certificate's subject, thumbprint and NotAfter are logged at `info`. The target `host:port` of an established tunnel, the negotiated key exchange group and byte counts are logged at `debug`; a refused tunnel is logged at `warn` with its target `host:port`, never with credentials or the `Proxy-Authorization` header. `check-upstream` prints only TLS parameters, the server certificate subject and the upstream status line, never upstream headers or bodies. |
 | An installer running as `SYSTEM` or another account creates a device key the user cannot use, or a second identity. | The MSI is per user and has no custom action that touches a key. `gateinto setup` refuses LocalSystem, LocalService and NetworkService and reuses an existing key. The agent and `open` never create a key. |
 | An uninstall, a silent uninstall or a script destroys the device identity. | Uninstall keeps the key and the config; they are not MSI components. `reset --purge-device-identity` requires the SPKI prefix, refuses without a terminal unless `--confirm-spki` matches, and deletes only the named Gateinto key after rechecking its SPKI. |
 | Uninstall cleanup deletes the user's own browser data. | The uninstaller only runs `gateinto stop --remove-stale-profiles`, which deletes Gateinto-marked profile directories under `%LOCALAPPDATA%\Gateinto\profiles`, never the user's Chrome or Edge profiles. |
@@ -145,12 +145,19 @@ meant to protect, against whom, and what it does not protect.
   heuristic: a service on another IP may go direct, and a shared gateway IP
   may send unrelated traffic through it. Only that new session is affected;
   the stored gateway and other browser sessions are unchanged.
+- Mixed routing is the default: a gateway without a saved `route`, including
+  one approved from a link that names no route, starts mixed sessions, so
+  sites that share no IP with the gateway see the user's local DNS lookups
+  and source IP and bypass gateway policy unless the gateway is set to the
+  strict `gateway` route ("All" in the GUI). A link approved for a new
+  gateway saves its route; the confirmation names it and warns about mixed
+  mode, but a user can approve without reading it.
 - A website can open up to 5 browser windows a minute (4 at a time) on
   configured gateways' portals, each with a proxy credential prompt that a
   user might mistake for a real login.
 - A user can be talked into approving a hostile gateway from a link
   (phishing). That gateway then sees hosts routed through it (every CONNECT
-  by default), can block or misroute those connections and chooses the start page,
+  with the `gateway` route), can block or misroute those connections and chooses the start page,
   where it can phish credentials. It cannot read end-to-end HTTPS content and
   gets a new, empty browser profile.
 - The confirmation stops accidental approval, not a user who is persuaded:
