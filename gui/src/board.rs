@@ -59,8 +59,10 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
 
 pub fn unpinned(
     mut tips: Vec<(Rect, &'static str)>,
-    pinned: Option<(Rect, &'static str)>,
+    focused: Option<(Rect, &'static str)>,
+    can_pin: bool,
 ) -> Vec<(Rect, &'static str)> {
+    let pinned = focused.filter(|_| can_pin);
     tips.retain(|&tip| Some(tip) != pinned);
     tips
 }
@@ -609,10 +611,18 @@ mod tests {
         ];
         let pinned = Some((r, tr(Text::SignInNote)));
         assert_eq!(
-            unpinned(tips(&targets), pinned),
+            unpinned(tips(&targets), pinned, true),
             [(other, tr(Text::AgentSignInNote))]
         );
-        assert_eq!(unpinned(tips(&targets), None), tips(&targets));
+        assert_eq!(unpinned(tips(&targets), None, true), tips(&targets));
+    }
+
+    #[test]
+    fn without_a_pin_window_a_focused_info_icon_keeps_its_hover_tip() {
+        let r = Rect::new(1, 2, 3, 4);
+        let targets = [(r, Zone::Info(Text::SignInNote))];
+        let focused = Some((r, tr(Text::SignInNote)));
+        assert_eq!(unpinned(tips(&targets), focused, false), tips(&targets));
     }
 
     #[test]
