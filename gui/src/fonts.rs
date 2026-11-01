@@ -69,8 +69,16 @@ impl Font {
     }
 }
 
+pub const ADVANCE_RUN: usize = 64;
+
 pub trait Measure {
     fn width(&self, font: Font, text: &str) -> i32;
+
+    // Widths are whole pixels, so a run of the character keeps the fraction of its advance.
+    fn advance(&self, font: Font, c: char) -> u64 {
+        let run: String = std::iter::repeat_n(c, ADVANCE_RUN).collect();
+        u64::try_from(self.width(font, &run)).unwrap_or(0)
+    }
 }
 
 pub const UI_FAMILIES: &[&str] = &["Segoe UI Variable Text", "Segoe UI"];

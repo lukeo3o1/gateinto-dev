@@ -96,7 +96,7 @@ const SESSIONS: [Sample; 3] = [
     },
 ];
 
-const LOG: [(u64, LogLevel, &str, &str); 8] = [
+const LOG: [(u64, LogLevel, &str, &str); 9] = [
     (7_400, LogLevel::Info, "agent", "agent ready"),
     (
         7_380,
@@ -109,6 +109,12 @@ const LOG: [(u64, LogLevel, &str, &str); 8] = [
         LogLevel::Warn,
         "session 3",
         "upstream connect took 4.2 s",
+    ),
+    (
+        2_600,
+        LogLevel::Warn,
+        "session 3",
+        "upstream refused tunnel target=wiki.northwind.example:443 error=CONNECT answered with status 403",
     ),
     (
         1_500,

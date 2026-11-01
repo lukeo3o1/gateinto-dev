@@ -120,9 +120,8 @@ pub fn evicted(before: &Journal, after: &Journal, filter: Filter) -> usize {
         .count()
 }
 
-pub fn kept_offset(offset: i32, evicted: usize, row_h: i32) -> i32 {
-    let rows = i32::try_from(evicted).unwrap_or(i32::MAX);
-    offset.saturating_sub(rows.saturating_mul(row_h)).max(0)
+pub fn kept_offset(offset: i32, dropped: i32) -> i32 {
+    offset.saturating_sub(dropped).max(0)
 }
 
 pub fn clock(time_ms: u64, offset: u64) -> String {
@@ -356,11 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn a_view_above_the_bottom_moves_up_by_the_dropped_rows() {
-        assert_eq!(kept_offset(400, 3, 24), 328);
-        assert_eq!(kept_offset(400, 0, 24), 400);
-        assert_eq!(kept_offset(40, 3, 24), 0);
-        assert_eq!(kept_offset(i32::MAX, usize::MAX, 24), 0);
+    fn a_view_above_the_bottom_moves_up_by_the_height_of_the_dropped_rows() {
+        assert_eq!(kept_offset(400, 72), 328);
+        assert_eq!(kept_offset(400, 0), 400);
+        assert_eq!(kept_offset(40, 72), 0);
+        assert_eq!(kept_offset(i32::MAX, i32::MAX), 0);
     }
 
     #[test]
