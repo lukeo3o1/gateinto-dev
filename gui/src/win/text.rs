@@ -8,13 +8,17 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::core::{BOOL, Interface, PCWSTR, Result};
 
 use super::sys::wide;
-use crate::fonts::{self, CJK_FAMILY, CJK_RANGES, Font, MONO_FAMILIES, Measure, UI_FAMILIES};
+use crate::fonts::{
+    self, Advances, CJK_FAMILY, CJK_RANGES, Font, MONO_FAMILIES, Measure, UI_FAMILIES,
+};
 use crate::i18n;
 use crate::scale::Scale;
 
+// One set per scale and language, so a rebuild on a DPI or language change drops stale advances.
 pub struct Fonts {
     dw: IDWriteFactory,
     formats: Vec<IDWriteTextFormat>,
+    advances: Advances,
 }
 
 fn installed(collection: &IDWriteFontCollection) -> Vec<&'static str> {
@@ -109,6 +113,7 @@ impl Fonts {
         Ok(Self {
             dw: dw.clone(),
             formats,
+            advances: Advances::default(),
         })
     }
 
@@ -132,5 +137,9 @@ impl Measure for Fonts {
             Ok(()) => metrics.widthIncludingTrailingWhitespace.ceil() as i32,
             Err(_) => 0,
         }
+    }
+
+    fn advance(&self, font: Font, c: char) -> u64 {
+        self.advances.get(self, font, c)
     }
 }

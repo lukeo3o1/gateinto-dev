@@ -1,8 +1,10 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use crate::i18n::Language;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Font {
     Brand,
     Item,
@@ -74,10 +76,28 @@ pub const ADVANCE_RUN: usize = 64;
 pub trait Measure {
     fn width(&self, font: Font, text: &str) -> i32;
 
-    // Widths are whole pixels, so a run of the character keeps the fraction of its advance.
     fn advance(&self, font: Font, c: char) -> u64 {
-        let run: String = std::iter::repeat_n(c, ADVANCE_RUN).collect();
-        u64::try_from(self.width(font, &run)).unwrap_or(0)
+        run_advance(self, font, c)
+    }
+}
+
+// Widths are whole pixels, so a run of the character keeps the fraction of its advance.
+pub fn run_advance(m: &(impl Measure + ?Sized), font: Font, c: char) -> u64 {
+    let run: String = std::iter::repeat_n(c, ADVANCE_RUN).collect();
+    u64::try_from(m.width(font, &run)).unwrap_or(0)
+}
+
+#[derive(Default)]
+pub struct Advances(RefCell<HashMap<(Font, char), u64>>);
+
+impl Advances {
+    pub fn get(&self, m: &(impl Measure + ?Sized), font: Font, c: char) -> u64 {
+        if let Some(&advance) = self.0.borrow().get(&(font, c)) {
+            return advance;
+        }
+        let advance = run_advance(m, font, c);
+        self.0.borrow_mut().insert((font, c), advance);
+        advance
     }
 }
 
@@ -194,5 +214,32 @@ mod tests {
         use crate::i18n::Language;
         assert_eq!(locale(Language::English), "en-us");
         assert_eq!(locale(Language::Chinese), "zh-tw");
+    }
+
+    #[test]
+    fn advances_are_measured_once_per_font_and_character() {
+        struct Counted(RefCell<Vec<(Font, String)>>);
+        impl Measure for Counted {
+            fn width(&self, font: Font, text: &str) -> i32 {
+                self.0.borrow_mut().push((font, text.to_owned()));
+                7 * text.chars().count() as i32
+            }
+        }
+        let counted = Counted(Default::default());
+        let advances = Advances::default();
+        let run = |c: char| String::from_iter(std::iter::repeat_n(c, ADVANCE_RUN));
+        for _ in 0..3 {
+            assert_eq!(advances.get(&counted, Font::Mono, 'a'), 7 * 64);
+            assert_eq!(advances.get(&counted, Font::Mono, '代'), 7 * 64);
+            assert_eq!(advances.get(&counted, Font::Body, 'a'), 7 * 64);
+        }
+        assert_eq!(
+            *counted.0.borrow(),
+            [
+                (Font::Mono, run('a')),
+                (Font::Mono, run('代')),
+                (Font::Body, run('a')),
+            ]
+        );
     }
 }
