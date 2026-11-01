@@ -300,6 +300,7 @@ mod tests {
     fn gateway(n: &str, host: Option<&str>, port: Option<u16>, source: Source) -> KnownGateway {
         KnownGateway {
             name: name(n),
+            display_name: None,
             host: host.map(str::to_owned),
             port,
             portal_url: None,

@@ -173,6 +173,7 @@ mod tests {
     fn gateway(name: &str, host: &str) -> KnownGateway {
         KnownGateway {
             name: name.parse().unwrap(),
+            display_name: None,
             host: Some(host.to_owned()),
             port: Some(443),
             portal_url: None,

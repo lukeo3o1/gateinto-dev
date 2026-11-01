@@ -47,6 +47,15 @@ the launch's `route` if it names one, otherwise the saved default. A launch
 URI's `route` applies only to its new browser session; a gateway approved
 from a link is stored with the route the link named, or `mixed` when it named
 none.
+
+A gateway may also carry an optional display name
+(`KnownGateway::display_name`, a `config::DisplayName`), read from
+`display_name` in its configuration section or linked gateway file. It is
+only shown by the GUI; the command line, IPC and `gateinto://` links keep
+using the identifier (`GatewayName`), and a link can never set it. Loading
+refuses a display name that is not already normalized (trimmed, single
+spaces), longer than 64 characters or containing control or text direction
+characters.
 `proxy::routing` resolves target and gateway concurrently, selects gateway on
 missing/error answers or a canonical IP intersection, and otherwise tries TCP
 to the resolved target addresses. Discovery and direct TCP share half the
@@ -420,7 +429,7 @@ The full protocol, limits and guarantees are in
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
 | `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |

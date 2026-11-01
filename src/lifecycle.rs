@@ -367,6 +367,7 @@ mod tests {
         .unwrap();
         let linked = LinkedGateway {
             name: "newco".parse().unwrap(),
+            display_name: None,
             address: "proxy.newco.example:8443".parse().unwrap(),
             portal_url: Some(
                 "https://portal.newco.example:444/home?secret=1"

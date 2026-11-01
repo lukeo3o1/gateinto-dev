@@ -98,6 +98,7 @@ mod tests {
     fn known(text: &str, host: &str, source: Source) -> KnownGateway {
         KnownGateway {
             name: name(text),
+            display_name: None,
             host: Some(host.to_owned()),
             port: Some(443),
             portal_url: None,
@@ -130,6 +131,7 @@ mod tests {
     fn linked(profile: &str, host: &str) -> LinkedGateway {
         LinkedGateway {
             name: name(profile),
+            display_name: None,
             address: host.parse().unwrap(),
             portal_url: None,
             approved_at: Some(1),

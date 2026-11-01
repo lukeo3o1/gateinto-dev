@@ -222,6 +222,7 @@ fn gateway(
         name: name
             .parse::<GatewayName>()
             .expect("sample gateway names are valid"),
+        display_name: None,
         host: Some(host.to_owned()),
         port: Some(port),
         portal_url: portal.map(|url| url.parse().expect("sample portal URLs are valid")),

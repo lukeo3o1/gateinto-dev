@@ -376,6 +376,7 @@ mod tests {
     fn gateway(name: &str, host: &str) -> KnownGateway {
         KnownGateway {
             name: name.parse::<GatewayName>().unwrap(),
+            display_name: None,
             host: Some(host.to_owned()),
             port: None,
             portal_url: None,

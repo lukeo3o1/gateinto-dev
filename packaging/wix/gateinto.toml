@@ -11,6 +11,11 @@
 # Placeholder that never resolves. Replace it with your own HTTPS forward proxy.
 # host = "proxy.example.invalid"
 # port = 443
+# Name shown for this gateway in the GUI instead of the table name: 1 to 64
+# characters, spaces and any script allowed, single spaces between words and
+# none at the ends. The command line and gateinto:// links keep using the table
+# name. An agent older than this setting refuses a file that contains it.
+# display_name = "Head Office"
 # Name verified in the upstream certificate. Defaults to host.
 # server_name = "proxy.example.invalid"
 # PEM bundle of CAs trusted for the upstream. Defaults to the Mozilla roots.

@@ -249,6 +249,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
             local: confirmation.gateway.is_local(),
             gateway: LinkedGateway {
                 name: confirmation.profile,
+                display_name: None,
                 address: confirmation.gateway,
                 portal_url: confirmation.portal,
                 approved_at: None,
@@ -404,6 +405,7 @@ mod tests {
     fn office() -> KnownGateway {
         KnownGateway {
             name: "office".parse().unwrap(),
+            display_name: None,
             host: Some("proxy.example.com".to_owned()),
             port: Some(443),
             portal_url: None,
@@ -871,6 +873,7 @@ mod tests {
     fn other(name: &str, host: &str) -> LinkedGateway {
         LinkedGateway {
             name: name.parse().unwrap(),
+            display_name: None,
             address: host.parse().unwrap(),
             portal_url: None,
             approved_at: None,
