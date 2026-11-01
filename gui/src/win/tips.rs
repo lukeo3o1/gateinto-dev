@@ -82,6 +82,10 @@ impl Tips {
         [self.window, self.pin]
     }
 
+    pub fn can_pin(&self) -> bool {
+        !self.pin.is_null()
+    }
+
     pub fn pinned(&self) -> bool {
         self.pinned.is_some()
     }
