@@ -43,6 +43,7 @@ impl Profiles for TestProfiles {
             .iter()
             .map(|(name, (plan, portal))| KnownGateway {
                 name: name.clone(),
+                display_name: None,
                 host: Some(plan.proxy.upstream.host.clone()),
                 port: Some(plan.proxy.upstream.port),
                 portal_url: portal.clone(),
@@ -52,6 +53,7 @@ impl Profiles for TestProfiles {
         let linked = self.linked.lock().unwrap().clone();
         let linked = linked.into_iter().map(|gateway| KnownGateway {
             name: gateway.name,
+            display_name: gateway.display_name,
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
             portal_url: gateway.portal_url,

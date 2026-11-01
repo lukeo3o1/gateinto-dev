@@ -57,9 +57,10 @@ its old meaning and always uses the `gateway` route; an older agent refuses
 agent also refuses a configuration file that contains `route` and disables
 a linked gateway file that contains it, so a downgrade fails closed rather
 than ignoring a saved route. `gateinto session browser` always uses the
-`gateway` route, whatever route the gateway is saved with, and a gateway
-added in the GUI's Add dialog is saved with the `gateway` route ("All")
-until the GUI offers a route choice.
+`gateway` route, whatever route the gateway is saved with. The GUI's Add
+dialog offers Mixed, preselected, and All (`gateway`); while Mixed is chosen
+its disclosure carries the same direct-connection warning as a link
+approval, and the gateway is saved with the chosen route.
 Operators needing all traffic through the gateway must save the gateway with
 `route = "gateway"` or use gateway-mode links, and must not treat this
 client as an enforcement boundary. Full rules

@@ -178,7 +178,6 @@ table! {
     NoGatewaysHint => "No gateways. Use Add gateway, or add one to the config file.", "沒有閘道。請使用「新增閘道」，或在設定檔中新增。";
     ConfigReadOnly => "From the config file, read-only here.", "來自設定檔，此處為唯讀。";
     AddGateway => "Add gateway", "新增閘道";
-    RoutePerStart => "Set per browser start; Start browser uses Gateway", "每次啟動瀏覽器時設定；「啟動瀏覽器」使用閘道";
     NotSet => "Not set", "未設定";
     Name => "Name", "名稱";
     NoValue => "None", "無";
@@ -189,6 +188,7 @@ table! {
     ConfigFile => "Config file", "設定檔";
     AddedHere => "Added on this device", "在這部裝置上新增";
     Route => "Route", "路由";
+    RouteIs => "Route: {0}", "路由：{0}";
     PortalPage => "Portal page", "入口網頁";
     TlsMode => "TLS mode", "TLS 模式";
     HybridPreferred => "Hybrid preferred", "優先使用混合";
@@ -199,7 +199,6 @@ table! {
     NoSessions => "No sessions", "沒有工作階段";
     SessionCount => "{0} session", "{0} 個工作階段";
     SessionsCount => "{0} sessions", "{0} 個工作階段";
-    GatewayAndMixed => "Gateway and Mixed", "閘道與混合";
     On => "On", "開啟";
     Off => "Off", "關閉";
     Optional => "Optional", "選用";
@@ -276,10 +275,9 @@ table! {
     CredentialsWarning => "Enter these only in the browser's proxy sign-in dialog that names {0}. Never enter them in a website's sign-in page or dialog.", "只能在顯示 {0} 的瀏覽器 Proxy 登入對話框中輸入。切勿在網站的登入頁面或對話框中輸入。";
     GatewayAddress => "Gateway address", "閘道位址";
     AddressHint => "Host name or IP address. Port 443 is the default.", "主機名稱或 IP 位址。預設連接埠為 443。";
-    NameHint => "Shown in lists. Leave empty to use the host name.", "顯示在清單中。留空則使用主機名稱。";
+    NameHint => "Shown in the app. Spaces are allowed.", "顯示在應用程式中，可包含空格。";
     PortalHint => "Optional. An https:// page the browser opens first.", "選填。瀏覽器最先開啟的 https:// 網頁。";
     NoFolder => "This device has no folder for added gateways.", "這台裝置沒有存放新增閘道的資料夾。";
-    Ambiguous => "Several gateways use this address. Enter the name of the one you mean.", "有多個閘道使用這個位址。請輸入您要的閘道名稱。";
     Damaged => "A damaged gateway entry on this device uses this name or address. Fix or remove it, then try again.", "這台裝置上有一筆損毀的閘道項目使用這個名稱或位址。請修正或移除後再試一次。";
     Unstorable => "This address is too long to store on this device.", "這個位址太長，無法存放在這台裝置上。";
     StoreUnavailable => "The gateways added on this device cannot be read, so no gateway can be added now.", "無法讀取這台裝置上新增的閘道，因此目前無法新增閘道。";
@@ -297,11 +295,10 @@ table! {
     Unusable => "These values cannot be used for a gateway.", "這些值無法用於閘道。";
     EnterHost => "Enter a host name or IP address, with an optional :port.", "請輸入主機名稱或 IP 位址，可加上 :連接埠。";
     ReservedHost => "The host may not start with a Windows device name such as CON or NUL.", "主機名稱不可用 CON 或 NUL 等 Windows 裝置名稱開頭。";
-    NameRule => "Use letters, digits, _ or -, not starting with -.", "請使用字母、數字、_ 或 -，且不可以 - 開頭。";
+    NameRule => "Use at most {0} characters, without control or text direction characters.", "最多 {0} 個字元，且不可包含控制字元或文字方向字元。";
     EnterHttps => "Enter an https:// address.", "請輸入 https:// 位址。";
     AlreadySetUp => "Already set up as \"{0}\".", "已設定為「{0}」。";
     NameUsed => "\"{0}\" is already used by another gateway.", "「{0}」已被其他閘道使用。";
-    TooClose => "Too close to \"{0}\": names may not differ only in letter case.", "與「{0}」太相近：名稱不可只有大小寫不同。";
     StartSession => "Start a browser session", "啟動瀏覽器工作階段";
     NoGatewaysYet => "No gateways yet.", "尚無閘道。";
     StartingSession => "Starting a browser session…", "正在啟動瀏覽器工作階段…";
@@ -436,6 +433,21 @@ pub fn confirmation_notice(confirmation: &Confirmation) -> String {
     }
 }
 
+const ZH_IDENTITY: &str = "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）";
+const ZH_TRUST: &str = "只有在您信任營運此閘道的組織時";
+const ZH_ROUTED: &str = "轉送給它的流量。";
+const ZH_ALL_TRAFFIC: &str = "隔離瀏覽器的所有流量：每個連線都會經過閘道。";
+const ZH_MIXED_WARNING: &str = "警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+     這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。";
+
+pub fn chinese_disclosure(route: Route) -> String {
+    let traffic = match route {
+        Route::Gateway => ZH_ALL_TRAFFIC.to_owned(),
+        Route::Mixed => format!("{ZH_ROUTED}{ZH_MIXED_WARNING}"),
+    };
+    format!("{ZH_IDENTITY}以及{traffic}{ZH_TRUST}才新增。")
+}
+
 fn chinese_notice(confirmation: &Confirmation) -> String {
     let local = if confirmation.gateway.is_local() {
         "\n此位址位於您的電腦或區域網路上。"
@@ -448,23 +460,16 @@ fn chinese_notice(confirmation: &Confirmation) -> String {
         .and_then(Origin::of)
         .map_or_else(|| "無".to_owned(), |origin| origin.to_string());
     let traffic = match confirmation.route {
-        Route::Gateway => {
-            "隔離瀏覽器的所有流量：每個連線都會經過閘道。\
-             此閘道將以閘道路由（應用程式中的「全部」）儲存"
-        }
-        Route::Mixed => {
-            "轉送給它的流量。警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
-             這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
-             此閘道將以混合路由儲存"
-        }
+        Route::Gateway => format!("{ZH_ALL_TRAFFIC}此閘道將以閘道路由（應用程式中的「全部」）儲存"),
+        Route::Mixed => format!("{ZH_ROUTED}{ZH_MIXED_WARNING}此閘道將以混合路由儲存"),
     };
     format!(
         "有網站要求將閘道「{}」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
          閘道：{}{local}\n\
          入口網站：{portal}\n\n\
-         閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及{traffic}，\
+         {ZH_IDENTITY}以及{traffic}，\
          之後未指定路由的連結也會使用此路由。\
-         只有在您信任營運此閘道的組織時才允許。",
+         {ZH_TRUST}才允許。",
         confirmation.profile, confirmation.gateway,
     )
 }

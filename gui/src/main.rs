@@ -22,6 +22,7 @@ mod log;
 mod logo;
 mod menu;
 mod message;
+mod naming;
 mod nav;
 mod pointer;
 mod remove;

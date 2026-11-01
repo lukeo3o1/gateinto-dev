@@ -296,6 +296,7 @@ impl App {
                     unix_now(),
                     self.launches.busy(),
                     &update.starting,
+                    &sessions::Names::new(&update.gateways),
                 ),
                 m,
             ),
@@ -304,7 +305,7 @@ impl App {
             board::menu::overlay(&mut board, l, s, t, v, &self.entries(), m);
         }
         if let Some(dialog) = &self.dialog {
-            let page = dialog.page(&update.state);
+            let page = dialog.page(&update.state, &sessions::Names::new(&update.gateways));
             board::dialog::credentials(&mut board, l, s, t, v, &page, m);
         }
         match self.removal() {
@@ -983,6 +984,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::CloseDialog
         | Zone::AddGateway
         | Zone::AddField(_)
+        | Zone::AddRoute(_)
         | Zone::ConfirmAdd
         | Zone::RemoveGateway
         | Zone::ConfirmRemove
@@ -1151,6 +1153,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Focus(input)) => {
             with_app(hwnd, |app| app.edit(|form| form.select(input)));
+            return;
+        }
+        Some(Action::Route(route)) => {
+            with_app(hwnd, |app| app.edit(|form| form.choose(route)));
             return;
         }
         Some(Action::ConfirmAdd) => {

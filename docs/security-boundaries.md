@@ -108,7 +108,9 @@ the local configuration file or its linked gateway file says `gateway`; a
 missing `route` means `mixed`, also in files written before the key existed.
 A gateway approved from a link is saved with the route the link named, or
 `mixed` when it named none, and the confirmation names that route and warns
-about mixed mode. A URI can choose a route for only its new browser session,
+about mixed mode. A gateway added in the GUI's Add dialog is saved with the
+route chosen there: Mixed is preselected and shows that warning, All is the
+strict option. A URI can choose a route for only its new browser session,
 which wins over the saved default; no extra prompt is required for a known
 gateway. Neither route is an enforced gateway policy. Direct connections expose source IP and
 local DNS and bypass gateway authorization; IP matching is a heuristic.

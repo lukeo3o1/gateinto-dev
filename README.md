@@ -389,10 +389,10 @@ The format, its limits and everything it can never do are specified in
   shared IPs; mixed mode exposes local DNS and the user's source IP and can
   bypass gateway policy. A gateway added from a link is saved with the route
   the link names, or with `mixed` when it names none; the confirmation names
-  that route and, for `mixed`, warns about the exposure. A gateway added in
-  the GUI's Add dialog is saved with `gateway` ("All") until the GUI offers a
-  route choice, and `gateinto session browser` always uses the `gateway`
-  route. See
+  that route and, for `mixed`, warns about the exposure. The GUI's Add
+  dialog preselects Mixed, with the same warning, offers All (`gateway`) and
+  saves the chosen route; `gateinto session browser` always uses the
+  `gateway` route. See
   [session routing](docs/protocol/launch-uri.md#session-routing).
 - System DNS work is limited to 64 queued or running lookups per process,
   shared by discovery and gateway connections. Timeouts do not release a
@@ -604,6 +604,7 @@ See [config.example.toml](config.example.toml).
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
 port = 443                       # required, here or with --upstream-port
+display_name = "Head Office"     # name shown by the GUI; defaults to the gateway name
 server_name = "proxy.example.invalid"
 ca_file = "upstream-ca.pem"
 tls_mode = "hybrid_preferred"    # hybrid_preferred | hybrid_required | classical_only
@@ -648,7 +649,7 @@ table, the flags alone describe the upstream, as an unnamed gateway
 | `[device_key] name` | `--key-name` (`check-upstream`, `session browser`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
-| `[gateways.<name>] portal_url`, `route`, `[browser] executable` | none |
+| `[gateways.<name>] display_name`, `portal_url`, `route`, `[browser] executable` | none |
 | `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | none |
 
 Rules:
@@ -671,6 +672,12 @@ Rules:
   of at most 2048 printable ASCII characters without spaces, quotes or
   backslashes. A launch URI cannot change it; a gateway added from a link
   brings its own portal, checked by the same rules.
+- `display_name` is only shown by the GUI, in place of the gateway name;
+  the command line, IPC and `gateinto://` links keep using the gateway name,
+  and a link cannot set it. It must already be trimmed with single spaces,
+  hold at most 64 characters and no control or text direction characters;
+  otherwise the file is refused. An agent older than this key refuses a file
+  that contains it, so remove the line before downgrading.
 - `route` is `mixed` (the default, also when the key is missing) or
   `gateway` (the strict option, "All" in the GUI); any other value is an
   error naming the gateway. It is the route of the gateway's browser sessions

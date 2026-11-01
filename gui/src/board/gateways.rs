@@ -99,8 +99,17 @@ impl<M: Measure> Painter<'_, M> {
             let glyph = Rect::new(name.right() + s.px(8.0), top, s.px(14.0), line);
             self.icon(icons::LOCK, glyph, 14.0, t.muted);
         }
-        let address = Rect::new(x, top + line, w, s.px(18.0));
+        let spacing = s.px(12.0);
+        let route_w = self.m.width(Font::Small, &row.route).min(w);
+        let address_w = self
+            .m
+            .width(Font::Mono, &row.address)
+            .min((w - route_w - spacing).max(0));
+        let address = Rect::new(x, top + line, address_w, s.px(18.0));
         self.text(Font::Mono, row.address.clone(), address, t.muted);
+        let route_x = address.right() + spacing;
+        let route = Rect::new(route_x, address.y, (x + w - route_x).max(0), address.h);
+        self.text(Font::Small, row.route.clone(), route, t.muted);
 
         self.eyes(sessions, row);
         self.start(
@@ -152,6 +161,7 @@ mod tests {
         Row {
             label: name.to_owned(),
             address: "proxy.example.com".to_owned(),
+            route: "Route: Mixed".to_owned(),
             sessions: "1 session".to_owned(),
             lit: false,
             config,
@@ -247,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_is_a_card_with_tile_name_lock_address_and_sessions() {
+    fn a_row_is_a_card_with_tile_name_lock_address_route_and_sessions() {
         let ops = draw(&listed(vec![row("office", true)])).ops;
         let y = FIRST;
         assert_eq!(
@@ -267,7 +277,13 @@ mod tests {
                 text(
                     Font::Mono,
                     "proxy.example.com",
-                    Rect::new(324, y + 37, 373, 18),
+                    Rect::new(324, y + 37, 119, 18),
+                    T.muted
+                ),
+                text(
+                    Font::Small,
+                    "Route: Mixed",
+                    Rect::new(455, y + 37, 242, 18),
                     T.muted
                 ),
                 Op::Round(Rect::new(713, y + 32, 5, 7), 2.5, T.eyes_idle),
@@ -372,6 +388,19 @@ mod tests {
             !ops.iter()
                 .any(|op| matches!(op, Op::Text(_, s, ..) if s == FOOTNOTE.english()))
         );
+    }
+
+    #[test]
+    fn a_long_address_leaves_room_for_the_route() {
+        let mut long = row("office", true);
+        long.address = "a".repeat(100);
+        let ops = draw(&listed(vec![long])).ops;
+        let card = inside(&ops, Rect::new(248, FIRST, 764, 72));
+        assert!(matches!(&card[6], Op::Text(Font::Mono, _, r, _) if r.w == 277));
+        assert!(matches!(
+            &card[7],
+            Op::Text(Font::Small, route, r, _) if route == "Route: Mixed" && r.x == 613 && r.w == 84
+        ));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
-use crate::config::{ConfigFile, GatewayName, PortalUrl};
+use crate::config::{ConfigFile, DisplayName, GatewayName, PortalUrl};
 use crate::http::{self, Authority, Host};
 use crate::proxy::Route;
 use crate::uri::LaunchRequest;
@@ -231,6 +231,7 @@ impl fmt::Display for Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownGateway {
     pub name: GatewayName,
+    pub display_name: Option<DisplayName>,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub portal_url: Option<PortalUrl>,
@@ -250,6 +251,7 @@ impl KnownGateway {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedGateway {
     pub name: GatewayName,
+    pub display_name: Option<DisplayName>,
     pub address: GatewayAddress,
     pub portal_url: Option<PortalUrl>,
     pub approved_at: Option<u64>,
@@ -262,6 +264,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
         .iter()
         .map(|(name, section)| KnownGateway {
             name: name.clone(),
+            display_name: section.display_name.clone(),
             host: section.host.clone(),
             port: section.port.map(NonZeroU16::get),
             portal_url: section.portal_url.clone(),
@@ -273,6 +276,7 @@ pub fn known_gateways(config: &ConfigFile, linked: &[LinkedGateway]) -> Vec<Know
         if !known.iter().any(|known| known.name == gateway.name) {
             known.push(KnownGateway {
                 name: gateway.name.clone(),
+                display_name: gateway.display_name.clone(),
                 host: Some(gateway.address.host()),
                 port: Some(gateway.address.port()),
                 portal_url: gateway.portal_url.clone(),
@@ -326,6 +330,11 @@ pub const IDENTITY: &str =
     "The gateway will see this device's identity (its client certificate, if one is installed)";
 pub const TRUST: &str = "only if you trust the organisation that runs this gateway.";
 pub const LOCAL_ADDRESS: &str = "This address is on your computer or local network.";
+pub const ALL_TRAFFIC: &str =
+    "all traffic of the isolated browser: every connection goes through the gateway.";
+pub const MIXED_WARNING: &str = "Warning: in mixed mode, sites may be reached directly instead \
+     of through the gateway, which exposes your local DNS lookups and your IP address to them \
+     and bypasses the gateway's policy.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
@@ -375,15 +384,13 @@ impl Confirmation {
         };
         let traffic = match self.route {
             Route::Gateway => {
-                "all traffic of the isolated browser: every connection goes through the gateway. \
-                 The gateway is saved with the gateway route (All in the app)"
+                format!(
+                    "{ALL_TRAFFIC} The gateway is saved with the gateway route (All in the app)"
+                )
             }
-            Route::Mixed => {
-                "the traffic routed to it. Warning: in mixed mode, sites may be reached directly \
-                 instead of through the gateway, which exposes your local DNS lookups and your IP \
-                 address to them and bypasses the gateway's policy. The gateway is saved with \
-                 the mixed route"
-            }
+            Route::Mixed => format!(
+                "the traffic routed to it. {MIXED_WARNING} The gateway is saved with the mixed route"
+            ),
         };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
@@ -651,6 +658,7 @@ pub fn resolve(
             start_page: link.url.clone().or_else(|| link.portal.clone()),
             add: Some(LinkedGateway {
                 name: profile.clone(),
+                display_name: None,
                 address: gateway.clone(),
                 portal_url: link.portal.clone(),
                 approved_at: Some(now),
@@ -680,6 +688,7 @@ mod tests {
     ) -> KnownGateway {
         KnownGateway {
             name: name(text),
+            display_name: None,
             host: Some(host.to_owned()),
             port: Some(port),
             portal_url: portal.map(|portal| portal.parse().unwrap()),
@@ -707,6 +716,7 @@ mod tests {
             ),
             KnownGateway {
                 name: name("incomplete"),
+                display_name: None,
                 host: None,
                 port: None,
                 portal_url: None,
@@ -846,6 +856,7 @@ mod tests {
         });
         known.gateways.push(KnownGateway {
             name: name("newer"),
+            display_name: None,
             host: Some("newer.example".to_owned()),
             port: Some(443),
             portal_url: Some("https://newer.example/".parse().unwrap()),
@@ -1360,6 +1371,18 @@ mod tests {
     }
 
     #[test]
+    fn the_route_wording_is_shared_with_other_disclosures() {
+        let mixed = Confirmation {
+            route: Route::Mixed,
+            ..confirmation()
+        };
+        assert!(mixed.message().contains(MIXED_WARNING));
+        assert!(!mixed.message().contains(ALL_TRAFFIC));
+        assert!(confirmation().message().contains(ALL_TRAFFIC));
+        assert!(!confirmation().message().contains(MIXED_WARNING));
+    }
+
+    #[test]
     fn a_mixed_confirmation_warns_that_sites_may_bypass_the_gateway() {
         let mixed = Confirmation {
             route: Route::Mixed,
@@ -1410,6 +1433,7 @@ mod tests {
                     start_page: Some(start.parse().unwrap()),
                     add: Some(LinkedGateway {
                         name: name("newco"),
+                        display_name: None,
                         address: "proxy.newco.example:443".parse().unwrap(),
                         portal_url: Some("https://portal.newco.example/home".parse().unwrap()),
                         approved_at: Some(NOW),
@@ -1662,11 +1686,31 @@ mod tests {
     fn linked(text: &str, host: &str) -> LinkedGateway {
         LinkedGateway {
             name: name(text),
+            display_name: None,
             address: host.parse().unwrap(),
             portal_url: Some(format!("https://{text}.example/").parse().unwrap()),
             approved_at: None,
             route: Route::Gateway,
         }
+    }
+
+    #[test]
+    fn known_gateways_carry_the_display_names_of_both_sources() {
+        let config = config_file(
+            "[gateways.corp]\nhost = \"proxy.corp.example\"\ndisplay_name = \"Head Office\"\n",
+        );
+        let known = known_gateways(
+            &config,
+            &[LinkedGateway {
+                display_name: Some(DisplayName::normalize("台北 辦公室").unwrap()),
+                ..linked("newco", "newco.example")
+            }],
+        );
+        let shown: Vec<_> = known
+            .iter()
+            .map(|gateway| gateway.display_name.as_ref().map(DisplayName::as_str))
+            .collect();
+        assert_eq!(shown, [Some("Head Office"), Some("台北 辦公室")]);
     }
 
     #[test]
@@ -1689,6 +1733,7 @@ mod tests {
             vec![
                 KnownGateway {
                     name: name("corp"),
+                    display_name: None,
                     host: Some("proxy.corp.example".to_owned()),
                     port: Some(443),
                     portal_url: None,
@@ -1697,6 +1742,7 @@ mod tests {
                 },
                 KnownGateway {
                     name: name("empty"),
+                    display_name: None,
                     host: None,
                     port: None,
                     portal_url: None,
@@ -1705,6 +1751,7 @@ mod tests {
                 },
                 KnownGateway {
                     name: name("newco"),
+                    display_name: None,
                     host: Some("::1".to_owned()),
                     port: Some(8443),
                     portal_url: Some("https://newco.example/".parse().unwrap()),

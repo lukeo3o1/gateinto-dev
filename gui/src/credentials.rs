@@ -179,12 +179,12 @@ impl Dialog {
         self.copied = None;
     }
 
-    pub fn page(&self, state: &AgentState) -> Page<'_> {
+    pub fn page(&self, state: &AgentState, names: &sessions::Names) -> Page<'_> {
         let listen = self.listen.to_string();
         let mut detail = Vec::new();
         let mut session = String::new();
         if let Some(info) = find(state, self.id) {
-            let row = sessions::row(info, info.started);
+            let row = sessions::row(info, info.started, names);
             session = format!("{}{}", row.title, row.number);
             if row.gateway != row.address {
                 detail.push(row.gateway);
@@ -297,7 +297,7 @@ mod tests {
             credentials: Some(Issued::Demo),
         });
         dialog.toggle();
-        let page = dialog.page(&running());
+        let page = dialog.page(&running(), &sessions::Names::default());
         assert_eq!(
             (page.username, page.password),
             ("demo-user", "demo-password")
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn a_waiting_dialog_shows_nothing_secret_and_cannot_copy() {
         let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
-        let page = dialog.page(&running());
+        let page = dialog.page(&running(), &sessions::Names::default());
         assert_eq!(page.session, "Chrome #3");
         assert_eq!(
             page.detail,
@@ -336,14 +336,18 @@ mod tests {
         );
         assert_eq!(dialog.secret(Field::Password), None);
         dialog.toggle();
-        assert!(!dialog.page(&running()).revealed);
+        assert!(
+            !dialog
+                .page(&running(), &sessions::Names::default())
+                .revealed
+        );
     }
 
     #[test]
     fn the_credentials_page_speaks_chinese() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         let dialog = Dialog::open(&running(), 3, 1).unwrap();
-        let page = dialog.page(&running());
+        let page = dialog.page(&running(), &sessions::Names::default());
         assert_eq!(
             page.detail,
             "office · proxy.example.com · 登入對話框會顯示 127.0.0.1:49210"
@@ -362,18 +366,23 @@ mod tests {
     #[test]
     fn the_password_stays_masked_until_shown() {
         let mut dialog = shown();
-        let page = dialog.page(&running());
+        let page = dialog.page(&running(), &sessions::Names::default());
         assert!(page.ready);
         assert_eq!(page.note, None);
         assert_eq!(page.username, "gateinto");
         assert_eq!(page.password, MASK);
         assert!(!page.revealed);
         dialog.toggle();
-        let page = dialog.page(&running());
+        let page = dialog.page(&running(), &sessions::Names::default());
         assert_eq!(page.password, PASSWORD);
         assert!(page.revealed);
         dialog.toggle();
-        assert_eq!(dialog.page(&running()).password, MASK);
+        assert_eq!(
+            dialog
+                .page(&running(), &sessions::Names::default())
+                .password,
+            MASK
+        );
     }
 
     #[test]
@@ -382,9 +391,15 @@ mod tests {
         assert_eq!(dialog.secret(Field::Username), Some("gateinto"));
         assert_eq!(dialog.secret(Field::Password), Some(PASSWORD));
         dialog.copied(Field::Password);
-        assert_eq!(dialog.page(&running()).copied, Some(Field::Password));
+        assert_eq!(
+            dialog.page(&running(), &sessions::Names::default()).copied,
+            Some(Field::Password)
+        );
         dialog.uncopy();
-        assert_eq!(dialog.page(&running()).copied, None);
+        assert_eq!(
+            dialog.page(&running(), &sessions::Names::default()).copied,
+            None
+        );
     }
 
     #[test]
@@ -392,11 +407,17 @@ mod tests {
         let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
         dialog.receive(reveal(2, 1, Ok(issued())));
         assert_eq!(dialog.secret(Field::Password), None);
-        assert_eq!(dialog.page(&running()).note, Some(WAITING.english()));
+        assert_eq!(
+            dialog.page(&running(), &sessions::Names::default()).note,
+            Some(WAITING.english())
+        );
         dialog.receive(reveal(3, 1, Err(RequestError::NotRunning)));
         dialog.receive(reveal(3, 1, Ok(issued())));
         assert_eq!(dialog.secret(Field::Password), None);
-        assert_eq!(dialog.page(&running()).note, Some(UNAVAILABLE.english()));
+        assert_eq!(
+            dialog.page(&running(), &sessions::Names::default()).note,
+            Some(UNAVAILABLE.english())
+        );
     }
 
     #[test]
@@ -404,7 +425,10 @@ mod tests {
         let mut dialog = Dialog::open(&running(), 3, 2).unwrap();
         assert!(!deliver(Some(&mut dialog), reveal(3, 1, Ok(issued()))));
         assert_eq!(dialog.secret(Field::Password), None);
-        assert_eq!(dialog.page(&running()).note, Some(WAITING.english()));
+        assert_eq!(
+            dialog.page(&running(), &sessions::Names::default()).note,
+            Some(WAITING.english())
+        );
         assert!(deliver(Some(&mut dialog), reveal(3, 2, Ok(issued()))));
         assert_eq!(dialog.secret(Field::Password), Some(PASSWORD));
     }
@@ -422,7 +446,7 @@ mod tests {
             1,
             Ok(Response::Error(format!("bad password: {PASSWORD}"))),
         ));
-        let page = dialog.page(&running());
+        let page = dialog.page(&running(), &sessions::Names::default());
         assert_eq!(page.note, Some(UNAVAILABLE.english()));
         assert!(!page.ready);
         assert!(!UNAVAILABLE.english().contains(PASSWORD));
@@ -454,7 +478,7 @@ mod tests {
         let state = AgentState::Running(vec![profile]);
         let dialog = Dialog::open(&state, 3, 1).unwrap();
         assert_eq!(
-            dialog.page(&state).detail,
+            dialog.page(&state, &sessions::Names::default()).detail,
             "proxy.example.com · sign-in dialog names 127.0.0.1:49210"
         );
     }

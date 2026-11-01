@@ -151,7 +151,9 @@ meant to protect, against whom, and what it does not protect.
   and source IP and bypass gateway policy unless the gateway is set to the
   strict `gateway` route ("All" in the GUI). A link approved for a new
   gateway saves its route; the confirmation names it and warns about mixed
-  mode, but a user can approve without reading it.
+  mode, but a user can approve without reading it. The GUI's Add dialog
+  preselects Mixed with the same warning, so a user who accepts the default
+  there also gets mixed sessions.
 - A website can open up to 5 browser windows a minute (4 at a time) on
   configured gateways' portals, each with a proxy credential prompt that a
   user might mistake for a real login.

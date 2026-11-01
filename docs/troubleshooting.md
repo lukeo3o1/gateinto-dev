@@ -202,8 +202,9 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   answered after its 120 seconds, or the agent restarted in between. Open
   the link again.
 - `linked-gateway: error: <file>: ...`: one file in `gateways/` is damaged,
-  was edited by hand (only `name`, `host`, `port`, `portal_url` and
-  `approved_at` are allowed), was renamed (its name must match its own host
+  was edited by hand (only `name`, `display_name`, `host`, `port`,
+  `portal_url`, `approved_at` and `route` are allowed, and `display_name`
+  must be 1 to 64 characters with single spaces between words), was renamed (its name must match its own host
   and port), is not a regular file, or uses a profile name that another
   file uses too. Only that gateway is disabled, and links to its name or
   address are refused until the file is fixed or deleted; delete it to

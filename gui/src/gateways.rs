@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use gateinto::config::{ConfigFile, GatewayName, Gateways};
 use gateinto::identity::client_cert::ClientCertificateMode;
-use gateinto::ipc::{SessionInfo, SessionRoute};
+use gateinto::ipc::SessionInfo;
 use gateinto::link::store::{LinkedStore, Loaded};
 use gateinto::link::{Known, KnownGateway, Source};
+use gateinto::proxy::Route;
 use gateinto::tls::TlsMode;
 
 use crate::agent::AgentState;
@@ -16,12 +17,12 @@ pub const EMPTY: Text = Text::NoGatewaysHint;
 pub const FOOTNOTE: Text = Text::ConfigReadOnly;
 pub const START: Text = Text::StartBrowser;
 pub const ADD: Text = Text::AddGateway;
-pub const ROUTE_PER_START: Text = Text::RoutePerStart;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub label: String,
     pub address: String,
+    pub route: String,
     pub sessions: String,
     pub lit: bool,
     pub config: bool,
@@ -113,6 +114,9 @@ pub fn names(listing: &Result<Known, String>) -> Vec<GatewayName> {
 }
 
 pub fn label(gateway: &KnownGateway) -> String {
+    if let Some(display_name) = &gateway.display_name {
+        return display_name.to_string();
+    }
     let address = address(gateway.host.as_deref(), gateway.port);
     gateway_label(gateway.name.as_str(), &address)
 }
@@ -161,7 +165,7 @@ pub fn details(
         facts: vec![
             (
                 Text::Name,
-                if title == name.as_str() {
+                if gateway.display_name.is_some() || title == name.as_str() {
                     title.clone()
                 } else {
                     tr(Text::NoValue).to_owned()
@@ -178,7 +182,7 @@ pub fn details(
                 })
                 .to_owned(),
             ),
-            (Text::Route, routes(&open)),
+            (Text::Route, tr(route(gateway.route)).to_owned()),
             (
                 Text::PortalPage,
                 gateway
@@ -229,20 +233,11 @@ fn count(sessions: usize) -> String {
     }
 }
 
-fn routes(open: &[&SessionInfo]) -> String {
-    let all = open
-        .iter()
-        .any(|session| session.route == SessionRoute::All);
-    let mixed = open
-        .iter()
-        .any(|session| session.route == SessionRoute::Mixed);
-    tr(match (all, mixed) {
-        (true, true) => Text::GatewayAndMixed,
-        (true, false) => Text::Gateway,
-        (false, true) => Text::Mixed,
-        (false, false) => ROUTE_PER_START,
-    })
-    .to_owned()
+pub fn route(route: Route) -> Text {
+    match route {
+        Route::Gateway => Text::All,
+        Route::Mixed => Text::Mixed,
+    }
 }
 
 fn certificate_text(mode: ClientCertificateMode, self_signed: bool) -> String {
@@ -262,6 +257,7 @@ fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
     let open = open(gateway, sessions);
     Row {
         label: label(gateway),
+        route: fill(Text::RouteIs, &[&tr(route(gateway.route))]),
         sessions: count(open.len()),
         lit: open.iter().any(|session| session.tunnels > 0),
         config: gateway.source == Source::Config,
@@ -300,6 +296,7 @@ mod tests {
     fn gateway(n: &str, host: Option<&str>, port: Option<u16>, source: Source) -> KnownGateway {
         KnownGateway {
             name: name(n),
+            display_name: None,
             host: host.map(str::to_owned),
             port,
             portal_url: None,
@@ -350,6 +347,7 @@ mod tests {
                 rows: vec![Row {
                     label: "office".to_owned(),
                     address: "proxy.example.com".to_owned(),
+                    route: "Route: All".to_owned(),
                     sessions: "1 session".to_owned(),
                     lit: false,
                     config: true,
@@ -426,7 +424,7 @@ mod tests {
                 ("Port", "8443"),
                 ("Server name", "edge.example.com"),
                 ("Source", "Config file"),
-                ("Route", "Gateway and Mixed"),
+                ("Route", "All"),
                 ("Portal page", "https://portal.example.com/"),
                 ("TLS mode", "Hybrid required"),
                 ("Client certificate", "Required, self-signed"),
@@ -437,12 +435,10 @@ mod tests {
 
     #[test]
     fn linked_gateway_details_fall_back_to_the_defaults() {
-        let listing = known(vec![gateway(
-            PROFILE,
-            Some("edge.example"),
-            Some(443),
-            Source::Linked,
-        )]);
+        let listing = known(vec![KnownGateway {
+            route: gateinto::proxy::Route::Mixed,
+            ..gateway(PROFILE, Some("edge.example"), Some(443), Source::Linked)
+        }]);
         let details = details(
             &listing,
             &Gateways::default(),
@@ -460,7 +456,7 @@ mod tests {
                 ("Port", "443"),
                 ("Server name", "edge.example"),
                 ("Source", "Added on this device"),
-                ("Route", tr(ROUTE_PER_START)),
+                ("Route", "Mixed"),
                 ("Portal page", "None"),
                 ("TLS mode", "Hybrid preferred"),
                 ("Client certificate", "Optional"),
@@ -478,6 +474,7 @@ mod tests {
         assert_eq!(page.subtitle, "這部裝置可透過其轉送的遠端 HTTPS 代理");
         assert_eq!(page.rows[0].sessions, "2 個工作階段");
         assert_eq!(page.rows[1].sessions, "沒有工作階段");
+        assert_eq!(page.rows[0].route, "路由：全部");
         let details = details(&listing, &Gateways::default(), &state, &name(PROFILE)).unwrap();
         assert_eq!(
             facts(&details),
@@ -487,7 +484,7 @@ mod tests {
                 ("連接埠", "443"),
                 ("伺服器名稱", "未設定"),
                 ("來源", "在這部裝置上新增"),
-                ("路由", "每次啟動瀏覽器時設定；「啟動瀏覽器」使用閘道"),
+                ("路由", "全部"),
                 ("入口網頁", "無"),
                 ("TLS 模式", "優先使用混合"),
                 ("用戶端憑證", "選用"),
@@ -500,6 +497,43 @@ mod tests {
             "必要，自我簽署"
         );
         assert_eq!(count(1), "1 個工作階段");
+    }
+
+    #[test]
+    fn rows_and_details_show_the_saved_route_whatever_the_sessions_use() {
+        let mixed = KnownGateway {
+            route: gateinto::proxy::Route::Mixed,
+            ..office()
+        };
+        let listing = known(vec![mixed]);
+        let state = AgentState::Running(vec![session(1, "office", 0)]);
+        assert_eq!(
+            page(&listing, &state, None, false).rows[0].route,
+            "Route: Mixed"
+        );
+        let details = details(&listing, &Gateways::default(), &state, &name("office")).unwrap();
+        assert!(facts(&details).contains(&("Route", "Mixed")));
+    }
+
+    #[test]
+    fn a_display_name_replaces_the_identifier_in_rows_and_details() {
+        let named = KnownGateway {
+            display_name: Some("台北 Office".parse().unwrap()),
+            ..gateway(PROFILE, Some("edge.example"), Some(443), Source::Linked)
+        };
+        let listing = known(vec![named.clone()]);
+        assert_eq!(label(&named), "台北 Office");
+        let page = page(&listing, &AgentState::Stopped, None, false);
+        assert_eq!(page.rows[0].label, "台北 Office");
+        let details = details(
+            &listing,
+            &Gateways::default(),
+            &AgentState::Stopped,
+            &name(PROFILE),
+        )
+        .unwrap();
+        assert_eq!(details.title, "台北 Office");
+        assert_eq!(facts(&details)[0], ("Name", "台北 Office"));
     }
 
     #[test]
