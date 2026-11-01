@@ -106,6 +106,76 @@ impl fmt::Display for GatewayName {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub struct DisplayName(String);
+
+impl DisplayName {
+    pub const MAX_LEN: usize = 64;
+
+    pub fn normalize(text: &str) -> Result<Self, InvalidDisplayName> {
+        let collapsed: Vec<&str> = text
+            .split(char::is_whitespace)
+            .filter(|w| !w.is_empty())
+            .collect();
+        let name = collapsed.join(" ");
+        let visible = name.chars().all(|c| {
+            !c.is_control()
+                && !matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        });
+        if !name.is_empty() && name.chars().count() <= Self::MAX_LEN && visible {
+            Ok(Self(name))
+        } else {
+            Err(InvalidDisplayName)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for DisplayName {
+    type Err = InvalidDisplayName;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::normalize(text)
+            .ok()
+            .filter(|name| name.0 == text)
+            .ok_or(InvalidDisplayName)
+    }
+}
+
+impl TryFrom<String> for DisplayName {
+    type Error = InvalidDisplayName;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        text.parse()
+    }
+}
+
+impl fmt::Display for DisplayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidDisplayName;
+
+impl fmt::Display for InvalidDisplayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "display_name must be 1 to {} characters without control or text direction \
+             characters, without leading or trailing spaces and with single spaces between words",
+            DisplayName::MAX_LEN
+        )
+    }
+}
+
+impl std::error::Error for InvalidDisplayName {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
 pub struct PortalUrl(String);
@@ -254,6 +324,7 @@ pub struct GatewaySection {
     pub self_signed_client_cert: Option<bool>,
     pub portal_url: Option<PortalUrl>,
     pub route: Option<Route>,
+    pub display_name: Option<DisplayName>,
 }
 
 impl GatewaySection {
@@ -276,6 +347,7 @@ impl GatewaySection {
                 .or(self.self_signed_client_cert),
             portal_url: overrides.portal_url.or(self.portal_url),
             route: overrides.route.or(self.route),
+            display_name: overrides.display_name.or(self.display_name),
         }
     }
 }
@@ -1420,6 +1492,73 @@ port = 443
             .to_string();
         assert!(error.contains("gateway \"main\""), "{error}");
         assert!(error.contains("route must be gateway or mixed"), "{error}");
+    }
+
+    #[test]
+    fn a_display_name_is_trimmed_and_its_spaces_collapsed() {
+        let normalized = |text: &str| DisplayName::normalize(text).map(|name| name.to_string());
+        assert_eq!(normalized("  My \t  Office \n"), Ok("My Office".to_owned()));
+        assert_eq!(
+            normalized("台北\u{3000}辦公室"),
+            Ok("台北 辦公室".to_owned())
+        );
+        assert_eq!(normalized("lab"), Ok("lab".to_owned()));
+        for empty in ["", "   ", "\u{3000}\t"] {
+            assert!(normalized(empty).is_err(), "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn a_display_name_is_bounded_in_characters_and_refuses_invisible_ones() {
+        let long = "辦".repeat(DisplayName::MAX_LEN);
+        assert_eq!(DisplayName::normalize(&long).unwrap().as_str(), long);
+        assert!(DisplayName::normalize(&format!("{long}x")).is_err());
+        for hidden in [
+            "a\u{0}b",
+            "a\u{7f}b",
+            "a\u{202e}b",
+            "a\u{2066}b",
+            "a\u{200f}b",
+            "a\u{061c}b",
+        ] {
+            assert!(DisplayName::normalize(hidden).is_err(), "{hidden:?}");
+        }
+    }
+
+    #[test]
+    fn a_stored_display_name_must_already_be_normalized() {
+        assert_eq!(
+            "My Office".parse::<DisplayName>().unwrap().as_str(),
+            "My Office"
+        );
+        for text in [" My Office", "My Office ", "My  Office", "My\tOffice", ""] {
+            let error = text.parse::<DisplayName>().unwrap_err().to_string();
+            assert!(error.contains("display_name"), "{text:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_gateway_section_may_carry_a_display_name() {
+        let file = ConfigFile::parse(&format!(
+            "{MINIMAL}display_name = \"台北 Office\"\n[gateways.plain]\n"
+        ))
+        .unwrap();
+        let names: Vec<(&str, Option<&str>)> = file
+            .gateways
+            .iter()
+            .map(|(name, section)| {
+                (
+                    name.as_str(),
+                    section.display_name.as_ref().map(DisplayName::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(names, [("main", Some("台北 Office")), ("plain", None)]);
+        let error = ConfigFile::parse("[gateways.main]\ndisplay_name = \" padded\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+        assert!(error.contains("display_name"), "{error}");
     }
 
     #[test]

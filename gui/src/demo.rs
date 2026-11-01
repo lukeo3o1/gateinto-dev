@@ -222,6 +222,7 @@ fn gateway(
         name: name
             .parse::<GatewayName>()
             .expect("sample gateway names are valid"),
+        display_name: None,
         host: Some(host.to_owned()),
         port: Some(port),
         portal_url: portal.map(|url| url.parse().expect("sample portal URLs are valid")),
@@ -417,7 +418,12 @@ mod tests {
         let names = gateways::names(&loaded.gateways);
         for session in listed() {
             assert!(names.iter().any(|name| name.as_str() == session.gateway));
-            assert!(!sessions::row(&session, NOW).gateway.starts_with("g-"));
+            let names = sessions::Names::new(&loaded.gateways);
+            assert!(
+                !sessions::row(&session, NOW, &names)
+                    .gateway
+                    .starts_with("g-")
+            );
         }
         assert!(loaded.agent.is_ok());
     }

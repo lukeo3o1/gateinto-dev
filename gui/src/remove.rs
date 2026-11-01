@@ -98,6 +98,7 @@ mod tests {
     fn known(text: &str, host: &str, source: Source) -> KnownGateway {
         KnownGateway {
             name: name(text),
+            display_name: None,
             host: Some(host.to_owned()),
             port: Some(443),
             portal_url: None,
@@ -130,6 +131,7 @@ mod tests {
     fn linked(profile: &str, host: &str) -> LinkedGateway {
         LinkedGateway {
             name: name(profile),
+            display_name: None,
             address: host.parse().unwrap(),
             portal_url: None,
             approved_at: Some(1),
@@ -180,6 +182,21 @@ mod tests {
         let edge = prompt(&listing(), &Removal::new(name(PROFILE))).unwrap();
         assert!(edge.question.contains("\"edge.example\""), "{edge:?}");
         assert!(!edge.question.contains(PROFILE));
+    }
+
+    #[test]
+    fn the_prompt_names_a_gateway_by_its_display_name() {
+        let mut lab = known("lab", "lab.example.net", Source::Linked);
+        lab.display_name = Some("台北 Lab".parse().unwrap());
+        let listing = Ok(Known {
+            gateways: vec![lab],
+            ..Known::default()
+        });
+        let prompt = prompt(&listing, &Removal::new(name("lab"))).unwrap();
+        assert_eq!(
+            prompt.question,
+            "Remove \"台北 Lab\" from the gateways added on this device?"
+        );
     }
 
     #[test]

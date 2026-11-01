@@ -47,6 +47,15 @@ the launch's `route` if it names one, otherwise the saved default. A launch
 URI's `route` applies only to its new browser session; a gateway approved
 from a link is stored with the route the link named, or `mixed` when it named
 none.
+
+A gateway may also carry an optional display name
+(`KnownGateway::display_name`, a `config::DisplayName`), read from
+`display_name` in its configuration section or linked gateway file. It is
+only shown by the GUI; the command line, IPC and `gateinto://` links keep
+using the identifier (`GatewayName`), and a link can never set it. Loading
+refuses a display name that is not already normalized (trimmed, single
+spaces), longer than 64 characters or containing control or text direction
+characters.
 `proxy::routing` resolves target and gateway concurrently, selects gateway on
 missing/error answers or a canonical IP intersection, and otherwise tries TCP
 to the resolved target addresses. Discovery and direct TCP share half the
@@ -405,6 +414,23 @@ The full protocol, limits and guarantees are in
   as with the command line. The list changes at the next 2-second poll. Demo
   mode only shows a fixed note. This is unit-tested but has not been tried
   on a real Windows desktop.
+- The GUI adds a gateway without the agent: its Add dialog asks for a
+  display name, the gateway address, an optional portal and the route.
+  The display name is trimmed, its whitespace collapsed, and an empty,
+  over-long or already shown name is refused (`gui/src/add.rs`). The
+  identifier the command line and links use is generated from it, or from
+  the host when nothing usable is left, made unique against the listed
+  gateways and never shown (`gui/src/naming.rs`). Mixed is preselected and
+  the disclosure then carries the link approval's direct-connection warning
+  (`link::MIXED_WARNING`); All uses its all-traffic wording
+  (`link::ALL_TRAFFIC`). In Chinese the disclosure uses the phrases of the
+  approval window's Chinese notice (`i18n::chinese_disclosure`). The gateway is written with `LinkedStore::add` on
+  `store::default_dir()` with its approval time and chosen route; the config
+  file is never written. The list and details show the saved route of each
+  gateway, and a browser started from the GUI asks for that saved route
+  (`route=saved`). Everywhere else the GUI names a gateway by its display
+  name, falling back to the identifier. This is unit-tested but not yet
+  verified on Windows.
 
 ## Modules
 
@@ -420,7 +446,7 @@ The full protocol, limits and guarantees are in
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
 | `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
@@ -436,6 +462,7 @@ The full protocol, limits and guarantees are in
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
+| `gui/src/add.rs`, `gui/src/naming.rs` | The GUI's Add for gateways on this device: the form, its limits and route choice, the disclosure, the generated identifier and the store write. |
 | `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
 | `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |

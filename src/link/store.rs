@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 
 use super::{DEFAULT_PORT, GatewayAddress, LinkedGateway, Origin};
-use crate::config::{self, GatewayName, PortalUrl};
+use crate::config::{self, DisplayName, GatewayName, PortalUrl};
 use crate::ipc::ConfirmToken;
 use crate::proxy::Route;
 
@@ -198,6 +198,7 @@ impl From<StoreError> for ForgetError {
 #[serde(deny_unknown_fields)]
 struct Entry {
     name: GatewayName,
+    display_name: Option<DisplayName>,
     host: String,
     port: NonZeroU16,
     portal_url: Option<PortalUrl>,
@@ -396,6 +397,12 @@ impl LinkedStore {
             gateway.address.host(),
             gateway.address.port()
         );
+        if let Some(display_name) = &gateway.display_name {
+            text.push_str(&format!(
+                "display_name = {}\n",
+                quoted(display_name.as_str())
+            ));
+        }
         if let Some(portal) = &gateway.portal_url {
             text.push_str(&format!("portal_url = \"{portal}\"\n"));
         }
@@ -617,11 +624,16 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
     }
     Ok(LinkedGateway {
         name: entry.name,
+        display_name: entry.display_name,
         address,
         portal_url: entry.portal_url,
         approved_at: entry.approved_at,
         route: entry.route.unwrap_or_default(),
     })
+}
+
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn temp_file_name(name: &str) -> bool {
@@ -761,6 +773,7 @@ mod tests {
     fn gateway(profile: &str, host: &str) -> LinkedGateway {
         LinkedGateway {
             name: name(profile),
+            display_name: None,
             address: address(host),
             portal_url: Some(format!("https://{profile}.example/").parse().unwrap()),
             approved_at: Some(NOW),
@@ -1275,6 +1288,53 @@ mod tests {
             loaded.invalid[0]
                 .reason
                 .contains("route must be gateway or mixed"),
+            "{}",
+            loaded.invalid[0].reason
+        );
+    }
+
+    #[test]
+    fn the_display_name_is_stored_quoted_and_a_file_without_one_has_none() {
+        let store = store();
+        let named = LinkedGateway {
+            display_name: Some(DisplayName::normalize(r#"台北 "Main" \ Office"#).unwrap()),
+            ..gateway("main", "m.example")
+        };
+        store.add(&named).unwrap();
+        store.add(&gateway("plain", "p.example")).unwrap();
+        let read = |file: &str| std::fs::read_to_string(store.dir().join(file)).unwrap();
+        assert!(
+            read("m.example.toml").contains("\ndisplay_name = \"台北 \\\"Main\\\" \\\\ Office\"\n"),
+            "{}",
+            read("m.example.toml")
+        );
+        assert!(!read("p.example.toml").contains("display_name"));
+        let bad = plant(
+            &store,
+            "b.example.toml",
+            &format!(
+                "{}display_name = \"two  spaces\"\n",
+                entry("bad", "b.example", 443)
+            ),
+        );
+        let loaded = store.load().unwrap();
+        let names: Vec<(&str, Option<&str>)> = loaded
+            .gateways
+            .iter()
+            .map(|gateway| {
+                let shown = gateway.display_name.as_ref().map(DisplayName::as_str);
+                (gateway.name.as_str(), shown)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [("main", Some(r#"台北 "Main" \ Office"#)), ("plain", None)]
+        );
+        assert_eq!(loaded.invalid.len(), 1);
+        assert_eq!(loaded.invalid[0].file, bad);
+        assert_eq!(loaded.invalid[0].name, Some(name("bad")));
+        assert!(
+            loaded.invalid[0].reason.contains("display_name"),
             "{}",
             loaded.invalid[0].reason
         );

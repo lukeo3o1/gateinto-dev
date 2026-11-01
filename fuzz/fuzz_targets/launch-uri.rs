@@ -10,6 +10,7 @@ use libfuzzer_sys::fuzz_target;
 fn known() -> Known {
     let gateway = |name: &str, host: &str, portal: Option<&str>, route| KnownGateway {
         name: name.parse().unwrap(),
+        display_name: None,
         host: Some(host.to_owned()),
         port: Some(443),
         portal_url: portal.map(|portal| portal.parse().unwrap()),

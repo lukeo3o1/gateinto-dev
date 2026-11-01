@@ -470,6 +470,7 @@ mod tests {
             Some(&probe),
             &known(vec![KnownGateway {
                 name: "office".parse::<GatewayName>().unwrap(),
+                display_name: None,
                 host: Some("proxy.example.com".to_owned()),
                 port: None,
                 portal_url: None,
@@ -644,6 +645,7 @@ mod tests {
     fn gateway(name: &str, host: &str, port: u16, source: Source) -> KnownGateway {
         KnownGateway {
             name: name.parse::<GatewayName>().unwrap(),
+            display_name: None,
             host: Some(host.to_owned()),
             port: Some(port),
             portal_url: None,

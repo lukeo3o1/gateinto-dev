@@ -139,7 +139,10 @@ Between older and newer clients and agents:
   contains `route` and does not start; it disables a linked gateway file
   that contains `route` and reports it as invalid, leaving the other
   gateways usable. Remove the `route` lines to use such a gateway with an
-  older agent.
+  older agent. The same holds for `display_name`: an older agent refuses a
+  configuration file that contains it and disables a linked gateway file
+  that contains it, as it does for any unknown field. Remove the
+  `display_name` line to use such a gateway with an older agent.
 
 After upgrading, run `gateinto stop` to close old sessions and restart the
 agent on the next launch.
@@ -394,9 +397,14 @@ linked entry is ignored.
   every platform, and so are DNS names that would read as an IPv6 address
   with `-` for `:` (such as `fe80--1`), since their file name would be
   ambiguous.
-- A file holds `name` (the internal or explicit profile), `host`, `port`,
-  optional `portal_url`, `approved_at` (Unix seconds) and optional `route`
-  (`gateway` or `mixed`, the saved default route), and nothing else.
+- A file holds `name` (the internal or explicit profile), optional
+  `display_name`, `host`, `port`, optional `portal_url`, `approved_at`
+  (Unix seconds) and optional `route` (`gateway` or `mixed`, the saved
+  default route), and nothing else. `display_name` is the name the GUI
+  shows; it is written only by the GUI's Add dialog, never taken from a
+  link, and must be 1 to 64 characters without control or text direction
+  characters, with single spaces between words and none at the ends.
+  Any other value makes the file invalid, disabling only its own entry.
   A missing portal is omitted rather than replaced with an inferred URL.
   Existing files containing `portal_url` remain valid. A missing `route`
   means `mixed`; any other value makes the file invalid, disabling only
