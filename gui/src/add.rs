@@ -301,18 +301,23 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
     };
     match link::resolve(&request, known, &mut Decision::Defer, 0) {
         Ok(Resolution::Confirm(confirmation)) => match display {
-            Some(display) => Verdict::Ready(Ready {
-                local: confirmation.gateway.is_local(),
-                gateway: LinkedGateway {
-                    name: confirmation.profile,
-                    display_name: Some(display),
-                    address: confirmation.gateway,
-                    portal_url: confirmation.portal,
-                    approved_at: None,
-                    route: form.route,
-                },
-            }),
             None => Verdict::Incomplete,
+            Some(display) => match damaged_name(known, &display) {
+                Some(held) => {
+                    Verdict::Invalid(Some(Input::Name), Message::with(Text::NameUsed, held))
+                }
+                None => Verdict::Ready(Ready {
+                    local: confirmation.gateway.is_local(),
+                    gateway: LinkedGateway {
+                        name: confirmation.profile,
+                        display_name: Some(display),
+                        address: confirmation.gateway,
+                        portal_url: confirmation.portal,
+                        approved_at: None,
+                        route: form.route,
+                    },
+                }),
+            },
         },
         Ok(Resolution::Launch(launch)) => Verdict::Invalid(
             Some(Input::Address),
@@ -320,6 +325,16 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
         ),
         Err(error) => link_error(known, error),
     }
+}
+
+fn damaged_name<'a>(known: &'a Known, display: &DisplayName) -> Option<&'a str> {
+    let wanted = display.as_str().to_lowercase();
+    known
+        .invalid
+        .iter()
+        .filter_map(|entry| entry.name.as_ref())
+        .map(GatewayName::as_str)
+        .find(|name| name.to_lowercase() == wanted)
 }
 
 pub fn disclosure(route: Route) -> String {
@@ -778,6 +793,26 @@ mod tests {
         assert_eq!(
             error(&form("proxy.example.com", "Lab", ""), &listing).0,
             Some(Input::Address)
+        );
+    }
+
+    #[test]
+    fn a_name_held_by_a_damaged_entry_elsewhere_is_refused() {
+        let listing = Ok(Known {
+            invalid: vec![InvalidEntry {
+                file: PathBuf::from("/secret/lab.gateway"),
+                name: Some("lab".parse().unwrap()),
+                addresses: vec!["proxy.example.org:443".parse().unwrap()],
+                reason: "bad".to_owned(),
+            }],
+            ..Known::default()
+        });
+        assert_eq!(
+            error(&form("proxy.example.net", "LAB", ""), &listing),
+            (
+                Some(Input::Name),
+                "\"lab\" is already used by another gateway.".to_owned()
+            )
         );
     }
 
