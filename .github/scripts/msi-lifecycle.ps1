@@ -27,7 +27,8 @@ $configDir = "$env:APPDATA\Gateinto"
 $configFile = "$configDir\gateinto.toml"
 $template = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\..\packaging\wix\gateinto.toml')
 $edited = "# kept by the lifecycle test`n"
-$installerKey = 'HKCU:\Software\Gateinto\Installer'
+$gateintoKey = 'HKCU:\Software\Gateinto'
+$installerKey = "$gateintoKey\Installer"
 $script:spki = $null
 $script:written = @()
 $script:guis = @()
@@ -132,6 +133,7 @@ foreach ($value in $touched) {
 if (Test-Path -LiteralPath $configFile) { throw "$configFile already exists; move it away before running this script" }
 if ($null -ne (Get-Value $installerKey 'ConfigTemplate')) { throw "$installerKey already has a value 'ConfigTemplate', so the install would skip the config template; remove it before running this script" }
 $hadConfigDir = Test-Path -LiteralPath $configDir
+$hadGateintoKey = Test-Path -LiteralPath $gateintoKey
 $hadInstallerKey = Test-Path -LiteralPath $installerKey
 
 try {
@@ -305,6 +307,7 @@ try {
     Start-Process msiexec.exe -Wait -ArgumentList '/x', "`"$UpgradeMsi`"", '/qn', '/norestart'
     Start-Process msiexec.exe -Wait -ArgumentList '/x', "`"$Msi`"", '/qn', '/norestart'
     if (-not $hadInstallerKey) { Remove-IfEmpty $installerKey }
+    if (-not $hadGateintoKey) { Remove-IfEmpty $gateintoKey }
     if (-not $hadConfigDir) { Remove-IfEmpty $configDir }
   }
 }
