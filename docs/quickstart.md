@@ -284,8 +284,9 @@ curl.exe -x http://127.0.0.1:50123 --proxy-user gateinto:<password> https://exam
 This prints the HTML of `example.com`. Use `curl.exe` (not the PowerShell
 `curl` alias). Add `-v` to see the session's `CONNECT` status;
 [troubleshooting.md](troubleshooting.md#status-codes) explains each status.
-Run with `$env:RUST_LOG = "info"` to also see the `listening` and
-`tunnel established` log lines.
+Run with `$env:RUST_LOG = "info"` to also see the `listening` log line, or
+with `$env:RUST_LOG = "debug"` to also see the `selected tunnel route` and
+`tunnel established` lines of each tunnel.
 
 For a browser, use `gateinto open` or a `gateinto://` link instead: the agent
 starts a session and opens Chrome or Edge with an isolated profile already

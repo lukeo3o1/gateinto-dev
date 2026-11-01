@@ -445,7 +445,7 @@ impl Shared {
             }
             Ok(Ok(opened)) => opened,
         };
-        info!("tunnel established");
+        debug!("tunnel established");
         let _open = self.open_tunnels.open();
         let mut response = b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
         response.extend_from_slice(&upstream_early);
@@ -479,10 +479,10 @@ impl Shared {
         )
         .await
         {
-            info!(route = "direct", "selected tunnel route");
+            debug!(route = "direct", "selected tunnel route");
             return Ok((Box::new(stream), Vec::new()));
         }
-        info!(route = "gateway", "selected tunnel route");
+        debug!(route = "gateway", "selected tunnel route");
         self.pool.open(&self.endpoint, target, &self.limits).await
     }
 }
