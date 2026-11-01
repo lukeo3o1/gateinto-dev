@@ -96,10 +96,10 @@ fn side(s: Scale) -> i32 {
 }
 
 pub fn dropped(l: &Layout, s: Scale, rows: &[Row], evicted: usize, m: &impl Measure) -> i32 {
-    let shown = &rows[..evicted.min(rows.len())];
-    let unknown = i32::try_from(evicted - shown.len()).unwrap_or(i32::MAX);
-    Entries::new(l, s, shown, m)
+    let unknown = i32::try_from(evicted.saturating_sub(rows.len())).unwrap_or(i32::MAX);
+    Entries::new(l, s, rows, m)
         .heights(s)
+        .take(evicted)
         .fold(0, i32::saturating_add)
         .saturating_add(unknown.saturating_mul(row_height(s)))
 }
@@ -645,6 +645,18 @@ mod tests {
         assert_eq!(dropped(&l, S, &rows, 2, &Chars), 42 + 24);
         assert_eq!(dropped(&l, S, &rows, 5, &Chars), 42 + 24 + 24 + 2 * 24);
         assert_eq!(dropped(&l, S, &[], 2, &Chars), 2 * 24);
+    }
+
+    #[test]
+    fn dropped_rows_are_wrapped_with_the_columns_of_every_row_shown() {
+        let l = layout();
+        let rows = vec![
+            row(LogLevel::Info, "agent", &"y".repeat(79)),
+            row(LogLevel::Info, "session 2", "short"),
+        ];
+        let b = draw(&page(&Body::Rows(rows.clone())));
+        assert_eq!(b.pane.map(|pane| pane.content), Some(8 + 42 + 24 + 8));
+        assert_eq!(dropped(&l, S, &rows, 1, &Chars), 42);
     }
 
     #[test]
