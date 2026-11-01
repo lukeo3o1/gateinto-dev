@@ -330,6 +330,11 @@ pub const IDENTITY: &str =
     "The gateway will see this device's identity (its client certificate, if one is installed)";
 pub const TRUST: &str = "only if you trust the organisation that runs this gateway.";
 pub const LOCAL_ADDRESS: &str = "This address is on your computer or local network.";
+pub const ALL_TRAFFIC: &str =
+    "all traffic of the isolated browser: every connection goes through the gateway.";
+pub const MIXED_WARNING: &str = "Warning: in mixed mode, sites may be reached directly instead \
+     of through the gateway, which exposes your local DNS lookups and your IP address to them \
+     and bypasses the gateway's policy.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
@@ -379,15 +384,13 @@ impl Confirmation {
         };
         let traffic = match self.route {
             Route::Gateway => {
-                "all traffic of the isolated browser: every connection goes through the gateway. \
-                 The gateway is saved with the gateway route (All in the app)"
+                format!(
+                    "{ALL_TRAFFIC} The gateway is saved with the gateway route (All in the app)"
+                )
             }
-            Route::Mixed => {
-                "the traffic routed to it. Warning: in mixed mode, sites may be reached directly \
-                 instead of through the gateway, which exposes your local DNS lookups and your IP \
-                 address to them and bypasses the gateway's policy. The gateway is saved with \
-                 the mixed route"
-            }
+            Route::Mixed => format!(
+                "the traffic routed to it. {MIXED_WARNING} The gateway is saved with the mixed route"
+            ),
         };
         format!(
             "A website asks to add the gateway \"{}\" to Gateinto and to open a browser \
@@ -1365,6 +1368,18 @@ mod tests {
             assert_eq!(launch.route, expected, "{route:?}");
             assert_eq!(launch.add.unwrap().route, expected, "{route:?}");
         }
+    }
+
+    #[test]
+    fn the_route_wording_is_shared_with_other_disclosures() {
+        let mixed = Confirmation {
+            route: Route::Mixed,
+            ..confirmation()
+        };
+        assert!(mixed.message().contains(MIXED_WARNING));
+        assert!(!mixed.message().contains(ALL_TRAFFIC));
+        assert!(confirmation().message().contains(ALL_TRAFFIC));
+        assert!(!confirmation().message().contains(MIXED_WARNING));
     }
 
     #[test]
