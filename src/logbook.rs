@@ -303,7 +303,7 @@ mod tests {
         recorded(&book, || {
             let session = info_span!("session", id = 7, gateway = "span-secret-gateway");
             let _session = session.enter();
-            let connection = info_span!("connection", peer = "127.0.0.1:5555");
+            let connection = info_span!("connection", peer = "span-secret-peer");
             let _connection = connection.enter();
             info!("inside a session");
         });
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(event.message, "inside a session");
         let line = event.to_line();
         assert!(!line.contains("span-secret-gateway"), "{line}");
-        assert!(!line.contains("5555"), "{line}");
+        assert!(!line.contains("span-secret-peer"), "{line}");
     }
 
     #[test]

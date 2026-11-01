@@ -124,8 +124,12 @@ async fn logs_never_contain_the_credentials() {
         .iter()
         .map(|event| event.message.as_str())
         .collect();
+    assert!(
+        kept.iter()
+            .all(|message| !message.contains("tunnel established")),
+        "a debug line reached the log page: {kept:?}"
+    );
     for expected in [
-        "tunnel established",
         "differ from the ones issued",
         "malformed local proxy credential",
         "rate limited",

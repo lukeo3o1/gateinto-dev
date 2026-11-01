@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::ops::Range;
 
 use gateinto::ipc::LogLevel;
 
 use super::{Board, Painter, inset};
-use crate::fonts::{Font, Measure};
+use crate::fonts::{ADVANCE_RUN, Font, Measure};
 use crate::hit::Zone;
 use crate::i18n::{Text, tr};
 use crate::icons;
@@ -14,6 +15,7 @@ use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::theme::{Rgb, Theme};
+use crate::wrap;
 
 const FILTERS: [(Filter, Text); 2] = [(Filter::All, Text::All), (Filter::Warnings, Text::Warnings)];
 const WIDEST_TIME: &str = "00:00:00";
@@ -45,28 +47,32 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
 
     let top = tools.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
-    let (pad, row_h) = (s.px(8.0), row_height(s));
+    let pad = s.px(8.0);
+    let entries = match page.body {
+        Body::Rows(rows) => Entries::new(l, s, rows, m),
+        Body::Empty(_) => Entries::default(),
+    };
     let total = match page.body {
-        Body::Rows(rows) => 2 * pad + rows.len() as i32 * row_h,
+        Body::Rows(_) => 2 * pad + entries.heights(s).sum::<i32>(),
         Body::Empty(_) => s.px(56.0),
     };
     let offset = p.scroll(view, total);
     let card = Rect::new(content.x, top - offset, content.w, total);
     p.framed(card, 10.0, t.card);
-    let side = s.px(16.0);
+    let side = side(s);
     match page.body {
         Body::Rows(rows) => {
-            let inner = Rect::new(card.x + side, card.y + pad, card.w - 2 * side, row_h);
-            let columns = Columns::new(&p, inner, rows);
-            for (i, row) in rows.iter().enumerate() {
-                let r = Rect::new(inner.x, inner.y + i as i32 * row_h, inner.w, row_h);
+            let mut y = card.y + pad;
+            for ((row, lines), h) in rows.iter().zip(&entries.lines).zip(entries.heights(s)) {
+                let r = Rect::new(card.x + side, y, card.w - 2 * side, h);
+                y = r.bottom();
                 if r.bottom() <= view.y {
                     continue;
                 }
                 if r.y >= view.bottom() {
                     break;
                 }
-                p.entry(&columns, r, row);
+                p.entry(&entries.columns, r, row, lines);
             }
         }
         Body::Empty(why) => {
@@ -77,30 +83,86 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     p.finish()
 }
 
-pub fn row_height(s: Scale) -> i32 {
+fn row_height(s: Scale) -> i32 {
     s.px(24.0)
 }
 
+fn line_height(s: Scale) -> i32 {
+    s.px(18.0)
+}
+
+fn side(s: Scale) -> i32 {
+    s.px(16.0)
+}
+
+pub fn dropped(l: &Layout, s: Scale, rows: &[Row], evicted: usize, m: &impl Measure) -> i32 {
+    let unknown = i32::try_from(evicted.saturating_sub(rows.len())).unwrap_or(i32::MAX);
+    Entries::new(l, s, rows, m)
+        .heights(s)
+        .take(evicted)
+        .fold(0, i32::saturating_add)
+        .saturating_add(unknown.saturating_mul(row_height(s)))
+}
+
+#[derive(Default)]
+struct Entries {
+    columns: Columns,
+    lines: Vec<Vec<Range<usize>>>,
+}
+
+impl Entries {
+    fn new(l: &Layout, s: Scale, rows: &[Row], m: &impl Measure) -> Self {
+        let columns = Columns::new(m, s, l.content.w - 2 * side(s), rows);
+        let limit = u64::try_from(columns.message).unwrap_or(0) * ADVANCE_RUN as u64;
+        let mut advances = HashMap::new();
+        let lines = rows
+            .iter()
+            .map(|row| {
+                wrap::lines(&row.message, limit, |c| {
+                    *advances
+                        .entry(c)
+                        .or_insert_with(|| m.advance(Font::Mono, c))
+                })
+            })
+            .collect();
+        Self { columns, lines }
+    }
+
+    fn heights(&self, s: Scale) -> impl Iterator<Item = i32> + '_ {
+        let (first, next) = (row_height(s), line_height(s));
+        self.lines
+            .iter()
+            .map(move |lines| first + (lines.len().max(1) as i32 - 1) * next)
+    }
+}
+
+#[derive(Default)]
 struct Columns {
     time: i32,
     level: i32,
     scope: i32,
     gap: i32,
+    message: i32,
 }
 
 impl Columns {
-    fn new<M: Measure>(p: &Painter<'_, M>, inner: Rect, rows: &[Row]) -> Self {
+    fn new(m: &impl Measure, s: Scale, width: i32, rows: &[Row]) -> Self {
         let scopes: BTreeSet<&str> = rows.iter().map(|row| row.scope.as_str()).collect();
         let widest = scopes
             .into_iter()
-            .map(|scope| p.m.width(Font::Mono, scope))
+            .map(|scope| m.width(Font::Mono, scope))
             .max()
             .unwrap_or(0);
+        let time = m.width(Font::Mono, WIDEST_TIME);
+        let level = m.width(Font::Mono, WIDEST_LEVEL);
+        let scope = widest.min(width / 4);
+        let gap = s.px(12.0);
         Self {
-            time: p.m.width(Font::Mono, WIDEST_TIME),
-            level: p.m.width(Font::Mono, WIDEST_LEVEL),
-            scope: widest.min(inner.w / 4),
-            gap: p.s.px(12.0),
+            time,
+            level,
+            scope,
+            gap,
+            message: (width - time - level - scope - 3 * gap).max(0),
         }
     }
 }
@@ -159,17 +221,27 @@ impl<M: Measure> Painter<'_, M> {
         }
     }
 
-    fn entry(&mut self, c: &Columns, r: Rect, row: &Row) {
-        let t = self.t;
-        let time = Rect::new(r.x, r.y, c.time, r.h);
+    fn entry(&mut self, c: &Columns, r: Rect, row: &Row, lines: &[Range<usize>]) {
+        let (s, t) = (self.s, self.t);
+        let first = row_height(s);
+        let time = Rect::new(r.x, r.y, c.time, first);
         self.text(Font::Mono, row.time.clone(), time, t.muted);
-        let level = Rect::new(time.right() + c.gap, r.y, c.level, r.h);
+        let level = Rect::new(time.right() + c.gap, r.y, c.level, first);
         self.text(Font::Mono, row.label(), level, level_ink(t, row.level));
-        let scope = Rect::new(level.right() + c.gap, r.y, c.scope, r.h);
+        let scope = Rect::new(level.right() + c.gap, r.y, c.scope, first);
         self.text(Font::Mono, row.scope.clone(), scope, t.muted);
         let x = scope.right() + c.gap;
-        let message = Rect::new(x, r.y, (r.right() - x).max(0), r.h);
-        self.text(Font::Mono, row.message.clone(), message, t.text);
+        let next = line_height(s);
+        let mut line = Rect::new(x, r.y, c.message, first);
+        for range in lines {
+            self.text(
+                Font::Mono,
+                row.message[range.clone()].to_owned(),
+                line,
+                t.text,
+            );
+            line = Rect::new(x, line.y + (line.h - next) / 2 + next, c.message, next);
+        }
     }
 }
 
@@ -486,6 +558,105 @@ mod tests {
         let shown = messages(&bottom);
         assert_eq!(shown.last().map(String::as_str), Some("line 99"));
         assert!(shown.len() <= 22);
+    }
+
+    const REFUSED: &str = "upstream refused tunnel target=gw.peztiacloud.com:443 error=CONNECT answered with status 403";
+
+    fn messages(b: &Board) -> Vec<(String, Rect)> {
+        b.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(Font::Mono, s, r, ink) if *ink == T.text => Some((s.to_string(), *r)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_message_continues_on_lines_under_the_message_column() {
+        let body = Body::Rows(vec![
+            row(LogLevel::Warn, "session 2", REFUSED),
+            row(LogLevel::Info, "agent", "after"),
+        ]);
+        let b = draw(&page(&body));
+        assert_eq!(
+            messages(&b),
+            [
+                (
+                    "upstream refused tunnel target=gw.peztiacloud.com:443 error=CONNECT answered"
+                        .to_owned(),
+                    Rect::new(454, 166, 542, 24)
+                ),
+                ("with status 403".to_owned(), Rect::new(454, 187, 542, 18)),
+                ("after".to_owned(), Rect::new(454, 208, 542, 24)),
+            ]
+        );
+        assert!(b.ops.contains(&text(
+            Font::Mono,
+            "WARN",
+            Rect::new(332, 166, 35, 24),
+            T.warning
+        )));
+        assert!(b.ops.contains(&text(
+            Font::Mono,
+            "INFO",
+            Rect::new(332, 208, 35, 24),
+            T.muted
+        )));
+        assert_eq!(b.pane, Some(Pane::new(LIST, 8 + 42 + 24 + 8, 0)));
+    }
+
+    #[test]
+    fn at_the_minimum_window_size_every_message_line_fits_and_nothing_is_lost() {
+        let (w, h) = Layout::min_size(S);
+        let l = Layout::new(w, h, S, true);
+        let token = "x".repeat(300);
+        let long = [REFUSED, token.as_str(), "short"];
+        let body = Body::Rows(
+            long.iter()
+                .map(|message| row(LogLevel::Warn, "session 12", message))
+                .collect(),
+        );
+        let b = draw_on(&l, &page(&body), &view());
+        let lines = messages(&b);
+        assert!(lines.len() > long.len() + 4, "{lines:?}");
+        let right = l.content.right() - 16;
+        for (line, r) in &lines {
+            assert!(Chars.width(Font::Mono, line) <= r.w, "{line:?} in {r:?}");
+            assert!(r.right() <= right, "{r:?}");
+        }
+        let shown: String = lines.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(shown.replace(' ', ""), long.concat().replace(' ', ""));
+        let pane = b.pane.expect("a pane");
+        let last = lines.last().unwrap().1;
+        assert_eq!(pane.content, last.bottom() - pane.view.y + 8);
+    }
+
+    #[test]
+    fn dropped_rows_are_as_tall_as_they_were_drawn() {
+        let l = layout();
+        let rows = vec![
+            row(LogLevel::Warn, "session 2", REFUSED),
+            row(LogLevel::Info, "agent", "short"),
+            row(LogLevel::Info, "agent", "short"),
+        ];
+        assert_eq!(dropped(&l, S, &rows, 0, &Chars), 0);
+        assert_eq!(dropped(&l, S, &rows, 1, &Chars), 42);
+        assert_eq!(dropped(&l, S, &rows, 2, &Chars), 42 + 24);
+        assert_eq!(dropped(&l, S, &rows, 5, &Chars), 42 + 24 + 24 + 2 * 24);
+        assert_eq!(dropped(&l, S, &[], 2, &Chars), 2 * 24);
+    }
+
+    #[test]
+    fn dropped_rows_are_wrapped_with_the_columns_of_every_row_shown() {
+        let l = layout();
+        let rows = vec![
+            row(LogLevel::Info, "agent", &"y".repeat(79)),
+            row(LogLevel::Info, "session 2", "short"),
+        ];
+        let b = draw(&page(&Body::Rows(rows.clone())));
+        assert_eq!(b.pane.map(|pane| pane.content), Some(8 + 42 + 24 + 8));
+        assert_eq!(dropped(&l, S, &rows, 1, &Chars), 42);
     }
 
     #[test]

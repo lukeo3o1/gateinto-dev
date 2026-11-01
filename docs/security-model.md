@@ -570,12 +570,13 @@ Non-guarantees:
   network and no other machine can reach a session.
 - **No secrets or payload in logs.** Tunnel payload, private keys and local
   proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
-  listen address, the client's local address and port for each tunnel, tunnel
-  established and idle-timeout events, and the client certificate's subject,
+  listen address, the client's local address and port for each tunnel,
+  idle-timeout events, and the client certificate's subject,
   SHA-1 thumbprint, NotAfter, source and key backend (for self-signed
   certificates the device key's SPKI SHA-256 and, per session, the SHA-256 of
-  the session's certificate). The target `host:port` of an established tunnel,
-  the negotiated TLS version and group, and byte counts are logged only at
+  the session's certificate). The selected route and the establishment of
+  each tunnel, the target `host:port` of an established tunnel, the
+  negotiated TLS version and group, and byte counts are logged only at
   `debug`. A refused tunnel is logged at `warn` with its target `host:port` and
   the cause, never with credentials or the `Proxy-Authorization` header. `check-upstream` prints
   TLS parameters, the server certificate subject and the upstream status line,

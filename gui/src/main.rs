@@ -40,6 +40,7 @@ mod uninstall;
 #[cfg(windows)]
 mod win;
 mod worker;
+mod wrap;
 
 fn main() {
     #[cfg(windows)]

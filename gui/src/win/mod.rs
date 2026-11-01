@@ -1298,6 +1298,11 @@ fn on_agent(hwnd: HWND) {
         let evicted = app.update.as_ref().map_or(0, |before| {
             log::evicted(&before.log, &update.log, app.filter)
         });
+        let shown = match &app.log {
+            log::Body::Rows(rows) => rows.as_slice(),
+            log::Body::Empty(_) => &[],
+        };
+        let dropped = board::log::dropped(&app.layout, app.s, shown, evicted, &app.fonts);
         app.launches.settle(update.launched);
         app.launch_settled(update.failure.as_ref());
         if app.dialog.as_ref().is_some_and(|d| !d.lasts(&update.state)) {
@@ -1319,10 +1324,9 @@ fn on_agent(hwnd: HWND) {
         app.relog();
         if pinned {
             app.view.scroll.set(NavPage::Log, i32::MAX);
-        } else if evicted > 0 {
+        } else if dropped > 0 {
             let offset = app.view.scroll.get(NavPage::Log);
-            let row_h = board::log::row_height(app.s);
-            let kept = log::kept_offset(offset, evicted, row_h);
+            let kept = log::kept_offset(offset, dropped);
             app.view.scroll.set(NavPage::Log, kept);
         }
         if app.entries() != entries {
