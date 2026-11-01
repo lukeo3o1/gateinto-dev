@@ -4,6 +4,7 @@ pub fn lines(text: &str, limit: u64, mut advance: impl FnMut(char) -> u64) -> Ve
     let mut lines = Vec::new();
     let line =
         |start: usize, end: usize| start..start + text[start..end].trim_end_matches(' ').len();
+    let blank = |start: usize, end: usize| text[start..end].bytes().all(|b| b == b' ');
     let (mut start, mut width) = (0, 0);
     let mut space = None;
     let mut continued = false;
@@ -13,7 +14,9 @@ pub fn lines(text: &str, limit: u64, mut advance: impl FnMut(char) -> u64) -> Ve
             if continued && i == start {
                 start = i + 1;
             } else if width + w > limit {
-                lines.push(line(start, i));
+                if !blank(start, i) {
+                    lines.push(line(start, i));
+                }
                 (start, width, space, continued) = (i + 1, 0, None, true);
             } else {
                 width += w;
@@ -22,12 +25,14 @@ pub fn lines(text: &str, limit: u64, mut advance: impl FnMut(char) -> u64) -> Ve
             continue;
         }
         if width + w > limit {
-            if let Some((at, before)) = space.take() {
+            if let Some((at, before)) = space.take().filter(|&(at, _)| !blank(start, at)) {
                 lines.push(line(start, at));
                 (start, width, continued) = (at + 1, width - before, true);
             }
             if width + w > limit && i > start {
-                lines.push(line(start, i));
+                if !blank(start, i) {
+                    lines.push(line(start, i));
+                }
                 (start, width, continued) = (i, 0, true);
             }
         }
@@ -77,6 +82,14 @@ mod tests {
     }
 
     #[test]
+    fn leading_spaces_never_leave_a_blank_line() {
+        assert_eq!(wrapped(" abcdef", 3), [" ab", "cde", "f"]);
+        assert_eq!(wrapped("   abc", 3), ["abc"]);
+        assert_eq!(wrapped("    ab", 3), ["ab"]);
+        assert_eq!(wrapped("ab     cd", 3), ["ab", "cd"]);
+    }
+
+    #[test]
     fn tokens_wider_than_a_line_are_cut_where_the_line_is_full() {
         assert_eq!(wrapped("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(wrapped("to abcdefghij", 4), ["to", "abcd", "efgh", "ij"]);
@@ -97,15 +110,20 @@ mod tests {
     fn no_line_is_wider_than_the_limit_and_no_text_is_lost() {
         let text = "WARN session 2 upstream refused tunnel target=gw.peztiacloud.com:443 \
                     error=CONNECT answered with status 403 代理程式 aaaaaaaaaaaaaaaaaaaaaaaaaa";
-        for limit in 2..80 {
+        for (text, limit) in ["", " ", "   "]
+            .map(|indent| format!("{indent}{text}"))
+            .iter()
+            .flat_map(|text| (2..80).map(move |limit| (text.as_str(), limit)))
+        {
             let ranges = lines(text, limit, cells);
             let mut rest = text;
             for range in &ranges {
                 let line = &text[range.clone()];
                 assert!(line.chars().map(cells).sum::<u64>() <= limit, "{line:?}");
+                assert!(!line.trim().is_empty(), "{limit} {text:?}");
                 rest = rest.trim_start_matches(' ');
                 rest = rest
-                    .strip_prefix(line)
+                    .strip_prefix(line.trim_start_matches(' '))
                     .unwrap_or_else(|| panic!("{line:?}"));
             }
             assert_eq!(rest.trim(), "", "{limit}");
