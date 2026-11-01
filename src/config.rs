@@ -121,7 +121,7 @@ impl DisplayName {
         let name = collapsed.join(" ");
         let visible = name.chars().all(|c| {
             !c.is_control()
-                && !matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+                && !matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
         });
         if !name.is_empty() && name.chars().count() <= Self::MAX_LEN && visible {
             Ok(Self(name))
@@ -1519,6 +1519,7 @@ port = 443
             "a\u{202e}b",
             "a\u{2066}b",
             "a\u{200f}b",
+            "a\u{061c}b",
         ] {
             assert!(DisplayName::normalize(hidden).is_err(), "{hidden:?}");
         }
