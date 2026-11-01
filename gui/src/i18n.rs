@@ -433,6 +433,21 @@ pub fn confirmation_notice(confirmation: &Confirmation) -> String {
     }
 }
 
+const ZH_IDENTITY: &str = "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）";
+const ZH_TRUST: &str = "只有在您信任營運此閘道的組織時";
+const ZH_ROUTED: &str = "轉送給它的流量。";
+const ZH_ALL_TRAFFIC: &str = "隔離瀏覽器的所有流量：每個連線都會經過閘道。";
+const ZH_MIXED_WARNING: &str = "警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+     這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。";
+
+pub fn chinese_disclosure(route: Route) -> String {
+    let traffic = match route {
+        Route::Gateway => ZH_ALL_TRAFFIC.to_owned(),
+        Route::Mixed => format!("{ZH_ROUTED}{ZH_MIXED_WARNING}"),
+    };
+    format!("{ZH_IDENTITY}以及{traffic}{ZH_TRUST}才新增。")
+}
+
 fn chinese_notice(confirmation: &Confirmation) -> String {
     let local = if confirmation.gateway.is_local() {
         "\n此位址位於您的電腦或區域網路上。"
@@ -445,23 +460,16 @@ fn chinese_notice(confirmation: &Confirmation) -> String {
         .and_then(Origin::of)
         .map_or_else(|| "無".to_owned(), |origin| origin.to_string());
     let traffic = match confirmation.route {
-        Route::Gateway => {
-            "隔離瀏覽器的所有流量：每個連線都會經過閘道。\
-             此閘道將以閘道路由（應用程式中的「全部」）儲存"
-        }
-        Route::Mixed => {
-            "轉送給它的流量。警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
-             這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
-             此閘道將以混合路由儲存"
-        }
+        Route::Gateway => format!("{ZH_ALL_TRAFFIC}此閘道將以閘道路由（應用程式中的「全部」）儲存"),
+        Route::Mixed => format!("{ZH_ROUTED}{ZH_MIXED_WARNING}此閘道將以混合路由儲存"),
     };
     format!(
         "有網站要求將閘道「{}」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
          閘道：{}{local}\n\
          入口網站：{portal}\n\n\
-         閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及{traffic}，\
+         {ZH_IDENTITY}以及{traffic}，\
          之後未指定路由的連結也會使用此路由。\
-         只有在您信任營運此閘道的組織時才允許。",
+         {ZH_TRUST}才允許。",
         confirmation.profile, confirmation.gateway,
     )
 }

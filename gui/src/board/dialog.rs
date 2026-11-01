@@ -1206,22 +1206,57 @@ mod tests {
     #[test]
     fn the_trust_disclosure_fits_the_minimum_window() {
         for route in [Route::Mixed, Route::Gateway] {
-            fits_the_minimum_window(route);
+            fits_the_minimum_window(route, &Chars);
+            let texts = texts(&draw_add(&min_layout(), &routed(true, route))).join(" ");
+            assert!(texts.contains("client certificate"), "{texts}");
+            assert!(texts.contains("trust the organisation"), "{texts}");
         }
     }
 
-    fn fits_the_minimum_window(route: Route) {
+    struct WideHan;
+
+    impl Measure for WideHan {
+        fn width(&self, _font: Font, text: &str) -> i32 {
+            text.chars()
+                .map(|c| if c.is_ascii() { 7 } else { 14 })
+                .sum()
+        }
+    }
+
+    #[test]
+    fn the_chinese_disclosure_fits_the_minimum_window_with_wide_glyphs() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        for route in [Route::Mixed, Route::Gateway] {
+            fits_the_minimum_window(route, &WideHan);
+        }
+    }
+
+    fn min_layout() -> crate::layout::Layout {
         let (w, h) = crate::layout::Layout::min_size(S);
-        let l = crate::layout::Layout::new(w, h, S, true);
-        let board = draw_add(&l, &routed(true, route));
+        crate::layout::Layout::new(w, h, S, true)
+    }
+
+    fn fits_the_minimum_window(route: Route, m: &impl Measure) {
+        let l = min_layout();
+        let h = crate::layout::Layout::min_size(S).1;
+        let mut board = Board {
+            targets: vec![(Rect::new(900, 300, 32, 32), Zone::Revoke(3))],
+            ..Board::default()
+        };
+        add(
+            &mut board,
+            &l,
+            S,
+            &T,
+            &View::default(),
+            &routed(true, route),
+            m,
+        );
         let panel = board.targets.last().unwrap().0;
         assert!(
             panel.y >= l.caption_row.bottom() && panel.bottom() <= h,
             "{panel:?}"
         );
-        let texts = texts(&board).join(" ");
-        assert!(texts.contains("client certificate"), "{texts}");
-        assert!(texts.contains("trust the organisation"), "{texts}");
         let footer = board
             .targets
             .iter()

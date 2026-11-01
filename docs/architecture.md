@@ -423,7 +423,8 @@ The full protocol, limits and guarantees are in
   gateways and never shown (`gui/src/naming.rs`). Mixed is preselected and
   the disclosure then carries the link approval's direct-connection warning
   (`link::MIXED_WARNING`); All uses its all-traffic wording
-  (`link::ALL_TRAFFIC`). The gateway is written with `LinkedStore::add` on
+  (`link::ALL_TRAFFIC`). In Chinese the disclosure uses the phrases of the
+  approval window's Chinese notice (`i18n::chinese_disclosure`). The gateway is written with `LinkedStore::add` on
   `store::default_dir()` with its approval time and chosen route; the config
   file is never written. The list and details show the saved route of each
   gateway, and a browser started from the GUI asks for that saved route

@@ -10,7 +10,7 @@ use gateinto::proxy::Route;
 use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
 
 use crate::gateways;
-use crate::i18n::{Text, fill, tr};
+use crate::i18n::{Language, Text, chinese_disclosure, current, fill, tr};
 use crate::naming;
 
 pub const TITLE: Text = Text::AddGateway;
@@ -314,6 +314,9 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
 }
 
 pub fn disclosure(route: Route) -> String {
+    if current() == Language::Chinese {
+        return chinese_disclosure(route);
+    }
     match route {
         Route::Mixed => {
             format!("{IDENTITY} and the traffic routed to it. {MIXED_WARNING} Add it {TRUST}")
@@ -904,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn the_form_speaks_chinese_but_the_disclosure_stays_as_the_agent_words_it() {
+    fn the_form_and_its_disclosure_speak_chinese() {
         let mut stuck = lab();
         assert!(!commit(&mut stuck, &known(vec![]), None, 1));
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
@@ -927,7 +930,19 @@ mod tests {
             sheet.notice,
             Some((disclosure(Route::Mixed), Tone::Warning))
         );
-        assert!(disclosure(Route::Mixed).starts_with(gateinto::link::IDENTITY));
+        assert_eq!(
+            disclosure(Route::Mixed),
+            "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及轉送給它的流量。\
+             警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+             這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
+             只有在您信任營運此閘道的組織時才新增。"
+        );
+        assert_eq!(
+            disclosure(Route::Gateway),
+            "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及\
+             隔離瀏覽器的所有流量：每個連線都會經過閘道。\
+             只有在您信任營運此閘道的組織時才新增。"
+        );
         assert_eq!(
             error(
                 &form("proxy.example.net", "office", ""),
