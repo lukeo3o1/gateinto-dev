@@ -1743,11 +1743,16 @@ mod tests {
 
     #[test]
     fn start_browser_leaves_the_route_to_the_saved_gateway() {
-        let Ok(Request::Launch(launch)) = Command::Launch("office".parse().unwrap()).request()
-        else {
+        let request = Command::Launch("office".parse().unwrap())
+            .request()
+            .unwrap();
+        assert_eq!(
+            request.to_string(),
+            "launch office session_credentials route=saved"
+        );
+        let Request::Launch(launch) = request else {
             panic!("expected a launch request");
         };
         assert_eq!(launch.route, None);
-        assert!(!launch.to_string().contains("route="));
     }
 }
