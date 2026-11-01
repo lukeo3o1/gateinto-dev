@@ -30,6 +30,7 @@ user32.dll AllowSetForegroundWindow
 user32.dll AppendMenuW
 user32.dll BeginPaint
 user32.dll ChangeWindowMessageFilterEx
+user32.dll ClientToScreen
 user32.dll CloseClipboard
 user32.dll CreateIconIndirect
 user32.dll CreatePopupMenu
@@ -42,6 +43,7 @@ user32.dll DispatchMessageW
 user32.dll EmptyClipboard
 user32.dll EndPaint
 user32.dll FindWindowExW
+user32.dll GetActiveWindow
 user32.dll GetCapture
 user32.dll GetClientRect
 user32.dll GetClipboardData
