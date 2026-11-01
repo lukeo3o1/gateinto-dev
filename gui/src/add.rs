@@ -28,6 +28,7 @@ const UNLISTED: Text = Text::Unlisted;
 const UNUSABLE: Text = Text::Unusable;
 // The longest DNS name, a colon and a five digit port.
 const MAX_ADDRESS: usize = 253 + 1 + 5;
+const MAX_TYPED_NAME: usize = 4 * DisplayName::MAX_LEN;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Input {
@@ -37,11 +38,19 @@ pub enum Input {
     Portal,
 }
 
+fn saved_len(name: &str) -> usize {
+    let words = name.split_whitespace().map(|word| word.chars().count() + 1);
+    words.sum::<usize>().saturating_sub(1)
+}
+
 impl Input {
     fn fits(self, field: &str, c: char) -> bool {
         match self {
             Self::Address => field.len() + c.len_utf8() <= MAX_ADDRESS,
-            Self::Name => field.chars().count() < DisplayName::MAX_LEN,
+            Self::Name => {
+                field.chars().count() < MAX_TYPED_NAME
+                    && saved_len(&format!("{field}{c}")) <= DisplayName::MAX_LEN
+            }
             Self::Portal => field.len() + c.len_utf8() <= PortalUrl::MAX_LEN,
         }
     }
@@ -540,6 +549,23 @@ mod tests {
             form.value(Input::Name).chars().count(),
             DisplayName::MAX_LEN
         );
+    }
+
+    #[test]
+    fn the_name_limit_counts_the_name_as_it_will_be_saved() {
+        let spaced = format!("{}a", "ab  ".repeat(21));
+        let mut form = Form::default();
+        form.select(Input::Name);
+        form.type_text(&format!("  {spaced}"));
+        assert_eq!(form.value(Input::Name), format!("  {spaced}"));
+        let saved = display_name(&form, &Known::default()).unwrap().unwrap();
+        assert_eq!(saved.as_str().chars().count(), DisplayName::MAX_LEN);
+        form.type_text("  x");
+        assert_eq!(form.value(Input::Name), format!("  {spaced}  "));
+        let mut blank = Form::default();
+        blank.select(Input::Name);
+        blank.type_text(&" ".repeat(1000));
+        assert_eq!(blank.value(Input::Name).len(), 4 * DisplayName::MAX_LEN);
     }
 
     #[test]
