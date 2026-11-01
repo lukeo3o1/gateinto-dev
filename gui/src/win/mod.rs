@@ -984,6 +984,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::CloseDialog
         | Zone::AddGateway
         | Zone::AddField(_)
+        | Zone::AddRoute(_)
         | Zone::ConfirmAdd
         | Zone::RemoveGateway
         | Zone::ConfirmRemove
@@ -1152,6 +1153,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Focus(input)) => {
             with_app(hwnd, |app| app.edit(|form| form.select(input)));
+            return;
+        }
+        Some(Action::Route(route)) => {
+            with_app(hwnd, |app| app.edit(|form| form.choose(route)));
             return;
         }
         Some(Action::ConfirmAdd) => {

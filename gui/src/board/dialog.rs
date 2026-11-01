@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use gateinto::proxy::Route;
+
 use super::{Board, Painter};
 use crate::add::{self, Sheet, Tone};
 use crate::credentials::{Field, HINT, Page, SUBTITLE};
@@ -392,10 +394,10 @@ pub fn add(
         .as_ref()
         .map(|(text, tone)| (wrap(m, Font::Small, text, w - 3 * pad - glyph), *tone));
     let notice_h = notice.as_ref().map_or(0, |(lines, _)| {
-        s.px(10.0) + 2 * pad + lines.len() as i32 * note
+        s.px(4.0) + 2 * pad + lines.len() as i32 * note
     });
     let entry = row + s.px(2.0) + note;
-    let body = s.px(42.0) + 3 * entry + 2 * gap + notice_h;
+    let body = s.px(36.0) + 3 * entry + 3 * gap + row + notice_h;
     let mut modal = Modal::open(l, s, t, v, m, body);
     let inner = modal.inner;
     let p = &mut modal.p;
@@ -409,7 +411,7 @@ pub fn add(
     let label_w = s.px(LABEL_W);
     let fx = x + label_w;
     let fw = w - label_w;
-    let mut y = inner.y + s.px(42.0);
+    let mut y = inner.y + s.px(36.0);
     for entry in &sheet.entries {
         p.text(
             Font::BodyStrong,
@@ -424,9 +426,31 @@ pub fn add(
         p.text(Font::Small, entry.note.clone(), r, tone(t, entry.tone));
         y = r.bottom() + gap;
     }
+    p.text(
+        Font::BodyStrong,
+        tr(Text::Route),
+        Rect::new(x, y, label_w, row),
+        t.text,
+    );
+    let parts = [
+        (
+            tr(Text::Mixed),
+            Zone::AddRoute(Route::Mixed),
+            sheet.route == Route::Mixed,
+        ),
+        (
+            tr(Text::All),
+            Zone::AddRoute(Route::Gateway),
+            sheet.route == Route::Gateway,
+        ),
+    ];
+    let choice = Rect::new(fx, y, fw, row);
+    let group = p.segment_group(choice, &parts, false);
+    p.segment_parts(group, &parts);
+    y = choice.bottom() + gap;
     if let Some((lines, kind)) = notice {
-        y += s.px(10.0);
-        let r = Rect::new(x, y, w, notice_h - s.px(10.0));
+        y += s.px(4.0);
+        let r = Rect::new(x, y, w, notice_h - s.px(4.0));
         p.push(Op::Round(r, s.pxf(8.0), t.notice));
         let icon = Rect::new(x + pad, y + pad, glyph, note);
         let mark = match kind {
@@ -607,6 +631,8 @@ impl<M: Measure> Painter<'_, M> {
 mod tests {
     use super::*;
     use crate::board::tests::{Chars, layout};
+
+    use gateinto::proxy::Route;
 
     use crate::add::{ADDRESS_HINT, Entry, Input, NAME_HINT, PORTAL_HINT, Tone, disclosure};
     use crate::credentials::{Field, MASK, Page, UNAVAILABLE, WAITING};
@@ -1019,6 +1045,10 @@ mod tests {
     }
 
     fn add_sheet(ready: bool) -> Sheet<'static> {
+        routed(ready, Route::Mixed)
+    }
+
+    fn routed(ready: bool, route: Route) -> Sheet<'static> {
         let entry = |input, label, value, note: Text| Entry {
             input,
             label,
@@ -1033,7 +1063,8 @@ mod tests {
                 entry(Input::Portal, "Portal page", "", PORTAL_HINT),
             ],
             focus: Input::Address,
-            notice: Some((disclosure(), Tone::Warning)),
+            route,
+            notice: Some((disclosure(route), Tone::Warning)),
             ready,
         }
     }
@@ -1045,6 +1076,9 @@ mod tests {
         for part in [
             "新增閘道",
             "主機名稱或 IP 位址。預設連接埠為 443。",
+            "路由",
+            "混合",
+            "全部",
             "取消",
             "新增",
         ] {
@@ -1070,6 +1104,8 @@ mod tests {
                 Zone::AddField(Input::Address),
                 Zone::AddField(Input::Name),
                 Zone::AddField(Input::Portal),
+                Zone::AddRoute(Route::Mixed),
+                Zone::AddRoute(Route::Gateway),
                 Zone::CloseDialog,
                 Zone::ConfirmAdd,
                 Zone::Dialog,
@@ -1085,14 +1121,39 @@ mod tests {
             ADDRESS_HINT.english(),
             NAME_HINT.english(),
             PORTAL_HINT.english(),
+            "Route",
+            "Mixed",
+            "All",
             "Cancel",
             "Add",
         ] {
             assert!(texts.iter().any(|t| t == part), "{part}");
         }
-        for absent in ["Route", "Mixed", "mixed mode"] {
-            assert!(!texts.iter().any(|t| t.contains(absent)), "{absent}");
-        }
+        assert!(texts.join(" ").contains("Warning: in mixed mode"));
+    }
+
+    fn segment(board: &Board, label: &str) -> Option<Font> {
+        board.ops.iter().find_map(|op| match op {
+            Op::Text(font, text, ..) if text == label => Some(*font),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_route_choice_marks_the_chosen_route_and_warns_only_for_mixed() {
+        let mixed = draw_add(&layout(), &routed(true, Route::Mixed));
+        assert_eq!(segment(&mixed, "Mixed"), Some(Font::SmallStrong));
+        assert_eq!(segment(&mixed, "All"), Some(Font::Small));
+        let all = draw_add(&layout(), &routed(true, Route::Gateway));
+        assert_eq!(segment(&all, "Mixed"), Some(Font::Small));
+        assert_eq!(segment(&all, "All"), Some(Font::SmallStrong));
+        let texts = texts(&all).join(" ");
+        assert!(!texts.contains("mixed mode"), "{texts}");
+        assert!(texts.contains("every connection goes through"), "{texts}");
+        let field = all.targets[2].0;
+        let choice = all.targets[3].0;
+        assert_eq!(choice.x, field.x + 3);
+        assert!(choice.y > field.bottom(), "{choice:?} {field:?}");
     }
 
     #[test]
@@ -1144,9 +1205,15 @@ mod tests {
 
     #[test]
     fn the_trust_disclosure_fits_the_minimum_window() {
+        for route in [Route::Mixed, Route::Gateway] {
+            fits_the_minimum_window(route);
+        }
+    }
+
+    fn fits_the_minimum_window(route: Route) {
         let (w, h) = crate::layout::Layout::min_size(S);
         let l = crate::layout::Layout::new(w, h, S, true);
-        let board = draw_add(&l, &add_sheet(true));
+        let board = draw_add(&l, &routed(true, route));
         let panel = board.targets.last().unwrap().0;
         assert!(
             panel.y >= l.caption_row.bottom() && panel.bottom() <= h,

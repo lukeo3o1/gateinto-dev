@@ -1740,4 +1740,14 @@ mod tests {
     fn starting_is_not_an_agent_request() {
         assert!(Command::Start.request().is_err());
     }
+
+    #[test]
+    fn start_browser_leaves_the_route_to_the_saved_gateway() {
+        let Ok(Request::Launch(launch)) = Command::Launch("office".parse().unwrap()).request()
+        else {
+            panic!("expected a launch request");
+        };
+        assert_eq!(launch.route, None);
+        assert!(!launch.to_string().contains("route="));
+    }
 }

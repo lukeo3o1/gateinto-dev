@@ -123,24 +123,42 @@ impl<M: Measure> Painter<'_, M> {
     }
 
     fn segments(&mut self, row: Rect, title: Text, parts: &[(&'static str, Zone, bool)]) {
+        let group = self.segment_group(row, parts, true);
+        let label = Rect::new(row.x, row.y, group.x - self.s.px(16.0) - row.x, row.h);
+        self.text(Font::Body, title, label, self.t.text);
+        self.segment_parts(group, parts);
+    }
+
+    pub(super) fn segment_group(
+        &self,
+        row: Rect,
+        parts: &[(&'static str, Zone, bool)],
+        right: bool,
+    ) -> Rect {
+        let s = self.s;
+        let (inset, gap, h) = (s.px(3.0), s.px(2.0), s.px(26.0));
+        let inner: i32 = parts
+            .iter()
+            .map(|&(label, ..)| self.segment_w(label))
+            .sum::<i32>()
+            + gap * (parts.len() as i32 - 1);
+        let (gw, gh) = (inner + 2 * inset, h + 2 * inset);
+        let x = if right { row.right() - gw } else { row.x };
+        Rect::new(x, row.y + (row.h - gh) / 2, gw, gh)
+    }
+
+    fn segment_w(&self, label: &str) -> i32 {
+        let w = self.m.width(Font::Small, label);
+        w.max(self.m.width(Font::SmallStrong, label)) + 2 * self.s.px(12.0)
+    }
+
+    pub(super) fn segment_parts(&mut self, group: Rect, parts: &[(&'static str, Zone, bool)]) {
         let (s, t) = (self.s, self.t);
         let (inset, gap, pad, h) = (s.px(3.0), s.px(2.0), s.px(12.0), s.px(26.0));
-        let widths: Vec<i32> = parts
-            .iter()
-            .map(|&(label, ..)| {
-                let w = self.m.width(Font::Small, label);
-                w.max(self.m.width(Font::SmallStrong, label)) + 2 * pad
-            })
-            .collect();
-        let inner: i32 = widths.iter().sum::<i32>() + gap * (widths.len() as i32 - 1);
-        let (gw, gh) = (inner + 2 * inset, h + 2 * inset);
-        let group = Rect::new(row.right() - gw, row.y + (row.h - gh) / 2, gw, gh);
-        let label = Rect::new(row.x, row.y, group.x - s.px(16.0) - row.x, row.h);
-        self.text(Font::Body, title, label, t.text);
         self.push(Op::Round(group, s.pxf(7.0), t.tile));
         let mut x = group.x + inset;
-        for (&(name, zone, chosen), w) in parts.iter().zip(widths) {
-            let part = Rect::new(x, group.y + inset, w, h);
+        for &(name, zone, chosen) in parts {
+            let part = Rect::new(x, group.y + inset, self.segment_w(name), h);
             x = part.right() + gap;
             let fill = match (chosen, self.v.pointer.look(zone)) {
                 (true, _) => Some(t.card),

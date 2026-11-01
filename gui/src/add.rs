@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use gateinto::config::{DisplayName, GatewayName, PortalUrl};
 use gateinto::link::store::{LinkedStore, StoreError};
 use gateinto::link::{
-    self, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, Resolution, TRUST,
+    self, ALL_TRAFFIC, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway,
+    MIXED_WARNING, Resolution, TRUST,
 };
+use gateinto::proxy::Route;
 use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
 
 use crate::gateways;
@@ -74,6 +76,7 @@ pub struct Form {
     name: String,
     portal: String,
     focus: Input,
+    route: Route,
     failure: Option<Message>,
 }
 
@@ -97,6 +100,11 @@ impl Form {
 
     pub fn select(&mut self, input: Input) {
         self.focus = input;
+    }
+
+    pub fn choose(&mut self, route: Route) {
+        self.failure = None;
+        self.route = route;
     }
 
     pub fn type_text(&mut self, text: &str) {
@@ -292,7 +300,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
                     address: confirmation.gateway,
                     portal_url: confirmation.portal,
                     approved_at: None,
-                    route: gateinto::proxy::Route::Gateway,
+                    route: form.route,
                 },
             }),
             None => Verdict::Incomplete,
@@ -305,8 +313,13 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
     }
 }
 
-pub fn disclosure() -> String {
-    format!("{IDENTITY} and the browser traffic routed to it. Add it {TRUST}")
+pub fn disclosure(route: Route) -> String {
+    match route {
+        Route::Mixed => {
+            format!("{IDENTITY} and the traffic routed to it. {MIXED_WARNING} Add it {TRUST}")
+        }
+        Route::Gateway => format!("{IDENTITY} and {ALL_TRAFFIC} Add it {TRUST}"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +342,7 @@ pub struct Entry<'a> {
 pub struct Sheet<'a> {
     pub entries: [Entry<'a>; 3],
     pub focus: Input,
+    pub route: Route,
     pub notice: Option<(String, Tone)>,
     pub ready: bool,
 }
@@ -367,10 +381,11 @@ pub fn sheet<'a>(form: &'a Form, listing: &Result<Known, String>) -> Sheet<'a> {
         .as_ref()
         .or(general)
         .map(|message| (message.text(), Tone::Error))
-        .or_else(|| Some((disclosure(), Tone::Warning)));
+        .or_else(|| Some((disclosure(form.route), Tone::Warning)));
     Sheet {
         entries,
         focus: form.focus,
+        route: form.route,
         notice,
         ready: form.failure.is_none() && matches!(verdict, Verdict::Ready(_)),
     }
@@ -817,8 +832,28 @@ mod tests {
             notes(&sheet),
             [hint(ADDRESS_HINT), hint(NAME_HINT), hint(PORTAL_HINT)]
         );
-        assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
+        assert_eq!(sheet.route, Route::Mixed);
+        assert_eq!(
+            sheet.notice,
+            Some((disclosure(Route::Mixed), Tone::Warning))
+        );
         assert!(!sheet.ready);
+    }
+
+    #[test]
+    fn the_route_starts_as_mixed_and_choosing_all_changes_the_disclosure() {
+        let mut form = form("proxy.example.net", "Lab", "");
+        assert_eq!(ready(&form, &known(vec![])).gateway.route, Route::Mixed);
+        form.failure = Some(FULL.into());
+        form.choose(Route::Gateway);
+        assert_eq!(form.failure, None);
+        assert_eq!(ready(&form, &known(vec![])).gateway.route, Route::Gateway);
+        let sheet = sheet(&form, &known(vec![]));
+        assert_eq!(sheet.route, Route::Gateway);
+        assert_eq!(
+            sheet.notice,
+            Some((disclosure(Route::Gateway), Tone::Warning))
+        );
     }
 
     #[test]
@@ -846,7 +881,10 @@ mod tests {
         let form = form("proxy.example.net", "Lab", "");
         let sheet = sheet(&form, &known(vec![]));
         assert!(sheet.ready);
-        assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
+        assert_eq!(
+            sheet.notice,
+            Some((disclosure(Route::Mixed), Tone::Warning))
+        );
     }
 
     #[test]
@@ -885,8 +923,11 @@ mod tests {
                 ("入口網頁", "選填。瀏覽器最先開啟的 https:// 網頁。"),
             ]
         );
-        assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
-        assert!(disclosure().starts_with(gateinto::link::IDENTITY));
+        assert_eq!(
+            sheet.notice,
+            Some((disclosure(Route::Mixed), Tone::Warning))
+        );
+        assert!(disclosure(Route::Mixed).starts_with(gateinto::link::IDENTITY));
         assert_eq!(
             error(
                 &form("proxy.example.net", "office", ""),
@@ -901,15 +942,28 @@ mod tests {
     }
 
     #[test]
-    fn the_disclosure_reuses_the_link_identity_and_trust_wording() {
+    fn the_disclosure_reuses_the_link_identity_route_and_trust_wording() {
         assert_eq!(
-            disclosure(),
+            disclosure(Route::Mixed),
             "The gateway will see this device's identity (its client certificate, if one is \
-             installed) and the browser traffic routed to it. Add it only if you trust the \
-             organisation that runs this gateway."
+             installed) and the traffic routed to it. Warning: in mixed mode, sites may be \
+             reached directly instead of through the gateway, which exposes your local DNS \
+             lookups and your IP address to them and bypasses the gateway's policy. Add it \
+             only if you trust the organisation that runs this gateway."
         );
-        assert!(disclosure().starts_with(gateinto::link::IDENTITY));
-        assert!(disclosure().ends_with(gateinto::link::TRUST));
+        assert_eq!(
+            disclosure(Route::Gateway),
+            "The gateway will see this device's identity (its client certificate, if one is \
+             installed) and all traffic of the isolated browser: every connection goes \
+             through the gateway. Add it only if you trust the organisation that runs this \
+             gateway."
+        );
+        for route in [Route::Mixed, Route::Gateway] {
+            assert!(disclosure(route).starts_with(gateinto::link::IDENTITY));
+            assert!(disclosure(route).ends_with(gateinto::link::TRUST));
+        }
+        assert!(disclosure(Route::Mixed).contains(gateinto::link::MIXED_WARNING));
+        assert!(disclosure(Route::Gateway).contains(gateinto::link::ALL_TRAFFIC));
     }
 
     #[test]
@@ -924,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn committing_stores_the_gateway_with_its_approval_time_and_the_gateway_route() {
+    fn committing_stores_the_gateway_with_its_approval_time_and_chosen_route() {
         let dir = scratch();
         let mut first = form(
             "proxy.example.net:8443",
@@ -948,7 +1002,7 @@ mod tests {
             "proxy.example.net:8443"
         );
         assert_eq!(stored.gateways[0].approved_at, Some(42));
-        assert_eq!(stored.gateways[0].route, gateinto::proxy::Route::Gateway);
+        assert_eq!(stored.gateways[0].route, Route::Mixed);
         let again = Ok(catalog(&ConfigFile::default(), Some(dir.clone())));
         let mut twin = form("proxy.example.org", "lab", "");
         assert!(!commit(&mut twin, &again, Some(dir.clone()), 43));
@@ -960,6 +1014,12 @@ mod tests {
             LinkedStore::new(dir.clone()).load().unwrap().gateways.len(),
             1
         );
+        let mut all = form("proxy.example.org", "Edge", "");
+        all.choose(Route::Gateway);
+        assert!(commit(&mut all, &again, Some(dir.clone()), 44));
+        let stored = LinkedStore::new(dir.clone()).load().unwrap();
+        let edge = stored.gateways.iter().find(|g| g.name.as_str() == "edge");
+        assert_eq!(edge.map(|g| g.route), Some(Route::Gateway));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

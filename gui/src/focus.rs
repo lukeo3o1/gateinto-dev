@@ -52,6 +52,7 @@ fn group(zone: Zone) -> Option<u8> {
         Zone::Theme(_) => Some(2),
         Zone::Entry(_) => Some(3),
         Zone::Language(_) => Some(4),
+        Zone::AddRoute(_) => Some(5),
         _ => None,
     }
 }
@@ -507,5 +508,21 @@ mod tests {
         );
         f.clicked(Zone::Theme(Choice::Dark), &stops);
         assert_eq!(f.arrow(&stops, true), Some(Zone::Theme(Choice::System)));
+    }
+
+    #[test]
+    fn route_parts_are_their_own_arrow_group() {
+        use gateinto::proxy::Route;
+        let stops = [
+            stop(Zone::AddField(crate::add::Input::Portal)),
+            stop(Zone::AddRoute(Route::Mixed)),
+            stop(Zone::AddRoute(Route::Gateway)),
+            stop(Zone::CloseDialog),
+        ];
+        let mut f = Focus::default();
+        f.clicked(Zone::AddRoute(Route::Mixed), &stops);
+        assert_eq!(f.arrow(&stops, true), Some(Zone::AddRoute(Route::Gateway)));
+        assert_eq!(f.arrow(&stops, true), Some(Zone::AddRoute(Route::Mixed)));
+        assert_eq!(f.arrow(&stops, false), Some(Zone::AddRoute(Route::Gateway)));
     }
 }
