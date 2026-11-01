@@ -414,6 +414,22 @@ The full protocol, limits and guarantees are in
   as with the command line. The list changes at the next 2-second poll. Demo
   mode only shows a fixed note. This is unit-tested but has not been tried
   on a real Windows desktop.
+- The GUI adds a gateway without the agent: its Add dialog asks for a
+  display name, the gateway address, an optional portal and the route.
+  The display name is trimmed, its whitespace collapsed, and an empty,
+  over-long or already shown name is refused (`gui/src/add.rs`). The
+  identifier the command line and links use is generated from it, or from
+  the host when nothing usable is left, made unique against the listed
+  gateways and never shown (`gui/src/naming.rs`). Mixed is preselected and
+  the disclosure then carries the link approval's direct-connection warning
+  (`link::MIXED_WARNING`); All uses its all-traffic wording
+  (`link::ALL_TRAFFIC`). The gateway is written with `LinkedStore::add` on
+  `store::default_dir()` with its approval time and chosen route; the config
+  file is never written. The list and details show the saved route of each
+  gateway, and a browser started from the GUI asks for that saved route
+  (`route=saved`). Everywhere else the GUI names a gateway by its display
+  name, falling back to the identifier. This is unit-tested but not yet
+  verified on Windows.
 
 ## Modules
 
@@ -445,6 +461,7 @@ The full protocol, limits and guarantees are in
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
+| `gui/src/add.rs`, `gui/src/naming.rs` | The GUI's Add for gateways on this device: the form, its limits and route choice, the disclosure, the generated identifier and the store write. |
 | `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
 | `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
