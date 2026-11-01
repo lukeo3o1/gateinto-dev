@@ -185,6 +185,21 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_names_a_gateway_by_its_display_name() {
+        let mut lab = known("lab", "lab.example.net", Source::Linked);
+        lab.display_name = Some("台北 Lab".parse().unwrap());
+        let listing = Ok(Known {
+            gateways: vec![lab],
+            ..Known::default()
+        });
+        let prompt = prompt(&listing, &Removal::new(name("lab"))).unwrap();
+        assert_eq!(
+            prompt.question,
+            "Remove \"台北 Lab\" from the gateways added on this device?"
+        );
+    }
+
+    #[test]
     fn the_prompt_speaks_chinese() {
         let _zh = speaking(Language::Chinese);
         let lab = prompt(&listing(), &Removal::new(name("lab"))).unwrap();

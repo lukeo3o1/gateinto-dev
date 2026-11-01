@@ -207,6 +207,9 @@ mod tests {
             picker(&listing),
             [launch("office", 0), launch("edge.example.net", 1)]
         );
+        let mut named = gateway("office", "proxy.example.com");
+        named.display_name = Some("Head Office".parse().unwrap());
+        assert_eq!(picker(&known(vec![named])), [launch("Head Office", 0)]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gateinto::config::{GatewayName, PortalUrl};
+use gateinto::config::{DisplayName, GatewayName, PortalUrl};
 use gateinto::link::store::{LinkedStore, StoreError};
 use gateinto::link::{
     self, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway, Resolution, TRUST,
@@ -9,13 +9,13 @@ use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
 
 use crate::gateways;
 use crate::i18n::{Text, fill, tr};
+use crate::naming;
 
 pub const TITLE: Text = Text::AddGateway;
 pub const ADDRESS_HINT: Text = Text::AddressHint;
 pub const NAME_HINT: Text = Text::NameHint;
 pub const PORTAL_HINT: Text = Text::PortalHint;
 pub const NO_FOLDER: Text = Text::NoFolder;
-const AMBIGUOUS: Text = Text::Ambiguous;
 const DAMAGED: Text = Text::Damaged;
 const UNSTORABLE: Text = Text::Unstorable;
 const UNAVAILABLE: Text = Text::StoreUnavailable;
@@ -36,12 +36,16 @@ pub enum Input {
 }
 
 impl Input {
-    fn limit(self) -> usize {
+    fn fits(self, field: &str, c: char) -> bool {
         match self {
-            Self::Address => MAX_ADDRESS,
-            Self::Name => GatewayName::MAX_LEN,
-            Self::Portal => PortalUrl::MAX_LEN,
+            Self::Address => field.len() + c.len_utf8() <= MAX_ADDRESS,
+            Self::Name => field.chars().count() < DisplayName::MAX_LEN,
+            Self::Portal => field.len() + c.len_utf8() <= PortalUrl::MAX_LEN,
         }
+    }
+
+    fn takes(self, c: char) -> bool {
+        !c.is_control() && (self == Self::Name || !c.is_whitespace())
     }
 }
 
@@ -96,13 +100,10 @@ impl Form {
     }
 
     pub fn type_text(&mut self, text: &str) {
-        let limit = self.focus.limit();
+        let input = self.focus;
         let field = self.field();
-        for c in text
-            .chars()
-            .filter(|c| !c.is_control() && !c.is_whitespace())
-        {
-            if field.len() + c.len_utf8() > limit {
+        for c in text.chars().filter(|&c| input.takes(c)) {
+            if !input.fits(field, c) {
                 break;
             }
             field.push(c);
@@ -190,7 +191,6 @@ fn field_error(error: UriError) -> Verdict {
     let (input, message) = match error {
         UriError::InvalidValue("gateway") => (Input::Address, Text::EnterHost),
         UriError::ReservedGateway => (Input::Address, Text::ReservedHost),
-        UriError::InvalidValue("profile") => (Input::Name, Text::NameRule),
         UriError::InvalidValue("portal") => (Input::Portal, Text::EnterHttps),
         _ => return Verdict::Invalid(None, UNUSABLE.into()),
     };
@@ -211,19 +211,40 @@ fn link_error(known: &Known, error: LinkError) -> Verdict {
             Some(Input::Address),
             Message::with(Text::AlreadySetUp, shown(known, &existing)),
         ),
-        LinkError::GatewayMismatch(name) | LinkError::ProfileCollision(name) => {
-            (Some(Input::Name), Message::with(Text::NameUsed, name))
-        }
-        LinkError::LookAlikeProfile { existing, .. } => {
-            (Some(Input::Name), Message::with(Text::TooClose, existing))
-        }
-        LinkError::AmbiguousGateway(_) => (Some(Input::Name), AMBIGUOUS.into()),
         LinkError::Damaged { .. } => (None, DAMAGED.into()),
         LinkError::Unstorable { .. } => (Some(Input::Address), UNSTORABLE.into()),
         LinkError::StoreUnavailable(_) => (None, UNAVAILABLE.into()),
         _ => (None, UNUSABLE.into()),
     };
     Verdict::Invalid(input, message)
+}
+
+fn display_name(form: &Form, known: &Known) -> Result<Option<DisplayName>, Message> {
+    if form.name.trim().is_empty() {
+        return Ok(None);
+    }
+    let name = DisplayName::normalize(&form.name)
+        .map_err(|_| Message::with(Text::NameRule, DisplayName::MAX_LEN))?;
+    let wanted = name.as_str().to_lowercase();
+    match known
+        .gateways
+        .iter()
+        .map(gateways::label)
+        .find(|shown| shown.to_lowercase() == wanted)
+    {
+        Some(shown) => Err(Message::with(Text::NameUsed, shown)),
+        None => Ok(Some(name)),
+    }
+}
+
+fn fields(form: &Form, profile: Option<&str>) -> Result<LaunchRequest, UriError> {
+    LaunchRequest::from_fields(
+        profile,
+        LaunchAuth::SessionCredentials.as_str(),
+        None,
+        Some(&form.address),
+        optional(&form.portal),
+    )
 }
 
 pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
@@ -234,28 +255,48 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
         Ok(known) => known,
         Err(_) => return Verdict::Invalid(None, UNLISTED.into()),
     };
-    let request = match LaunchRequest::from_fields(
-        optional(&form.name),
-        LaunchAuth::SessionCredentials.as_str(),
-        None,
-        Some(&form.address),
-        optional(&form.portal),
-    ) {
+    let host = match fields(form, None) {
+        Ok(request) => request
+            .gateway
+            .map_or_else(String::new, |gateway| gateway.host()),
+        Err(error) => return field_error(error),
+    };
+    let display = match display_name(form, known) {
+        Ok(display) => display,
+        Err(message) => return Verdict::Invalid(Some(Input::Name), message),
+    };
+    let taken: Vec<&str> = known
+        .gateways
+        .iter()
+        .map(|gateway| gateway.name.as_str())
+        .chain(
+            known
+                .invalid
+                .iter()
+                .filter_map(|entry| entry.name.as_ref().map(|name| name.as_str())),
+        )
+        .collect();
+    let typed = display.as_ref().map_or("", DisplayName::as_str);
+    let name = naming::identifier(typed, &host, &taken);
+    let request = match fields(form, Some(name.as_str())) {
         Ok(request) => request,
         Err(error) => return field_error(error),
     };
     match link::resolve(&request, known, &mut Decision::Defer, 0) {
-        Ok(Resolution::Confirm(confirmation)) => Verdict::Ready(Ready {
-            local: confirmation.gateway.is_local(),
-            gateway: LinkedGateway {
-                name: confirmation.profile,
-                display_name: None,
-                address: confirmation.gateway,
-                portal_url: confirmation.portal,
-                approved_at: None,
-                route: gateinto::proxy::Route::Gateway,
-            },
-        }),
+        Ok(Resolution::Confirm(confirmation)) => match display {
+            Some(display) => Verdict::Ready(Ready {
+                local: confirmation.gateway.is_local(),
+                gateway: LinkedGateway {
+                    name: confirmation.profile,
+                    display_name: Some(display),
+                    address: confirmation.gateway,
+                    portal_url: confirmation.portal,
+                    approved_at: None,
+                    route: gateinto::proxy::Route::Gateway,
+                },
+            }),
+            None => Verdict::Incomplete,
+        },
         Ok(Resolution::Launch(launch)) => Verdict::Invalid(
             Some(Input::Address),
             Message::with(Text::AlreadySetUp, shown(known, &launch.profile)),
@@ -459,30 +500,40 @@ mod tests {
     }
 
     #[test]
-    fn each_field_stops_at_its_byte_limit() {
-        for (input, limit) in [
-            (Input::Address, 259),
-            (Input::Name, GatewayName::MAX_LEN),
-            (Input::Portal, PortalUrl::MAX_LEN),
-        ] {
+    fn the_name_keeps_spaces_and_chinese_but_drops_control_characters() {
+        let mut form = Form::default();
+        form.select(Input::Name);
+        form.type_text("台北 Office\r\n");
+        assert_eq!(form.value(Input::Name), "台北 Office");
+    }
+
+    #[test]
+    fn each_field_stops_at_its_limit() {
+        for (input, limit) in [(Input::Address, 259), (Input::Portal, PortalUrl::MAX_LEN)] {
             let mut form = Form::default();
             form.select(input);
             form.type_text(&"a".repeat(limit + 10));
             assert_eq!(form.value(input).len(), limit);
         }
+        let mut form = Form::default();
+        form.select(Input::Name);
+        form.type_text(&"台".repeat(DisplayName::MAX_LEN + 6));
+        assert_eq!(
+            form.value(Input::Name).chars().count(),
+            DisplayName::MAX_LEN
+        );
     }
 
     #[test]
     fn a_limit_never_splits_a_character() {
         let mut form = Form::default();
-        form.select(Input::Name);
-        form.type_text("a");
-        form.type_text(&"\u{e9}".repeat(40));
-        assert_eq!(form.value(Input::Name).len(), GatewayName::MAX_LEN - 1);
-        form.type_text("b");
-        assert_eq!(form.value(Input::Name).len(), GatewayName::MAX_LEN);
+        form.type_text("ab");
+        form.type_text(&"\u{e9}".repeat(200));
+        assert_eq!(form.value(Input::Address).len(), MAX_ADDRESS - 1);
         form.type_text("c");
-        assert_eq!(form.value(Input::Name).len(), GatewayName::MAX_LEN);
+        assert_eq!(form.value(Input::Address).len(), MAX_ADDRESS);
+        form.type_text("d");
+        assert_eq!(form.value(Input::Address).len(), MAX_ADDRESS);
     }
 
     #[test]
@@ -502,13 +553,59 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_name_proposes_the_generated_name_shown_by_host() {
-        let ready = ready(&form("proxy.example.net", "", ""), &known(vec![]));
-        assert!(ready.gateway.name.as_str().starts_with("g-"));
+    fn an_empty_or_blank_name_is_incomplete() {
+        for name in ["", "   "] {
+            assert_eq!(
+                check(&form("proxy.example.net", name, ""), &known(vec![])),
+                Verdict::Incomplete
+            );
+        }
+    }
+
+    #[test]
+    fn a_display_name_is_kept_and_an_identifier_is_generated_from_it() {
+        let ready = ready(
+            &form("proxy.example.net", "  Head   Office ", ""),
+            &known(vec![]),
+        );
+        assert_eq!(
+            ready.gateway.display_name.as_ref().map(DisplayName::as_str),
+            Some("Head Office")
+        );
+        assert_eq!(ready.gateway.name.as_str(), "head-office");
         assert_eq!(ready.gateway.address.to_string(), "proxy.example.net:443");
         assert_eq!(ready.gateway.portal_url, None);
         assert_eq!(ready.gateway.approved_at, None);
         assert!(!ready.local);
+    }
+
+    #[test]
+    fn a_chinese_display_name_gets_an_identifier_from_the_host() {
+        let ready = ready(&form("proxy.example.net", "台北辦公室", ""), &known(vec![]));
+        assert_eq!(
+            ready.gateway.display_name.as_ref().map(DisplayName::as_str),
+            Some("台北辦公室")
+        );
+        assert_eq!(ready.gateway.name.as_str(), "proxy-example-net");
+    }
+
+    #[test]
+    fn a_taken_identifier_gets_the_next_free_number() {
+        let mut lab = office();
+        lab.name = "lab".parse().unwrap();
+        lab.display_name = Some("Old lab".parse().unwrap());
+        let listing = Ok(Known {
+            gateways: vec![lab],
+            invalid: vec![InvalidEntry {
+                file: PathBuf::from("/secret/lab-2.gateway"),
+                name: Some("LAB-2".parse().unwrap()),
+                addresses: Vec::new(),
+                reason: "bad".to_owned(),
+            }],
+            ..Known::default()
+        });
+        let ready = ready(&form("proxy.example.net", "Lab", ""), &listing);
+        assert_eq!(ready.gateway.name.as_str(), "lab-3");
     }
 
     #[test]
@@ -544,12 +641,12 @@ mod tests {
             Some(Input::Address)
         );
         assert_eq!(
-            error(&form("proxy.example.net", "a.b", ""), &none).0,
-            Some(Input::Name)
-        );
-        assert_eq!(
-            error(&form("proxy.example.net", "-lab", ""), &none).0,
-            Some(Input::Name)
+            error(&form("proxy.example.net", "a\u{202E}b", ""), &none),
+            (
+                Some(Input::Name),
+                "Use at most 64 characters, without control or text direction characters."
+                    .to_owned()
+            )
         );
         assert_eq!(
             error(
@@ -595,20 +692,27 @@ mod tests {
     }
 
     #[test]
-    fn a_taken_or_look_alike_name_is_refused() {
+    fn a_name_shown_for_another_gateway_is_refused_ignoring_letter_case() {
         let listing = known(vec![office()]);
+        for typed in ["office", "Office"] {
+            assert_eq!(
+                error(&form("proxy.example.net", typed, ""), &listing),
+                (
+                    Some(Input::Name),
+                    "\"office\" is already used by another gateway.".to_owned()
+                )
+            );
+        }
+        let mut head = office();
+        head.display_name = Some("Head Office".parse().unwrap());
         assert_eq!(
-            error(&form("proxy.example.net", "office", ""), &listing),
+            error(
+                &form("proxy.example.net", "head  office", ""),
+                &known(vec![head])
+            ),
             (
                 Some(Input::Name),
-                "\"office\" is already used by another gateway.".to_owned()
-            )
-        );
-        assert_eq!(
-            error(&form("proxy.example.net", "Office", ""), &listing),
-            (
-                Some(Input::Name),
-                "Too close to \"office\": names may not differ only in letter case.".to_owned()
+                "\"Head Office\" is already used by another gateway.".to_owned()
             )
         );
     }
@@ -623,13 +727,13 @@ mod tests {
     }
 
     #[test]
-    fn an_address_shared_by_several_gateways_asks_for_a_name() {
+    fn an_address_shared_by_several_gateways_names_one_of_them() {
         let mut home = office();
         home.name = "home".parse().unwrap();
         let listing = known(vec![office(), home]);
         assert_eq!(
-            error(&form("proxy.example.com", "", ""), &listing),
-            (Some(Input::Name), AMBIGUOUS.english().to_owned())
+            error(&form("proxy.example.com", "Lab", ""), &listing).0,
+            Some(Input::Address)
         );
     }
 
@@ -639,7 +743,7 @@ mod tests {
             invalid: vec![InvalidEntry {
                 file: PathBuf::from("/secret/lab.gateway"),
                 name: Some("lab".parse().unwrap()),
-                addresses: Vec::new(),
+                addresses: vec!["proxy.example.net:443".parse().unwrap()],
                 reason: "bad".to_owned(),
             }],
             ..Known::default()
@@ -673,7 +777,7 @@ mod tests {
             field_error(UriError::TooLong),
             Verdict::Invalid(None, UNUSABLE.into())
         );
-        for text in [AMBIGUOUS, DAMAGED, UNSTORABLE, UNAVAILABLE, UNUSABLE] {
+        for text in [DAMAGED, UNSTORABLE, UNAVAILABLE, UNUSABLE] {
             for word in ["link", "launch", "URI", "profile"] {
                 assert!(!text.english().contains(word), "{text}");
             }
@@ -719,9 +823,9 @@ mod tests {
 
     #[test]
     fn a_field_error_replaces_only_that_hint() {
-        let form = form("proxy.example.net", "a.b", "");
+        let form = form("proxy.example.net", "a\u{202E}b", "");
         let sheet = sheet(&form, &known(vec![]));
-        assert_eq!(sheet.entries[1].value, "a.b");
+        assert_eq!(sheet.entries[1].value, "a\u{202E}b");
         assert_eq!(sheet.entries[1].tone, Tone::Error);
         assert_eq!(sheet.entries[0].note, ADDRESS_HINT.english());
         assert_eq!(sheet.entries[2].note, PORTAL_HINT.english());
@@ -730,7 +834,7 @@ mod tests {
 
     #[test]
     fn a_ready_local_gateway_warns_under_its_address() {
-        let form = form("127.0.0.1:3128", "", "");
+        let form = form("127.0.0.1:3128", "Local", "");
         let sheet = sheet(&form, &known(vec![]));
         assert!(sheet.ready);
         assert_eq!(sheet.entries[0].clone().note, gateinto::link::LOCAL_ADDRESS);
@@ -739,7 +843,7 @@ mod tests {
 
     #[test]
     fn every_add_shows_the_identity_and_trust_disclosure() {
-        let form = form("proxy.example.net", "", "");
+        let form = form("proxy.example.net", "Lab", "");
         let sheet = sheet(&form, &known(vec![]));
         assert!(sheet.ready);
         assert_eq!(sheet.notice, Some((disclosure(), Tone::Warning)));
@@ -777,7 +881,7 @@ mod tests {
             labels,
             [
                 ("閘道位址", "主機名稱或 IP 位址。預設連接埠為 443。"),
-                ("名稱", "顯示在清單中。留空則使用主機名稱。"),
+                ("名稱", "顯示在應用程式中，可包含空格。"),
                 ("入口網頁", "選填。瀏覽器最先開啟的 https:// 網頁。"),
             ]
         );
@@ -832,6 +936,13 @@ mod tests {
         let stored = LinkedStore::new(dir.clone()).load().unwrap();
         assert_eq!(stored.gateways.len(), 1);
         assert_eq!(stored.gateways[0].name.as_str(), "lab");
+        assert_eq!(
+            stored.gateways[0]
+                .display_name
+                .as_ref()
+                .map(DisplayName::as_str),
+            Some("lab")
+        );
         assert_eq!(
             stored.gateways[0].address.to_string(),
             "proxy.example.net:8443"

@@ -113,6 +113,9 @@ pub fn names(listing: &Result<Known, String>) -> Vec<GatewayName> {
 }
 
 pub fn label(gateway: &KnownGateway) -> String {
+    if let Some(display_name) = &gateway.display_name {
+        return display_name.to_string();
+    }
     let address = address(gateway.host.as_deref(), gateway.port);
     gateway_label(gateway.name.as_str(), &address)
 }
@@ -161,7 +164,7 @@ pub fn details(
         facts: vec![
             (
                 Text::Name,
-                if title == name.as_str() {
+                if gateway.display_name.is_some() || title == name.as_str() {
                     title.clone()
                 } else {
                     tr(Text::NoValue).to_owned()
@@ -501,6 +504,27 @@ mod tests {
             "必要，自我簽署"
         );
         assert_eq!(count(1), "1 個工作階段");
+    }
+
+    #[test]
+    fn a_display_name_replaces_the_identifier_in_rows_and_details() {
+        let named = KnownGateway {
+            display_name: Some("台北 Office".parse().unwrap()),
+            ..gateway(PROFILE, Some("edge.example"), Some(443), Source::Linked)
+        };
+        let listing = known(vec![named.clone()]);
+        assert_eq!(label(&named), "台北 Office");
+        let page = page(&listing, &AgentState::Stopped, None, false);
+        assert_eq!(page.rows[0].label, "台北 Office");
+        let details = details(
+            &listing,
+            &Gateways::default(),
+            &AgentState::Stopped,
+            &name(PROFILE),
+        )
+        .unwrap();
+        assert_eq!(details.title, "台北 Office");
+        assert_eq!(facts(&details)[0], ("Name", "台北 Office"));
     }
 
     #[test]

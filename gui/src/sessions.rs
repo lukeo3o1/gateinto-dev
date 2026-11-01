@@ -1,4 +1,5 @@
 use gateinto::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
+use gateinto::link::Known;
 
 use crate::agent::AgentState;
 use crate::i18n::{Text, fill, tr};
@@ -50,12 +51,38 @@ pub struct Page {
 
 pub const EMPTY: Text = Text::NoSessionsHint;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Names(Vec<(String, String)>);
+
+impl Names {
+    pub fn new(listing: &Result<Known, String>) -> Self {
+        Self(
+            listing
+                .iter()
+                .flat_map(|known| &known.gateways)
+                .filter_map(|gateway| {
+                    let shown = gateway.display_name.as_ref()?;
+                    Some((gateway.name.to_string(), shown.to_string()))
+                })
+                .collect(),
+        )
+    }
+
+    pub fn label(&self, gateway: &str, upstream: &str) -> String {
+        self.0.iter().find(|(name, _)| name == gateway).map_or_else(
+            || gateway_label(gateway, upstream),
+            |(_, shown)| shown.clone(),
+        )
+    }
+}
+
 pub fn page(
     state: &AgentState,
     failure: Option<&str>,
     now: u64,
     busy: bool,
     starting: &Starting,
+    names: &Names,
 ) -> Page {
     let (status, rows) = match state {
         AgentState::Running(sessions) => {
@@ -81,7 +108,10 @@ pub fn page(
                 launch: if busy { Launch::Busy } else { Launch::Ready },
                 start: Launch::Hidden,
             };
-            (status, Some(sessions.iter().map(|s| row(s, now)).collect()))
+            (
+                status,
+                Some(sessions.iter().map(|s| row(s, now, names)).collect()),
+            )
         }
         AgentState::Stopped => (
             Status {
@@ -133,7 +163,7 @@ pub fn browser_title(kind: Option<BrowserKind>) -> &'static str {
     }
 }
 
-pub fn row(session: &SessionInfo, now: u64) -> Row {
+pub fn row(session: &SessionInfo, now: u64, names: &Names) -> Row {
     let (kind, title) = match session.kind {
         SessionKind::Browser => (Kind::Browser, browser_title(session.browser)),
         SessionKind::Unknown => (Kind::Other, tr(Text::Session)),
@@ -149,7 +179,7 @@ pub fn row(session: &SessionInfo, now: u64) -> Row {
             SessionAuth::None => Text::NoAuthentication,
             SessionAuth::Unknown => Text::Unknown,
         }),
-        gateway: gateway_label(&session.gateway, &session.upstream),
+        gateway: names.label(&session.gateway, &session.upstream),
         route: tr(match session.route {
             SessionRoute::All => Text::All,
             SessionRoute::Mixed => Text::Mixed,
@@ -212,6 +242,7 @@ mod tests {
     use super::*;
     use crate::start::Starting;
 
+    const NO_NAMES: Names = Names(Vec::new());
     const PROFILE: &str = "g-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd";
 
     fn session(id: u64, tunnels: u64) -> SessionInfo {
@@ -232,7 +263,7 @@ mod tests {
     #[test]
     fn a_running_agent_relays_while_any_session_has_tunnels() {
         let state = AgentState::Running(vec![session(1, 0), session(2, 3), session(3, 1)]);
-        let page = page(&state, None, 1_000, false, &Starting::Idle);
+        let page = page(&state, None, 1_000, false, &Starting::Idle, &NO_NAMES);
         assert_eq!(
             page.status,
             Status {
@@ -252,7 +283,14 @@ mod tests {
     fn the_status_and_rows_speak_chinese() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         let state = AgentState::Running(vec![session(1, 0), session(2, 3)]);
-        let page = page(&state, None, 1_000 + 7_200, false, &Starting::Idle);
+        let page = page(
+            &state,
+            None,
+            1_000 + 7_200,
+            false,
+            &Starting::Idle,
+            &NO_NAMES,
+        );
         assert_eq!(page.status.title, "轉送中");
         assert_eq!(
             page.status.subtitle,
@@ -270,44 +308,63 @@ mod tests {
     }
 
     fn page_title(state: &AgentState) -> &'static str {
-        page(state, None, 0, false, &Starting::Idle).status.title
+        page(state, None, 0, false, &Starting::Idle, &NO_NAMES)
+            .status
+            .title
     }
 
     #[test]
     fn the_start_browser_button_waits_for_a_launch_in_flight() {
         let running = AgentState::Running(Vec::new());
         assert_eq!(
-            page(&running, None, 0, false, &Starting::Idle)
+            page(&running, None, 0, false, &Starting::Idle, &NO_NAMES)
                 .status
                 .launch,
             Launch::Ready
         );
         assert_eq!(
-            page(&running, None, 0, true, &Starting::Idle).status.launch,
+            page(&running, None, 0, true, &Starting::Idle, &NO_NAMES)
+                .status
+                .launch,
             Launch::Busy
         );
-        let stopped = page(&AgentState::Stopped, None, 0, true, &Starting::Idle)
-            .status
-            .launch;
+        let stopped = page(
+            &AgentState::Stopped,
+            None,
+            0,
+            true,
+            &Starting::Idle,
+            &NO_NAMES,
+        )
+        .status
+        .launch;
         assert_eq!(stopped, Launch::Hidden);
     }
 
     #[test]
     fn only_a_stopped_agent_offers_to_start_and_waits_for_a_start_in_flight() {
-        let starting = page(&AgentState::Stopped, None, 0, false, &Starting::InFlight).status;
+        let starting = page(
+            &AgentState::Stopped,
+            None,
+            0,
+            false,
+            &Starting::InFlight,
+            &NO_NAMES,
+        )
+        .status;
         assert_eq!(starting.start, Launch::Busy);
         assert_eq!(starting.subtitle, "Starting the agent…");
         assert_eq!(starting.title, "Stopped");
         let running = AgentState::Running(Vec::new());
         assert_eq!(
-            page(&running, None, 0, false, &Starting::InFlight)
+            page(&running, None, 0, false, &Starting::InFlight, &NO_NAMES)
                 .status
                 .start,
             Launch::Hidden
         );
         let unreachable = AgentState::Unreachable(crate::i18n::Note::Agent("x".to_owned()));
         assert_eq!(
-            page(&unreachable, None, 0, false, &Starting::InFlight)
+            page(&unreachable, None, 0, false, &Starting::InFlight, &NO_NAMES)
                 .status
                 .start,
             Launch::Hidden
@@ -318,6 +375,7 @@ mod tests {
             0,
             false,
             &Starting::Idle,
+            &NO_NAMES,
         )
         .status;
         assert_eq!(
@@ -329,18 +387,34 @@ mod tests {
     #[test]
     fn a_failed_start_says_so_until_the_agent_is_no_longer_stopped() {
         let failed = Starting::Failed(crate::start::FAILED.into());
-        let stopped = page(&AgentState::Stopped, None, 0, false, &failed).status;
+        let stopped = page(&AgentState::Stopped, None, 0, false, &failed, &NO_NAMES).status;
         assert_eq!(
             (stopped.start, stopped.subtitle.as_str()),
             (Launch::Ready, crate::start::FAILED.english())
         );
-        let running = page(&AgentState::Running(Vec::new()), None, 0, false, &failed).status;
+        let running = page(
+            &AgentState::Running(Vec::new()),
+            None,
+            0,
+            false,
+            &failed,
+            &NO_NAMES,
+        )
+        .status;
         assert_eq!(
             running.subtitle,
             "Agent running on loopback only · 0 sessions · 0 active"
         );
         assert_eq!(running.start, Launch::Hidden);
-        let later = page(&AgentState::Stopped, Some("could not"), 0, false, &failed).status;
+        let later = page(
+            &AgentState::Stopped,
+            Some("could not"),
+            0,
+            false,
+            &failed,
+            &NO_NAMES,
+        )
+        .status;
         assert_eq!(later.subtitle, "could not");
     }
 
@@ -352,6 +426,7 @@ mod tests {
             1_000,
             false,
             &Starting::Idle,
+            &NO_NAMES,
         );
         assert_eq!(page.status.title, "Idle");
         assert_eq!(
@@ -370,6 +445,7 @@ mod tests {
             1_000,
             false,
             &Starting::Idle,
+            &NO_NAMES,
         );
         assert_eq!(page.status.title, "Idle");
         assert_eq!(
@@ -382,7 +458,14 @@ mod tests {
     #[test]
     fn a_stopped_agent_has_no_table_open_eyes_or_stop_button() {
         assert_eq!(
-            page(&AgentState::Stopped, None, 0, false, &Starting::Idle),
+            page(
+                &AgentState::Stopped,
+                None,
+                0,
+                false,
+                &Starting::Idle,
+                &NO_NAMES
+            ),
             Page {
                 status: Status {
                     title: "Stopped",
@@ -403,7 +486,7 @@ mod tests {
             "the agent did not answer".to_owned(),
         ));
         assert_eq!(
-            page(&state, None, 0, false, &Starting::Idle),
+            page(&state, None, 0, false, &Starting::Idle, &NO_NAMES),
             Page {
                 status: Status {
                     title: "Agent unreachable",
@@ -421,7 +504,14 @@ mod tests {
     #[test]
     fn a_failed_command_replaces_the_subtitle() {
         let state = AgentState::Running(vec![session(1, 1)]);
-        let page = page(&state, Some("no session 9"), 1_000, false, &Starting::Idle);
+        let page = page(
+            &state,
+            Some("no session 9"),
+            1_000,
+            false,
+            &Starting::Idle,
+            &NO_NAMES,
+        );
         assert_eq!(page.status.title, "Relaying");
         assert_eq!(page.status.subtitle, "no session 9");
         assert_eq!(page.rows.unwrap().len(), 1);
@@ -430,7 +520,7 @@ mod tests {
     #[test]
     fn a_row_describes_its_session() {
         assert_eq!(
-            row(&session(7, 2), 1_000 + 3 * 60),
+            row(&session(7, 2), 1_000 + 3 * 60, &NO_NAMES),
             Row {
                 id: 7,
                 kind: Kind::Browser,
@@ -444,7 +534,29 @@ mod tests {
                 active: true,
             }
         );
-        assert!(!row(&session(7, 0), 1_000).active);
+        assert!(!row(&session(7, 0), 1_000, &NO_NAMES).active);
+    }
+
+    #[test]
+    fn a_session_shows_the_display_name_of_its_gateway() {
+        let named = gateinto::link::KnownGateway {
+            name: "office".parse().unwrap(),
+            display_name: Some("台北 Office".parse().unwrap()),
+            host: Some("proxy.example.com".to_owned()),
+            port: Some(443),
+            portal_url: None,
+            route: gateinto::proxy::Route::Mixed,
+            source: gateinto::link::Source::Linked,
+        };
+        let names = Names::new(&Ok(Known {
+            gateways: vec![named],
+            ..Known::default()
+        }));
+        assert_eq!(row(&session(1, 0), 0, &names).gateway, "台北 Office");
+        let mut other = session(2, 0);
+        other.gateway = PROFILE.to_owned();
+        assert_eq!(row(&other, 0, &names).gateway, "proxy.example.com");
+        assert_eq!(Names::new(&Err("unreadable".to_owned())), NO_NAMES);
     }
 
     #[test]
@@ -453,7 +565,7 @@ mod tests {
             let mut s = session(1, 0);
             s.kind = kind;
             s.browser = browser;
-            let r = row(&s, 0);
+            let r = row(&s, 0, &NO_NAMES);
             (r.title, r.kind)
         };
         use BrowserKind as B;
@@ -481,7 +593,7 @@ mod tests {
             let mut s = session(1, 0);
             s.auth = auth;
             s.route = route;
-            let r = row(&s, 0);
+            let r = row(&s, 0, &NO_NAMES);
             (r.auth, r.route)
         };
         assert_eq!(

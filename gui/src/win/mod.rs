@@ -296,6 +296,7 @@ impl App {
                     unix_now(),
                     self.launches.busy(),
                     &update.starting,
+                    &sessions::Names::new(&update.gateways),
                 ),
                 m,
             ),
@@ -304,7 +305,7 @@ impl App {
             board::menu::overlay(&mut board, l, s, t, v, &self.entries(), m);
         }
         if let Some(dialog) = &self.dialog {
-            let page = dialog.page(&update.state);
+            let page = dialog.page(&update.state, &sessions::Names::new(&update.gateways));
             board::dialog::credentials(&mut board, l, s, t, v, &page, m);
         }
         match self.removal() {
