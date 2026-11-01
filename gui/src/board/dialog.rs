@@ -822,7 +822,7 @@ mod tests {
                 (Text::Port, "8443".to_owned()),
                 (Text::ServerName, "edge.example.com".to_owned()),
                 (Text::Source, "Config file".to_owned()),
-                (Text::Route, "Gateway and Mixed".to_owned()),
+                (Text::Route, "Mixed".to_owned()),
                 (Text::PortalPage, "https://portal.example.com/".to_owned()),
                 (Text::TlsMode, "Hybrid required".to_owned()),
                 (Text::ClientCertificate, "Required, self-signed".to_owned()),
