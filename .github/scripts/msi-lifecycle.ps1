@@ -130,6 +130,7 @@ foreach ($value in $touched) {
   if ($null -ne (Get-Value $value[0] $value[1])) { throw "$($value[0]) already has a value '$($value[1])'; remove it before running this script" }
 }
 if (Test-Path -LiteralPath $configFile) { throw "$configFile already exists; move it away before running this script" }
+if ($null -ne (Get-Value $installerKey 'ConfigTemplate')) { throw "$installerKey already has a value 'ConfigTemplate', so the install would skip the config template; remove it before running this script" }
 $hadConfigDir = Test-Path -LiteralPath $configDir
 $hadInstallerKey = Test-Path -LiteralPath $installerKey
 
