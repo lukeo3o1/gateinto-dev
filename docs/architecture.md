@@ -342,11 +342,19 @@ The full protocol, limits and guarantees are in
   agent replaces the default path; `none` means no file; a stopped or
   unreachable agent, an error such as `invalid request` from an older agent,
   or any other answer leaves the default path in use. Gateways, agent
-  settings, the device key name, the add-gateway name check and Open config
-  file use that path. Settings shows the path, with a fixed note when it is
-  not the default one or when the agent loaded no file. The GUI only reads
-  the file and opens it in the system's editor on request; it never writes
-  it. This is unit-tested but has not been tried on a real Windows desktop.
+  settings, the device key name and the add-gateway name check use that path.
+  Open config file uses the file the agent reported, and the default path in
+  every other case, including when the agent loaded no file. Settings shows
+  the path, with a fixed note when it is not the default one. When the agent
+  loaded no file, it shows the default path with "not created yet", or
+  "restart the agent to use it" when a file exists there now. The agent card
+  says "From the config file" when the agent reports a file, "Built-in
+  defaults" when it reports none, and, while it reports nothing, "From the
+  config file" only if the default file exists. The GUI only reads the file
+  and opens it in the system's editor on request; when the file is missing,
+  Open config file opens its folder in Explorer if the folder exists, and
+  shows a fixed failure message otherwise. It never creates or writes the
+  file. This is unit-tested but has not been tried on a real Windows desktop.
 - Settings shows whether the agent starts at sign-in, read-only. On Windows
   `gui/src/win/run.rs` reads, with `RegGetValueW` and no expansion, the
   installer's `Gateinto` value in
@@ -366,7 +374,17 @@ The full protocol, limits and guarantees are in
   state is a fixed translated text; the values and their paths are never
   shown. A fixed note says the installer sets it, for example with
   `AUTOSTART=1`. The GUI has no control for it and never writes, creates or
-  deletes either value. It reads it when Settings is
+  deletes either value. This note, and the one saying the app's own switch
+  opens the app and not the agent, are not drawn as text: each sits behind a
+  small info icon after the row's label. The icon is a keyboard focus stop
+  with no action. Hovering it shows the sentence in the window's standard
+  tooltip; focusing it with the keyboard shows the same sentence in a second,
+  tracked tooltip placed below the icon while the window is active
+  (`board::focused_tip`, `win/tips.rs`); while that tooltip is shown, the
+  icon has no hover tooltip, so only one appears (`board::unpinned`). The
+  GUI has no accessibility tree of
+  its own, so a screen reader gets the sentence only if it reads tooltip
+  windows; this has not been tried. It reads it when Settings is
   selected and, while Settings stays selected, on worker updates at most once
   per 2-second poll (`settings::reread`); there is no extra timer. Demo mode
   shows a fixed On and never reads the registry. The app's own switch is
@@ -530,9 +548,13 @@ delete `Gateinto App` and its StartupApproved entry only when
 `gateinto-gui.exe`. The key is
 created by `gateinto setup` (or `key init`) as the user who will use it;
 `setup` refuses the LocalSystem, LocalService and NetworkService accounts.
-Other commands only open the key. The key and the config file
-(`%APPDATA%\Gateinto\gateinto.toml` by default) are not MSI components, so an
-uninstall keeps them and a reinstall keeps the SPKI. Only
+Other commands only open the key. The key is not an MSI component, so an
+uninstall keeps it and a reinstall keeps the SPKI. The MSI creates the config
+file (`%APPDATA%\Gateinto\gateinto.toml`) from a template with every setting
+commented out only when it does not exist. That component is permanent, its
+condition is evaluated only on first install, and it is never reinstalled
+while its `HKCU` marker exists, so by design the installer never overwrites or
+removes the file; this is not yet verified on Windows. Only
 `gateinto reset --purge-device-identity` deletes the key: it requires the SPKI
 prefix, stops the agent, reopens the named key with `NCryptOpenKey`, checks
 the SPKI again and deletes that handle with `NCryptDeleteKey`.

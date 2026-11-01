@@ -103,8 +103,10 @@ jobs:
         run: |
           pwsh packaging/wix/build.ps1 -Output "$env:RUNNER_TEMP\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
-      - name: Install, set up, uninstall, reinstall and purge (Software KSP)
-        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -Exe target\release\gateinto.exe -LogDir "$env:RUNNER_TEMP\msi"
+          pwsh packaging/wix/build.ps1 -Output "$env:RUNNER_TEMP\upgrade\gateinto.msi"
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
+      - name: Install, set up, repair, upgrade, uninstall, reinstall and purge (Software KSP)
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -UpgradeMsi "$env:RUNNER_TEMP\upgrade\gateinto.msi" -Exe target\release\gateinto.exe -LogDir "$env:RUNNER_TEMP\msi"
       - name: Upload the installer logs
         if: failure()
         uses: actions/upload-artifact@v7

@@ -1,5 +1,6 @@
 param(
   [Parameter(Mandatory)] [string] $Msi,
+  [Parameter(Mandatory)] [string] $UpgradeMsi,
   [Parameter(Mandatory)] [string] $Exe,
   [Parameter(Mandatory)] [string] $LogDir
 )
@@ -7,6 +8,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Msi = (Resolve-Path -LiteralPath $Msi).Path
+$UpgradeMsi = (Resolve-Path -LiteralPath $UpgradeMsi).Path
+if ($UpgradeMsi -eq $Msi) { throw 'the upgrade MSI must be a separate build of the same version' }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $outside = Join-Path $LogDir 'gateinto-outside.exe'
 Copy-Item -LiteralPath $Exe -Destination $outside
@@ -20,6 +23,11 @@ $guiValue = 'Gateinto App'
 $probe = 'Gateinto Lifecycle Probe'
 $probeData = '"C:\gateinto-lifecycle-probe.exe"'
 $approvedOn = [byte[]] (2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+$configDir = "$env:APPDATA\Gateinto"
+$configFile = "$configDir\gateinto.toml"
+$template = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\..\packaging\wix\gateinto.toml')
+$edited = "# kept by the lifecycle test`n"
+$installerKey = 'HKCU:\Software\Gateinto\Installer'
 $script:spki = $null
 $script:written = @()
 $script:guis = @()
@@ -34,9 +42,9 @@ function Step([string] $Name, [scriptblock] $Body) {
   try { & $Body } finally { '::endgroup::' }
 }
 
-function Invoke-Msiexec([string] $Action, [string] $LogName, [string[]] $Properties = @()) {
+function Invoke-Msiexec([string] $Action, [string] $LogName, [string[]] $Properties = @(), [string] $Package = $Msi) {
   $log = Join-Path $LogDir $LogName
-  $arguments = @($Action, "`"$Msi`"", '/qn', '/norestart') + $Properties + @('/l*v', "`"$log`"")
+  $arguments = @($Action, "`"$Package`"", '/qn', '/norestart') + $Properties + @('/l*v', "`"$log`"")
   $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $arguments
   if ($process.ExitCode -ne 0) { Get-Content $log -Tail 200 | Out-Host; throw "msiexec $Action exited with $($process.ExitCode) (3010 means a restart was needed)" }
   $log
@@ -96,6 +104,22 @@ function Start-Gui {
   $gui
 }
 
+function Assert-ConfigIs([string] $Expected, [string] $When) {
+  if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { throw "$configFile is missing $When" }
+  if ((Get-Content -Raw -LiteralPath $configFile) -ne $Expected) { throw "$configFile changed $When" }
+}
+
+function Get-UninstallEntries {
+  Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+    Get-ItemProperty | Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Gateinto' }
+}
+
+function Remove-IfEmpty([string] $Path) {
+  if ((Test-Path -LiteralPath $Path) -and -not (Get-ChildItem -Force -LiteralPath $Path) -and -not ((Get-Item -LiteralPath $Path).Property)) {
+    Remove-Item -LiteralPath $Path -Force
+  }
+}
+
 function Test-UserPathHasInstallDir {
   $userPath = (Get-ItemProperty 'HKCU:\Environment' -ErrorAction SilentlyContinue).Path
   [bool] ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $installDir })
@@ -105,6 +129,9 @@ $touched = @(@($runKey, $guiValue), @($runKey, $probe), @($approvedKey, $guiValu
 foreach ($value in $touched) {
   if ($null -ne (Get-Value $value[0] $value[1])) { throw "$($value[0]) already has a value '$($value[1])'; remove it before running this script" }
 }
+if (Test-Path -LiteralPath $configFile) { throw "$configFile already exists; move it away before running this script" }
+$hadConfigDir = Test-Path -LiteralPath $configDir
+$hadInstallerKey = Test-Path -LiteralPath $installerKey
 
 try {
   Step 'Install silently per user' {
@@ -125,8 +152,7 @@ try {
     if ($null -ne (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Gateinto -ErrorAction SilentlyContinue)) {
       throw 'the autostart entry exists although AUTOSTART was not set'
     }
-    $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
-      Get-ItemProperty | Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Gateinto' }
+    $uninstall = Get-UninstallEntries
     if (-not $uninstall) { throw 'no uninstall entry with DisplayName Gateinto' }
     $uninstall | Select-Object PSPath, DisplayName, DisplayVersion, UninstallString | Format-List | Out-String
     $stderrFile = Join-Path $LogDir 'key-info-before-setup.err'
@@ -136,6 +162,7 @@ try {
     "key info stderr: $keyInfoError"
     if ($code -eq 0) { throw 'a device key exists right after installing; the installer must not create one' }
     if ($keyInfoError -notmatch 'no device key named') { throw 'key info failed for another reason than a missing device key' }
+    Assert-ConfigIs $template 'right after installing'
   }
 
   Step 'gateinto setup (Microsoft Software Key Storage Provider, not a TPM)' {
@@ -151,6 +178,24 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "gateinto status exited with $LASTEXITCODE" }
     $status
     if ($status -notmatch "(?m)^spki-sha256: $script:spki\r?$") { throw 'status did not report the key from setup' }
+  }
+
+  Step 'Edit the config template, then repair and upgrade the product that installed it' {
+    $created = (Get-Item -LiteralPath $configFile).CreationTime
+    Set-Content -NoNewline -LiteralPath $configFile -Value $edited
+    (Get-Item -LiteralPath $configFile).LastWriteTime = $created
+    $null = Invoke-Msiexec '/fa' 'repair-fa.log'
+    Assert-ConfigIs $edited 'after msiexec /fa'
+    $null = Invoke-Msiexec '/f' 'repair-f.log'
+    Assert-ConfigIs $edited 'after msiexec /f'
+    $null = Invoke-Msiexec '/i' 'upgrade-1.log' @() $UpgradeMsi
+    Assert-GuiInstalled
+    if (@(Get-UninstallEntries).Count -ne 1) { throw 'the same-version upgrade left more or fewer than one Gateinto uninstall entry' }
+    Assert-ConfigIs $edited 'after a same-version major upgrade'
+    $null = Invoke-Msiexec '/i' 'upgrade-2.log'
+    Assert-GuiInstalled
+    if (@(Get-UninstallEntries).Count -ne 1) { throw 'the upgrade back left more or fewer than one Gateinto uninstall entry' }
+    Assert-ConfigIs $edited 'after upgrading back to the first build'
   }
 
   Step 'Uninstall while the agent runs, then check what is removed and what is kept' {
@@ -181,6 +226,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "gateinto key info exited with $LASTEXITCODE after uninstall" }
     $out
     if ($out -notmatch "(?m)^spki-sha256: $script:spki\r?$") { throw 'the device key changed or vanished after uninstall' }
+    Assert-ConfigIs $edited 'after uninstall'
   }
 
   Step 'Reinstall with AUTOSTART=1 and set up again (Software KSP)' {
@@ -195,6 +241,9 @@ try {
     $out
     if ($out -notmatch '(?m)^device-key: reused\r?$') { throw 'setup after reinstall did not reuse the key' }
     if ($out -notmatch "(?m)^spki-sha256: $script:spki\r?$") { throw 'setup after reinstall reported another SPKI' }
+    Assert-ConfigIs $edited 'after a reinstall'
+    $null = Invoke-Msiexec '/fa' 'repair-2.log'
+    Assert-ConfigIs $edited 'after a repair'
   }
 
   Step 'Purge the device identity, then setup creates a new one (Software KSP)' {
@@ -241,15 +290,21 @@ try {
     if ((Get-Value $runKey $probe) -ne $probeData) { throw "the uninstaller changed the unrelated Run value $probe" }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
     Assert-GuiRemoved
+    Assert-ConfigIs $edited 'after the second uninstall'
   }
 } finally {
   Step 'Clean up the key, the test values and the installation' {
     $script:guis | Where-Object { -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
     foreach ($value in $script:written) { Remove-Value $value[0] $value[1] }
+    Remove-Item -LiteralPath $configFile -Force -ErrorAction SilentlyContinue
+    Remove-Value $installerKey 'ConfigTemplate'
     if ($script:spki -and (Test-Path $outside)) {
       & $outside reset --purge-device-identity --confirm-spki $script:spki
     }
+    Start-Process msiexec.exe -Wait -ArgumentList '/x', "`"$UpgradeMsi`"", '/qn', '/norestart'
     Start-Process msiexec.exe -Wait -ArgumentList '/x', "`"$Msi`"", '/qn', '/norestart'
+    if (-not $hadInstallerKey) { Remove-IfEmpty $installerKey }
+    if (-not $hadConfigDir) { Remove-IfEmpty $configDir }
   }
 }
 

@@ -1193,7 +1193,7 @@ mod tests {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         assert_eq!(
             Note::from(CONFIRMATION).shown(),
-            "代理程式要求確認此閘道；請開啟其 gateinto:// 連結以確認"
+            "代理程式要求確認此閘道；請重新開啟該閘道的連結以確認"
         );
     }
 

@@ -36,6 +36,7 @@ pub enum Action {
     RemoveGateway,
     ConfirmRemove,
     OpenMain,
+    Explain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +88,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::RemoveGateway => Some(Action::RemoveGateway),
         Zone::ConfirmRemove => Some(Action::ConfirmRemove),
         Zone::OpenMain => Some(Action::OpenMain),
+        Zone::Info(_) => Some(Action::Explain),
         _ => None,
     }
 }
@@ -195,6 +197,9 @@ mod tests {
         let mut p = Pointer::default();
         p.down(Zone::OpenMain);
         assert_eq!(p.up(Zone::OpenMain), Some(Action::OpenMain));
+        let info = Zone::Info(crate::i18n::Text::SignInNote);
+        p.down(info);
+        assert_eq!(p.up(info), Some(Action::Explain));
     }
 
     #[test]

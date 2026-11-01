@@ -25,6 +25,7 @@ pub enum Zone {
     Entry(usize),
     OpenConfig,
     SignIn,
+    Info(crate::i18n::Text),
     Theme(Choice),
     Language(crate::i18n::Choice),
     CopyId,

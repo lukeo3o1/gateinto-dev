@@ -1359,6 +1359,44 @@ port = 443
     }
 
     #[test]
+    fn the_installer_template_comments_out_every_example_setting() {
+        let template = include_str!("../packaging/wix/gateinto.toml");
+        assert_eq!(ConfigFile::parse(template).unwrap(), ConfigFile::default());
+        assert!(
+            template
+                .lines()
+                .all(|line| line.is_empty() || line.starts_with('#')),
+            "{template}"
+        );
+        let commented: Vec<&str> = template.lines().collect();
+        let example = include_str!("../config.example.toml");
+        for line in example
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let wanted = format!("# {line}");
+            assert!(commented.contains(&wanted.as_str()), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_installer_never_reinstalls_or_removes_the_config_template() {
+        let wxs = include_str!("../packaging/wix/gateinto.wxs");
+        let component = wxs
+            .lines()
+            .find(|line| line.contains(r#"<Component Id="ConfigTemplate""#))
+            .unwrap();
+        for wanted in [
+            r#"Permanent="yes""#,
+            r#"NeverOverwrite="yes""#,
+            r#"Condition="NOT CONFIGEXISTS""#,
+        ] {
+            assert!(component.contains(wanted), "{wanted}");
+        }
+        assert!(!component.contains("Transitive"), "{component}");
+    }
+
+    #[test]
     fn a_gateway_route_defaults_to_mixed_and_can_be_gateway() {
         let file = ConfigFile::parse(&format!(
             "{MINIMAL}route = \"mixed\"\n[gateways.plain]\n[gateways.forced]\nroute = \"gateway\"\n"
