@@ -224,11 +224,6 @@ jobs:
           if gh api "repos/$GH_REPO/git/ref/tags/$CHANNEL" > /dev/null 2>&1; then
             gh api --method DELETE "repos/$GH_REPO/git/refs/tags/$CHANNEL"
           fi
-          if [[ $CHANNEL == latest ]]; then
-            flags=(--latest)
-          else
-            flags=(--prerelease --latest=false)
-          fi
           gh release create "$CHANNEL" dist/* --target "$SHA" --title "Gateinto $CHANNEL $SHA ($BUILT)" \
-            --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+            --notes-file "$RUNNER_TEMP/notes.md" --prerelease --latest=false
           gh release view "$CHANNEL"
