@@ -100,15 +100,15 @@ struct Pending {
 
 struct Asked<'a> {
     ask: &'a Ask,
-    changed: bool,
+    approved: bool,
 }
 
 impl Confirm for Asked<'_> {
     fn decide(&mut self, ask: &Ask) -> Decision {
-        if ask == self.ask {
+        self.approved = ask == self.ask;
+        if self.approved {
             Decision::Approve
         } else {
-            self.changed = true;
             Decision::Deny
         }
     }
@@ -405,10 +405,10 @@ impl Agent {
         let known = self.inner.profiles.known()?;
         let mut asked = Asked {
             ask: &answered.ask,
-            changed: false,
+            approved: false,
         };
         let resolution = link::resolve(&answered.request, &known, &mut asked, unix_now());
-        if asked.changed {
+        if !asked.approved {
             warn!(
                 gateway = %answered.ask.profile(),
                 "refused an approval: the link asks for something else than when it was confirmed"

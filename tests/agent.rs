@@ -1321,3 +1321,52 @@ async fn a_denied_switch_to_mixed_opens_no_session() {
     assert!(agent.linked().is_empty());
     agent.stop().await;
 }
+
+const CHANGED: &str =
+    "the gateways changed while the confirmation was open; nothing was done, open the link again";
+
+fn newco(agent: &TestAgent, route: gateinto::proxy::Route) -> LinkedGateway {
+    LinkedGateway {
+        name: "newco".parse().unwrap(),
+        display_name: None,
+        address: agent.gateway().parse().unwrap(),
+        portal_url: Some(NEW_PORTAL.parse().unwrap()),
+        approved_at: Some(unix_now()),
+        route,
+    }
+}
+
+async fn approves_nothing(agent: &TestAgent, token: ConfirmToken, linked: &[LinkedGateway]) {
+    let response = agent.send(Request::Approve(token)).await;
+    assert!(refused(&response, CHANGED), "{response:?}");
+    assert!(agent.sessions().await.is_empty());
+    assert_eq!(agent.linked(), linked);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_gateway_is_refused_once_the_gateway_was_saved_with_all_meanwhile() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("mixed").unwrap();
+    let (echo, token) = agent.asks(request).await;
+    assert!(!echo.iter().any(|line| line.starts_with("saved-route:")));
+    let saved = newco(&agent, gateinto::proxy::Route::Gateway);
+    agent.linked.lock().unwrap().push(saved.clone());
+    approves_nothing(&agent, token, &[saved]).await;
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switch_to_mixed_is_refused_once_its_gateway_was_removed_meanwhile() {
+    let agent = TestAgent::start(limits()).await;
+    let named = agent.new_link(None).with_route("mixed").unwrap();
+    let unnamed = link("newco", None, None, None).with_route("mixed").unwrap();
+    for request in [named, unnamed] {
+        let saved = newco(&agent, gateinto::proxy::Route::Gateway);
+        agent.linked.lock().unwrap().push(saved);
+        let (echo, token) = agent.asks(request).await;
+        assert_eq!(field(&echo, "saved-route"), "gateway");
+        agent.linked.lock().unwrap().clear();
+        approves_nothing(&agent, token, &[]).await;
+    }
+    agent.stop().await;
+}
