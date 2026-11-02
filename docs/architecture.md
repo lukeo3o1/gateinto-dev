@@ -355,7 +355,10 @@ The full protocol, limits and guarantees are in
   cannot approve. Enter, Space and Escape always Deny, as do closing the
   dialog and its timeout; other keys do nothing. Keyboard-only and
   screen-reader users therefore cannot approve a link there, only Deny it.
-  Not yet verified on Windows.
+  The dialog widens up to the work area to show the whole notice; when even
+  that cannot hold it, it shows a fixed message instead and no Allow button,
+  so the details are never cut off (`gui/src/board/approval.rs`). Not yet
+  verified on Windows.
 - The GUI worker asks the agent for `list` (and `config`, and the log page
   while the Log page is open) at most once every 2 seconds
   (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
