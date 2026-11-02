@@ -80,8 +80,8 @@ pub fn focused_tip(stops: &[Stop], ring: Option<Zone>) -> Option<(Rect, &'static
 struct Columns {
     session: Rect,
     gateway: Rect,
-    uptime: Rect,
-    activity: Rect,
+    uptime: Option<Rect>,
+    activity: Option<Rect>,
     actions: Rect,
 }
 
@@ -235,39 +235,80 @@ impl<'a, M: Measure> Painter<'a, M> {
     fn status(&mut self, content: Rect, page: &Page) -> Rect {
         let (s, t) = (self.s, self.t);
         let status = &page.status;
-        let card = Rect::new(content.x, content.y, content.w, s.px(92.0));
+        let gap = s.px(16.0);
+        let x = content.x + s.px(20.0) + s.px(56.0) + s.px(16.0);
+        let edge = content.right() - s.px(20.0);
+        let labels = [
+            status.stop.then(|| tr(STOP_LABEL)),
+            (status.start != Launch::Hidden).then(|| tr(START_AGENT)),
+            (status.launch != Launch::Hidden).then(|| tr(START)),
+        ];
+        let buttons: i32 = labels
+            .iter()
+            .flatten()
+            .map(|label| self.button_w(label) + gap)
+            .sum();
+        let (title, sub, between) = (s.px(28.0), s.px(18.0), s.px(2.0));
+        let fits = |w: i32| {
+            let lines = dialog::wrap(self.m, Font::Body, &status.subtitle, w);
+            (self.m.width(Font::Status, status.title) <= w && lines.len() <= 2).then_some(lines)
+        };
+        let beside = fits(edge - buttons - x);
+        let stacked = beside.is_none();
+        let (w, mut lines) = match beside {
+            Some(lines) => (edge - buttons - x, lines),
+            None => (
+                edge - x,
+                dialog::wrap(self.m, Font::Body, &status.subtitle, edge - x),
+            ),
+        };
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let block = title + between + sub * lines.len() as i32;
+        let (pad, row_h) = (s.px(18.0), s.px(32.0));
+        let h = if stacked {
+            (pad + block + s.px(14.0) + row_h + pad).max(s.px(92.0))
+        } else {
+            s.px(92.0)
+        };
+        let card = Rect::new(content.x, content.y, content.w, h);
+        let row = if stacked {
+            Rect::new(card.x, card.bottom() - pad - row_h, card.w, row_h)
+        } else {
+            card
+        };
         self.framed(card, 12.0, t.card);
         let logo = s.px(56.0);
-        let logo = Rect::new(card.x + s.px(20.0), card.y + s.px(18.0), logo, logo);
+        let logo = Rect::new(card.x + s.px(20.0), card.y + pad, logo, logo);
         self.push(Op::Logo(logo, status.logo));
-        let x = logo.right() + s.px(16.0);
-        let mut right = card.right() - s.px(20.0);
-        let button = status
-            .stop
-            .then(|| self.button(card, right, tr(STOP_LABEL)));
-        if let Some(button) = button {
-            right = button.x - s.px(16.0);
-        }
-        let start =
-            (status.start != Launch::Hidden).then(|| self.button(card, right, tr(START_AGENT)));
-        if let Some(start) = start {
-            right = start.x - s.px(16.0);
-        }
-        let pick = (status.launch != Launch::Hidden).then(|| self.button(card, right, tr(START)));
-        if let Some(pick) = pick {
-            right = pick.x - s.px(16.0);
-        }
-        let (title, sub) = (s.px(28.0), s.px(18.0));
-        let top = card.y + (card.h - title - s.px(2.0) - sub) / 2;
-        let w = right - x;
+        let mut right = edge;
+        let mut place = |p: &Self, label: Option<&'static str>| {
+            label.map(|label| {
+                let button = p.button(row, right, label);
+                right = button.x - gap;
+                button
+            })
+        };
+        let [stop, start, pick] = labels;
+        let button = place(self, stop);
+        let start = place(self, start);
+        let pick = place(self, pick);
+        let top = if stacked {
+            card.y + pad
+        } else {
+            card.y + (card.h - block) / 2
+        };
         self.text(
             Font::Status,
             status.title,
             Rect::new(x, top, w, title),
             t.text,
         );
-        let subtitle = Rect::new(x, top + title + s.px(2.0), w, sub);
-        self.text(Font::Body, status.subtitle.clone(), subtitle, t.muted);
+        for (i, line) in lines.into_iter().enumerate() {
+            let y = top + title + between + i as i32 * sub;
+            self.text(Font::Body, line, Rect::new(x, y, w, sub), t.muted);
+        }
         if let Some(pick) = pick {
             let ready = status.launch == Launch::Ready;
             self.start(pick, icons::PLUS, tr(START), Zone::Picker, ready);
@@ -291,10 +332,15 @@ impl<'a, M: Measure> Painter<'a, M> {
         card
     }
 
-    fn button(&self, card: Rect, right: i32, label: &str) -> Rect {
+    fn button_w(&self, label: &str) -> i32 {
         let s = self.s;
         let text = self.m.width(Font::BodyStrong, label);
-        let w = s.px(14.0) + s.px(16.0) + s.px(8.0) + text + s.px(14.0);
+        s.px(14.0) + s.px(16.0) + s.px(8.0) + text + s.px(14.0)
+    }
+
+    fn button(&self, card: Rect, right: i32, label: &str) -> Rect {
+        let s = self.s;
+        let w = self.button_w(label);
         let h = s.px(32.0);
         Rect::new(right - w, card.y + (card.h - h) / 2, w, h)
     }
@@ -342,12 +388,22 @@ impl<'a, M: Measure> Painter<'a, M> {
         let s = self.s;
         let gap = s.px(16.0);
         let right = row.right() - s.px(16.0);
-        let column = |right: i32, w: f32| Rect::new(right - s.px(w), row.y, s.px(w), row.h);
-        let actions = column(right, 64.0);
-        let activity = column(actions.x - gap, 70.0);
-        let uptime = column(activity.x - gap, 80.0);
-        let gateway = column(uptime.x - gap, 210.0);
+        let column = |right: i32, w: i32| Rect::new(right - w, row.y, w, row.h);
+        let actions = column(right, s.px(64.0));
         let x = row.x + s.px(72.0);
+        let (uptime_w, activity_w) = (s.px(80.0), s.px(70.0));
+        let (session_min, gateway_min) = (s.px(120.0), s.px(140.0));
+        let room = actions.x - gap - x;
+        let timed = room - uptime_w - activity_w - 2 * gap >= session_min + gap + gateway_min;
+        let (uptime, activity, end) = if timed {
+            let activity = column(actions.x - gap, activity_w);
+            let uptime = column(activity.x - gap, uptime_w);
+            (Some(uptime), Some(activity), uptime.x - gap)
+        } else {
+            (None, None, actions.x - gap)
+        };
+        let gateway_w = s.px(210.0).min(end - x - gap - session_min).max(0);
+        let gateway = column(end, gateway_w);
         Columns {
             session: Rect::new(x, row.y, (gateway.x - gap - x).max(0), row.h),
             gateway,
@@ -375,12 +431,14 @@ impl<'a, M: Measure> Painter<'a, M> {
         let header = Rect::new(table.x, table.y, table.w, header_h);
         let c = self.columns(header);
         for (label, col) in [
-            (Text::Session, c.session),
-            (Text::Gateway, c.gateway),
+            (Text::Session, Some(c.session)),
+            (Text::Gateway, Some(c.gateway)),
             (Text::Uptime, c.uptime),
             (Text::Activity, c.activity),
         ] {
-            self.text(Font::Small, label, col, t.muted);
+            if let Some(col) = col {
+                self.text(Font::Small, label, col, t.muted);
+            }
         }
         self.rule(table, header.bottom());
         if rows.is_empty() {
@@ -437,25 +495,33 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.pill(first.x + w + pill_gap, first, row.route);
         self.text(Font::Mono, row.address.clone(), line2(c.gateway), t.muted);
 
-        self.text(Font::Body, row.uptime.clone(), c.uptime, t.text);
-
-        let (dot_w, dot_h, dot_gap) = (s.px(5.0), s.px(7.0), s.px(4.0));
-        let dot = if row.active { t.accent } else { t.eyes_idle };
-        let radius = s.pxf(3.0).min(dot_w as f32 / 2.0);
-        let y = r.y + (r.h - dot_h) / 2;
-        for i in 0..2 {
-            let x = c.activity.x + i * (dot_w + dot_gap);
-            self.push(Op::Round(Rect::new(x, y, dot_w, dot_h), radius, dot));
+        if let Some(uptime) = c.uptime {
+            self.text(Font::Body, row.uptime.clone(), uptime, t.text);
         }
-        let x = c.activity.x + 2 * dot_w + dot_gap + s.px(8.0);
-        let label = tr(if row.active { Text::Active } else { Text::Idle });
-        let state = Rect::new(x, r.y, c.activity.right() - x, r.h);
-        self.text(Font::Small, label, state, t.muted);
+        if let Some(activity) = c.activity {
+            self.activity(activity, row.active);
+        }
 
         let size = s.px(32.0);
         let y = c.actions.y + (c.actions.h - size) / 2;
         self.revoke(Rect::new(c.actions.x, y, size, size), row.id);
         self.more(Rect::new(c.actions.right() - size, y, size, size), row.id);
+    }
+
+    fn activity(&mut self, column: Rect, active: bool) {
+        let (s, t) = (self.s, self.t);
+        let (dot_w, dot_h, dot_gap) = (s.px(5.0), s.px(7.0), s.px(4.0));
+        let dot = if active { t.accent } else { t.eyes_idle };
+        let radius = s.pxf(3.0).min(dot_w as f32 / 2.0);
+        let y = column.y + (column.h - dot_h) / 2;
+        for i in 0..2 {
+            let x = column.x + i * (dot_w + dot_gap);
+            self.push(Op::Round(Rect::new(x, y, dot_w, dot_h), radius, dot));
+        }
+        let x = column.x + 2 * dot_w + dot_gap + s.px(8.0);
+        let label = tr(if active { Text::Active } else { Text::Idle });
+        let state = Rect::new(x, column.y, column.right() - x, column.h);
+        self.text(Font::Small, label, state, t.muted);
     }
 
     fn more(&mut self, button: Rect, id: u64) {
@@ -497,6 +563,7 @@ impl<'a, M: Measure> Painter<'a, M> {
 mod tests {
     use super::*;
     use crate::fonts::Font;
+    use crate::i18n::{Language, fill, speaking};
     use crate::icons;
     use crate::logo::State;
     use crate::menu::Popup;
@@ -739,13 +806,13 @@ mod tests {
     }
 
     #[test]
-    fn the_status_card_shows_the_logo_title_and_subtitle_inside_the_content_clip() {
+    fn the_status_card_shows_the_logo_title_and_a_wrapped_subtitle_inside_the_content_clip() {
         let l = layout();
         let ops = draw(&running(vec![row(1)])).ops;
         assert_eq!(ops.first(), Some(&Op::Clip(l.content)));
         assert_eq!(ops.last(), Some(&Op::Unclip));
         assert_eq!(
-            ops[1..6],
+            ops[1..7],
             [
                 Op::Round(Rect::new(248, 80, 764, 92), 12.0, T.border),
                 Op::Round(Rect::new(249, 81, 762, 90), 11.0, T.card),
@@ -753,15 +820,16 @@ mod tests {
                 text(
                     Font::Status,
                     "Relaying",
-                    Rect::new(340, 102, 355, 28),
+                    Rect::new(340, 93, 355, 28),
                     T.text
                 ),
                 text(
                     Font::Body,
-                    "Agent running on loopback only · 1 session · 1 active",
-                    Rect::new(340, 132, 355, 18),
+                    "Agent running on loopback only · 1 session · 1",
+                    Rect::new(340, 123, 355, 18),
                     T.muted
                 ),
+                text(Font::Body, "active", Rect::new(340, 141, 355, 18), T.muted),
             ]
         );
     }
@@ -1288,6 +1356,127 @@ mod tests {
             Some(Op::Round(Rect::new(1024, 338, 4, 318), 2.0, T.eyes_idle))
         );
         assert_eq!(draw(&running(vec![row(1)])).ops.last(), Some(&Op::Unclip));
+    }
+
+    fn ink(ops: &[Op]) -> Vec<(Rect, String)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                Op::Text(_, s, r, _) => Some((*r, s.to_string())),
+                Op::Round(r, ..) | Op::Icon(_, r, ..) => Some((*r, String::new())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn apart(a: Rect, b: Rect) -> bool {
+        a.right() <= b.x || b.right() <= a.x || a.bottom() <= b.y || b.bottom() <= a.y
+    }
+
+    #[test]
+    fn from_the_minimum_window_up_the_sessions_table_keeps_every_column_clear_of_the_tile() {
+        let (min, h) = Layout::min_size(S);
+        for language in [Language::English, Language::Chinese] {
+            let _speaking = speaking(language);
+            for (route, w) in [Text::All, Text::Mixed]
+                .into_iter()
+                .flat_map(|route| (min..=1040).step_by(20).map(move |w| (route, w)))
+            {
+                let l = Layout::new(w, h, S, true);
+                let mut long = row(12);
+                long.gateway = "a-very-long-gateway-name.example.com".to_owned();
+                long.address = "a-very-long-gateway-name.example.com:8443".to_owned();
+                long.route = tr(route);
+                let mut page = running(vec![long]);
+                page.status.subtitle = fill(Text::RunningMany, &[&12, &10]);
+                let b = board(&l, S, &T, &View::default(), &page, &Chars);
+                let at = b
+                    .ops
+                    .iter()
+                    .position(|op| matches!(op, Op::Text(Font::Heading, ..)))
+                    .unwrap();
+                let header = b.ops[at..]
+                    .iter()
+                    .find_map(|op| match op {
+                        Op::Text(Font::Small, s, r, _) if s == tr(Text::Session) => Some(*r),
+                        _ => None,
+                    })
+                    .unwrap();
+                let labels: Vec<_> = ink(&b.ops[at..])
+                    .into_iter()
+                    .filter(|(r, s)| r.y == header.y && !s.is_empty())
+                    .collect();
+                assert!(labels.len() >= 2, "{labels:?}");
+                for (i, (r, s)) in labels.iter().enumerate() {
+                    assert!(r.w > 0, "{s:?} {r:?}");
+                    assert!(r.right() <= l.content.right() - 16, "{s:?} {r:?}");
+                    for (other, t) in &labels[i + 1..] {
+                        assert!(apart(*r, *other), "{s:?} {r:?} {t:?} {other:?}");
+                    }
+                }
+                let line = Rect::new(l.content.x, header.bottom(), l.content.w, 60);
+                let drawn = ink(&inside(&b.ops, line));
+                let tile = drawn[0].0;
+                assert_eq!(tile.w, 40);
+                for (r, s) in &drawn[2..] {
+                    assert!(r.w > 0, "{s:?} {r:?}");
+                    assert!(apart(*r, tile), "{s:?} {r:?} {tile:?}");
+                }
+                let pill = drawn
+                    .iter()
+                    .find(|(r, s)| s.is_empty() && r.h == 16)
+                    .unwrap()
+                    .0;
+                let name = drawn
+                    .iter()
+                    .find(|(_, s)| *s == "a-very-long-gateway-name.example.com")
+                    .unwrap()
+                    .0;
+                assert!(apart(name, pill), "{name:?} {pill:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn at_the_minimum_window_the_status_card_shows_the_whole_subtitle() {
+        let (w, h) = Layout::min_size(S);
+        let l = Layout::new(w, h, S, true);
+        for language in [Language::English, Language::Chinese] {
+            let _speaking = speaking(language);
+            let mut page = running(vec![row(1)]);
+            page.status.subtitle = fill(Text::RunningMany, &[&12, &10]);
+            let b = board(&l, S, &T, &View::default(), &page, &Chars);
+            let card = match b.ops[1] {
+                Op::Round(r, ..) => r,
+                _ => unreachable!(),
+            };
+            let lines: Vec<_> = b
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Text(Font::Body, s, r, _) if r.bottom() <= card.bottom() => {
+                        Some((s.to_string(), *r))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for (line, r) in &lines {
+                assert!(Chars.width(Font::Body, line) <= r.w, "{line:?} {r:?}");
+                assert!(r.right() <= card.right(), "{r:?}");
+                for &(button, _) in &b.targets[..2] {
+                    assert!(apart(*r, button), "{line:?} {r:?} {button:?}");
+                }
+            }
+            let shown: String = lines.iter().map(|(line, _)| line.as_str()).collect();
+            let shown = shown.replace(' ', "");
+            for count in ["12", "10"] {
+                assert!(shown.contains(count), "{shown:?}");
+            }
+            assert_eq!(shown, page.status.subtitle.replace(' ', ""));
+            for &(button, _) in &b.targets[..2] {
+                assert!(button.x >= card.x && button.right() <= card.right());
+                assert!(button.bottom() <= card.bottom(), "{button:?} {card:?}");
+            }
+        }
     }
 
     #[test]

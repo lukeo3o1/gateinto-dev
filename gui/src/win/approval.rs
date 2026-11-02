@@ -150,7 +150,7 @@ fn place(main: HWND, ticket: u64, confirmation: Confirmation) -> Option<(HWND, R
             .fonts
             .as_ref()
             .filter(|_| !approval.hwnd.is_null())?;
-        let (w, h) = outer(s, fonts, &confirmation);
+        let (w, h) = outer(s, fonts, &confirmation, work);
         approval.open = Some(Open {
             dialog: Dialog::open(ticket, now()),
             confirmation,
@@ -164,11 +164,13 @@ fn place(main: HWND, ticket: u64, confirmation: Confirmation) -> Option<(HWND, R
     .flatten()
 }
 
-fn outer(s: Scale, fonts: &Fonts, confirmation: &Confirmation) -> (i32, i32) {
+fn outer(s: Scale, fonts: &Fonts, confirmation: &Confirmation, work: Rect) -> (i32, i32) {
     let notice = confirmation_notice(confirmation);
-    let (w, h) = (sheet::width(s), sheet::height(s, fonts, &notice));
-    let [left, top, right, bottom] = sys::adjusted_rect(w, h, STYLE, EX_STYLE, s.dpi);
-    (right - left, bottom - top)
+    let [left, top, right, bottom] = sys::adjusted_rect(0, 0, STYLE, EX_STYLE, s.dpi);
+    let edges = (right - left, bottom - top);
+    let room = (work.w - edges.0, work.h - edges.1);
+    let (w, h) = sheet::size(s, fonts, &notice, room);
+    (w + edges.0, h + edges.1)
 }
 
 fn answer(main: HWND, answer: Answer) {
@@ -345,6 +347,11 @@ fn tick(main: HWND) {
 fn rescaled(hwnd: HWND, main: HWND, wp: WPARAM, lp: LPARAM) {
     let s = Scale::new((wp & 0xffff) as u32);
     let r = unsafe { &*(lp as *const RECT) };
+    let centre = POINT {
+        x: r.left + (r.right - r.left) / 2,
+        y: r.top + (r.bottom - r.top) / 2,
+    };
+    let work = tray::work_area(centre).map(|(work, ..)| work);
     let size = with_app(main, |app| {
         let approval = &mut app.approval;
         approval.rescale(&app.gfx, s);
@@ -354,6 +361,7 @@ fn rescaled(hwnd: HWND, main: HWND, wp: WPARAM, lp: LPARAM) {
             approval.s,
             approval.fonts.as_ref()?,
             &open.confirmation,
+            work?,
         ))
     });
     let flags = SWP_NOZORDER | SWP_NOACTIVATE;

@@ -11,6 +11,7 @@ use gateinto::sessions::SessionId;
 use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
+use zeroize::Zeroize;
 
 use crate::agent::{AgentState, Config};
 use crate::approval::{self, Answer, Desk};
@@ -162,8 +163,15 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
     }
 }
 
+fn wiped<E>(mut reply: Result<Response, E>) -> Result<Response, E> {
+    if let Ok(Response::Ok(lines)) = &mut reply {
+        lines.zeroize();
+    }
+    reply
+}
+
 pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Option<Note> {
-    match reply {
+    match wiped(reply) {
         Ok(Response::Ok(_)) => None,
         Ok(Response::Error(message)) => Some(Note::Agent(message)),
         Err(RequestError::NotRunning) if matches!(command, Command::Stop) => None,
@@ -184,6 +192,7 @@ where
     if let Ok(Response::Ok(lines)) = &reply
         && let Some(token) = ipc::confirm_token(lines)
     {
+        drop(wiped(reply));
         let _ = send(Request::Deny(token)).await;
         return Some(CONFIRMATION.into());
     }
@@ -226,7 +235,7 @@ where
         prompt(Prompt::Dismiss(ticket));
         Ok(answer == Ok(Ok(Answer::Allow)))
     };
-    match settle(&launch, reply, send, ask).await {
+    match wiped(settle(&launch, reply, send, ask).await) {
         Ok(Response::Ok(_)) => None,
         Ok(Response::Error(message)) => Some(Note::Agent(message)),
         Err(error) => refused(error),
@@ -1122,6 +1131,7 @@ mod tests {
         Reveal {
             id,
             ticket: 1,
+            listen: None,
             credentials: SessionCredentials::parse("gateinto", PASSWORD).map(Issued::Agent),
         }
     }
@@ -1176,6 +1186,20 @@ mod tests {
             failure(Command::Stop, Err(RequestError::Closed)),
             Some(Text::AgentClosed.into())
         );
+    }
+
+    #[test]
+    fn a_discarded_reply_is_wiped_but_an_error_is_kept() {
+        let issued = || {
+            Ok::<_, ()>(Response::Ok(vec![
+                "username: gi-1".to_owned(),
+                "password: secret".to_owned(),
+            ]))
+        };
+        assert_eq!(wiped(issued()), Ok(Response::Ok(Vec::new())));
+        let error = || Ok::<_, ()>(Response::Error("no session".to_owned()));
+        assert_eq!(wiped(error()), error());
+        assert_eq!(wiped(Err::<Response, _>(())), Err(()));
     }
 
     #[test]

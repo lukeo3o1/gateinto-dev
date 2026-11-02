@@ -9,6 +9,7 @@ use gateinto::ipc::{
     SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, Source};
+use gateinto::sessions::SessionId;
 
 use crate::agent::Config;
 use crate::credentials::{Issued, Reveal};
@@ -189,8 +190,14 @@ pub fn answer(request: Request, now: u64) -> Response {
     match request {
         Request::List => Response::Ok(sessions(now).iter().map(SessionInfo::to_line).collect()),
         Request::Log { after } => Response::Ok(log(after, now)),
-        Request::Credentials(_)
-        | Request::Launch(_)
+        Request::Credentials(id) => Response::Ok(
+            SESSIONS
+                .iter()
+                .filter(|session| SessionId::from(session.id) == id)
+                .map(|session| format!("listen: {}:{}", Ipv4Addr::LOCALHOST, session.port))
+                .collect(),
+        ),
+        Request::Launch(_)
         | Request::Close(_)
         | Request::Stop
         | Request::Config
@@ -484,6 +491,12 @@ mod tests {
                 .any(|u| u.failure == Some(NOT_STARTED.into()))
         );
         let reveals = reveals.borrow();
+        let listen = sessions(u64::MAX)
+            .into_iter()
+            .find(|s| s.id == 3)
+            .unwrap()
+            .listen;
+        assert_eq!(reveals[0].listen, Some(listen));
         let issued = reveals[0].credentials.as_ref().unwrap();
         assert_eq!(
             (issued.username(), issued.password()),

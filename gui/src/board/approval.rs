@@ -21,6 +21,7 @@ const BUTTON: f32 = 32.0;
 const GAP: f32 = 8.0;
 const MIN: f32 = 96.0;
 const SIDES: f32 = 28.0;
+const WIDEN: f32 = 40.0;
 
 pub struct Sheet<'a> {
     pub notice: &'a str,
@@ -54,9 +55,20 @@ pub fn lines(m: &impl Measure, notice: &str, width: i32) -> Vec<String> {
         .collect()
 }
 
-pub fn height(s: Scale, m: &impl Measure, notice: &str) -> i32 {
-    let count = lines(m, notice, width(s) - 2 * s.px(PAD)).len() as i32;
+pub fn height(s: Scale, m: &impl Measure, notice: &str, width: i32) -> i32 {
+    let count = lines(m, notice, width - 2 * s.px(PAD)).len() as i32;
     2 * s.px(PAD) + count * s.px(LINE) + s.px(FOOTER)
+}
+
+pub fn size(s: Scale, m: &impl Measure, notice: &str, room: (i32, i32)) -> (i32, i32) {
+    let mut w = width(s).min(room.0);
+    loop {
+        let h = height(s, m, notice, w);
+        if h <= room.1 || w >= room.0 {
+            return (w, h);
+        }
+        w = (w + s.px(WIDEN)).min(room.0);
+    }
 }
 
 pub fn button(zone: Zone) -> Option<Button> {
@@ -167,10 +179,13 @@ mod tests {
     use crate::focus::{self, Stop};
     use crate::fonts::Font;
     use crate::hit::Zone;
+    use crate::i18n::{Language, confirmation_notice, speaking};
     use crate::layout::Rect;
     use crate::scale::Scale;
     use crate::scene::Op;
     use crate::theme::Theme;
+    use gateinto::link::Confirmation;
+    use gateinto::proxy::Route;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
@@ -213,7 +228,8 @@ mod tests {
     #[test]
     fn the_height_fits_every_line_and_the_footer() {
         assert_eq!(width(S), 460);
-        assert_eq!(height(S, &Chars, NOTICE), 172);
+        assert_eq!(height(S, &Chars, NOTICE, width(S)), 172);
+        assert_eq!(size(S, &Chars, NOTICE, (1920, 1040)), (460, 172));
     }
 
     #[test]
@@ -313,6 +329,60 @@ mod tests {
             5.0,
             T.caption_pressed
         )));
+    }
+
+    fn long_host(start: &str) -> String {
+        let mut host = start.to_owned();
+        while host.len() < 240 {
+            let label = "a".repeat(60.min(239 - host.len()));
+            host = format!("{host}{label}.");
+        }
+        host.trim_end_matches('.').to_owned()
+    }
+
+    #[test]
+    fn long_hosts_break_inside_the_width_and_are_shown_whole() {
+        let host = format!("{}:8443", long_host("login.contoso.com."));
+        let origin = format!("https://{}:9443", long_host("portal.contoso.com."));
+        assert!(host.len() > 240);
+        let confirmation = Confirmation {
+            route: Route::Gateway,
+            profile: "newco".parse().unwrap(),
+            gateway: host.parse().unwrap(),
+            portal: Some(format!("{origin}/home").parse().unwrap()),
+        };
+        for language in [Language::English, Language::Chinese] {
+            let _speaking = speaking(language);
+            let notice = confirmation_notice(&confirmation);
+            for room in [(1920, 1040), (1920, 420)] {
+                let (w, h) = size(S, &Chars, &notice, room);
+                assert!(w <= room.0 && h <= room.1, "{w}x{h} in {room:?}");
+                let frame = Rect::new(0, 0, w, h);
+                let drawn = lines(&Chars, &notice, w - 2 * S.px(PAD));
+                let sheet = Sheet {
+                    notice: &notice,
+                    ..sheet(None)
+                };
+                let shown: Vec<_> = approval(frame, S, &T, &sheet, &Chars)
+                    .ops
+                    .into_iter()
+                    .filter_map(|op| match op {
+                        Op::Text(Font::Body, s, r, _) => Some((s.to_string(), r)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(shown.len(), drawn.len());
+                let footer = frame.bottom() - S.px(FOOTER);
+                for ((line, r), want) in shown.iter().zip(&drawn) {
+                    assert_eq!(line, want);
+                    assert!(Chars.width(Font::Body, line) <= r.w, "{line:?} {r:?}");
+                    assert!(r.right() <= frame.right() && r.bottom() <= footer, "{r:?}");
+                }
+                let joined = drawn.concat();
+                assert!(joined.contains(&host), "{joined}");
+                assert!(joined.contains(&origin), "{joined}");
+            }
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub const HINT: Text = Text::HyphenHint;
 pub struct Reveal {
     pub id: u64,
     pub ticket: u64,
+    pub listen: Option<SocketAddr>,
     pub credentials: Option<Issued>,
 }
 
@@ -45,21 +46,25 @@ impl Issued {
 }
 
 pub fn reveal(id: u64, ticket: u64, reply: Result<Response, RequestError>) -> Reveal {
-    let credentials = match reply {
+    let (listen, credentials) = match reply {
         Ok(Response::Ok(mut lines)) => {
+            let listen = lines
+                .iter()
+                .find_map(|line| line.strip_prefix("listen: ")?.parse().ok());
             let credentials = ipc::issued_credentials(&lines);
             lines.zeroize();
-            credentials.map(Issued::Agent)
+            (listen, credentials.map(Issued::Agent))
         }
         Ok(Response::Error(mut message)) => {
             message.zeroize();
-            None
+            (None, None)
         }
-        Err(_) => None,
+        Err(_) => (None, None),
     };
     Reveal {
         id,
         ticket,
+        listen,
         credentials,
     }
 }
@@ -145,7 +150,12 @@ impl Dialog {
     pub fn receive(&mut self, reveal: Reveal) {
         let asked = reveal.id == self.id && reveal.ticket == self.ticket;
         if asked && matches!(self.secret, Secret::Waiting) {
-            self.secret = reveal.credentials.map_or(Secret::Failed, Secret::Shown);
+            self.secret = match reveal.credentials {
+                Some(credentials) if reveal.listen == Some(self.listen) => {
+                    Secret::Shown(credentials)
+                }
+                _ => Secret::Failed,
+            };
         }
     }
 
@@ -294,6 +304,7 @@ mod tests {
         dialog.receive(Reveal {
             id: 3,
             ticket: 1,
+            listen: Some("127.0.0.1:49210".parse().unwrap()),
             credentials: Some(Issued::Demo),
         });
         dialog.toggle();
@@ -331,8 +342,8 @@ mod tests {
         assert_eq!(page.password, "");
         assert_eq!(
             page.warning,
-            "Enter these only in the browser's proxy sign-in dialog that names \
-             127.0.0.1:49210. Never enter them in a website's sign-in page or dialog."
+            "Enter these only in the proxy sign-in prompt for 127.0.0.1:49210. \
+             Never enter them in a website's sign-in page or dialog."
         );
         assert_eq!(dialog.secret(Field::Password), None);
         dialog.toggle();
@@ -354,11 +365,11 @@ mod tests {
         );
         assert_eq!(
             page.note,
-            Some("正在向代理程式索取此工作階段的憑證\u{2026}")
+            Some("正在向代理程式索取此工作階段的登入資訊\u{2026}")
         );
         assert_eq!(
             page.warning,
-            "只能在顯示 127.0.0.1:49210 的瀏覽器 Proxy 登入對話框中輸入。\
+            "只能在 127.0.0.1:49210 的代理登入提示中輸入。\
              切勿在網站的登入頁面或對話框中輸入。"
         );
     }
@@ -431,6 +442,33 @@ mod tests {
         );
         assert!(deliver(Some(&mut dialog), reveal(3, 2, Ok(issued()))));
         assert_eq!(dialog.secret(Field::Password), Some(PASSWORD));
+    }
+
+    #[test]
+    fn a_reveal_for_another_listen_address_fails_with_the_fixed_note() {
+        let other = Response::Ok(vec![
+            "listen: 127.0.0.1:50000".to_owned(),
+            "username: gateinto".to_owned(),
+            format!("password: {PASSWORD}"),
+        ]);
+        let unnamed = Response::Ok(vec![
+            "username: gateinto".to_owned(),
+            format!("password: {PASSWORD}"),
+        ]);
+        for reply in [other, unnamed] {
+            let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
+            assert!(!deliver(Some(&mut dialog), reveal(3, 1, Ok(reply))));
+            assert_eq!(dialog.secret(Field::Password), None);
+            let page = dialog.page(&running(), &sessions::Names::default());
+            assert_eq!(page.note, Some(UNAVAILABLE.english()));
+            assert!(!page.ready);
+            dialog.receive(reveal(3, 1, Ok(issued())));
+            assert_eq!(dialog.secret(Field::Password), None);
+        }
+        assert_eq!(
+            reveal(3, 1, Ok(issued())).listen,
+            Some("127.0.0.1:49210".parse().unwrap())
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use gateinto::config::is_bidi_control;
 use gateinto::ipc::{self, LogEvent, LogLevel, LogPage, Request, RequestError, Response};
 
 use crate::agent::AgentState;
@@ -173,6 +174,13 @@ fn label(level: LogLevel) -> String {
     level.as_str().to_ascii_uppercase()
 }
 
+fn shown(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !is_bidi_control(c))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Body {
     Rows(Vec<Row>),
@@ -190,12 +198,8 @@ pub fn body(state: &AgentState, journal: &Journal, filter: Filter, offset: u64) 
         .map(|event| Row {
             time: clock(event.time, offset),
             level: event.level,
-            scope: event.scope.clone(),
-            message: event
-                .message
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect(),
+            scope: shown(&event.scope),
+            message: shown(&event.message),
         })
         .collect();
     if !rows.is_empty() {
@@ -516,6 +520,26 @@ mod tests {
             text(&journal, Filter::All, 0),
             format!("{time} INFO agent {raw}\r\n")
         );
+    }
+
+    #[test]
+    fn bidi_controls_are_dropped_from_shown_scopes_and_messages() {
+        let bidi = "\u{061C}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}";
+        let mut journal = Journal::default();
+        let page = LogPage {
+            last: 1,
+            events: vec![LogEvent {
+                scope: format!("ag{bidi}ent\t"),
+                message: format!("evil{bidi}.com\n"),
+                ..event(1, LogLevel::Info)
+            }],
+        };
+        journal.absorb(Ok(Response::Ok(page.to_lines())));
+        let Body::Rows(rows) = body(&running(), &journal, Filter::All, 0) else {
+            panic!("rows expected");
+        };
+        assert_eq!(rows[0].scope, "agent ");
+        assert_eq!(rows[0].message, "evil.com ");
     }
 
     #[test]

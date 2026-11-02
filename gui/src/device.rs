@@ -66,8 +66,33 @@ pub struct KeyCard {
     pub title: &'static str,
     pub note: Option<String>,
     pub alert: bool,
-    pub rows: Vec<(&'static str, String)>,
+    pub rows: Vec<KeyRow>,
     pub copy: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRow {
+    pub label: &'static str,
+    pub value: String,
+    pub code: bool,
+}
+
+impl KeyRow {
+    pub fn text(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            value,
+            code: false,
+        }
+    }
+
+    pub fn code(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            value,
+            code: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,10 +197,10 @@ fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
                 note: None,
                 alert: false,
                 rows: vec![
-                    (tr(STORAGE), storage(key.backend)),
-                    (tr(Text::Algorithm), device_key::ALGORITHM.to_owned()),
-                    (tr(KEY_NAME), key.name.to_string()),
-                    (tr(DEVICE_ID), key.fingerprint.clone()),
+                    KeyRow::text(tr(STORAGE), storage(key.backend)),
+                    KeyRow::text(tr(Text::Algorithm), device_key::ALGORITHM.to_owned()),
+                    KeyRow::text(tr(KEY_NAME), key.name.to_string()),
+                    KeyRow::code(tr(DEVICE_ID), key.fingerprint.clone()),
                 ],
                 copy: Some(tr(if copied { COPIED } else { COPY })),
             }
@@ -183,7 +208,7 @@ fn key_card(key: Option<&KeyState>, copied: bool) -> KeyCard {
         Some(KeyState::Missing(name)) => card(
             tr(MISSING).to_owned(),
             true,
-            vec![(tr(KEY_NAME), name.to_string())],
+            vec![KeyRow::text(tr(KEY_NAME), name.to_string())],
         ),
         Some(KeyState::Unsupported(error) | KeyState::Failed(error)) => {
             card(first_line(error), true, Vec::new())
@@ -480,13 +505,13 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(page.subtitle, "這部電腦登入時閘道看到的資訊");
+        assert_eq!(page.subtitle, "這台電腦登入時閘道看到的資訊");
         let card = page.key;
         assert_eq!(card.title, "裝置金鑰");
-        let keys: Vec<&str> = card.rows.iter().map(|(k, _)| *k).collect();
+        let keys: Vec<&str> = card.rows.iter().map(|row| row.label).collect();
         assert_eq!(keys, ["儲存位置", "演算法", "金鑰名稱", "裝置識別碼"]);
         assert_eq!(
-            card.rows[0].1,
+            card.rows[0].value,
             "軟體 (Microsoft Software Key Storage Provider)"
         );
         assert_eq!(card.copy, Some("已複製"));
@@ -499,7 +524,7 @@ mod tests {
                 ("Gateinto", VERSION.to_owned()),
             ]
         );
-        assert_eq!(page.gateways.unwrap()[0].source, "在這部裝置上新增");
+        assert_eq!(page.gateways.unwrap()[0].source, "在這台裝置上新增");
         assert_eq!(draw(None).key.note.as_deref(), Some("正在讀取裝置金鑰…"));
         assert_eq!(draw(Some(&probed(tpm()))).key.title, "硬體金鑰");
         assert_eq!(draw(Some(&probed(tpm()))).key.copy, Some("複製裝置識別碼"));
@@ -512,7 +537,7 @@ mod tests {
             key: tpm(),
             system: System::default(),
         };
-        assert_eq!(draw(Some(&nameless)).computer.unwrap().name, "這部電腦");
+        assert_eq!(draw(Some(&nameless)).computer.unwrap().name, "這台電腦");
     }
 
     #[test]
@@ -525,13 +550,13 @@ mod tests {
                 note: None,
                 alert: false,
                 rows: vec![
-                    (
+                    KeyRow::text(
                         tr(STORAGE),
                         "TPM (Microsoft Platform Crypto Provider)".to_owned()
                     ),
-                    ("Algorithm", "ECDSA P-256".to_owned()),
-                    ("Key name", "gateinto-device-v1".to_owned()),
-                    (tr(DEVICE_ID), id(1)),
+                    KeyRow::text("Algorithm", "ECDSA P-256".to_owned()),
+                    KeyRow::text("Key name", "gateinto-device-v1".to_owned()),
+                    KeyRow::code(tr(DEVICE_ID), id(1)),
                 ],
                 copy: Some("Copy device ID"),
             }
@@ -547,13 +572,13 @@ mod tests {
         assert_eq!(card.note, None);
         assert_eq!(
             card.rows[0],
-            (
+            KeyRow::text(
                 tr(STORAGE),
                 "Software (Microsoft Software Key Storage Provider)".to_owned()
             )
         );
-        assert!(card.rows.iter().all(|(_, value)| !value.contains("TPM")));
-        assert_eq!(card.rows[3], (tr(DEVICE_ID), id(2)));
+        assert!(card.rows.iter().all(|row| !row.value.contains("TPM")));
+        assert_eq!(card.rows[3], KeyRow::code(tr(DEVICE_ID), id(2)));
     }
 
     #[test]
@@ -573,7 +598,7 @@ mod tests {
                 title: "Device key",
                 note: Some("No device key yet. Run `gateinto setup` to create one.".to_owned()),
                 alert: true,
-                rows: vec![("Key name", "work".to_owned())],
+                rows: vec![KeyRow::text("Key name", "work".to_owned())],
                 copy: None,
             }
         );
