@@ -120,7 +120,12 @@ prompt in `src/prompt.rs`, the GUI link-approval dialog). The client denies
 unless the agent's echo names the link's gateway and both routes, the agent
 re-resolves on approval and refuses if anything changed, and refusal,
 timeout or any failure opens no session and never falls back to All. The
-saved route never changes. Neither route is an enforced gateway policy. Direct connections expose source IP and
+saved route never changes. In the GUI's link-approval dialog only a mouse
+click on Allow, after a 1-second arming delay that restarts when the dialog
+is activated, focused, moved or resized, approves; Enter, Space and Escape
+always Deny, so a keystroke meant for another window cannot approve a link.
+Keyboard-only and screen-reader users cannot approve links there (not yet
+verified on Windows). Neither route is an enforced gateway policy. Direct connections expose source IP and
 local DNS and bypass gateway authorization; IP matching is a heuristic.
 See [session routing](protocol/launch-uri.md#session-routing).
 

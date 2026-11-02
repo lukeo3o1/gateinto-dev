@@ -346,6 +346,16 @@ The full protocol, limits and guarantees are in
   `gateinto.exe` is not a file next to the GUI, it shows a fixed message and
   starts nothing. Demo mode never starts an agent. This is unit-tested but has
   not been tried on a real Windows desktop.
+- The GUI's link-approval dialog (`gui/src/approval.rs`,
+  `gui/src/win/approval.rs`) shows a link's new gateway or route switch and
+  sends Approve only from its Allow button. Allow answers only a mouse press
+  and release on it, both after a 1-second arming delay
+  (`approval::ARMING`) that restarts whenever the dialog is activated,
+  focused, moved or resized, so that an Enter meant for another window
+  cannot approve. Enter, Space and Escape always Deny, as do closing the
+  dialog and its timeout; other keys do nothing. Keyboard-only and
+  screen-reader users therefore cannot approve a link there, only Deny it.
+  Not yet verified on Windows.
 - The GUI worker asks the agent for `list` (and `config`, and the log page
   while the Log page is open) at most once every 2 seconds
   (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
