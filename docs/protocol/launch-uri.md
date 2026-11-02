@@ -570,6 +570,7 @@ they never contain spaces or line breaks.
 | `close <id>` | none |
 | `credentials <id>` | `listen: 127.0.0.1:<port>`, `username: <user name>`, `password: <password>`; `error: no session <id>` once the session is closed |
 | `stop` | none; the agent closes every session, then exits |
+| `log <after>` | `agent-pid: <pid>`, `last: <n>` (the sequence number of the newest event logged since the agent started, `0` when none), then, oldest first, one JSON object per kept event with a sequence number above `<after>`: `{"seq":<n>,"time":<Unix milliseconds>,"level":"error"\|"warn"\|"info","scope":"session <id>" or a module name,"message":<text>}`. The agent keeps only the last 500 events at `info` and above in memory, each message cut to 1000 characters, and stops adding events before the answer would exceed 64 KiB. `<after>` is a decimal number without sign or leading zeros. |
 | `config` | `config: <absolute path>` of the config file the agent loaded, or `config: none` when it runs without one; an agent whose path is not UTF-8 or contains a line break answers an error instead |
 
 Mixed launches and their first-time confirmations also include `route: mixed`.

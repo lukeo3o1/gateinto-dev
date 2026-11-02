@@ -581,6 +581,14 @@ Non-guarantees:
   the cause, never with credentials or the `Proxy-Authorization` header. `check-upstream` prints
   TLS parameters, the server certificate subject and the upstream status line,
   never upstream headers or bodies. The configuration file holds no secrets.
+- **The agent's logbook.** The agent also keeps its `info`, `warn` and
+  `error` events in an in-memory logbook (`src/logbook.rs`) that the GUI
+  shows. It is never written to disk and is lost when the agent exits; it
+  holds the last 500 entries, each message cut to 1000 characters. Any
+  program running as the user can read it with the `log <after>` request on
+  the per-user IPC endpoint. Refused-tunnel warnings in it include the
+  CONNECT target `host:port`, which reveals browsing destinations but no
+  credentials.
 - **Strict configuration.** Unknown keys are errors and there is no default
   upstream, so a typo cannot silently send traffic somewhere unintended.
 
