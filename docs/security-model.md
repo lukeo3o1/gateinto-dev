@@ -349,9 +349,10 @@ Guarantees:
   they print and show them in the prompt instead.
 - **A prompt that names the proxy.** On an interactive Windows desktop the
   prompt is a message box; otherwise it goes to the command's terminal. It
-  names the proxy address the browser's own sign-in dialog shows and says to
-  enter the credentials only there, never in a website's sign-in page or
-  dialog. When there is neither, `gateinto open` names the command that
+  names the proxy address and says to enter the credentials only in the
+  proxy sign-in prompt for it, never in a website's sign-in page or dialog.
+  Whether the browser's prompt shows that address is not yet verified on
+  Windows. When there is neither, `gateinto open` names the command that
   shows them, and the foreground commands close their session and fail
   rather than serve credentials nobody can see. The presentation lives in
   `src/prompt.rs` and can be replaced without touching the check.

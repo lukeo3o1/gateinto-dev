@@ -529,9 +529,10 @@ Details of `session_credentials`:
   object; that session then accepts only session credentials and `open`
   shows them. On Windows with an interactive desktop they appear in a
   message box; elsewhere on the command's terminal (stderr). The prompt
-  names the proxy address (`127.0.0.1:<port>`) the browser's sign-in dialog
-  shows, and says to enter the credentials only there and never in a
-  website's sign-in page or dialog.
+  names the proxy address (`127.0.0.1:<port>`) and says to enter the
+  credentials only in the proxy sign-in prompt for it, never in a website's
+  sign-in page or dialog. Whether the browser's prompt shows that address
+  is not yet verified on Windows.
   `gateinto session credentials <id>` asks the agent for them over its
   per-user IPC endpoint and shows the same prompt again. Without a desktop or
   terminal `gateinto open` prints a warning naming that command instead, and

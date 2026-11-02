@@ -97,9 +97,8 @@ impl CredentialsNotice<'_> {
 pub fn credentials_text(notice: &CredentialsNotice) -> String {
     let listen = notice.listen;
     let mut text = format!(
-        "{}\n\nProxy: {listen}\nUsername: {}\nPassword: {}\n\nEnter these only in the browser's \
-         proxy sign-in dialog that names the proxy {listen}. Never enter them in a website's \
-         sign-in page or dialog. Type them exactly, including the hyphens. They stop working \
+        "{}\n\nProxy: {listen}\nUsername: {}\nPassword: {}\n\nEnter these only in the proxy \
+         sign-in prompt for {listen}. Never enter them in a website's sign-in page or dialog. Type them exactly, including the hyphens. They stop working \
          when the session closes.",
         notice.title(),
         notice.credentials.username(),
@@ -427,7 +426,7 @@ mod tests {
             "Proxy: 127.0.0.1:49152",
             "Username: gateinto",
             "Password: jkmn-pqrs-tuvw",
-            "only in the browser's proxy sign-in dialog that names the proxy 127.0.0.1:49152",
+            "Enter these only in the proxy sign-in prompt for 127.0.0.1:49152.",
             "Never enter them in a website's sign-in page or dialog",
             "including the hyphens",
             "stop working when the session closes",
