@@ -97,9 +97,13 @@ installed. Uninstall it first, then install this one." Uninstall the local build
 [Uninstall](#uninstall)); the device key and the config file are kept.
 
 The x86 MSI installs the `i686-pc-windows-msvc` executables, which need Windows 10 or later. The
-GUI is not part of the experimental Windows 7 build and has no Windows 7 version. CI
-runs it only under WOW64 on 64-bit Windows Server; it has not been tested on a real 32-bit
-Windows 10 installation, and it is untested on Windows 7, where that executable does not start.
+GUI is not released for Windows 7 and is not part of the experimental Windows 7 release build.
+An experimental `i686-win7-windows-msvc` build of the GUI exists only as a CI artifact of
+[windows7.yml](../.github/workflows/windows7.yml); it has had only a static import audit and has
+never been run (see [windows7-feasibility.md](windows7-feasibility.md#gui-static-import-audit)).
+CI runs the x86 build only under WOW64 on 64-bit Windows Server; it has not been tested on a
+real 32-bit Windows 10 installation, and it is untested on Windows 7, where that executable does
+not start.
 
 ## Install
 
