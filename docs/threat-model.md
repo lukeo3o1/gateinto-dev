@@ -139,9 +139,12 @@ meant to protect, against whom, and what it does not protect.
   that is not acceptable.
 - Anyone who can edit the configuration file can point Gateinto at another
   upstream or CA bundle, like anyone who can change its command line.
-- A website can select `route=mixed` in a launch link for a known gateway
-  without an additional prompt. This exposes local DNS and the source IP of
-  direct connections, which bypass gateway policy. DNS/IP matching is a
+- A website can select `route=mixed` in a launch link for a known gateway.
+  For a gateway saved as `gateway` (All) this needs the user's explicit
+  approval of a prompt naming the switch from All to Mixed for this session;
+  refusal, timeout or any failure opens no session. Once approved, mixed
+  routing exposes local DNS and the source IP of direct connections, which
+  bypass gateway policy. DNS/IP matching is a
   heuristic: a service on another IP may go direct, and a shared gateway IP
   may send unrelated traffic through it. Only that new session is affected;
   the stored gateway and other browser sessions are unchanged.

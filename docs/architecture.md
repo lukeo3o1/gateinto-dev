@@ -46,7 +46,10 @@ when missing (`proxy::Route::default`). `link::resolve` gives a new session
 the launch's `route` if it names one, otherwise the saved default. A launch
 URI's `route` applies only to its new browser session; a gateway approved
 from a link is stored with the route the link named, or `mixed` when it named
-none.
+none. A launch that asks for `mixed` on a gateway saved as `gateway` is a
+loosening (`link::Loosening`): `resolve` returns it as an `Ask` to confirm
+through the same token flow as a new gateway, and only an approval opens
+that one mixed session; the saved route never changes.
 
 A gateway may also carry an optional display name
 (`KnownGateway::display_name`, a `config::DisplayName`), read from
@@ -240,7 +243,8 @@ browser outside any job; its `launch` answer carries the credentials.
         |  parse again, rate limit, session cap
         |  link::resolve against the config file + gateways/*.toml
         |    known gateway ----------------------------------------------.
-        |    new gateway: answer "confirm: <token>", keep the request     |
+        |    new gateway, or mixed for a gateway saved with All:          |
+        |       answer "confirm: <token>", keep the request               |
         |       <- gateinto open asks the user (MessageBoxW / terminal)   |
         |       <- "approve <token>": LinkedStore::add, then -------------|
         |       <- "deny <token>": forget the request                     v

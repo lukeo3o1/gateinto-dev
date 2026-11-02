@@ -6,7 +6,7 @@ use std::time::Duration;
 use gateinto::config::{GatewayName, Gateways};
 use gateinto::ipc::{self, Request, RequestError, Response};
 use gateinto::link::approval::{ApprovalError, settle};
-use gateinto::link::{Confirmation, Known};
+use gateinto::link::{Ask, Known};
 use gateinto::sessions::SessionId;
 use gateinto::uri::{LaunchAuth, LaunchRequest};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -41,7 +41,7 @@ pub enum Command {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
-    Ask(u64, Confirmation),
+    Ask(u64, Ask),
     Dismiss(u64),
 }
 
@@ -449,6 +449,7 @@ mod tests {
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
     use gateinto::ipc::{LogEvent, LogLevel, LogPage};
+    use gateinto::link::LinkError;
     use gateinto::proxy::SessionCredentials;
 
     use super::*;
@@ -1233,13 +1234,79 @@ mod tests {
         TOKEN.parse().unwrap()
     }
 
-    fn proposed() -> Confirmation {
+    fn proposed() -> Ask {
         let launch = link();
-        Confirmation {
+        Ask::Add(gateinto::link::Confirmation {
             route: launch.route.unwrap_or_default(),
             profile: launch.proposed_profile().unwrap(),
             gateway: launch.gateway.clone().unwrap(),
             portal: launch.portal.clone(),
+        })
+    }
+
+    fn loosening_link() -> LaunchRequest {
+        "gateinto://connect?profile=corp&route=mixed"
+            .parse()
+            .unwrap()
+    }
+
+    fn loosening() -> Ask {
+        Ask::Loosen(gateinto::link::Loosening {
+            profile: "corp".parse().unwrap(),
+            gateway: None,
+        })
+    }
+
+    fn loosening_asked(
+        log: &RefCell<Vec<Request>>,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Launch(_) => {
+                    let mut lines = vec![ipc::confirm_line(&token())];
+                    lines.extend(loosening().echo());
+                    Response::Ok(lines)
+                }
+                _ => Response::Ok(Vec::new()),
+            }))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_switching_a_gateway_to_mixed_asks_and_only_allow_approves_it() {
+        for (answer, wait, sent) in [
+            (
+                Some(Answer::Allow),
+                Duration::from_millis(500),
+                Request::Approve(token()),
+            ),
+            (
+                Some(Answer::Deny),
+                Duration::from_millis(500),
+                Request::Deny(token()),
+            ),
+            (
+                None,
+                crate::approval::TIMEOUT + Duration::from_secs(1),
+                Request::Deny(token()),
+            ),
+        ] {
+            let log = RefCell::new(Vec::new());
+            let respond = move |prompt: &Prompt| match (prompt, answer) {
+                (Prompt::Ask(ticket, _), Some(answer)) => vec![Command::Answer(*ticket, answer)],
+                _ => Vec::new(),
+            };
+            let (prompts, failures) = linked(
+                loosening_asked(&log),
+                vec![Command::Link(loosening_link())],
+                respond,
+                wait,
+            )
+            .await;
+            assert_eq!(settled(&log), [Request::Launch(loosening_link()), sent]);
+            assert_eq!(prompts, [Prompt::Ask(1, loosening()), Prompt::Dismiss(1)]);
+            assert!(failures.iter().all(Option::is_none), "{failures:?}");
         }
     }
 
@@ -1521,7 +1588,9 @@ mod tests {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
                 Request::Launch(_) => {
-                    let mut elsewhere = proposed();
+                    let Ask::Add(mut elsewhere) = proposed() else {
+                        unreachable!()
+                    };
                     elsewhere.gateway = "proxy.elsewhere.example".parse().unwrap();
                     let mut lines = elsewhere.echo();
                     lines.push(ipc::confirm_line(&token()));
@@ -1558,7 +1627,15 @@ mod tests {
             Some(Text::LinkAgentNotRunning.into())
         );
         assert_eq!(
-            refused(ApprovalError::Denied("newco".parse().unwrap())),
+            refused(ApprovalError::Denied(LinkError::Denied(
+                "newco".parse().unwrap()
+            ))),
+            None
+        );
+        assert_eq!(
+            refused(ApprovalError::Denied(LinkError::LooseningDenied(
+                "corp".parse().unwrap()
+            ))),
             None
         );
     }

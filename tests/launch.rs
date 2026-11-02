@@ -505,6 +505,8 @@ async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
+    use gateinto::ipc::{self, Request, Response};
+
     let launcher = Launcher::new("").await;
     let text = std::fs::read_to_string(&launcher.config).unwrap().replace(
         &format!("portal_url = \"{PORTAL}\"\n"),
@@ -518,11 +520,33 @@ async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
         .success()
         .lines();
     assert!(!saved.iter().any(|line| line.starts_with("route:")));
-    let forced = launcher
-        .open("gateinto://connect?profile=main&route=mixed")
+    let mixed = "gateinto://connect?profile=main&route=mixed";
+    #[cfg(not(windows))]
+    {
+        let refused = launcher.open(mixed).await;
+        assert!(
+            refused.failure().stderr.contains("no desktop or terminal"),
+            "{}",
+            refused.stderr
+        );
+        assert!(refused.stdout.is_empty(), "{}", refused.stdout);
+    }
+    let endpoint = launcher.endpoint();
+    let Response::Ok(asked) = ipc::send(&endpoint, &Request::Launch(mixed.parse().unwrap()))
         .await
-        .success()
-        .lines();
+        .unwrap()
+    else {
+        panic!("not a confirmation")
+    };
+    assert_eq!(field(&asked, "route"), "mixed");
+    assert_eq!(field(&asked, "saved-route"), "gateway");
+    let token = ipc::confirm_token(&asked).unwrap();
+    let Response::Ok(forced) = ipc::send(&endpoint, &Request::Approve(token))
+        .await
+        .unwrap()
+    else {
+        panic!("approval failed")
+    };
     assert_eq!(field(&forced, "route"), "mixed");
     let mut browsers = Vec::new();
     for lines in [&saved, &forced] {
@@ -544,6 +568,7 @@ async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
     let route = |lines: &[String]| listed_session(&list, lines).map(|session| session.route);
     assert_eq!(route(&saved), Some(SessionRoute::All), "{list:?}");
     assert_eq!(route(&forced), Some(SessionRoute::Mixed), "{list:?}");
+    assert_eq!(std::fs::read_to_string(&launcher.config).unwrap(), text);
     for browser in browsers {
         browser.exit();
     }

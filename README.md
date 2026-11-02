@@ -380,7 +380,9 @@ The format, its limits and everything it can never do are specified in
   configuration file or its gateway file says `gateway`; gateways already on
   disk without `route` are `mixed` too. A link without `route`
   uses that saved default; `route=gateway` or `route=mixed` applies to only
-  that new browser session and changes nothing saved. In mixed mode, target and gateway DNS answers are compared by IP;
+  that new browser session and changes nothing saved. A `route=mixed` link
+  for a gateway saved as `gateway` asks first whether to switch it from All
+  to Mixed for that session; without an explicit yes no session opens. In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
   Other targets try direct TCP, falling back to the gateway on TCP error or
   timeout before local `200`. Gateway errors and established tunnels never

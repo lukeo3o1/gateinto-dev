@@ -1282,3 +1282,42 @@ async fn an_approval_is_kept_when_the_session_cap_is_reached_meanwhile() {
     assert_eq!(again.start_page(), NEW_PORTAL);
     agent.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_link_to_a_gateway_saved_with_all_opens_a_mixed_session_only_once_approved() {
+    let agent = TestAgent::start(limits()).await;
+    let mixed = || {
+        LaunchRequest::new("main", "session_credentials")
+            .unwrap()
+            .with_route("mixed")
+            .unwrap()
+    };
+    let (echo, token) = agent.asks(mixed()).await;
+    assert_eq!(field(&echo, "gateway"), "main");
+    assert_eq!(field(&echo, "route"), "mixed");
+    assert_eq!(field(&echo, "saved-route"), "gateway");
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert_eq!(field(&lines, "route"), "mixed");
+    assert_eq!(agent.listed(&lines).await.route, SessionRoute::Mixed);
+    assert!(agent.linked().is_empty());
+    let (plain, _plain_browser) = agent.launched("main").await;
+    assert_eq!(agent.listed(&plain).await.route, SessionRoute::All);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_denied_switch_to_mixed_opens_no_session() {
+    let agent = TestAgent::start(limits()).await;
+    let request = LaunchRequest::new("main", "session_credentials")
+        .unwrap()
+        .with_route("mixed")
+        .unwrap();
+    let (_, token) = agent.asks(request).await;
+    assert_eq!(
+        agent.send(Request::Deny(token)).await,
+        Response::Ok(Vec::new())
+    );
+    assert!(agent.sessions().await.is_empty());
+    assert!(agent.linked().is_empty());
+    agent.stop().await;
+}

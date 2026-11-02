@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt;
 
-use gateinto::link::{Confirmation, Origin};
+use gateinto::link::{Ask, Confirmation, Loosening, Origin};
 use gateinto::proxy::Route;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -425,10 +425,11 @@ impl fmt::Display for Text {
     }
 }
 
-pub fn confirmation_notice(confirmation: &Confirmation) -> String {
-    match current() {
-        Language::English => confirmation.message(),
-        Language::Chinese => chinese_notice(confirmation),
+pub fn confirmation_notice(ask: &Ask) -> String {
+    match (current(), ask) {
+        (Language::English, _) => ask.message(),
+        (Language::Chinese, Ask::Add(confirmation)) => chinese_notice(confirmation),
+        (Language::Chinese, Ask::Loosen(loosening)) => chinese_loosening(loosening),
     }
 }
 
@@ -470,6 +471,22 @@ fn chinese_notice(confirmation: &Confirmation) -> String {
          之後未指定路由的連結也會使用此路由。\
          {ZH_TRUST}才允許。",
         confirmation.profile, confirmation.gateway,
+    )
+}
+
+fn chinese_loosening(loosening: &Loosening) -> String {
+    let gateway = loosening
+        .gateway
+        .as_ref()
+        .map_or_else(String::new, |gateway| format!("閘道：{gateway}\n\n"));
+    format!(
+        "有連結要求在此瀏覽器工作階段中，將閘道「{}」從「全部」切換為「混合」。\n\n\
+         {gateway}\
+         此閘道以「全部」儲存：每個連線都會經過閘道。在「混合」模式下，只有轉送給閘道的流量會經過它。\
+         {ZH_MIXED_WARNING}\n\n\
+         此閘道仍以「全部」儲存；只有此工作階段使用「混合」。\
+         只有在您信任開啟此連結的網站時才允許。",
+        loosening.profile,
     )
 }
 
@@ -613,6 +630,72 @@ mod tests {
         assert_eq!(from_tags(&names(&[])), None);
     }
 
+    fn loosenings() -> Vec<Loosening> {
+        [None, Some("proxy.corp.example"), Some("[fd00::1]:8443")]
+            .into_iter()
+            .map(|gateway| Loosening {
+                profile: "corp".parse().unwrap(),
+                gateway: gateway.map(|gateway| gateway.parse().unwrap()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_chinese_switch_notice_says_what_the_english_one_does() {
+        for loosening in loosenings() {
+            let english = loosening.message();
+            let chinese = chinese_loosening(&loosening);
+            assert!(english.contains(gateinto::link::MIXED_WARNING), "{english}");
+            for part in [
+                "將閘道「corp」從「全部」切換為「混合」",
+                "此瀏覽器工作階段",
+                ZH_MIXED_WARNING,
+                "此閘道仍以「全部」儲存；只有此工作階段使用「混合」。",
+                "只有在您信任開啟此連結的網站時才允許。",
+            ] {
+                assert!(chinese.contains(part), "{part} in {chinese}");
+            }
+            match &loosening.gateway {
+                Some(gateway) => {
+                    assert!(
+                        english.contains(&format!("Gateway: {gateway}")),
+                        "{english}"
+                    );
+                    assert!(chinese.contains(&format!("閘道：{gateway}")), "{chinese}");
+                }
+                None => {
+                    assert!(!english.contains("Gateway:"), "{english}");
+                    assert!(!chinese.contains("閘道："), "{chinese}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_notice_of_an_ask_is_the_one_of_its_kind() {
+        let loosening = loosenings().remove(1);
+        let confirmation = confirmations().remove(0);
+        set(Language::English);
+        assert_eq!(
+            confirmation_notice(&Ask::Loosen(loosening.clone())),
+            loosening.message()
+        );
+        assert_eq!(
+            confirmation_notice(&Ask::Add(confirmation.clone())),
+            confirmation.message()
+        );
+        set(Language::Chinese);
+        assert_eq!(
+            confirmation_notice(&Ask::Loosen(loosening.clone())),
+            chinese_loosening(&loosening)
+        );
+        assert_eq!(
+            confirmation_notice(&Ask::Add(confirmation.clone())),
+            chinese_notice(&confirmation)
+        );
+        set(Language::English);
+    }
+
     fn confirmations() -> Vec<Confirmation> {
         let mut all = Vec::new();
         for gateway in [
@@ -719,7 +802,7 @@ mod tests {
 
     #[test]
     fn the_confirmation_notice_follows_the_language() {
-        let confirmation = &confirmations()[1];
+        let confirmation = &Ask::Add(confirmations().remove(1));
         assert_eq!(confirmation_notice(confirmation), confirmation.message());
         let _zh = speaking(Language::Chinese);
         assert_eq!(

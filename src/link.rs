@@ -365,15 +365,7 @@ impl Confirmation {
     }
 
     pub fn echoed_by(&self, lines: &[String]) -> bool {
-        let echoed: Vec<&String> = lines
-            .iter()
-            .filter(|line| {
-                !line.starts_with(crate::ipc::CONFIRM)
-                    && !line.starts_with("linked-gateway: error: ")
-                    && !line.starts_with("linked-gateways: error: ")
-            })
-            .collect();
-        echoed.into_iter().eq(self.echo().iter())
+        echoes(lines, &self.echo())
     }
 
     pub fn message(&self) -> String {
@@ -406,6 +398,101 @@ impl Confirmation {
     }
 }
 
+fn echoed(lines: &[String]) -> impl Iterator<Item = &String> {
+    lines.iter().filter(|line| {
+        !line.starts_with(crate::ipc::CONFIRM)
+            && !line.starts_with("linked-gateway: error: ")
+            && !line.starts_with("linked-gateways: error: ")
+    })
+}
+
+fn echoes(lines: &[String], echo: &[String]) -> bool {
+    echoed(lines).eq(echo.iter())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loosening {
+    pub profile: GatewayName,
+    pub gateway: Option<GatewayAddress>,
+}
+
+impl Loosening {
+    pub fn echo(&self) -> Vec<String> {
+        let mut lines = vec![format!("gateway: {}", self.profile)];
+        if let Some(gateway) = &self.gateway {
+            lines.push(format!("address: {gateway}"));
+        }
+        lines.push(format!("route: {}", Route::Mixed));
+        lines.push(format!("saved-route: {}", Route::Gateway));
+        lines
+    }
+
+    pub fn echoed_name(lines: &[String]) -> Option<GatewayName> {
+        echoed(lines)
+            .next()?
+            .strip_prefix("gateway: ")?
+            .parse()
+            .ok()
+    }
+
+    pub fn message(&self) -> String {
+        let gateway = self
+            .gateway
+            .as_ref()
+            .map_or_else(String::new, |gateway| format!("Gateway: {gateway}\n\n"));
+        format!(
+            "A link asks to switch the gateway \"{}\" from All to Mixed for this browser \
+             session.\n\n\
+             {gateway}\
+             The gateway is saved with All: every connection goes through the gateway. With \
+             Mixed, only the traffic routed to the gateway goes through it. {MIXED_WARNING}\n\n\
+             The gateway stays saved with All; only this session uses Mixed. Allow it only if \
+             you trust the website that opened the link.",
+            self.profile,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ask {
+    Add(Confirmation),
+    Loosen(Loosening),
+}
+
+impl Ask {
+    pub fn profile(&self) -> &GatewayName {
+        match self {
+            Self::Add(confirmation) => &confirmation.profile,
+            Self::Loosen(loosening) => &loosening.profile,
+        }
+    }
+
+    pub fn echo(&self) -> Vec<String> {
+        match self {
+            Self::Add(confirmation) => confirmation.echo(),
+            Self::Loosen(loosening) => loosening.echo(),
+        }
+    }
+
+    pub fn echoed_by(&self, lines: &[String]) -> bool {
+        echoes(lines, &self.echo())
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::Add(confirmation) => confirmation.message(),
+            Self::Loosen(loosening) => loosening.message(),
+        }
+    }
+
+    pub fn denied(&self) -> LinkError {
+        match self {
+            Self::Add(confirmation) => LinkError::Denied(confirmation.profile.clone()),
+            Self::Loosen(loosening) => LinkError::LooseningDenied(loosening.profile.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Approve,
@@ -414,11 +501,11 @@ pub enum Decision {
 }
 
 pub trait Confirm {
-    fn decide(&mut self, confirmation: &Confirmation) -> Decision;
+    fn decide(&mut self, ask: &Ask) -> Decision;
 }
 
 impl Confirm for Decision {
-    fn decide(&mut self, _: &Confirmation) -> Decision {
+    fn decide(&mut self, _: &Ask) -> Decision {
         *self
     }
 }
@@ -434,7 +521,7 @@ pub struct Launch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     Launch(Launch),
-    Confirm(Confirmation),
+    Confirm(Ask),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,6 +538,7 @@ pub enum LinkError {
         existing: GatewayName,
     },
     Denied(GatewayName),
+    LooseningDenied(GatewayName),
     LookAlikeProfile {
         profile: GatewayName,
         existing: GatewayName,
@@ -527,6 +615,11 @@ impl fmt::Display for LinkError {
                 f,
                 "adding the gateway \"{name}\" was not allowed; nothing was stored"
             ),
+            Self::LooseningDenied(name) => write!(
+                f,
+                "the mixed route for the gateway \"{name}\" was not allowed; no session was \
+                 opened and the gateway keeps its saved route"
+            ),
         }
     }
 }
@@ -579,8 +672,20 @@ pub fn resolve(
             (Some(url), Some(portal)) if same_origin(url, portal) => Some(url.clone()),
             (Some(_), Some(_)) => return Err(LinkError::UrlOutsidePortal(local.name.clone())),
         };
+        let route = link.route.unwrap_or(local.route);
+        if local.route == Route::Gateway && route == Route::Mixed {
+            let ask = Ask::Loosen(Loosening {
+                profile: local.name.clone(),
+                gateway: link.gateway.clone(),
+            });
+            match confirm.decide(&ask) {
+                Decision::Approve => {}
+                Decision::Deny => return Err(ask.denied()),
+                Decision::Defer => return Ok(Resolution::Confirm(ask)),
+            }
+        }
         return Ok(Resolution::Launch(Launch {
-            route: link.route.unwrap_or(local.route),
+            route,
             profile: local.name.clone(),
             start_page,
             add: None,
@@ -643,14 +748,14 @@ pub fn resolve(
         });
     }
     let route = link.route.unwrap_or_default();
-    let confirmation = Confirmation {
+    let ask = Ask::Add(Confirmation {
         route,
         profile: profile.clone(),
         gateway: gateway.clone(),
         portal: link.portal.clone(),
-    };
-    match confirm.decide(&confirmation) {
-        Decision::Defer => Ok(Resolution::Confirm(confirmation)),
+    });
+    match confirm.decide(&ask) {
+        Decision::Defer => Ok(Resolution::Confirm(ask)),
         Decision::Deny => Err(LinkError::Denied(profile.clone())),
         Decision::Approve => Ok(Resolution::Launch(Launch {
             route,
@@ -741,12 +846,12 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         decision: Option<Decision>,
-        asked: Vec<Confirmation>,
+        asked: Vec<Ask>,
     }
 
     impl Confirm for Recorder {
-        fn decide(&mut self, confirmation: &Confirmation) -> Decision {
-            self.asked.push(confirmation.clone());
+        fn decide(&mut self, ask: &Ask) -> Decision {
+            self.asked.push(ask.clone());
             self.decision.expect("no confirmation was expected")
         }
     }
@@ -754,7 +859,7 @@ mod tests {
     fn resolve_with(
         link: &LaunchRequest,
         decision: Option<Decision>,
-    ) -> (Result<Resolution, LinkError>, Vec<Confirmation>) {
+    ) -> (Result<Resolution, LinkError>, Vec<Ask>) {
         let mut confirm = Recorder {
             decision,
             asked: Vec::new(),
@@ -1058,9 +1163,11 @@ mod tests {
         let generated = request.proposed_profile().unwrap();
         assert_eq!(generated.as_str().len(), GatewayName::MAX_LEN);
         let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
-        assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].portal, None);
-        assert_eq!(asked[0].portal_origin(), "none");
+        let [Ask::Add(asked)] = asked.as_slice() else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(asked.portal, None);
+        assert_eq!(asked.portal_origin(), "none");
         let Ok(Resolution::Launch(launch)) = resolution else {
             panic!("no launch")
         };
@@ -1288,7 +1395,7 @@ mod tests {
     fn a_portalless_confirmation_does_not_accept_an_invented_portal_in_the_echo() {
         let request = address_link("new.example", None, None);
         let (resolution, _) = resolve_with(&request, Some(Decision::Defer));
-        let Ok(Resolution::Confirm(confirmation)) = resolution else {
+        let Ok(Resolution::Confirm(Ask::Add(confirmation))) = resolution else {
             panic!("not confirmation")
         };
         assert!(confirmation.message().contains("Portal: none"));
@@ -1305,7 +1412,7 @@ mod tests {
     fn mixed_confirmation_binds_the_route_and_discloses_direct_connections() {
         let request = new_link(None).with_route("mixed").unwrap();
         let (resolution, _) = resolve_with(&request, Some(Decision::Defer));
-        let Ok(Resolution::Confirm(mixed)) = resolution else {
+        let Ok(Resolution::Confirm(Ask::Add(mixed))) = resolution else {
             panic!("missing confirmation")
         };
         assert_eq!(mixed.route, Route::Mixed);
@@ -1332,7 +1439,6 @@ mod tests {
             (None, "bare", Route::Mixed),
             (Some("gateway"), "corp", Route::Gateway),
             (Some("gateway"), "bare", Route::Gateway),
-            (Some("mixed"), "corp", Route::Mixed),
             (Some("mixed"), "bare", Route::Mixed),
         ] {
             let mut request = link(saved, None, None, None);
@@ -1349,6 +1455,150 @@ mod tests {
         }
     }
 
+    fn loosening(profile: &str, gateway: Option<&str>) -> Ask {
+        Ask::Loosen(Loosening {
+            profile: name(profile),
+            gateway: gateway.map(|gateway| gateway.parse().unwrap()),
+        })
+    }
+
+    #[test]
+    fn a_link_that_loosens_a_saved_gateway_route_needs_a_decision_naming_it() {
+        for (request, expected) in [
+            (link("corp", None, None, None), loosening("corp", None)),
+            (
+                link("corp", None, Some("proxy.corp.example"), None),
+                loosening("corp", Some("proxy.corp.example:443")),
+            ),
+            (
+                address_link("PROXY.CORP.EXAMPLE", None, None),
+                loosening("corp", Some("proxy.corp.example:443")),
+            ),
+        ] {
+            let request = request.with_route("mixed").unwrap();
+            let (resolution, asked) = resolve_with(&request, Some(Decision::Defer));
+            assert_eq!(resolution, Ok(Resolution::Confirm(expected.clone())));
+            assert_eq!(asked, vec![expected]);
+        }
+    }
+
+    #[test]
+    fn an_approved_loosening_opens_one_mixed_session_and_changes_nothing_saved() {
+        let request = link("corp", None, None, None).with_route("mixed").unwrap();
+        let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
+        assert_eq!(asked, vec![loosening("corp", None)]);
+        assert_eq!(
+            resolution,
+            Ok(Resolution::Launch(Launch {
+                route: Route::Mixed,
+                profile: name("corp"),
+                start_page: Some(PORTAL.parse().unwrap()),
+                add: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_denied_loosening_opens_no_session_and_does_not_fall_back_to_all() {
+        let request = link("corp", None, None, None).with_route("mixed").unwrap();
+        let (resolution, _) = resolve_with(&request, Some(Decision::Deny));
+        assert_eq!(resolution, Err(LinkError::LooseningDenied(name("corp"))));
+        let error = LinkError::LooseningDenied(name("corp")).to_string();
+        assert!(error.contains("no session was opened"), "{error}");
+        assert!(error.contains("\"corp\""), "{error}");
+    }
+
+    #[test]
+    fn a_link_with_the_saved_route_a_stricter_one_or_none_launches_unasked() {
+        let mut known = Known {
+            gateways: profiles(),
+            ..Known::default()
+        };
+        known.gateways[1].route = Route::Mixed;
+        for (route, saved, expected) in [
+            (None, "corp", Route::Gateway),
+            (Some("gateway"), "corp", Route::Gateway),
+            (None, "bare", Route::Mixed),
+            (Some("mixed"), "bare", Route::Mixed),
+            (Some("gateway"), "bare", Route::Gateway),
+        ] {
+            let mut request = link(saved, None, None, None);
+            if let Some(route) = route {
+                request = request.with_route(route).unwrap();
+            }
+            let mut confirm = Recorder::default();
+            let Ok(Resolution::Launch(launch)) = resolve(&request, &known, &mut confirm, NOW)
+            else {
+                panic!("{route:?} {saved}: not a launch")
+            };
+            assert_eq!(launch.route, expected, "{route:?} {saved}");
+            assert!(confirm.asked.is_empty(), "{route:?} {saved}");
+        }
+    }
+
+    #[test]
+    fn a_loosening_says_it_switches_from_all_to_mixed_for_this_session_only() {
+        let Ask::Loosen(asked) = loosening("corp", Some("proxy.corp.example:443")) else {
+            unreachable!()
+        };
+        let message = asked.message();
+        assert_eq!(
+            message,
+            "A link asks to switch the gateway \"corp\" from All to Mixed for this browser \
+             session.\n\n\
+             Gateway: proxy.corp.example:443\n\n\
+             The gateway is saved with All: every connection goes through the gateway. With \
+             Mixed, only the traffic routed to the gateway goes through it. Warning: in mixed \
+             mode, sites may be reached directly instead of through the gateway, which exposes \
+             your local DNS lookups and your IP address to them and bypasses the gateway's \
+             policy.\n\n\
+             The gateway stays saved with All; only this session uses Mixed. Allow it only if \
+             you trust the website that opened the link."
+        );
+        assert!(message.contains(MIXED_WARNING));
+        let Ask::Loosen(unnamed) = loosening("corp", None) else {
+            unreachable!()
+        };
+        assert!(
+            !unnamed.message().contains("Gateway: "),
+            "{}",
+            unnamed.message()
+        );
+    }
+
+    #[test]
+    fn a_loosening_echo_binds_the_gateway_and_both_routes_and_never_passes_for_an_add() {
+        let by_address = loosening("corp", Some("proxy.corp.example:443"));
+        assert_eq!(
+            by_address.echo(),
+            [
+                "gateway: corp",
+                "address: proxy.corp.example:443",
+                "route: mixed",
+                "saved-route: gateway",
+            ]
+        );
+        assert_eq!(
+            loosening("corp", None).echo(),
+            ["gateway: corp", "route: mixed", "saved-route: gateway"]
+        );
+        let add = Ask::Add(Confirmation {
+            route: Route::Mixed,
+            profile: name("corp"),
+            gateway: "proxy.corp.example:443".parse().unwrap(),
+            portal: None,
+        });
+        for (ask, other) in [
+            (&by_address, &add),
+            (&add, &by_address),
+            (&by_address, &loosening("corp", None)),
+            (&loosening("corp", None), &loosening("other", None)),
+        ] {
+            assert!(ask.echoed_by(&ask.echo()));
+            assert!(!ask.echoed_by(&other.echo()), "{ask:?} {other:?}");
+        }
+    }
+
     #[test]
     fn a_gateway_approved_from_a_link_is_saved_with_its_route_or_mixed() {
         for (route, expected) in [
@@ -1361,7 +1611,10 @@ mod tests {
                 request = request.with_route(route).unwrap();
             }
             let (resolution, asked) = resolve_with(&request, Some(Decision::Approve));
-            assert_eq!(asked[0].route, expected, "{route:?}");
+            let [Ask::Add(asked)] = asked.as_slice() else {
+                panic!("{asked:?}")
+            };
+            assert_eq!(asked.route, expected, "{route:?}");
             let Ok(Resolution::Launch(launch)) = resolution else {
                 panic!("{route:?}: not a launch")
             };
@@ -1410,8 +1663,8 @@ mod tests {
             route: Route::Mixed,
             ..confirmation()
         };
-        assert_eq!(resolution, Ok(Resolution::Confirm(mixed.clone())));
-        assert_eq!(asked, vec![mixed]);
+        assert_eq!(resolution, Ok(Resolution::Confirm(Ask::Add(mixed.clone()))));
+        assert_eq!(asked, vec![Ask::Add(mixed)]);
     }
 
     #[test]

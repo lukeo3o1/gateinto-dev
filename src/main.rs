@@ -911,8 +911,8 @@ async fn open(args: OpenArgs) -> Result {
         let endpoint = &endpoint;
         async move { ipc::send(endpoint, &request).await }
     };
-    let ask = async |confirmation| {
-        tokio::task::spawn_blocking(move || prompt::ask(&confirmation).map_err(|e| e.to_string()))
+    let ask = async |asked| {
+        tokio::task::spawn_blocking(move || prompt::ask(&asked).map_err(|e| e.to_string()))
             .await
             .unwrap_or_else(|error| Err(error.to_string()))
     };

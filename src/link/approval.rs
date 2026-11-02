@@ -1,9 +1,9 @@
 use std::fmt;
 use std::future::Future;
 
-use crate::config::GatewayName;
 use crate::ipc::{Request, RequestError, Response};
-use crate::link::{Confirmation, LinkError};
+use crate::link::{Ask, Confirmation, LinkError, Loosening};
+use crate::proxy::Route;
 use crate::uri::LaunchRequest;
 
 #[derive(Debug)]
@@ -13,7 +13,7 @@ pub enum ApprovalError {
     UnnamedGateway,
     NotEchoed,
     Unasked(String),
-    Denied(GatewayName),
+    Denied(LinkError),
 }
 
 impl fmt::Display for ApprovalError {
@@ -29,7 +29,7 @@ impl fmt::Display for ApprovalError {
                  stored",
             ),
             Self::Unasked(reason) => f.write_str(reason),
-            Self::Denied(profile) => LinkError::Denied(profile.clone()).fmt(f),
+            Self::Denied(error) => error.fmt(f),
         }
     }
 }
@@ -45,7 +45,7 @@ pub async fn settle<S, R, A, Q>(
 where
     S: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
-    A: FnOnce(Confirmation) -> Q,
+    A: FnOnce(Ask) -> Q,
     Q: Future<Output = Result<bool, String>>,
 {
     let lines = match &reply {
@@ -62,25 +62,52 @@ where
     let Some(profile) = launch.proposed_profile() else {
         return deny(ApprovalError::MissingSelector).await;
     };
-    let Some(gateway) = launch.gateway.clone() else {
-        return deny(ApprovalError::UnnamedGateway).await;
+    let Some(asked) = asked(launch, profile, lines) else {
+        let error = if launch.gateway.is_none() {
+            ApprovalError::UnnamedGateway
+        } else {
+            ApprovalError::NotEchoed
+        };
+        return deny(error).await;
     };
-    let confirmation = Confirmation {
-        route: launch.route.unwrap_or_default(),
-        profile: profile.clone(),
-        gateway,
-        portal: launch.portal.clone(),
-    };
-    if !confirmation.echoed_by(lines) {
-        return deny(ApprovalError::NotEchoed).await;
-    }
-    match ask(confirmation).await {
+    let denied = asked.denied();
+    match ask(asked).await {
         Ok(true) => send(Request::Approve(token))
             .await
             .map_err(ApprovalError::Request),
-        Ok(false) => deny(ApprovalError::Denied(profile)).await,
+        Ok(false) => deny(ApprovalError::Denied(denied)).await,
         Err(reason) => deny(ApprovalError::Unasked(reason)).await,
     }
+}
+
+fn asked(
+    launch: &LaunchRequest,
+    profile: crate::config::GatewayName,
+    lines: &[String],
+) -> Option<Ask> {
+    if let Some(gateway) = launch.gateway.clone() {
+        let add = Ask::Add(Confirmation {
+            route: launch.route.unwrap_or_default(),
+            profile,
+            gateway,
+            portal: launch.portal.clone(),
+        });
+        if add.echoed_by(lines) {
+            return Some(add);
+        }
+    }
+    if launch.route != Some(Route::Mixed) {
+        return None;
+    }
+    let profile = match &launch.profile {
+        Some(profile) => profile.clone(),
+        None => Loosening::echoed_name(lines)?,
+    };
+    let loosen = Ask::Loosen(Loosening {
+        profile,
+        gateway: launch.gateway.clone(),
+    });
+    loosen.echoed_by(lines).then_some(loosen)
 }
 
 #[cfg(test)]
@@ -89,7 +116,6 @@ mod tests {
 
     use super::*;
     use crate::ipc::{self, ConfirmToken};
-    use crate::proxy::Route;
 
     const TOKEN: &str = "00112233445566778899aabbccddeeff";
     const LINK: &str = "gateinto://connect?profile=newco&gateway=proxy.newco.example\
@@ -103,13 +129,26 @@ mod tests {
         uri.parse().unwrap()
     }
 
-    fn confirmation(launch: &LaunchRequest) -> Confirmation {
-        Confirmation {
+    fn confirmation(launch: &LaunchRequest) -> Ask {
+        Ask::Add(Confirmation {
             route: launch.route.unwrap_or_default(),
             profile: launch.proposed_profile().unwrap(),
             gateway: launch.gateway.clone().unwrap(),
             portal: launch.portal.clone(),
-        }
+        })
+    }
+
+    fn loosening(profile: &str, gateway: Option<&str>) -> Ask {
+        Ask::Loosen(Loosening {
+            profile: profile.parse().unwrap(),
+            gateway: gateway.map(|gateway| gateway.parse().unwrap()),
+        })
+    }
+
+    fn asks(ask: &Ask) -> Response {
+        let mut lines = vec![ipc::confirm_line(&token())];
+        lines.extend(ask.echo());
+        Response::Ok(lines)
     }
 
     fn asking(launch: &LaunchRequest) -> Response {
@@ -160,19 +199,19 @@ mod tests {
 
     fn answer(
         answer: Result<bool, String>,
-    ) -> impl FnOnce(Confirmation) -> std::future::Ready<Result<bool, String>> {
+    ) -> impl FnOnce(Ask) -> std::future::Ready<Result<bool, String>> {
         move |_| std::future::ready(answer)
     }
 
     async fn settle_link(
         agent: &Agent,
-        ask: impl FnOnce(Confirmation) -> std::future::Ready<Result<bool, String>>,
+        ask: impl FnOnce(Ask) -> std::future::Ready<Result<bool, String>>,
     ) -> Result<Response, ApprovalError> {
         let link = launch(LINK);
         settle(&link, asking(&link), agent.send(), ask).await
     }
 
-    fn unasked(_: Confirmation) -> std::future::Ready<Result<bool, String>> {
+    fn unasked(_: Ask) -> std::future::Ready<Result<bool, String>> {
         panic!("asked")
     }
 
@@ -200,6 +239,9 @@ mod tests {
             .unwrap();
         let asked = asked.into_inner().unwrap();
         assert_eq!(asked, confirmation(&link));
+        let Ask::Add(asked) = asked else {
+            panic!("{asked:?}")
+        };
         assert_eq!(asked.route, Route::Mixed);
     }
 
@@ -215,7 +257,10 @@ mod tests {
     async fn a_refusal_denies_and_says_nothing_was_stored() {
         let agent = Agent::new();
         let error = settle_link(&agent, answer(Ok(false))).await.unwrap_err();
-        assert!(matches!(&error, ApprovalError::Denied(name) if name.as_str() == "newco"));
+        assert!(matches!(
+            &error,
+            ApprovalError::Denied(LinkError::Denied(name)) if name.as_str() == "newco"
+        ));
         assert_eq!(
             error.to_string(),
             LinkError::Denied("newco".parse().unwrap()).to_string()
@@ -308,5 +353,100 @@ mod tests {
             "{error}"
         );
         assert_eq!(agent.sent(), [Request::Approve(token())]);
+    }
+
+    async fn settled_asking(
+        link: &str,
+        ask: &Ask,
+        answer: bool,
+    ) -> (Result<Response, ApprovalError>, Option<Ask>, Vec<Request>) {
+        let agent = Agent::new();
+        let asked = RefCell::new(None);
+        let ask_user = |ask| {
+            *asked.borrow_mut() = Some(ask);
+            std::future::ready(Ok(answer))
+        };
+        let settled = settle(&launch(link), asks(ask), agent.send(), ask_user).await;
+        (settled, asked.into_inner(), agent.sent())
+    }
+
+    #[tokio::test]
+    async fn a_mixed_link_to_a_gateway_saved_with_all_asks_to_switch_this_session() {
+        for (link, ask) in [
+            (
+                "gateinto://connect?profile=corp&route=mixed",
+                loosening("corp", None),
+            ),
+            (
+                "gateinto://connect?profile=corp&gateway=proxy.corp.example&route=mixed",
+                loosening("corp", Some("proxy.corp.example:443")),
+            ),
+            (
+                "gateinto://connect?gateway=proxy.corp.example&route=mixed",
+                loosening("corp", Some("proxy.corp.example:443")),
+            ),
+        ] {
+            let (settled, asked, sent) = settled_asking(link, &ask, true).await;
+            assert_eq!(settled.unwrap(), launched(), "{link}");
+            assert_eq!(asked, Some(ask), "{link}");
+            assert_eq!(sent, [Request::Approve(token())], "{link}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_switch_denies_and_opens_no_session() {
+        let ask = loosening("corp", None);
+        let (settled, _, sent) =
+            settled_asking("gateinto://connect?profile=corp&route=mixed", &ask, false).await;
+        let error = settled.unwrap_err();
+        assert!(
+            matches!(&error, ApprovalError::Denied(LinkError::LooseningDenied(_))),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("no session was opened"),
+            "{error}"
+        );
+        assert_eq!(sent, [Request::Deny(token())]);
+    }
+
+    #[tokio::test]
+    async fn a_switch_the_link_does_not_ask_for_denies_unasked() {
+        for (link, ask) in [
+            ("gateinto://connect?profile=corp", loosening("corp", None)),
+            (
+                "gateinto://connect?profile=corp&route=gateway",
+                loosening("corp", None),
+            ),
+            (
+                "gateinto://connect?profile=corp&route=mixed",
+                loosening("other", None),
+            ),
+            (
+                "gateinto://connect?profile=corp&route=mixed",
+                loosening("corp", Some("proxy.corp.example:443")),
+            ),
+            (
+                "gateinto://connect?gateway=proxy.corp.example&route=mixed",
+                loosening("corp", Some("proxy.other.example:443")),
+            ),
+            (
+                "gateinto://connect?gateway=proxy.corp.example&route=mixed",
+                loosening("corp", None),
+            ),
+        ] {
+            let agent = Agent::new();
+            let error = settle(&launch(link), asks(&ask), agent.send(), unasked)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ApprovalError::NotEchoed | ApprovalError::UnnamedGateway
+                ),
+                "{link}: {error}"
+            );
+            assert_eq!(agent.sent(), [Request::Deny(token())], "{link}");
+        }
     }
 }

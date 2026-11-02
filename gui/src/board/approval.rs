@@ -184,7 +184,7 @@ mod tests {
     use crate::scale::Scale;
     use crate::scene::Op;
     use crate::theme::Theme;
-    use gateinto::link::Confirmation;
+    use gateinto::link::{Ask, Confirmation};
     use gateinto::proxy::Route;
 
     const T: Theme = Theme::LIGHT;
@@ -345,12 +345,12 @@ mod tests {
         let host = format!("{}:8443", long_host("login.contoso.com."));
         let origin = format!("https://{}:9443", long_host("portal.contoso.com."));
         assert!(host.len() > 240);
-        let confirmation = Confirmation {
+        let confirmation = Ask::Add(Confirmation {
             route: Route::Gateway,
             profile: "newco".parse().unwrap(),
             gateway: host.parse().unwrap(),
             portal: Some(format!("{origin}/home").parse().unwrap()),
-        };
+        });
         for language in [Language::English, Language::Chinese] {
             let _speaking = speaking(language);
             let notice = confirmation_notice(&confirmation);

@@ -106,6 +106,9 @@ fuzz_target!(|data: &[u8]| {
             .find(|known| known.name == launch.profile);
         let saved = local.map_or(Route::Mixed, |known| known.route);
         assert_eq!(launch.route, request.route.unwrap_or(saved));
+        if saved == Route::Gateway && launch.route == Route::Mixed {
+            assert_eq!(decision, Decision::Approve);
+        }
         let portal = local
             .map(|known| known.portal_url.clone())
             .unwrap_or_else(|| request.portal.clone());

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use gateinto::config::{DisplayName, GatewayName, PortalUrl};
 use gateinto::link::store::{LinkedStore, StoreError};
 use gateinto::link::{
-    self, ALL_TRAFFIC, Decision, IDENTITY, Known, LOCAL_ADDRESS, LinkError, LinkedGateway,
-    MIXED_WARNING, Resolution, TRUST,
+    self, ALL_TRAFFIC, Ask, Decision, IDENTITY, Known, LOCAL_ADDRESS, Launch, LinkError,
+    LinkedGateway, Loosening, MIXED_WARNING, Resolution, TRUST,
 };
 use gateinto::proxy::Route;
 use gateinto::uri::{LaunchAuth, LaunchRequest, UriError};
@@ -300,7 +300,7 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
         Err(error) => return field_error(error),
     };
     match link::resolve(&request, known, &mut Decision::Defer, 0) {
-        Ok(Resolution::Confirm(confirmation)) => match display {
+        Ok(Resolution::Confirm(Ask::Add(confirmation))) => match display {
             None => Verdict::Incomplete,
             Some(display) => match damaged_name(known, &display) {
                 Some(held) => {
@@ -319,9 +319,12 @@ pub fn check(form: &Form, listing: &Result<Known, String>) -> Verdict {
                 }),
             },
         },
-        Ok(Resolution::Launch(launch)) => Verdict::Invalid(
+        Ok(
+            Resolution::Launch(Launch { profile, .. })
+            | Resolution::Confirm(Ask::Loosen(Loosening { profile, .. })),
+        ) => Verdict::Invalid(
             Some(Input::Address),
-            Message::with(Text::AlreadySetUp, shown(known, &launch.profile)),
+            Message::with(Text::AlreadySetUp, shown(known, &profile)),
         ),
         Err(error) => link_error(known, error),
     }

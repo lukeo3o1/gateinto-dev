@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 
-use crate::link::Confirmation;
+use crate::link::Ask;
 use crate::proxy::SessionCredentials;
 use crate::sessions::SessionId;
 
@@ -11,50 +11,48 @@ pub struct Unavailable;
 impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "cannot ask whether to add the gateway: no desktop or terminal to ask on; nothing \
-             was stored",
+            "cannot ask to confirm the link: no desktop or terminal to ask on; nothing was stored \
+             and no session was opened",
         )
     }
 }
 
 impl std::error::Error for Unavailable {}
 
-pub fn dialog_text(confirmation: &Confirmation) -> String {
-    format!(
-        "{}\n\nChoose OK to allow this gateway, or Cancel to refuse.",
-        confirmation.message()
-    )
+fn choices(ask: &Ask) -> (&'static str, &'static str) {
+    match ask {
+        Ask::Add(_) => (
+            "Choose OK to allow this gateway, or Cancel to refuse.",
+            "Type yes to add this gateway: ",
+        ),
+        Ask::Loosen(_) => (
+            "Choose OK to allow the mixed route for this session, or Cancel to refuse.",
+            "Type yes to use the mixed route for this session: ",
+        ),
+    }
 }
 
-pub fn ask_on(
-    confirmation: &Confirmation,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> io::Result<bool> {
-    write!(
-        output,
-        "{}\n\nType yes to add this gateway: ",
-        confirmation.message()
-    )?;
+pub fn dialog_text(ask: &Ask) -> String {
+    format!("{}\n\n{}", ask.message(), choices(ask).0)
+}
+
+pub fn ask_on(ask: &Ask, input: &mut impl BufRead, output: &mut impl Write) -> io::Result<bool> {
+    write!(output, "{}\n\n{}", ask.message(), choices(ask).1)?;
     output.flush()?;
     let mut line = String::new();
     input.read_line(&mut line)?;
     Ok(line.trim() == "yes")
 }
 
-pub fn ask(confirmation: &Confirmation) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn ask(ask: &Ask) -> Result<bool, Box<dyn std::error::Error>> {
     use std::io::IsTerminal;
 
     #[cfg(windows)]
     if windows::interactive_desktop() {
-        return Ok(windows::message_box(&dialog_text(confirmation)));
+        return Ok(windows::message_box(&dialog_text(ask)));
     }
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
-        return Ok(ask_on(
-            confirmation,
-            &mut io::stdin().lock(),
-            &mut io::stderr(),
-        )?);
+        return Ok(ask_on(ask, &mut io::stdin().lock(), &mut io::stderr())?);
     }
     Err(Unavailable.into())
 }
@@ -302,13 +300,13 @@ mod windows {
 mod tests {
     use super::*;
 
-    fn confirmation() -> Confirmation {
-        Confirmation {
+    fn confirmation() -> Ask {
+        Ask::Add(crate::link::Confirmation {
             route: crate::proxy::Route::Gateway,
             profile: "newco".parse().unwrap(),
             gateway: "proxy.newco.example".parse().unwrap(),
             portal: Some("https://portal.newco.example/home".parse().unwrap()),
-        }
+        })
     }
 
     #[test]
@@ -356,6 +354,42 @@ mod tests {
                 "{output}"
             );
         }
+    }
+
+    fn loosening() -> Ask {
+        Ask::Loosen(crate::link::Loosening {
+            profile: "corp".parse().unwrap(),
+            gateway: Some("proxy.corp.example".parse().unwrap()),
+        })
+    }
+
+    #[test]
+    fn the_terminal_prompt_for_a_switch_to_mixed_names_the_session_and_needs_yes() {
+        for (input, expected) in [("yes\n", true), ("y\n", false), ("\n", false)] {
+            let mut output = Vec::new();
+            let answer = ask_on(&loosening(), &mut input.as_bytes(), &mut output).unwrap();
+            assert_eq!(answer, expected, "{input:?}");
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.starts_with(&loosening().message()), "{output}");
+            assert!(
+                output.ends_with("Type yes to use the mixed route for this session: "),
+                "{output}"
+            );
+            assert!(output.contains("from All to Mixed"), "{output}");
+            assert!(output.contains(crate::link::MIXED_WARNING), "{output}");
+        }
+    }
+
+    #[test]
+    fn the_dialog_text_for_a_switch_to_mixed_says_that_ok_allows_it_for_this_session() {
+        let text = dialog_text(&loosening());
+        assert!(text.starts_with(&loosening().message()), "{text}");
+        assert!(
+            text.ends_with(
+                "\n\nChoose OK to allow the mixed route for this session, or Cancel to refuse."
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -453,5 +487,6 @@ mod tests {
         let error = Unavailable.to_string();
         assert!(error.contains("no desktop or terminal"), "{error}");
         assert!(error.contains("nothing was stored"), "{error}");
+        assert!(error.contains("no session was opened"), "{error}");
     }
 }

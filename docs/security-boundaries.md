@@ -111,8 +111,16 @@ A gateway approved from a link is saved with the route the link named, or
 about mixed mode. A gateway added in the GUI's Add dialog is saved with the
 route chosen there: Mixed is preselected and shows that warning, All is the
 strict option. A URI can choose a route for only its new browser session,
-which wins over the saved default; no extra prompt is required for a known
-gateway. Neither route is an enforced gateway policy. Direct connections expose source IP and
+which wins over the saved default. A URI can tighten the route of a known
+gateway without a prompt, but never loosen it silently: `route=mixed` for a
+gateway saved as `gateway` goes through the confirm-token flow with a prompt
+saying that the link switches this gateway from All to Mixed for this
+session, with the mixed-mode warning (`src/link.rs` `Loosening`, the CLI
+prompt in `src/prompt.rs`, the GUI link-approval dialog). The client denies
+unless the agent's echo names the link's gateway and both routes, the agent
+re-resolves on approval and refuses if anything changed, and refusal,
+timeout or any failure opens no session and never falls back to All. The
+saved route never changes. Neither route is an enforced gateway policy. Direct connections expose source IP and
 local DNS and bypass gateway authorization; IP matching is a heuristic.
 See [session routing](protocol/launch-uri.md#session-routing).
 
