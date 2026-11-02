@@ -70,13 +70,14 @@ keeps it. See [docs/install.md](docs/install.md).
 The repository is private, so its GitHub Releases are for the owner's own
 downloads. There are three rolling releases, each with a tag of the same name
 that moves to the commit it was built from
-([details](docs/install.md#releases)):
+([details](docs/install.md#releases)). Every release, `latest` included, is
+marked as a prerelease and its notes say "Pre-release, not externally
+security reviewed.":
 
 - `alpha`: replaced automatically after CI passes on a push to `master` and
-  the release build and tests pass; a prerelease.
-- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref;
-  a prerelease.
-- `latest`: replaced by hand the same way; marked as the latest release.
+  the release build and tests pass.
+- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref.
+- `latest`: replaced by hand the same way.
 
 Every release has the x64 and x86 MSIs and the x64 and i686 executables;
 `alpha` and `beta` also have the experimental Windows 7 executable for

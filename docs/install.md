@@ -13,13 +13,15 @@ templates. To build the MSI yourself, use `packaging/wix/build.ps1` as described
 
 The repository is private, so its GitHub Releases are for the owner's own downloads; nothing is
 published for anyone else. There are exactly three releases, one per channel, each with a tag of
-the same name that points at the commit it was built from:
+the same name that points at the commit it was built from. Every channel, `latest` included, is
+a pre-release, not externally security reviewed; GitHub marks each one as a prerelease, so none
+is shown as the repository's latest release:
 
 | Channel | Published | Marked on GitHub |
 | --- | --- | --- |
 | `alpha` | automatically, after CI passes on a push to `master` and the release workflow's own build and tests pass | prerelease |
 | `beta` | by hand: Actions → Release → Run workflow, channel `beta`, and a full commit SHA (recommended), branch or tag (default `master`) | prerelease |
-| `latest` | by hand, the same way with channel `latest` | latest release |
+| `latest` | by hand, the same way with channel `latest` | prerelease |
 
 Every publish replaces the whole release: the workflow deletes the release and its tag and
 creates both again at the built commit, so the files, the tag and the notes always describe one
@@ -34,9 +36,10 @@ checked; a branch is resolved when the run starts. Only commits that contain thi
 workflow's `.github/actions` and `.github/scripts` can be released, so commits from before the
 release channels were added cannot be published.
 
-The release title and notes name the channel, the full commit SHA and the build date, followed
-by a notice that the files are not code-signed, that TPM keys, real browsers, physical Windows
-machines and Windows 7 are not yet verified on real hardware
+The release notes start with "Pre-release, not externally security reviewed." and the title and
+notes name the channel, the full commit SHA and the build date, followed by a notice that the
+files are not code-signed, that TPM keys, real browsers, physical Windows machines and Windows 7
+are not yet verified on real hardware
 ([#23](https://github.com/lukeo3o1/gateinto-dev/issues/23)), and, for `alpha` and `beta`, that
 the Windows 7 build is experimental and can use only the Microsoft Software Key Storage
 Provider.
@@ -54,7 +57,7 @@ copy without it. The copy keeps the same download URL from one publish to the ne
 
 Each file has a `.sha256` next to it, one line with the lowercase SHA-256, two spaces and the
 file name. The names with the commit are `gateinto-<commit>-<target>.exe` and so on, for
-example `gateinto-0123456789ab-x86_64-pc-windows-msvc.exe`. The stable URLs are
+example `gateinto-0123456789ab-x86_64-pc-windows-msvc.exe`. The fixed URLs are
 
 ```text
 https://github.com/lukeo3o1/gateinto-dev/releases/download/<channel>/<file without the commit>
