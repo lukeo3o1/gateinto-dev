@@ -333,7 +333,8 @@ The full protocol, limits and guarantees are in
   `--config`, with null standard handles and, on Windows, `CREATE_NO_WINDOW`.
   At most one start is in flight; the button stays disabled until it ends.
   The GUI waits for that command to exit, off the UI thread, for up to 45
-  seconds (then kills it), and polls the agent at once after a clean exit.
+  seconds (then kills it), and polls the agent again at the next allowed
+  poll after a clean exit.
   A nonzero exit, a failure to start it or the timeout shows a fixed message,
   never the command's output or error, on the sessions page and in the tray
   flyout until the next start or until a poll finds the agent no longer
@@ -345,6 +346,15 @@ The full protocol, limits and guarantees are in
   `gateinto.exe` is not a file next to the GUI, it shows a fixed message and
   starts nothing. Demo mode never starts an agent. This is unit-tested but has
   not been tried on a real Windows desktop.
+- The GUI worker asks the agent for `list` (and `config`, and the log page
+  while the Log page is open) at most once every 2 seconds
+  (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
+  change, a dialog answer, a credentials reveal, a link or a start delivers
+  the last polled state at once, and a command that changes the agent (a
+  launch, a revoke, a stop) shows its result from the next poll, which comes
+  2 seconds after the previous one; a gateway added or removed in the GUI
+  shows up at that poll too. Clicking repeatedly never makes the GUI poll
+  faster.
 - The agent remembers which config file it loaded (`ipc::ConfigSource`): the
   absolute form of `--config`, the default file when it existed at start, or
   none. The `config` request answers `config: <path>` or `config: none` and

@@ -478,7 +478,7 @@ mod tests {
             |r| reveals.borrow_mut().push(reveal(r)),
             |_| panic!("the demo prompted for a link"),
         );
-        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         let updates = updates.borrow();
         let last = updates.last().unwrap();
         assert!(matches!(&last.state, AgentState::Running(s) if !s.is_empty()));

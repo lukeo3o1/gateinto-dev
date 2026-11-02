@@ -264,6 +264,39 @@ where
     }
 }
 
+async fn poll<F, R>(
+    send: &F,
+    load: &mut impl FnMut(&Config) -> Loaded,
+    watching: bool,
+    journal: &mut Journal,
+) -> (AgentState, Config, Loaded)
+where
+    F: Fn(Request) -> R,
+    R: Future<Output = Result<Response, RequestError>>,
+{
+    let state = AgentState::from_list(send(Request::List).await);
+    let config = match state {
+        AgentState::Running(_) => Config::from_reply(send(Request::Config).await),
+        AgentState::Stopped | AgentState::Unreachable(_) => Config::Unreported,
+    };
+    match state {
+        AgentState::Stopped => journal.stopped(),
+        AgentState::Running(_) if watching => {
+            for _ in 0..LOG_PAGES {
+                let Some(request) = journal.request() else {
+                    break;
+                };
+                if !journal.absorb(send(request).await) {
+                    break;
+                }
+            }
+        }
+        AgentState::Running(_) | AgentState::Unreachable(_) => {}
+    }
+    let loaded = load(&config);
+    (state, config, loaded)
+}
+
 pub async fn serve<F, R>(
     commands: UnboundedReceiver<Command>,
     send: F,
@@ -318,26 +351,14 @@ pub async fn serve_with<F, R, S>(
     let mut linking: Option<Linking<'_>> = None;
     let mut starting: Option<Pin<Box<S>>> = None;
     let mut unstarted: Option<Note> = None;
+    let mut polled = poll(&send, &mut load, watching, &mut journal).await;
+    let mut next_poll = tokio::time::Instant::now() + POLL;
     loop {
-        let state = AgentState::from_list(send(Request::List).await);
-        let config = match state {
-            AgentState::Running(_) => Config::from_reply(send(Request::Config).await),
-            AgentState::Stopped | AgentState::Unreachable(_) => Config::Unreported,
-        };
-        match state {
-            AgentState::Stopped => journal.stopped(),
-            AgentState::Running(_) if watching => {
-                for _ in 0..LOG_PAGES {
-                    let Some(request) = journal.request() else {
-                        break;
-                    };
-                    if !journal.absorb(send(request).await) {
-                        break;
-                    }
-                }
-            }
-            AgentState::Running(_) | AgentState::Unreachable(_) => {}
+        if tokio::time::Instant::now() >= next_poll {
+            polled = poll(&send, &mut load, watching, &mut journal).await;
+            next_poll = tokio::time::Instant::now() + POLL;
         }
+        let (state, config, loaded) = polled.clone();
         let stopped = state == AgentState::Stopped;
         if !stopped {
             unstarted = None;
@@ -346,7 +367,7 @@ pub async fn serve_with<F, R, S>(
             gateways,
             sections,
             agent,
-        } = load(&config);
+        } = loaded;
         deliver(Update {
             state,
             gateways,
@@ -433,7 +454,7 @@ pub async fn serve_with<F, R, S>(
                 starting = None;
                 unstarted = note;
             }
-            () = tokio::time::sleep(POLL) => {}
+            () = tokio::time::sleep_until(next_poll) => {}
         }
     }
 }
@@ -550,8 +571,6 @@ mod tests {
                 Request::List,
                 Request::Config,
                 Request::List,
-                Request::Config,
-                Request::List,
                 Request::Config
             ]
         );
@@ -599,7 +618,7 @@ mod tests {
             [None, Some(probe(1)), Some(probe(1)), Some(probe(1))]
         );
         assert_eq!(*probes.borrow(), 1);
-        assert_eq!(*log.borrow(), polls(4));
+        assert_eq!(*log.borrow(), polls(3));
     }
 
     fn polls(n: usize) -> Vec<Request> {
@@ -635,7 +654,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_command_is_followed_by_a_poll_that_carries_its_failure_once() {
+    async fn a_command_failure_is_delivered_once_and_refreshed_at_the_earliest_allowed_poll() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
         tx.send(Command::Close(5)).unwrap();
@@ -661,10 +680,62 @@ mod tests {
                 Request::Config,
                 Request::Close(SessionId::from(5)),
                 Request::List,
-                Request::Config,
-                Request::List,
                 Request::Config
             ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn commands_that_change_nothing_deliver_the_cached_state_without_polling() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        for command in [
+            Command::Watch(true),
+            Command::Watch(false),
+            Command::Answer(9, Answer::Deny),
+            Command::Start,
+            Command::Watch(true),
+        ] {
+            tx.send(command).unwrap();
+        }
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            agent(&log),
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(1_900), run).await.is_err());
+        assert_eq!(updates, vec![polled(None); 6]);
+        assert_eq!(*log.borrow(), polls(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn commands_that_change_the_agent_refresh_no_sooner_than_two_seconds_apart() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        for _ in 0..3 {
+            tx.send(Command::Close(5)).unwrap();
+        }
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            agent(&log),
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(1_900), run).await.is_err());
+        let closes = || vec![Request::Close(SessionId::from(5)); 3];
+        assert_eq!(*log.borrow(), [polls(1), closes()].concat());
+        assert_eq!(
+            updates,
+            [vec![polled(None)], vec![polled(said("no session 5")); 3]].concat()
         );
     }
 
@@ -771,20 +842,10 @@ mod tests {
         let (loads, probes, delivered) =
             configs_read(configured(&log, Response::Ok(vec![line]))).await;
         let reported = Config::Reported(ipc::ConfigSource::File(file));
-        assert_eq!(loads, vec![reported.clone(); 3]);
+        assert_eq!(loads, vec![reported.clone(); 2]);
+        assert_eq!(delivered, vec![reported.clone(); 3]);
         assert_eq!(probes, [reported]);
-        assert_eq!(delivered, loads);
-        assert_eq!(
-            *log.borrow(),
-            [
-                Request::List,
-                Request::Config,
-                Request::List,
-                Request::Config,
-                Request::List,
-                Request::Config
-            ]
-        );
+        assert_eq!(*log.borrow(), polls(2));
     }
 
     #[tokio::test(start_paused = true)]
@@ -792,12 +853,9 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let older = Response::Error(ipc::INVALID_REQUEST.to_owned());
         let (loads, probes, delivered) = configs_read(configured(&log, older)).await;
-        assert_eq!(
-            loads,
-            [Config::Unreported, Config::Unreported, Config::Unreported]
-        );
+        assert_eq!(loads, vec![Config::Unreported; 2]);
+        assert_eq!(delivered, vec![Config::Unreported; 3]);
         assert_eq!(probes, [Config::Unreported]);
-        assert_eq!(delivered, loads);
     }
 
     #[tokio::test(start_paused = true)]
@@ -805,11 +863,8 @@ mod tests {
         for reply in [stopped as fn() -> _, || Err(RequestError::TimedOut)] {
             let log = RefCell::new(Vec::new());
             let (loads, _, delivered) = configs_read(listing(&log, reply)).await;
-            assert_eq!(
-                loads,
-                [Config::Unreported, Config::Unreported, Config::Unreported]
-            );
-            assert_eq!(delivered, loads);
+            assert_eq!(loads, vec![Config::Unreported; 2]);
+            assert_eq!(delivered, vec![Config::Unreported; 3]);
             assert!(log.borrow().iter().all(|r| *r == Request::List));
         }
     }
@@ -851,13 +906,7 @@ mod tests {
         assert_eq!(updates, [polled(None), launched(polled(None))]);
         assert_eq!(
             *log.borrow(),
-            [
-                Request::List,
-                Request::Config,
-                launch("office"),
-                Request::List,
-                Request::Config
-            ]
+            [Request::List, Request::Config, launch("office")]
         );
     }
 
@@ -889,9 +938,7 @@ mod tests {
                 Request::List,
                 Request::Config,
                 launch("office"),
-                Request::Deny(token.parse().unwrap()),
-                Request::List,
-                Request::Config
+                Request::Deny(token.parse().unwrap())
             ]
         );
     }
@@ -947,7 +994,7 @@ mod tests {
             unrevealed,
             unprompted,
         );
-        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
         assert_eq!(
             *log.borrow(),
             [
@@ -962,7 +1009,7 @@ mod tests {
             ]
         );
         let seen: Vec<Vec<u64>> = updates.iter().map(logged).collect();
-        assert_eq!(seen, [vec![], vec![1, 2], vec![1, 2]]);
+        assert_eq!(seen, [vec![], vec![], vec![1, 2], vec![1, 2]]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -970,7 +1017,6 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
         tx.send(Command::Watch(true)).unwrap();
-        tx.send(Command::Watch(false)).unwrap();
         let answer = |after: u64| log_page(1, after + 1..=1);
         let mut updates = Vec::new();
         let run = serve(
@@ -982,7 +1028,13 @@ mod tests {
             unrevealed,
             unprompted,
         );
-        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        let leave = async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            tx.send(Command::Watch(false)).unwrap();
+            std::future::pending::<()>().await;
+        };
+        let both = async { tokio::join!(run, leave) };
+        assert!(timeout(Duration::from_millis(4_500), both).await.is_err());
         assert_eq!(
             *log.borrow(),
             [
@@ -991,8 +1043,6 @@ mod tests {
                 Request::List,
                 Request::Config,
                 Request::Log { after: 0 },
-                Request::List,
-                Request::Config,
                 Request::List,
                 Request::Config,
             ]
@@ -1016,7 +1066,7 @@ mod tests {
             unrevealed,
             unprompted,
         );
-        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
         let asked: Vec<Request> = log.borrow()[4..].to_vec();
         assert_eq!(
             asked,
@@ -1026,7 +1076,7 @@ mod tests {
                 Request::Log { after: 4 },
             ]
         );
-        assert_eq!(logged(&updates[1]), [1, 2, 3, 4, 5]);
+        assert_eq!(logged(&updates[2]), [1, 2, 3, 4, 5]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1420,7 +1470,7 @@ mod tests {
         .await;
         assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
         assert_eq!(settled(&log), [Request::Launch(link())]);
-        assert_eq!(log.borrow().len(), 1 + polls(4).len());
+        assert_eq!(log.borrow().len(), 1 + polls(3).len());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1705,7 +1755,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_stopped_agent_is_started_once_and_refreshed_as_soon_as_it_runs() {
+    async fn a_stopped_agent_is_started_once_and_refreshed_at_the_next_allowed_poll() {
         let log = RefCell::new(Vec::new());
         let (calls, seen) = starts(
             listing(&log, stopped),
@@ -1728,7 +1778,8 @@ mod tests {
                 (6_000, busy.clone(), None),
                 (8_000, busy, None),
                 (9_000, idle.clone(), None),
-                (11_000, idle, None),
+                (10_000, idle.clone(), None),
+                (12_000, idle, None),
             ]
         );
         assert!(log.borrow().iter().all(|r| *r == Request::List));
@@ -1753,8 +1804,8 @@ mod tests {
                 (0, Starting::Idle, None),
                 (0, Starting::InFlight, None),
                 (1_000, failed.clone(), None),
-                (3_000, failed.clone(), None),
-                (5_000, failed, None),
+                (2_000, failed.clone(), None),
+                (4_000, failed, None),
             ]
         );
     }
@@ -1778,8 +1829,10 @@ mod tests {
                 (0, Starting::Idle, None),
                 (0, Starting::InFlight, None),
                 (1_000, failed.clone(), None),
+                (2_000, failed.clone(), None),
                 (2_500, Starting::InFlight, None),
-                (3_500, failed, None),
+                (3_500, failed.clone(), None),
+                (4_000, failed, None),
             ]
         );
     }
@@ -1809,8 +1862,8 @@ mod tests {
                 (0, Starting::Idle, None),
                 (0, Starting::InFlight, None),
                 (1_000, Starting::Failed(crate::start::FAILED.into()), None),
-                (3_000, Starting::Idle, None),
-                (5_000, Starting::Idle, None),
+                (2_000, Starting::Failed(crate::start::FAILED.into()), None),
+                (4_000, Starting::Idle, None),
             ]
         );
     }
