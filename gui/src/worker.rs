@@ -1131,6 +1131,7 @@ mod tests {
         Reveal {
             id,
             ticket: 1,
+            listen: None,
             credentials: SessionCredentials::parse("gateinto", PASSWORD).map(Issued::Agent),
         }
     }
