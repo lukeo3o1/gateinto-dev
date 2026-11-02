@@ -1,4 +1,4 @@
-use super::{Board, Painter};
+use super::{Board, PILL_GAP, Painter};
 use crate::fonts::{Font, Measure};
 use crate::gateways::{ADD, EMPTY, FOOTNOTE, Page, Row, START};
 use crate::hit::Zone;
@@ -89,27 +89,20 @@ impl<M: Measure> Painter<'_, M> {
         } else {
             0
         };
-        let name_w = self
-            .m
-            .width(Font::Heading, &row.label)
-            .min((w - lock).max(0));
+        let pill_gap = s.px(PILL_GAP);
+        let room = w - lock - pill_gap - self.pill_w(row.route);
+        let name_w = self.m.width(Font::Heading, &row.label).min(room.max(0));
         let name = Rect::new(x, top, name_w, line);
         self.text(Font::Heading, row.label.clone(), name, t.text);
         if row.config {
             let glyph = Rect::new(name.right() + s.px(8.0), top, s.px(14.0), line);
             self.icon(icons::LOCK, glyph, 14.0, t.muted);
         }
-        let spacing = s.px(12.0);
-        let route_w = self.m.width(Font::Small, &row.route).min(w);
-        let address_w = self
-            .m
-            .width(Font::Mono, &row.address)
-            .min((w - route_w - spacing).max(0));
+        let first = Rect::new(x, top, w, line);
+        self.pill(name.right() + lock + pill_gap, first, row.route);
+        let address_w = self.m.width(Font::Mono, &row.address).min(w);
         let address = Rect::new(x, top + line, address_w, s.px(18.0));
         self.text(Font::Mono, row.address.clone(), address, t.muted);
-        let route_x = address.right() + spacing;
-        let route = Rect::new(route_x, address.y, (x + w - route_x).max(0), address.h);
-        self.text(Font::Small, row.route.clone(), route, t.muted);
 
         self.eyes(sessions, row);
         self.start(
@@ -145,6 +138,7 @@ mod tests {
     use crate::fonts::Font;
     use crate::gateways::{ADD, EMPTY, FOOTNOTE, Row, START, SUBTITLE};
     use crate::hit::Zone;
+    use crate::i18n::{Language, Text, speaking};
     use crate::icons;
     use crate::nav::{Nav, Page as NavPage};
     use crate::scene::Op;
@@ -161,7 +155,7 @@ mod tests {
         Row {
             label: name.to_owned(),
             address: "proxy.example.com".to_owned(),
-            route: "Route: Mixed".to_owned(),
+            route: "Mixed",
             sessions: "1 session".to_owned(),
             lit: false,
             config,
@@ -257,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_is_a_card_with_tile_name_lock_address_route_and_sessions() {
+    fn a_row_is_a_card_with_tile_name_lock_route_pill_address_and_sessions() {
         let ops = draw(&listed(vec![row("office", true)])).ops;
         let y = FIRST;
         assert_eq!(
@@ -274,16 +268,17 @@ mod tests {
                     T.text
                 ),
                 Op::Icon(icons::LOCK, Rect::new(374, y + 20, 14, 14), 1.0, T.muted),
+                Op::Round(Rect::new(394, y + 19, 49, 16), 8.0, T.tile),
+                text(
+                    Font::Pill,
+                    "Mixed",
+                    Rect::new(401, y + 19, 35, 16),
+                    T.pill_text
+                ),
                 text(
                     Font::Mono,
                     "proxy.example.com",
                     Rect::new(324, y + 37, 119, 18),
-                    T.muted
-                ),
-                text(
-                    Font::Small,
-                    "Route: Mixed",
-                    Rect::new(455, y + 37, 242, 18),
                     T.muted
                 ),
                 Op::Round(Rect::new(713, y + 32, 5, 7), 2.5, T.eyes_idle),
@@ -391,32 +386,108 @@ mod tests {
     }
 
     #[test]
-    fn a_long_address_leaves_room_for_the_route() {
+    fn without_a_lock_the_pill_follows_the_name() {
+        let mut all = row("edge", false);
+        all.route = "All";
+        let ops = draw(&listed(vec![all])).ops;
+        let card = inside(&ops, Rect::new(248, FIRST, 764, 72));
+        assert_eq!(
+            card[4..7],
+            [
+                text(
+                    Font::Heading,
+                    "edge",
+                    Rect::new(324, FIRST + 17, 28, 20),
+                    T.text
+                ),
+                Op::Round(Rect::new(358, FIRST + 19, 35, 16), 8.0, T.tile),
+                text(
+                    Font::Pill,
+                    "All",
+                    Rect::new(365, FIRST + 19, 21, 16),
+                    T.pill_text
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_address_takes_the_whole_second_line() {
         let mut long = row("office", true);
         long.address = "a".repeat(100);
         let ops = draw(&listed(vec![long])).ops;
         let card = inside(&ops, Rect::new(248, FIRST, 764, 72));
-        assert!(matches!(&card[6], Op::Text(Font::Mono, _, r, _) if r.w == 277));
-        assert!(matches!(
-            &card[7],
-            Op::Text(Font::Small, route, r, _) if route == "Route: Mixed" && r.x == 613 && r.w == 84
-        ));
+        assert!(matches!(&card[8], Op::Text(Font::Mono, _, r, _) if r.x == 324 && r.w == 373));
+        assert!(
+            !card
+                .iter()
+                .any(|op| matches!(op, Op::Text(Font::Small, s, ..) if s.contains("Route")))
+        );
     }
 
     #[test]
-    fn a_long_name_leaves_room_for_its_lock() {
+    fn a_long_name_leaves_room_for_its_lock_and_pill() {
         let ops = draw(&listed(vec![row(&"n".repeat(100), true)])).ops;
         let card = inside(&ops, Rect::new(248, FIRST, 764, 72));
-        assert!(matches!(&card[4], Op::Text(Font::Heading, _, r, _) if r.w == 351));
+        assert!(matches!(&card[4], Op::Text(Font::Heading, _, r, _) if r.w == 296));
         assert_eq!(
             card[5],
             Op::Icon(
                 icons::LOCK,
-                Rect::new(683, FIRST + 20, 14, 14),
+                Rect::new(628, FIRST + 20, 14, 14),
                 1.0,
                 T.muted
             )
         );
+        assert_eq!(
+            card[6],
+            Op::Round(Rect::new(648, FIRST + 19, 49, 16), 8.0, T.tile)
+        );
+    }
+
+    #[test]
+    fn the_pill_stays_inside_the_card_at_the_minimum_window_in_both_languages() {
+        let (w, h) = crate::layout::Layout::min_size(S);
+        let l = crate::layout::Layout::new(w, h, S, true);
+        for language in [Language::English, Language::Chinese] {
+            let _speaking = speaking(language);
+            for route in [Text::Mixed, Text::All] {
+                for config in [true, false] {
+                    let mut long = row(&"n".repeat(100), config);
+                    long.route = tr(route);
+                    let b = board(&l, S, &T, &view(), &listed(vec![long]), &Chars);
+                    let card = b.targets.last().unwrap().0;
+                    let start = b.targets[b.targets.len() - 2].0;
+                    let pill = b
+                        .ops
+                        .iter()
+                        .find_map(|op| match op {
+                            Op::Round(r, _, c) if *c == T.tile && r.h == 16 => Some(*r),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let word = b.ops.iter().find_map(|op| match op {
+                        Op::Text(Font::Pill, s, _, _) => Some(s.to_string()),
+                        _ => None,
+                    });
+                    let name = b
+                        .ops
+                        .iter()
+                        .find_map(|op| match op {
+                            Op::Text(Font::Heading, _, r, _) => Some(*r),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(word.as_deref(), Some(tr(route)));
+                    assert!(name.w > 0 && name.right() < pill.x, "{name:?} {pill:?}");
+                    assert!(
+                        pill.x >= card.x && pill.right() < start.x,
+                        "{pill:?} {start:?}"
+                    );
+                    assert_eq!(pill.w, Chars.width(Font::Pill, tr(route)) + 14);
+                }
+            }
+        }
     }
 
     #[test]

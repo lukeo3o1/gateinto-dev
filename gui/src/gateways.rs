@@ -22,7 +22,7 @@ pub const ADD: Text = Text::AddGateway;
 pub struct Row {
     pub label: String,
     pub address: String,
-    pub route: String,
+    pub route: &'static str,
     pub sessions: String,
     pub lit: bool,
     pub config: bool,
@@ -257,7 +257,7 @@ fn row(gateway: &KnownGateway, sessions: &[SessionInfo]) -> Row {
     let open = open(gateway, sessions);
     Row {
         label: label(gateway),
-        route: fill(Text::RouteIs, &[&tr(route(gateway.route))]),
+        route: tr(route(gateway.route)),
         sessions: count(open.len()),
         lit: open.iter().any(|session| session.tunnels > 0),
         config: gateway.source == Source::Config,
@@ -347,7 +347,7 @@ mod tests {
                 rows: vec![Row {
                     label: "office".to_owned(),
                     address: "proxy.example.com".to_owned(),
-                    route: "Route: All".to_owned(),
+                    route: "All",
                     sessions: "1 session".to_owned(),
                     lit: false,
                     config: true,
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(page.subtitle, "這部裝置可透過其轉送的遠端 HTTPS 代理");
         assert_eq!(page.rows[0].sessions, "2 個工作階段");
         assert_eq!(page.rows[1].sessions, "沒有工作階段");
-        assert_eq!(page.rows[0].route, "路由：全部");
+        assert_eq!(page.rows[0].route, "全部");
         let details = details(&listing, &Gateways::default(), &state, &name(PROFILE)).unwrap();
         assert_eq!(
             facts(&details),
@@ -507,10 +507,7 @@ mod tests {
         };
         let listing = known(vec![mixed]);
         let state = AgentState::Running(vec![session(1, "office", 0)]);
-        assert_eq!(
-            page(&listing, &state, None, false).rows[0].route,
-            "Route: Mixed"
-        );
+        assert_eq!(page(&listing, &state, None, false).rows[0].route, "Mixed");
         let details = details(&listing, &Gateways::default(), &state, &name("office")).unwrap();
         assert!(facts(&details).contains(&("Route", "Mixed")));
     }

@@ -39,6 +39,8 @@ const STOP_LABEL: Text = Text::StopAgent;
 const START_AGENT: Text = Text::StartAgent;
 const REVOKE_TIP: Text = Text::RevokeSession;
 const MORE_TIP: Text = Text::More;
+const PILL_PAD: f32 = 7.0;
+const PILL_GAP: f32 = 6.0;
 
 pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
     if targets.iter().any(|&(_, zone)| zone == Zone::Menu) {
@@ -176,6 +178,20 @@ impl<'a, M: Measure> Painter<'a, M> {
 
     fn text(&mut self, font: Font, text: impl Into<Cow<'static, str>>, r: Rect, c: Rgb) {
         self.push(Op::Text(font, text.into(), r, c));
+    }
+
+    fn pill_w(&self, text: &str) -> i32 {
+        self.m.width(Font::Pill, text) + 2 * self.s.px(PILL_PAD)
+    }
+
+    fn pill(&mut self, x: i32, line: Rect, text: &'static str) {
+        let (s, t) = (self.s, self.t);
+        let (pad, h) = (s.px(PILL_PAD), s.px(16.0));
+        let w = self.pill_w(text).min(line.right() - x).max(0);
+        let pill = Rect::new(x, line.y + (line.h - h) / 2, w, h);
+        self.push(Op::Round(pill, s.pxf(8.0), t.tile));
+        let inner = Rect::new(pill.x + pad, pill.y, pill.w - 2 * pad, pill.h);
+        self.text(Font::Pill, text, inner, t.pill_text);
     }
 
     fn icon(&mut self, icon: Icon, centre: Rect, size: f32, c: Rgb) {
@@ -409,9 +425,8 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.text(Font::Small, row.auth, line2(c.session), t.muted);
 
         let first = line1(c.gateway);
-        let (pill_pad, pill_gap) = (s.px(7.0), s.px(6.0));
-        let pill_w = self.m.width(Font::Pill, row.route) + 2 * pill_pad;
-        let room = (first.w - pill_gap - pill_w).max(0);
+        let pill_gap = s.px(PILL_GAP);
+        let room = (first.w - pill_gap - self.pill_w(row.route)).max(0);
         let w = self.m.width(Font::BodyStrong, &row.gateway).min(room);
         self.text(
             Font::BodyStrong,
@@ -419,17 +434,7 @@ impl<'a, M: Measure> Painter<'a, M> {
             Rect { w, ..first },
             t.text,
         );
-        let pill_h = s.px(16.0);
-        let x = first.x + w + pill_gap;
-        let pill = Rect::new(
-            x,
-            first.y + (first.h - pill_h) / 2,
-            pill_w.min(first.right() - x),
-            pill_h,
-        );
-        self.push(Op::Round(pill, s.pxf(8.0), t.tile));
-        let route = Rect::new(pill.x + pill_pad, pill.y, pill.w - 2 * pill_pad, pill.h);
-        self.text(Font::Pill, row.route, route, t.pill_text);
+        self.pill(first.x + w + pill_gap, first, row.route);
         self.text(Font::Mono, row.address.clone(), line2(c.gateway), t.muted);
 
         self.text(Font::Body, row.uptime.clone(), c.uptime, t.text);
