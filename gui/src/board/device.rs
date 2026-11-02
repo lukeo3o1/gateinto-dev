@@ -71,14 +71,10 @@ impl<M: Measure> Painter<'_, M> {
             Some(note) => self.note(heading, note.clone(), key.alert),
             None => heading,
         };
-        for (i, (label, value)) in key.rows.iter().enumerate() {
+        for (i, key_row) in key.rows.iter().enumerate() {
             let row = self.line(above, i as i32);
-            let font = if *label == crate::i18n::tr(crate::device::DEVICE_ID) {
-                Font::Mono
-            } else {
-                Font::Body
-            };
-            self.pair(row, label, value.clone(), font);
+            let font = if key_row.code { Font::Mono } else { Font::Body };
+            self.pair(row, key_row.label, key_row.value.clone(), font);
         }
     }
 
@@ -133,7 +129,7 @@ impl<M: Measure> Painter<'_, M> {
 mod tests {
     use super::*;
     use crate::board::tests::{Chars, inside, layout, text};
-    use crate::device::{Computer, Gateway, KeyCard, SUBTITLE, USED_WITH};
+    use crate::device::{Computer, Gateway, KeyCard, KeyRow, SUBTITLE, USED_WITH};
     use crate::fonts::Font;
     use crate::gateways::EMPTY;
     use crate::hit::Zone;
@@ -163,13 +159,13 @@ mod tests {
                 note: Some("Kept in this PC's TPM".to_owned()),
                 alert: false,
                 rows: vec![
-                    (
+                    KeyRow::text(
                         "Storage",
                         "TPM (Microsoft Platform Crypto Provider)".to_owned(),
                     ),
-                    ("Algorithm", "ECDSA P-256".to_owned()),
-                    ("Key name", "Gateinto Device".to_owned()),
-                    ("Device ID", id()),
+                    KeyRow::text("Algorithm", "ECDSA P-256".to_owned()),
+                    KeyRow::text("Key name", "Gateinto Device".to_owned()),
+                    KeyRow::code("Device ID", id()),
                 ],
                 copy: Some("Copy device ID"),
             },
@@ -313,6 +309,22 @@ mod tests {
             ]
         );
         assert_eq!(card.len(), 8 + 4 * 3);
+    }
+
+    #[test]
+    fn the_device_id_is_set_in_mono_whatever_the_language() {
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        let ops = draw(&page()).ops;
+        let fonts: Vec<Font> = inside(&ops, KEY)
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text(font, text, ..) if *text == id() || text.contains("Microsoft") => {
+                    Some(*font)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fonts, [Font::Body, Font::Mono]);
     }
 
     #[test]
