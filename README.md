@@ -70,13 +70,14 @@ keeps it. See [docs/install.md](docs/install.md).
 The repository is private, so its GitHub Releases are for the owner's own
 downloads. There are three rolling releases, each with a tag of the same name
 that moves to the commit it was built from
-([details](docs/install.md#releases)):
+([details](docs/install.md#releases)). Every release, `latest` included, is
+marked as a prerelease and its notes say "Pre-release, not externally
+security reviewed.":
 
 - `alpha`: replaced automatically after CI passes on a push to `master` and
-  the release build and tests pass; a prerelease.
-- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref;
-  a prerelease.
-- `latest`: replaced by hand the same way; marked as the latest release.
+  the release build and tests pass.
+- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref.
+- `latest`: replaced by hand the same way.
 
 Every release has the x64 and x86 MSIs and the x64 and i686 executables;
 `alpha` and `beta` also have the experimental Windows 7 executable for
@@ -377,12 +378,16 @@ The format, its limits and everything it can never do are specified in
   gateway's policy.** The strict option is `gateway` ("All" in the GUI):
   every CONNECT goes through the gateway.
   Each gateway has a saved default route, `mixed` unless its `route` in the
-  configuration file or its gateway file says `gateway`; gateways already on
-  disk without `route` are `mixed` too. A link without `route`
-  uses that saved default; `route=gateway` or `route=mixed` applies to only
-  that new browser session and changes nothing saved. A `route=mixed` link
-  for a gateway saved as `gateway` asks first whether to switch it from All
-  to Mixed for that session; without an explicit yes no session opens. In mixed mode, target and gateway DNS answers are compared by IP;
+  configuration file or its gateway file says `gateway`. **After upgrading
+  from an agent without a saved `route` key, such as earlier `alpha` builds,
+  gateways already on disk without `route`, including linked gateways approved
+  with the wording that all traffic goes through the gateway, load as `mixed`;
+  add `route = "gateway"` to keep them strict.** A link without `route` uses
+  that saved default; `route=gateway` or `route=mixed` applies to only that
+  new browser session and changes nothing saved. A `route=mixed` link for a
+  gateway saved as `gateway` asks first whether to switch it from All to
+  Mixed for that session; without an explicit yes no session opens.
+  In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
   Other targets try direct TCP, falling back to the gateway on TCP error or
   timeout before local `200`. Gateway errors and established tunnels never
