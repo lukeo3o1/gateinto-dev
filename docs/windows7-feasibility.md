@@ -127,7 +127,7 @@ live in two composite actions,
 [win7-audit](../.github/actions/win7-audit/action.yml), which the
 [release workflow](../.github/workflows/release.yml) also uses for the alpha
 and beta releases. The i686 job installs NASM 2.16.03 with
-`ilammy/setup-nasm@v1`, as `ci.yml` does. Both jobs set
+`ilammy/setup-nasm` v1.5.2 (pinned by commit SHA), as `ci.yml` does. Both jobs set
 `AWS_LC_SYS_CMAKE_BUILDER=0`: only the `cc` builder defines
 `_WIN32_WINNT=0x0601` for `-win7-windows-msvc` targets. Each job checks the
 static C runtime and runs

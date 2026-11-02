@@ -20,7 +20,7 @@ You need:
 
 The repository is private; its releases are the owner's own downloads.
 [install.md](install.md#releases) describes the three channels (`alpha`,
-`beta` and `latest`), their files and their stable URLs. On 64-bit Windows 10
+`beta` and `latest`), their files and their fixed URLs. On 64-bit Windows 10
 or 11 download `gateinto-x86_64-pc-windows-msvc.exe` and
 `gateinto-x86_64-pc-windows-msvc.exe.sha256` from the `latest` release (or
 `alpha` or `beta` for a newer, less tested commit) into one folder, then

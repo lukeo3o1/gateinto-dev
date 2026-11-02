@@ -175,7 +175,7 @@ NASM (`-f win32`). Its prebuilt NASM objects exist only for `x86_64`
 (`use_prebuilt_nasm` requires `target_arch() == "x86_64"`), and without NASM
 the build stops with "NASM command not found! Build cannot continue."
 `aws-lc-rs` recommends installing NASM from nasm.us. The i686 jobs install
-NASM 2.16.03 with `ilammy/setup-nasm@v1`, which downloads that release from
+NASM 2.16.03 with `ilammy/setup-nasm` v1.5.2 (pinned by commit SHA), which downloads that release from
 nasm.us; the x64 jobs do not install it, so they keep using the prebuilt
 objects. `aws-lc-sys` ships pre-generated `i686-pc-windows-msvc` bindings, so
 no `libclang` is needed.
@@ -244,7 +244,7 @@ key after the TPM fallback and `key info` matched it; `check-upstream` reported
 `HTTP/1.1 200 Connection established` for `example.com:443`; `curl.exe` got
 `200` and `405`; and `certutil -delkey` removed the key afterwards.
 
-Every job that compiles Rust uses `Swatinem/rust-cache@v2` with its own
+Every job that compiles Rust uses `Swatinem/rust-cache` v2.9.3 (pinned by commit SHA) with its own
 `shared-key`. The CI jobs save their cache only on `master`, so pull requests
 restore the `master` cache without evicting it with their own. The Windows 7
 workflow saves its cache only when it is started by hand (`workflow_dispatch`),
