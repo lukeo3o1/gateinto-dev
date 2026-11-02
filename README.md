@@ -377,10 +377,14 @@ The format, its limits and everything it can never do are specified in
   gateway's policy.** The strict option is `gateway` ("All" in the GUI):
   every CONNECT goes through the gateway.
   Each gateway has a saved default route, `mixed` unless its `route` in the
-  configuration file or its gateway file says `gateway`; gateways already on
-  disk without `route` are `mixed` too. A link without `route`
-  uses that saved default; `route=gateway` or `route=mixed` applies to only
-  that new browser session and changes nothing saved. In mixed mode, target and gateway DNS answers are compared by IP;
+  configuration file or its gateway file says `gateway`. **After upgrading
+  from an agent without a saved `route` key, such as earlier `alpha` builds,
+  gateways already on disk without `route`, including linked gateways approved
+  with the wording that all traffic goes through the gateway, load as `mixed`;
+  add `route = "gateway"` to keep them strict.** A link without `route` uses
+  that saved default; `route=gateway` or `route=mixed` applies to only that
+  new browser session and changes nothing saved.
+  In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
   Other targets try direct TCP, falling back to the gateway on TCP error or
   timeout before local `200`. Gateway errors and established tunnels never

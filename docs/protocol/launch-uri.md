@@ -48,7 +48,9 @@ through the gateway.
 
 Every gateway has a saved default route: `mixed` unless its `route` key in
 the configuration file or in its linked gateway file is `gateway`. A missing
-`route` key means `mixed`, also in files written before the key existed. The
+`route` key means `mixed`, also in files written before the key existed, so
+gateways that earlier agents used with the `gateway` route become mixed after
+an upgrade (see "Between older and newer clients and agents" below). The
 route of a new browser session is, in this order:
 
 1. the `route` of the link (`gateway` or `mixed`), for that session only;
@@ -121,11 +123,21 @@ gateway). `gateinto open` and the GUI's Launch send `route=saved` when the
 link names no route. `gateinto session browser` is not affected by the saved
 route: it always uses the `gateway` route, also when the gateway is saved
 with `route = "mixed"`. A gateway added in the GUI's Add dialog is saved with
-the `gateway` route, shown as "All" in the app, until the GUI offers a route
-choice.
+the route chosen there: Mixed is preselected and shows the direct-connection
+warning, and All (`gateway`) is the strict option.
 
 Between older and newer clients and agents:
 
+- Upgrading from an agent without a saved `route` key, such as earlier
+  `alpha` builds, changes what existing gateways do. That agent used the
+  `gateway` route unless a link named `route=mixed`, and a gateway approved
+  from a link without `route` was confirmed with the wording that all
+  traffic of the isolated browser goes through it. The newer agent loads a
+  linked gateway file without a `route` key, and a `[gateways.<name>]`
+  section without `route`, as `mixed`, so a link without `route` to such a
+  gateway now starts a mixed session that may reach sites directly. Add
+  `route = "gateway"` to the gateway file or the configuration section to
+  keep every connection on the gateway.
 - An older client with a newer agent: a launch without a route uses the
   `gateway` route, whatever route the gateway is saved with, and a new
   gateway approved from it is saved with the `gateway` route, or with `mixed`
