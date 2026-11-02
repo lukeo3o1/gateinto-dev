@@ -471,7 +471,7 @@ mod tests {
         let state = AgentState::Running(vec![session(1, "office", 0), session(2, "office", 0)]);
         let listing = known(vec![office(), gateway(PROFILE, None, None, Source::Linked)]);
         let page = page(&listing, &state, None, false);
-        assert_eq!(page.subtitle, "這部裝置可透過其轉送的遠端 HTTPS 代理");
+        assert_eq!(page.subtitle, "這台裝置可透過其轉送的遠端 HTTPS 代理");
         assert_eq!(page.rows[0].sessions, "2 個工作階段");
         assert_eq!(page.rows[1].sessions, "沒有工作階段");
         assert_eq!(page.rows[0].route, "全部");
@@ -483,7 +483,7 @@ mod tests {
                 ("主機", "未設定"),
                 ("連接埠", "443"),
                 ("伺服器名稱", "未設定"),
-                ("來源", "在這部裝置上新增"),
+                ("來源", "在這台裝置上新增"),
                 ("路由", "全部"),
                 ("入口網頁", "無"),
                 ("TLS 模式", "優先使用混合"),

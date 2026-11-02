@@ -679,8 +679,8 @@ mod tests {
             ready,
             copied: None,
             note,
-            warning: "Enter these only in the browser's proxy sign-in dialog that names \
-                      127.0.0.1:49210. Never enter them in a website's sign-in page or dialog."
+            warning: "Enter these only in the proxy sign-in prompt for 127.0.0.1:49210. \
+                      Never enter them in a website's sign-in page or dialog."
                 .to_owned(),
         }
     }
@@ -808,8 +808,8 @@ mod tests {
         copied.copied = Some(Field::Password);
         let all = texts(&draw(&copied)).join("\n");
         for part in [
-            "工作階段憑證",
-            "瀏覽器因此要求 Proxy 登入",
+            "工作階段登入資訊",
+            "作業系統使用者，瀏覽器因此要求代理登入",
             "使用者名稱",
             "密碼",
             "請完整輸入，包括連字號。",

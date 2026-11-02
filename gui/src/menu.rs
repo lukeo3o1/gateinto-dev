@@ -329,7 +329,7 @@ mod tests {
             .into_iter()
             .map(|entry| entry.label.into_owned())
             .collect();
-        assert_eq!(labels, ["顯示憑證", "開啟入口網頁", "閘道詳細資料"]);
+        assert_eq!(labels, ["顯示登入資訊", "開啟入口網頁", "閘道詳細資料"]);
         assert_eq!(picker(&known(Vec::new()))[0].label, "沒有閘道");
     }
 

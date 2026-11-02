@@ -480,7 +480,7 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(page.subtitle, "這部電腦登入時閘道看到的資訊");
+        assert_eq!(page.subtitle, "這台電腦登入時閘道看到的資訊");
         let card = page.key;
         assert_eq!(card.title, "裝置金鑰");
         let keys: Vec<&str> = card.rows.iter().map(|(k, _)| *k).collect();
@@ -499,7 +499,7 @@ mod tests {
                 ("Gateinto", VERSION.to_owned()),
             ]
         );
-        assert_eq!(page.gateways.unwrap()[0].source, "在這部裝置上新增");
+        assert_eq!(page.gateways.unwrap()[0].source, "在這台裝置上新增");
         assert_eq!(draw(None).key.note.as_deref(), Some("正在讀取裝置金鑰…"));
         assert_eq!(draw(Some(&probed(tpm()))).key.title, "硬體金鑰");
         assert_eq!(draw(Some(&probed(tpm()))).key.copy, Some("複製裝置識別碼"));
@@ -512,7 +512,7 @@ mod tests {
             key: tpm(),
             system: System::default(),
         };
-        assert_eq!(draw(Some(&nameless)).computer.unwrap().name, "這部電腦");
+        assert_eq!(draw(Some(&nameless)).computer.unwrap().name, "這台電腦");
     }
 
     #[test]

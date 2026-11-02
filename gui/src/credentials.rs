@@ -342,8 +342,8 @@ mod tests {
         assert_eq!(page.password, "");
         assert_eq!(
             page.warning,
-            "Enter these only in the browser's proxy sign-in dialog that names \
-             127.0.0.1:49210. Never enter them in a website's sign-in page or dialog."
+            "Enter these only in the proxy sign-in prompt for 127.0.0.1:49210. \
+             Never enter them in a website's sign-in page or dialog."
         );
         assert_eq!(dialog.secret(Field::Password), None);
         dialog.toggle();
@@ -365,11 +365,11 @@ mod tests {
         );
         assert_eq!(
             page.note,
-            Some("正在向代理程式索取此工作階段的憑證\u{2026}")
+            Some("正在向代理程式索取此工作階段的登入資訊\u{2026}")
         );
         assert_eq!(
             page.warning,
-            "只能在顯示 127.0.0.1:49210 的瀏覽器 Proxy 登入對話框中輸入。\
+            "只能在 127.0.0.1:49210 的代理登入提示中輸入。\
              切勿在網站的登入頁面或對話框中輸入。"
         );
     }
