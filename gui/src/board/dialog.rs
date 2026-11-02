@@ -57,15 +57,34 @@ pub fn wrap(m: &impl Measure, font: Font, text: &str, width: i32) -> Vec<String>
     for (spaced, piece) in pieces(text) {
         let gap = if spaced { " " } else { "" };
         let joined = format!("{line}{gap}{piece}");
-        if !line.is_empty() && m.width(font, &joined) > width {
-            lines.push(std::mem::replace(&mut line, piece));
-        } else {
+        if line.is_empty() || m.width(font, &joined) <= width {
             line = joined;
+        } else {
+            lines.push(std::mem::replace(&mut line, piece));
+        }
+        if m.width(font, &line) > width {
+            let mut cut = cut(m, font, &line, width);
+            line = cut.pop().unwrap_or_default();
+            lines.extend(cut);
         }
     }
     if !line.is_empty() {
         lines.push(line);
     }
+    lines
+}
+
+fn cut(m: &impl Measure, font: Font, piece: &str, width: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for c in piece.chars() {
+        line.push(c);
+        if line.len() > c.len_utf8() && m.width(font, &line) > width {
+            line.pop();
+            lines.push(std::mem::replace(&mut line, c.to_string()));
+        }
+    }
+    lines.push(line);
     lines
 }
 
@@ -691,15 +710,20 @@ mod tests {
     }
 
     #[test]
-    fn lines_wrap_greedily_at_spaces() {
+    fn lines_wrap_greedily_at_spaces_and_cut_words_wider_than_a_line() {
         assert_eq!(
             wrap(&Chars, Font::Small, "aa bb cc dd", 7 * 5),
             ["aa bb", "cc dd"]
         );
         assert_eq!(
             wrap(&Chars, Font::Small, "abcdefgh ij", 7 * 4),
-            ["abcdefgh", "ij"]
+            ["abcd", "efgh", "ij"]
         );
+        assert_eq!(
+            wrap(&Chars, Font::Small, "to abcdefghij k", 7 * 4),
+            ["to", "abcd", "efgh", "ij k"]
+        );
+        assert_eq!(wrap(&Chars, Font::Small, "ab", 0), ["a", "b"]);
         assert_eq!(wrap(&Chars, Font::Small, "", 70), Vec::<String>::new());
     }
 
