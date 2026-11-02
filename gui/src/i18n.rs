@@ -188,7 +188,6 @@ table! {
     ConfigFile => "Config file", "設定檔";
     AddedHere => "Added on this device", "在這部裝置上新增";
     Route => "Route", "路由";
-    RouteIs => "Route: {0}", "路由：{0}";
     PortalPage => "Portal page", "入口網頁";
     TlsMode => "TLS mode", "TLS 模式";
     HybridPreferred => "Hybrid preferred", "優先使用混合";
