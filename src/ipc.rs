@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use zeroize::Zeroizing;
+
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::proxy::{Route, SessionCredentials};
@@ -597,8 +599,9 @@ fn closed_or_io(error: io::Error) -> RequestError {
 
 async fn exchange(endpoint: &Endpoint, request: &Request) -> Result<Response, RequestError> {
     let mut stream = connect(endpoint).await?;
+    let line = Zeroizing::new(format!("{request}\n"));
     stream
-        .write_all(format!("{request}\n").as_bytes())
+        .write_all(line.as_bytes())
         .await
         .map_err(closed_or_io)?;
     stream.flush().await.map_err(closed_or_io)?;
@@ -613,19 +616,19 @@ async fn exchange(endpoint: &Endpoint, request: &Request) -> Result<Response, Re
             "the agent's response is too long",
         )));
     }
-    let response = String::from_utf8(response)
+    let response = std::str::from_utf8(&response)
         .map_err(|_| RequestError::Protocol(ProtocolError("invalid response from the agent")))?;
-    Response::decode(&response).map_err(RequestError::Protocol)
+    Response::decode(response).map_err(RequestError::Protocol)
 }
 
 pub async fn read_to_close(
     stream: &mut (impl AsyncRead + Unpin),
     limit: usize,
-) -> io::Result<Vec<u8>> {
-    let mut received = Vec::new();
-    let mut buffer = [0; 4096];
+) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut buffer = Zeroizing::new([0; 4096]);
+    let mut received = Zeroizing::new(Vec::with_capacity(limit + buffer.len()));
     while received.len() <= limit {
-        match stream.read(&mut buffer).await {
+        match stream.read(&mut buffer[..]).await {
             Ok(0) => break,
             Ok(n) => received.extend_from_slice(&buffer[..n]),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
@@ -1501,9 +1504,17 @@ mod tests {
     async fn a_pipe_closed_after_the_response_ends_it() {
         let mut pipe = ClosedPipe(Some(b"ok\nsession: 1\n"));
         assert_eq!(
-            read_to_close(&mut pipe, MAX_RESPONSE_BYTES).await.unwrap(),
+            &read_to_close(&mut pipe, MAX_RESPONSE_BYTES).await.unwrap()[..],
             b"ok\nsession: 1\n"
         );
+    }
+
+    #[tokio::test]
+    async fn the_response_is_read_into_one_wiped_allocation() {
+        let mut long: &[u8] = &[b'a'; 10_000];
+        let read: Zeroizing<Vec<u8>> = read_to_close(&mut long, 6000).await.unwrap();
+        assert!(read.capacity() >= 6000 + 4096, "{}", read.capacity());
+        assert_eq!(&read[..], &[b'a'; 8192]);
     }
 
     #[tokio::test]
