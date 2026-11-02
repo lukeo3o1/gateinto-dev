@@ -110,6 +110,10 @@ impl fmt::Display for GatewayName {
 #[serde(try_from = "String")]
 pub struct DisplayName(String);
 
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 impl DisplayName {
     pub const MAX_LEN: usize = 64;
 
@@ -119,10 +123,7 @@ impl DisplayName {
             .filter(|w| !w.is_empty())
             .collect();
         let name = collapsed.join(" ");
-        let visible = name.chars().all(|c| {
-            !c.is_control()
-                && !matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-        });
+        let visible = name.chars().all(|c| !c.is_control() && !is_bidi_control(c));
         if !name.is_empty() && name.chars().count() <= Self::MAX_LEN && visible {
             Ok(Self(name))
         } else {

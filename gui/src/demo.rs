@@ -491,7 +491,11 @@ mod tests {
                 .any(|u| u.failure == Some(NOT_STARTED.into()))
         );
         let reveals = reveals.borrow();
-        let listen = sessions(u64::MAX).into_iter().find(|s| s.id == 3).unwrap().listen;
+        let listen = sessions(u64::MAX)
+            .into_iter()
+            .find(|s| s.id == 3)
+            .unwrap()
+            .listen;
         assert_eq!(reveals[0].listen, Some(listen));
         let issued = reveals[0].credentials.as_ref().unwrap();
         assert_eq!(
