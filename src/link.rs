@@ -427,6 +427,10 @@ impl Loosening {
         lines
     }
 
+    pub fn asked_in(lines: &[String]) -> bool {
+        echoed(lines).any(|line| line.starts_with("saved-route: "))
+    }
+
     pub fn echoed_name(lines: &[String]) -> Option<GatewayName> {
         echoed(lines)
             .next()?

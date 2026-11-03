@@ -63,7 +63,7 @@ where
         return deny(ApprovalError::MissingSelector).await;
     };
     let Some(asked) = asked(launch, profile, lines) else {
-        let error = if launch.gateway.is_none() {
+        let error = if launch.gateway.is_none() && !Loosening::asked_in(lines) {
             ApprovalError::UnnamedGateway
         } else {
             ApprovalError::NotEchoed
@@ -439,13 +439,7 @@ mod tests {
             let error = settle(&launch(link), asks(&ask), agent.send(), unasked)
                 .await
                 .unwrap_err();
-            assert!(
-                matches!(
-                    error,
-                    ApprovalError::NotEchoed | ApprovalError::UnnamedGateway
-                ),
-                "{link}: {error}"
-            );
+            assert!(matches!(error, ApprovalError::NotEchoed), "{link}: {error}");
             assert_eq!(agent.sent(), [Request::Deny(token())], "{link}");
         }
     }
