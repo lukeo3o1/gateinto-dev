@@ -7,6 +7,7 @@ use zeroize::Zeroize;
 use crate::agent::AgentState;
 use crate::i18n::{Text, fill, tr};
 use crate::sessions;
+use crate::worker::Command;
 
 pub const MASK: &str = "\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}";
 pub const WAITING: Text = Text::AskingCredentials;
@@ -119,6 +120,14 @@ pub fn offers(state: &AgentState, id: u64) -> bool {
 
 pub fn clears_clipboard(copied: Option<u32>, sequence: u32) -> bool {
     copied == Some(sequence)
+}
+
+pub fn ends(command: &Command, id: u64) -> bool {
+    match command {
+        Command::Stop => true,
+        Command::Close(closed) => *closed == id,
+        _ => false,
+    }
 }
 
 pub fn deliver(dialog: Option<&mut Dialog>, reveal: Reveal) -> bool {
@@ -526,5 +535,14 @@ mod tests {
         assert!(clears_clipboard(Some(5), 5));
         assert!(!clears_clipboard(Some(5), 6));
         assert!(!clears_clipboard(None, 5));
+    }
+
+    #[test]
+    fn stopping_the_agent_or_closing_the_shown_session_ends_the_dialog() {
+        assert!(ends(&Command::Stop, 7));
+        assert!(ends(&Command::Close(7), 7));
+        assert!(!ends(&Command::Close(8), 7));
+        assert!(!ends(&Command::Start, 7));
+        assert!(!ends(&Command::Credentials(7, 1), 7));
     }
 }

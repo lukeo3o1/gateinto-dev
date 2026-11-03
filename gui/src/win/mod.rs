@@ -676,6 +676,19 @@ impl App {
         self.invalidate();
     }
 
+    fn order(&mut self, command: Command) {
+        if self
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| credentials::ends(&command, dialog.id()))
+        {
+            self.dialog = None;
+            self.forget_secret();
+            self.uncopy();
+        }
+        self.link.send(command);
+    }
+
     fn revoke_credentials(&mut self) {
         if let Some(dialog) = &self.dialog {
             self.link.send(Command::Close(dialog.id()));
@@ -1012,7 +1025,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::StopAgent) => {
-            with_app(hwnd, |app| app.link.send(Command::Stop));
+            with_app(hwnd, |app| app.order(Command::Stop));
             return;
         }
         Some(Action::StartAgent) => {
@@ -1020,7 +1033,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::Revoke(id)) => {
-            with_app(hwnd, |app| app.link.send(Command::Close(id)));
+            with_app(hwnd, |app| app.order(Command::Close(id)));
             return;
         }
         Some(Action::StartBrowser(row)) => {
