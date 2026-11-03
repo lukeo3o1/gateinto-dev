@@ -57,9 +57,18 @@ route of a new browser session is, in this order:
 2. otherwise the gateway's saved default;
 3. otherwise `mixed`.
 
-`route=gateway` keeps only the new browser session on the gateway route, and
-`route=mixed` opts a gateway saved as `gateway` into mixed routing for that
-session:
+`route=gateway` keeps only the new browser session on the gateway route.
+`route=mixed` for a gateway saved as `gateway` loosens its route, so it is
+never applied silently: the agent asks through the same confirm-token flow
+as a new gateway, with the echo lines `gateway: <name>`, `address: <host:port>`
+(only when the link names `gateway`), `route: mixed` and `saved-route:
+gateway`. The prompt says that the link asks to switch this gateway from All
+to Mixed for this browser session and carries the mixed-mode warning. Only
+an explicit approval opens the mixed session; it changes nothing saved.
+Deny, the 120-second timeout, a mismatched echo, no desktop or terminal to
+ask on, or any other failure opens no session and never falls back to the
+gateway route. A link with the saved route, with `route=gateway`, or without
+`route` launches without this question:
 
 ```text
 gateinto://connect?profile=office&route=gateway

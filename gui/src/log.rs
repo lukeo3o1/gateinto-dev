@@ -176,8 +176,14 @@ fn label(level: LogLevel) -> String {
 
 fn shown(text: &str) -> String {
     text.chars()
-        .filter(|&c| !is_bidi_control(c))
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .filter(|&c| !is_bidi_control(c) && !matches!(c, '\u{200B}' | '\u{2060}' | '\u{FEFF}'))
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -525,21 +531,41 @@ mod tests {
     #[test]
     fn bidi_controls_are_dropped_from_shown_scopes_and_messages() {
         let bidi = "\u{061C}\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}";
+        let row = shown_row(&format!("ag{bidi}ent\t"), &format!("evil{bidi}.com\n"));
+        assert_eq!(row.scope, "agent ");
+        assert_eq!(row.message, "evil.com ");
+    }
+
+    fn shown_row(scope: &str, message: &str) -> Row {
         let mut journal = Journal::default();
         let page = LogPage {
             last: 1,
             events: vec![LogEvent {
-                scope: format!("ag{bidi}ent\t"),
-                message: format!("evil{bidi}.com\n"),
+                scope: scope.to_owned(),
+                message: message.to_owned(),
                 ..event(1, LogLevel::Info)
             }],
         };
         journal.absorb(Ok(Response::Ok(page.to_lines())));
-        let Body::Rows(rows) = body(&running(), &journal, Filter::All, 0) else {
+        let Body::Rows(mut rows) = body(&running(), &journal, Filter::All, 0) else {
             panic!("rows expected");
         };
-        assert_eq!(rows[0].scope, "agent ");
-        assert_eq!(rows[0].message, "evil.com ");
+        rows.remove(0)
+    }
+
+    #[test]
+    fn line_and_paragraph_separators_are_shown_as_spaces() {
+        let row = shown_row("ag\u{2028}ent", "first\u{2028}second\u{2029}third");
+        assert_eq!(row.scope, "ag ent");
+        assert_eq!(row.message, "first second third");
+    }
+
+    #[test]
+    fn invisible_zero_width_characters_are_dropped() {
+        let hidden = "\u{200B}\u{2060}\u{FEFF}";
+        let row = shown_row(&format!("ag{hidden}ent"), &format!("evil{hidden}.com"));
+        assert_eq!(row.scope, "agent");
+        assert_eq!(row.message, "evil.com");
     }
 
     #[test]

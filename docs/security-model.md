@@ -21,8 +21,13 @@ received by a session uses the gateway. A gateway's saved default route is
 `gateway`; a missing `route`, including in files written before the key
 existed, means `mixed`. A gateway approved from a link is saved with the
 route the link named, or `mixed` when it named none. A launch URI without
-`route` uses the saved default. A launch URI may opt its new browser session into `route=mixed` or
-`route=gateway` without changing any other session or saved gateway. Mixed routing is an IP heuristic, not a policy or
+`route` uses the saved default. A launch URI may select `route=gateway` for its new browser session without
+changing any other session or saved gateway. `route=mixed` for a gateway
+saved as `gateway` needs an explicit approval of a prompt saying that the
+link switches this gateway from All to Mixed for this session, with the
+mixed-mode warning; the agent re-checks the gateway and both routes on
+approval. Refusal, timeout or any failure opens no session and does not fall
+back to All; approval changes nothing saved. Mixed routing is an IP heuristic, not a policy or
 scope guarantee: locally resolved target addresses matching any gateway IP,
 empty answers and DNS errors use the gateway; other targets try direct TCP.
 Direct opening and DNS share half the total opening timeout before gateway
@@ -344,9 +349,10 @@ Guarantees:
   they print and show them in the prompt instead.
 - **A prompt that names the proxy.** On an interactive Windows desktop the
   prompt is a message box; otherwise it goes to the command's terminal. It
-  names the proxy address the browser's own sign-in dialog shows and says to
-  enter the credentials only there, never in a website's sign-in page or
-  dialog. When there is neither, `gateinto open` names the command that
+  names the proxy address and says to enter the credentials only in the
+  proxy sign-in prompt for it, never in a website's sign-in page or dialog.
+  Whether the browser's prompt shows that address is not yet verified on
+  Windows. When there is neither, `gateinto open` names the command that
   shows them, and the foreground commands close their session and fail
   rather than serve credentials nobody can see. The presentation lives in
   `src/prompt.rs` and can be replaced without touching the check.

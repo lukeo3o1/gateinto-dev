@@ -65,7 +65,7 @@ pub fn size(s: Scale, m: &impl Measure, notice: &str, room: (i32, i32)) -> (i32,
     loop {
         let h = height(s, m, notice, w);
         if h <= room.1 || w >= room.0 {
-            return (w, h);
+            return (w, h.min(room.1));
         }
         w = (w + s.px(WIDEN)).min(room.0);
     }
@@ -85,7 +85,14 @@ pub fn approval(frame: Rect, s: Scale, t: &Theme, sheet: &Sheet, m: &impl Measur
     p.push(Op::Fill(frame, t.bg));
     let pad = s.px(PAD);
     let width = frame.w - 2 * pad;
-    for (i, line) in lines(m, sheet.notice, width).into_iter().enumerate() {
+    let notice = lines(m, sheet.notice, width);
+    let fits = 2 * pad + notice.len() as i32 * s.px(LINE) + s.px(FOOTER) <= frame.h;
+    let shown = if fits {
+        notice
+    } else {
+        lines(m, tr(Text::NoticeTooLong), width)
+    };
+    for (i, line) in shown.into_iter().enumerate() {
         let y = frame.y + pad + i as i32 * s.px(LINE);
         p.text(
             Font::Body,
@@ -114,6 +121,7 @@ pub fn approval(frame: Rect, s: Scale, t: &Theme, sheet: &Sheet, m: &impl Measur
     let allow_w = p.button_width(&[tr(Text::Allow), &fill(Text::AllowIn, &[&1])]);
     let allow = Rect::new(deny.x - s.px(GAP) - allow_w, y, allow_w, h);
     match sheet.countdown {
+        _ if !fits => {}
         Some(left) => {
             p.framed(allow, 6.0, t.tile);
             p.label(allow, fill(Text::AllowIn, &[&left]), t.eyes_idle);
@@ -184,7 +192,7 @@ mod tests {
     use crate::scale::Scale;
     use crate::scene::Op;
     use crate::theme::Theme;
-    use gateinto::link::Confirmation;
+    use gateinto::link::{Ask, Confirmation};
     use gateinto::proxy::Route;
 
     const T: Theme = Theme::LIGHT;
@@ -345,12 +353,12 @@ mod tests {
         let host = format!("{}:8443", long_host("login.contoso.com."));
         let origin = format!("https://{}:9443", long_host("portal.contoso.com."));
         assert!(host.len() > 240);
-        let confirmation = Confirmation {
+        let confirmation = Ask::Add(Confirmation {
             route: Route::Gateway,
             profile: "newco".parse().unwrap(),
             gateway: host.parse().unwrap(),
             portal: Some(format!("{origin}/home").parse().unwrap()),
-        };
+        });
         for language in [Language::English, Language::Chinese] {
             let _speaking = speaking(language);
             let notice = confirmation_notice(&confirmation);
@@ -382,6 +390,48 @@ mod tests {
                 assert!(joined.contains(&host), "{joined}");
                 assert!(joined.contains(&origin), "{joined}");
             }
+        }
+    }
+
+    #[test]
+    fn a_notice_too_long_for_the_screen_is_never_cut_and_cannot_be_allowed() {
+        let host = format!("{}:65535", long_host("login.contoso.com."));
+        let origin = format!("https://{}:65535", long_host("portal.contoso.com."));
+        let profile = "n".repeat(gateinto::config::GatewayName::MAX_LEN);
+        let ask = Ask::Add(Confirmation {
+            route: Route::Mixed,
+            profile: profile.parse().unwrap(),
+            gateway: host.parse().unwrap(),
+            portal: Some(format!("{origin}/home").parse().unwrap()),
+        });
+        for language in [Language::English, Language::Chinese] {
+            let _speaking = speaking(language);
+            let notice = confirmation_notice(&ask);
+            let room = (320, 240);
+            let (w, h) = size(S, &Chars, &notice, room);
+            assert!(w <= room.0 && h <= room.1, "{w}x{h} in {room:?}");
+            let frame = Rect::new(0, 0, w, h);
+            let sheet = Sheet {
+                notice: &notice,
+                ..sheet(None)
+            };
+            let board = approval(frame, S, &T, &sheet, &Chars);
+            assert_eq!(board.targets.len(), 1);
+            assert_eq!(board.targets[0].1, Zone::DenyLink);
+            let footer = frame.bottom() - S.px(FOOTER);
+            let shown: Vec<String> = board
+                .ops
+                .into_iter()
+                .filter_map(|op| match op {
+                    Op::Text(Font::Body, s, r, _) => {
+                        assert!(r.bottom() <= footer, "{r:?}");
+                        Some(s.to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let refusal = lines(&Chars, tr(Text::NoticeTooLong), w - 2 * S.px(PAD));
+            assert_eq!(shown, refusal);
         }
     }
 

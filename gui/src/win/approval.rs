@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::time::Duration;
 
-use gateinto::link::Confirmation;
+use gateinto::link::Ask;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
@@ -46,7 +46,7 @@ pub struct Approval {
 
 struct Open {
     dialog: Dialog,
-    confirmation: Confirmation,
+    confirmation: Ask,
     hover: Option<Button>,
     shown: Option<u64>,
 }
@@ -122,7 +122,7 @@ pub fn prompt(main: HWND, prompt: Prompt) {
     }
 }
 
-fn ask(main: HWND, ticket: u64, confirmation: Confirmation) {
+fn ask(main: HWND, ticket: u64, confirmation: Ask) {
     let Some((hwnd, r)) = place(main, ticket, confirmation) else {
         with_app(main, |app| {
             app.link.send(Command::Answer(ticket, Answer::Deny))
@@ -138,7 +138,7 @@ fn ask(main: HWND, ticket: u64, confirmation: Confirmation) {
     with_app(main, |app| app.approval.rearm());
 }
 
-fn place(main: HWND, ticket: u64, confirmation: Confirmation) -> Option<(HWND, Rect)> {
+fn place(main: HWND, ticket: u64, confirmation: Ask) -> Option<(HWND, Rect)> {
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) };
     let (work, _, dpi) = tray::work_area(cursor)?;
@@ -164,7 +164,7 @@ fn place(main: HWND, ticket: u64, confirmation: Confirmation) -> Option<(HWND, R
     .flatten()
 }
 
-fn outer(s: Scale, fonts: &Fonts, confirmation: &Confirmation, work: Rect) -> (i32, i32) {
+fn outer(s: Scale, fonts: &Fonts, confirmation: &Ask, work: Rect) -> (i32, i32) {
     let notice = confirmation_notice(confirmation);
     let [left, top, right, bottom] = sys::adjusted_rect(0, 0, STYLE, EX_STYLE, s.dpi);
     let edges = (right - left, bottom - top);

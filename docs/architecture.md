@@ -46,7 +46,10 @@ when missing (`proxy::Route::default`). `link::resolve` gives a new session
 the launch's `route` if it names one, otherwise the saved default. A launch
 URI's `route` applies only to its new browser session; a gateway approved
 from a link is stored with the route the link named, or `mixed` when it named
-none.
+none. A launch that asks for `mixed` on a gateway saved as `gateway` is a
+loosening (`link::Loosening`): `resolve` returns it as an `Ask` to confirm
+through the same token flow as a new gateway, and only an approval opens
+that one mixed session; the saved route never changes.
 
 A gateway may also carry an optional display name
 (`KnownGateway::display_name`, a `config::DisplayName`), read from
@@ -240,7 +243,8 @@ browser outside any job; its `launch` answer carries the credentials.
         |  parse again, rate limit, session cap
         |  link::resolve against the config file + gateways/*.toml
         |    known gateway ----------------------------------------------.
-        |    new gateway: answer "confirm: <token>", keep the request     |
+        |    new gateway, or mixed for a gateway saved with All:          |
+        |       answer "confirm: <token>", keep the request               |
         |       <- gateinto open asks the user (MessageBoxW / terminal)   |
         |       <- "approve <token>": LinkedStore::add, then -------------|
         |       <- "deny <token>": forget the request                     v
@@ -329,7 +333,8 @@ The full protocol, limits and guarantees are in
   `--config`, with null standard handles and, on Windows, `CREATE_NO_WINDOW`.
   At most one start is in flight; the button stays disabled until it ends.
   The GUI waits for that command to exit, off the UI thread, for up to 45
-  seconds (then kills it), and polls the agent at once after a clean exit.
+  seconds (then kills it), and polls the agent again at the next allowed
+  poll after a clean exit.
   A nonzero exit, a failure to start it or the timeout shows a fixed message,
   never the command's output or error, on the sessions page and in the tray
   flyout until the next start or until a poll finds the agent no longer
@@ -341,6 +346,28 @@ The full protocol, limits and guarantees are in
   `gateinto.exe` is not a file next to the GUI, it shows a fixed message and
   starts nothing. Demo mode never starts an agent. This is unit-tested but has
   not been tried on a real Windows desktop.
+- The GUI's link-approval dialog (`gui/src/approval.rs`,
+  `gui/src/win/approval.rs`) shows a link's new gateway or route switch and
+  sends Approve only from its Allow button. Allow answers only a mouse press
+  and release on it, both after a 1-second arming delay
+  (`approval::ARMING`) that restarts whenever the dialog is activated,
+  focused, moved or resized, so that an Enter meant for another window
+  cannot approve. Enter, Space and Escape always Deny, as do closing the
+  dialog and its timeout; other keys do nothing. Keyboard-only and
+  screen-reader users therefore cannot approve a link there, only Deny it.
+  The dialog widens up to the work area to show the whole notice; when even
+  that cannot hold it, it shows a fixed message instead and no Allow button,
+  so the details are never cut off (`gui/src/board/approval.rs`). Not yet
+  verified on Windows.
+- The GUI worker asks the agent for `list` (and `config`, and the log page
+  while the Log page is open) at most once every 2 seconds
+  (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
+  change, a dialog answer, a credentials reveal, a link or a start delivers
+  the last polled state at once, and a command that changes the agent (a
+  launch, a revoke, a stop) shows its result from the next poll, which comes
+  2 seconds after the previous one; a gateway added or removed in the GUI
+  shows up at that poll too. Clicking repeatedly never makes the GUI poll
+  faster.
 - The agent remembers which config file it loaded (`ipc::ConfigSource`): the
   absolute form of `--config`, the default file when it existed at start, or
   none. The `config` request answers `config: <path>` or `config: none` and
@@ -464,7 +491,7 @@ The full protocol, limits and guarantees are in
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
 | `gui/src/add.rs`, `gui/src/naming.rs` | The GUI's Add for gateways on this device: the form, its limits and route choice, the disclosure, the generated identifier and the store write. |
-| `gui/src/log.rs`, `gui/src/board/log.rs`, `gui/src/wrap.rs` | The GUI's log view: the journal of agent log events, the filter, copying, and the drawn rows. A long message wraps onto continuation lines under its message column: `wrap.rs` breaks at the last space that fits and cuts tokens wider than a line, measured with per-character advances of the mono font. |
+| `gui/src/log.rs`, `gui/src/board/log.rs`, `gui/src/wrap.rs` | The GUI's log view: the journal of agent log events, the filter, copying, and the drawn rows. A long message wraps onto continuation lines under its message column: `wrap.rs` breaks at the last space that fits and cuts tokens wider than a line, measured with per-character advances of the mono font. Shown scopes and messages drop text direction controls and the invisible U+200B, U+2060 and U+FEFF, and show control characters and the U+2028 and U+2029 separators as spaces; copying keeps the text as it was. |
 | `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
 | `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |

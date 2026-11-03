@@ -384,7 +384,9 @@ The format, its limits and everything it can never do are specified in
   with the wording that all traffic goes through the gateway, load as `mixed`;
   add `route = "gateway"` to keep them strict.** A link without `route` uses
   that saved default; `route=gateway` or `route=mixed` applies to only that
-  new browser session and changes nothing saved.
+  new browser session and changes nothing saved. A `route=mixed` link for a
+  gateway saved as `gateway` asks first whether to switch it from All to
+  Mixed for that session; without an explicit yes no session opens.
   In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
   Other targets try direct TCP, falling back to the gateway on TCP error or
@@ -527,9 +529,10 @@ Details of `session_credentials`:
   object; that session then accepts only session credentials and `open`
   shows them. On Windows with an interactive desktop they appear in a
   message box; elsewhere on the command's terminal (stderr). The prompt
-  names the proxy address (`127.0.0.1:<port>`) the browser's sign-in dialog
-  shows, and says to enter the credentials only there and never in a
-  website's sign-in page or dialog.
+  names the proxy address (`127.0.0.1:<port>`) and says to enter the
+  credentials only in the proxy sign-in prompt for it, never in a website's
+  sign-in page or dialog. Whether the browser's prompt shows that address
+  is not yet verified on Windows.
   `gateinto session credentials <id>` asks the agent for them over its
   per-user IPC endpoint and shows the same prompt again. Without a desktop or
   terminal `gateinto open` prints a warning naming that command instead, and

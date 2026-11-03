@@ -339,9 +339,11 @@ Not verified with real Chrome or Edge. On an isolated test deployment:
 1. Set `route = "gateway"` on a configured profile. Launch it without
    `route` and with `route=gateway`; verify both send CONNECTs through the
    gateway.
-2. Launch the same profile with `route=mixed`. Verify a DNS target matching
-   a gateway IP uses the gateway, a distinct public target connects directly,
-   and missing local DNS answers use the gateway. Observe DNS and network
+2. Launch the same profile with `route=mixed`. Verify Gateinto first asks
+   to switch the gateway from All to Mixed for this session; Cancel or no
+   answer within 120 seconds opens no browser. Allow it, then verify a DNS
+   target matching a gateway IP uses the gateway, a distinct public target
+   connects directly, and missing local DNS answers use the gateway. Observe DNS and network
    captures rather than treating an error page as proof of the route.
 3. Verify a failed direct TCP opening tries gateway CONNECT, while a gateway
    refusal remains an error. A target TLS error after local CONNECT success

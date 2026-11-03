@@ -189,12 +189,16 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   gateway's portal; a gateway without a portal accepts no `url`.
 - `... its address is already set up as "<other>"; use profile=<other> in
   the link`: the gateway in the link is known under another name.
-- `cannot ask whether to add the gateway: no desktop or terminal to ask on`:
+- `cannot ask to confirm the link: no desktop or terminal to ask on`:
   `gateinto open` was started without a visible desktop or terminal, so it
   could not ask. Click the link in a desktop session, or run `gateinto open
   -- "<link>"` in a terminal and type `yes`.
 - `adding the gateway "<name>" was not allowed; nothing was stored`: the
   dialog was answered Cancel or closed, or something other than `yes` was typed.
+- `the mixed route for the gateway "<name>" was not allowed; no session was
+  opened ...`: the link asked to use the mixed route for a gateway saved with
+  the gateway route (All), and the switch was refused. Open the link without
+  `route=mixed`, or change the gateway's saved route.
 - `another gateway confirmation is already waiting for an answer`: answer
   the open dialog first; an unanswered confirmation expires after 120
   seconds.
