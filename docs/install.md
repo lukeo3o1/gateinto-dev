@@ -13,13 +13,15 @@ templates. To build the MSI yourself, use `packaging/wix/build.ps1` as described
 
 The repository is private, so its GitHub Releases are for the owner's own downloads; nothing is
 published for anyone else. There are exactly three releases, one per channel, each with a tag of
-the same name that points at the commit it was built from:
+the same name that points at the commit it was built from. Every channel, `latest` included, is
+a pre-release, not externally security reviewed; GitHub marks each one as a prerelease, so none
+is shown as the repository's latest release:
 
 | Channel | Published | Marked on GitHub |
 | --- | --- | --- |
 | `alpha` | automatically, after CI passes on a push to `master` and the release workflow's own build and tests pass | prerelease |
 | `beta` | by hand: Actions → Release → Run workflow, channel `beta`, and a full commit SHA (recommended), branch or tag (default `master`) | prerelease |
-| `latest` | by hand, the same way with channel `latest` | latest release |
+| `latest` | by hand, the same way with channel `latest` | prerelease |
 
 Every publish replaces the whole release: the workflow deletes the release and its tag and
 creates both again at the built commit, so the files, the tag and the notes always describe one
@@ -34,9 +36,10 @@ checked; a branch is resolved when the run starts. Only commits that contain thi
 workflow's `.github/actions` and `.github/scripts` can be released, so commits from before the
 release channels were added cannot be published.
 
-The release title and notes name the channel, the full commit SHA and the build date, followed
-by a notice that the files are not code-signed, that TPM keys, real browsers, physical Windows
-machines and Windows 7 are not yet verified on real hardware
+The release notes start with "Pre-release, not externally security reviewed." and the title and
+notes name the channel, the full commit SHA and the build date, followed by a notice that the
+files are not code-signed, that TPM keys, real browsers, physical Windows machines and Windows 7
+are not yet verified on real hardware
 ([#23](https://github.com/lukeo3o1/gateinto-dev/issues/23)), and, for `alpha` and `beta`, that
 the Windows 7 build is experimental and can use only the Microsoft Software Key Storage
 Provider.
@@ -54,7 +57,7 @@ copy without it. The copy keeps the same download URL from one publish to the ne
 
 Each file has a `.sha256` next to it, one line with the lowercase SHA-256, two spaces and the
 file name. The names with the commit are `gateinto-<commit>-<target>.exe` and so on, for
-example `gateinto-0123456789ab-x86_64-pc-windows-msvc.exe`. The stable URLs are
+example `gateinto-0123456789ab-x86_64-pc-windows-msvc.exe`. The fixed URLs are
 
 ```text
 https://github.com/lukeo3o1/gateinto-dev/releases/download/<channel>/<file without the commit>
@@ -93,9 +96,14 @@ MSI (`0.0.0`) over it as a downgrade and refuses with "A newer version of Gatein
 installed. Uninstall it first, then install this one." Uninstall the local build first (see
 [Uninstall](#uninstall)); the device key and the config file are kept.
 
-The x86 MSI installs the `i686-pc-windows-msvc` executable, which needs Windows 10 or later. CI
-runs it only under WOW64 on 64-bit Windows Server; it has not been tested on a real 32-bit
-Windows 10 installation, and it is untested on Windows 7, where that executable does not start.
+The x86 MSI installs the `i686-pc-windows-msvc` executables, which need Windows 10 or later. The
+GUI is not released for Windows 7 and is not part of the experimental Windows 7 release build.
+An experimental `i686-win7-windows-msvc` build of the GUI exists only as a CI artifact of
+[windows7.yml](../.github/workflows/windows7.yml); it has had only a static import audit and has
+never been run (see [windows7-feasibility.md](windows7-feasibility.md#gui-static-import-audit)).
+CI runs the x86 build only under WOW64 on 64-bit Windows Server; it has not been tested on a
+real 32-bit Windows 10 installation, and it is untested on Windows 7, where that executable does
+not start.
 
 ## Install
 
@@ -113,6 +121,10 @@ It installs:
 - `%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe`, with that folder appended to the user
   `PATH` (`HKCU\Environment`). Open a new terminal after installing so that `gateinto` is
   found; terminals that were already open keep the old `PATH`;
+- the GUI, `%LOCALAPPDATA%\Programs\Gateinto\gateinto-gui.exe`, next to `gateinto.exe`, where
+  its **Start agent** button looks for it;
+- a Start Menu shortcut named **Gateinto** in the user's own Start Menu
+  (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Gateinto.lnk`) that opens the GUI;
 - the `gateinto://` handler in `HKCU\Software\Classes\gateinto`, with the command
   `"%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe" open -- "%1"` (the path is written out in
   full). The handler is per-user only; the MSI writes no `HKLM` handler. The executable path is
@@ -124,11 +136,21 @@ It installs:
   background process and waits until it accepts requests; if an agent already runs it does
   nothing. The agent runs without a console; a console window may flash briefly at logon. It
   is off by default;
+- the config file `%APPDATA%\Gateinto\gateinto.toml`, only when no file of that name exists
+  yet. It is a template ([packaging/wix/gateinto.toml](../packaging/wix/gateinto.toml)) based on
+  [config.example.toml](../config.example.toml) in which every setting is commented out, so
+  it changes nothing until a line is uncommented: Gateinto behaves as with no config file.
+  The installer is designed never to overwrite an existing file and to keep it on uninstall
+  (see [Config file location](#config-file-location)); this is not yet verified on Windows;
 - the uninstall entry under Settings → Apps → Installed apps, written by Windows Installer.
 
-The package creates no shortcuts. It does not create a device key or a config file, and none of
-its custom actions creates a key: the installer never creates a key as `SYSTEM` or as an
-elevated installer account. Windows Installer runs a per-user package as the installing user.
+The package creates no other shortcuts. Installing starts neither the GUI nor the agent, and does
+not write the GUI's own `Gateinto App` value in the Run key (the GUI's **Start the app at
+sign-in** switch); only that switch writes it. A full uninstall removes it (see below). The package does not create a device key,
+and none of its custom actions creates a key: the installer never creates a key as
+`SYSTEM` or as an elevated installer account; `gateinto setup` does that later. Windows
+Installer runs a per-user package as the installing user, so the config template lands in that
+user's own `%APPDATA%`.
 
 ### Why per-user
 
@@ -153,7 +175,7 @@ gateinto setup --config D:\gateinto.toml --backend software
    create a key for the wrong account. When run elevated, it notes on stderr that the key still
    belongs to the current Windows user, not to the machine;
 2. reads the config file, `--config` or the default `%APPDATA%\Gateinto\gateinto.toml`, and
-   prints its path and each gateway as `gateway: <name>: <host>:<port> (config)`, then the
+   prints its path and each gateway as `gateway: <name>: <host>:<port>, route <route> (config)`, then the
    gateways added from `gateinto://` links as `... (linked)`. A config that does not
    parse stops `setup` before any key is touched;
 3. does what `gateinto key init` does. It reuses an existing key named `[device_key] name`
@@ -168,7 +190,7 @@ Output (example):
 
 ```text
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443 (config)
+gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: none (no directory at C:\Users\me\AppData\Roaming\Gateinto\gateways)
 key-name: gateinto-device-v1
 device-key: created
@@ -198,15 +220,34 @@ a TPM was skipped, so it does not create keys implicitly.
 Without `--config`, every command reads `%APPDATA%\Gateinto\gateinto.toml` when that file
 exists (`$XDG_CONFIG_HOME/gateinto/gateinto.toml`, or `~/.config/gateinto/gateinto.toml`, on
 Linux for development). The installed handler and the autostart entry pass no `--config`, so
-this is where an installed Gateinto finds its gateways. The installer does not create or remove
-this file.
+this is where an installed Gateinto finds its gateways. The installer creates this file from a
+template with every setting commented out, only if it does not exist yet, and records this in
+the value `ConfigTemplate` under `HKCU\Software\Gateinto\Installer`. The design intent, not yet verified on Windows,
+is that Windows Installer never overwrites or removes the file afterwards: a repair or an
+upgrade skips the template while that value exists, and an uninstall keeps both the file and the
+value. A deleted file therefore does not come back as the template, not even after an uninstall
+and a new install, unless the `ConfigTemplate` value is deleted too. Uncomment a setting, then restart the agent: it reads the file
+only when it starts. `gateinto reset --purge-device-identity --purge-config` deletes the file;
+see [Purge](#purge-gateinto-reset---purge-device-identity).
 
 Gateways that the user approved from a `gateinto://` link are kept separately in
 the `gateways` folder next to it, one file per gateway (`%APPDATA%\Gateinto\gateways\proxy.corp.example.toml`), also when
 `--config` names another file. Gateinto writes only that file, never the config file; on a name
-collision the config file wins. `gateinto gateway list` shows every gateway with its source and
+collision the config file wins. `gateinto gateway list` shows every gateway with its default route and source and
 `gateinto gateway forget <name>` removes one added from a link. See
 [protocol/launch-uri.md](protocol/launch-uri.md#linked-gateways).
+
+## Where settings are stored
+
+- The config file (above) holds the gateways and the `[limits]`, `[browser]` and
+  `[device_key]` settings. The agent reads it when it starts. The GUI only reads it and opens
+  it in the system's editor on request; it never writes it.
+- The GUI's own preferences are stored per user as the values `Theme` and `Language` in
+  `HKCU\Software\Gateinto\App`. They apply when chosen in Settings and do not involve the agent.
+- **Start the app at sign-in** is the GUI's value `Gateinto App` in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The agent's own start at sign-in is the
+  installer's value `Gateinto` in the same key (see [Install](#install)); the GUI only reads it
+  and never writes it.
 
 ## Status: `gateinto status`
 
@@ -223,16 +264,16 @@ device-key: present
 provider: Microsoft Platform Crypto Provider
 spki-sha256: 3f0c…
 config: C:\Users\me\AppData\Roaming\Gateinto\gateinto.toml (default location)
-gateway: office: proxy.example.com:443 (config)
+gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: C:\Users\me\AppData\Roaming\Gateinto\gateways
-gateway: corp: proxy.corp.example:443 (linked)
+gateway: corp: proxy.corp.example:443, route mixed (linked)
 agent: running
 session: 2 browser office 127.0.0.1:50123
 uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1"
 ```
 
 `device-key` is `present`, `absent`, `unavailable` (not Windows) or `error: …`. Gateways show
-only name, host, port and source (`config` or `linked`); CA files, certificate files, portal
+only name, host, port, default route (`mixed`, the default, or `gateway`) and source (`config` or `linked`); CA files, certificate files, portal
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
 its path or query. Sessions come from the running agent, the same lines as `gateinto session list`.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.
@@ -248,6 +289,7 @@ msiexec /x gateinto.msi /qn
 | Resource | Default uninstall |
 |---|---|
 | `gateinto.exe` | removed |
+| `gateinto-gui.exe` and the **Gateinto** Start Menu shortcut | removed |
 | Install folder in the user `PATH` | removed |
 | `gateinto://` handler (`HKCU\Software\Classes\gateinto`) | removed |
 | Logon autostart entry created by the installer | removed |
@@ -255,7 +297,8 @@ msiexec /x gateinto.msi /qn
 | Running agent, its listeners, tunnels and sessions | closed (see below) |
 | Gateinto browser profiles in `%LOCALAPPDATA%\Gateinto\profiles` | deleted |
 | Device key | **kept** |
-| Config file(s), including `%APPDATA%\Gateinto\gateinto.toml` | **kept** |
+| Config file(s), including `%APPDATA%\Gateinto\gateinto.toml`, also when the installer created it | **kept** (by design for the template, not yet verified on Windows) |
+| The installer's `ConfigTemplate` marker in `HKCU\Software\Gateinto\Installer` | **kept** (by design, not yet verified on Windows) |
 | Gateways added from links, `%APPDATA%\Gateinto\gateways\*.toml` | **kept** |
 | The user's own Chrome and Edge profiles, other programs' keys | never touched |
 
@@ -271,6 +314,28 @@ During an interactive uninstall a console window may flash briefly while `gatein
 runs, because `gateinto.exe` is a console program. A major upgrade (installing a newer MSI over
 an older one) runs the same step for the old version: it stops a running agent and does not
 start it again. The next `gateinto://` link or `gateinto agent --detach` starts a new one.
+
+Also before files are removed, the uninstaller runs `gateinto-gui.exe --uninstall` as the
+installing user. It looks for windows of the GUI's own window classes (`GateintoWindow` and
+the demo's `GateintoDemoWindow`) that belong to a process of the same user and the same
+`gateinto-gui.exe` file, posts each a private exit message that closes it like **Exit** in the
+tray menu (also when it would hide to the tray), and waits at most 5 seconds for those
+processes to end. Secrets the window held are cleared as on any other exit. It then deletes
+the GUI's `Gateinto App` value in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` only
+if that value is a plain string that runs exactly the installed `gateinto-gui.exe` (the path is
+compared without regard to case), and in that case also the `Gateinto App` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, where Task
+Manager records whether the entry is turned off. A value that points at another copy, has
+another type or cannot be read is left in place, and so is every other value, including the
+installer's `Gateinto` value and its StartupApproved entry. A GUI that does not close in time
+is not ended by force; Windows Installer may then need a restart to remove the file. The step's
+failure does not stop the uninstall. An interactive uninstall may still ask to close the GUI
+before this step runs; this is not tested.
+
+A major upgrade removes the old version with `gateinto-gui.exe --quit` instead: it closes
+the GUI the same way but keeps the `Gateinto App` value and its StartupApproved entry, so
+**Start the app at sign-in** stays on. Only an old version that already has this step runs
+it during an upgrade. Installing never runs the GUI.
 
 An uninstall does not revoke anything and does not delete the device identity.
 
@@ -360,17 +425,45 @@ and run
 [.github/scripts/msi-lifecycle.ps1](../.github/scripts/msi-lifecycle.ps1), which checks the
 following with the Microsoft Software Key Storage Provider (the runners have no TPM):
 
-- a silent per-user install writes the exe, the user `PATH` entry, the exact handler command
-  and the uninstall entry, and creates no device key (`key info` fails until `setup` runs);
+- a silent per-user install writes the exe, the GUI next to it, the **Gateinto** Start Menu
+  shortcut pointing at the GUI, the user `PATH` entry, the exact handler command and the
+  uninstall entry, starts no `gateinto.exe` or `gateinto-gui.exe` process, writes no
+  `Gateinto App` Run value, and creates no device key (`key info` fails until `setup` runs);
 - the first `setup` creates a key;
-- a silent uninstall with a running agent stops the agent and removes the exe and the handler,
-  while `key info`, run from a copy outside the install folder, still shows the same SPKI;
+- a silent uninstall with a running agent stops the agent and removes the exe, the GUI, the
+  shortcut and the handler,
+  while `key info`, run from a copy outside the install folder, still shows the same SPKI; the
+  GUI was started before it and `Gateinto App` was set to the installed GUI with a
+  StartupApproved entry, and the uninstall closes the GUI and removes both values but keeps an
+  unrelated Run value; if the runner shows no GUI window, only the values are checked, with a
+  warning;
 - after a reinstall with `AUTOSTART=1`, the Run value is exactly
-  `"…\gateinto.exe" agent --detach` and `setup` reuses the key with the same SPKI; the next
-  uninstall removes the Run value;
+  `"…\gateinto.exe" agent --detach`, the GUI and the shortcut are back, and `setup` reuses the
+  key with the same SPKI; the uninstall after the purge below removes the Run value, the GUI and
+  the shortcut, and keeps a `Gateinto App` value that points at another copy, its
+  StartupApproved entry and the StartupApproved entry of the agent's `Gateinto` value;
 - `reset` refuses a wrong prefix and a missing confirmation, deletes the key with the right
-  prefix, keeps the handler, and the next `setup` creates a different SPKI.
+  prefix, keeps the handler, and the next `setup` creates a different SPKI;
+- the script also checks the config template: the first install creates
+  `%APPDATA%\Gateinto\gateinto.toml` with exactly the template's content; the file is then
+  edited with its write time set back to its creation time, and a forced repair
+  (`msiexec /fa`), a default repair (`msiexec /f`), a same-version major upgrade to a second
+  build and back, both uninstalls, the reinstall and another `msiexec /fa` keep the edited
+  content. These checks were added after the
+  last recorded CI run and have not run on Windows yet. A unit test checks that the template
+  parses to the built-in defaults and comments out every setting of `config.example.toml`.
+
+For manual testing, CI runs on a push to `master` and on pull requests, unless they change only
+Markdown or `docs/` files other than `README.md` and `docs/quickstart.md`; when the x64
+lifecycle check passes, the run keeps the MSI it installed as the `gateinto-msi-x64` artifact for
+14 days. It is not a release: it is built
+from the CI release build without `-Version`, so it has the `Cargo.toml` version like a
+[local build](#releases), and it is not signed.
 
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
-runners are Windows Server), and a `gateinto://` link clicked in a real browser. See
+runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
+the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
+keeping `Gateinto App` across an upgrade between two versions. The checks that close the GUI and
+remove or keep `Gateinto App` on uninstall passed in CI for x64 and x86; closing the GUI was
+confirmed in the x64 log, the x86 log was not checked for it. See
 [verification.md](verification.md).

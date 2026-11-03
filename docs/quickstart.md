@@ -20,7 +20,7 @@ You need:
 
 The repository is private; its releases are the owner's own downloads.
 [install.md](install.md#releases) describes the three channels (`alpha`,
-`beta` and `latest`), their files and their stable URLs. On 64-bit Windows 10
+`beta` and `latest`), their files and their fixed URLs. On 64-bit Windows 10
 or 11 download `gateinto-x86_64-pc-windows-msvc.exe` and
 `gateinto-x86_64-pc-windows-msvc.exe.sha256` from the `latest` release (or
 `alpha` or `beta` for a newer, less tested commit) into one folder, then
@@ -284,8 +284,9 @@ curl.exe -x http://127.0.0.1:50123 --proxy-user gateinto:<password> https://exam
 This prints the HTML of `example.com`. Use `curl.exe` (not the PowerShell
 `curl` alias). Add `-v` to see the session's `CONNECT` status;
 [troubleshooting.md](troubleshooting.md#status-codes) explains each status.
-Run with `$env:RUST_LOG = "info"` to also see the `listening` and
-`tunnel established` log lines.
+Run with `$env:RUST_LOG = "info"` to also see the `listening` log line, or
+with `$env:RUST_LOG = "debug"` to also see the `selected tunnel route` and
+`tunnel established` lines of each tunnel.
 
 For a browser, use `gateinto open` or a `gateinto://` link instead: the agent
 starts a session and opens Chrome or Edge with an isolated profile already

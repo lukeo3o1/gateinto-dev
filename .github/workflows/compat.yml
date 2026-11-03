@@ -30,8 +30,10 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: compat-x64-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -54,15 +56,16 @@ jobs:
       TARGET: i686-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ env.TARGET }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: compat-i686-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install NASM ${{ env.NASM_VERSION }}
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         with:
           version: ${{ env.NASM_VERSION }}
       - run: cargo test --target $env:TARGET --all-targets --all-features --locked
@@ -84,14 +87,18 @@ jobs:
       WIX_VERSION: '5.0.2'
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: compat-release-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked -p gateinto -p gateinto-gui
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto.exe
+      - name: Check that gateinto-gui.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto-gui.exe
       - name: Install WiX ${{ env.WIX_VERSION }}
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
@@ -101,8 +108,10 @@ jobs:
         run: |
           pwsh packaging/wix/build.ps1 -Output "$env:RUNNER_TEMP\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
-      - name: Install, set up, uninstall, reinstall and purge (Software KSP)
-        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -Exe target\release\gateinto.exe -LogDir "$env:RUNNER_TEMP\msi"
+          pwsh packaging/wix/build.ps1 -Output "$env:RUNNER_TEMP\upgrade\gateinto.msi"
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
+      - name: Install, set up, repair, upgrade, uninstall, reinstall and purge (Software KSP)
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\gateinto.msi" -UpgradeMsi "$env:RUNNER_TEMP\upgrade\gateinto.msi" -Exe target\release\gateinto.exe -LogDir "$env:RUNNER_TEMP\msi"
       - name: Upload the installer logs
         if: failure()
         uses: actions/upload-artifact@v7

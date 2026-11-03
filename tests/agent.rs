@@ -15,16 +15,18 @@ use gateinto::browser::ProfileDir;
 use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
 use gateinto::ipc::{
-    self, BindError, ConfirmToken, Endpoint, Request, RequestError, Response, Server, SessionAuth,
-    SessionInfo, SessionKind, SessionRoute,
+    self, BindError, ConfigSource, ConfirmToken, Endpoint, LogPage, Request, RequestError,
+    Response, Server, SessionAuth, SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
+use gateinto::logbook::Logbook;
 use gateinto::proxy::Config;
 use gateinto::sessions::SessionId;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
+use tracing_subscriber::layer::SubscriberExt;
 
 type Linked = Arc<Mutex<Vec<LinkedGateway>>>;
 
@@ -41,17 +43,21 @@ impl Profiles for TestProfiles {
             .iter()
             .map(|(name, (plan, portal))| KnownGateway {
                 name: name.clone(),
+                display_name: None,
                 host: Some(plan.proxy.upstream.host.clone()),
                 port: Some(plan.proxy.upstream.port),
                 portal_url: portal.clone(),
+                route: gateinto::proxy::Route::Gateway,
                 source: Source::Config,
             });
         let linked = self.linked.lock().unwrap().clone();
         let linked = linked.into_iter().map(|gateway| KnownGateway {
             name: gateway.name,
+            display_name: gateway.display_name,
             host: Some(gateway.address.host()),
             port: Some(gateway.address.port()),
             portal_url: gateway.portal_url,
+            route: gateway.route,
             source: Source::Linked,
         });
         Ok(Known {
@@ -160,6 +166,8 @@ impl TestAgent {
                 browser,
                 profiles_root: profiles_root.clone(),
                 limits,
+                logbook: Default::default(),
+                config: ConfigSource::Defaults,
             },
             TestProfiles {
                 plans,
@@ -311,7 +319,7 @@ async fn tunnel_echoes(proxy: SocketAddr, lines: &[String]) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
+async fn a_gateway_approved_from_a_mixed_link_is_saved_with_the_mixed_route() {
     let agent = TestAgent::start(limits()).await;
     let request = agent.new_link(None).with_route("mixed").unwrap();
     let (echo, token) = agent.asks(request).await;
@@ -332,12 +340,85 @@ async fn approving_a_gateway_preserves_mixed_mode_without_storing_it() {
         b"mixed approval"
     );
     assert!(agent._upstream.requests().is_empty());
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Mixed);
+    let (plain, plain_browser) = agent
+        .opened(Request::Launch(
+            LaunchRequest::new("newco", "session_credentials").unwrap(),
+        ))
+        .await;
+    assert_eq!(field(&plain, "route"), "mixed");
+    let (mut stream, response) = send(
+        plain_browser.proxy(),
+        &connect_with(&target.to_string(), Some(&session_auth(&plain))),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    stream.shutdown().await.unwrap();
+    assert!(read_to_end_within(&mut stream, WAIT).await.is_empty());
+    assert!(agent._upstream.requests().is_empty());
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_line_without_a_route_from_an_older_client_uses_the_gateway_route() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("mixed").unwrap();
+    let (_, token) = agent.asks(request).await;
+    let (_lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Mixed);
+    let old: Request = "launch newco session_credentials".parse().unwrap();
+    assert_eq!(old.to_string(), "launch newco session_credentials");
+    let (lines, browser) = agent.opened(old).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let (mut stream, response) = send(
+        browser.proxy(),
+        &connect_with(&target.to_string(), Some(&session_auth(&lines))),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    stream.shutdown().await.unwrap();
+    let _ = read_to_end_within(&mut stream, WAIT).await;
+    assert_eq!(agent._upstream.requests().len(), 1);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_approved_from_an_older_client_launch_without_a_route_is_saved_with_the_gateway_route()
+ {
+    let agent = TestAgent::start(limits()).await;
+    let current = Request::Launch(agent.new_link(None)).to_string();
+    assert!(current.contains(" route=saved"), "{current}");
+    let old_line = current.replace(" route=saved", "");
+    let old: Request = old_line.parse().unwrap();
+    assert_eq!(old.to_string(), old_line);
+    let Request::Launch(old) = old else {
+        panic!("{old_line}")
+    };
+    let (echo, token) = agent.asks(old).await;
+    assert!(!echo.iter().any(|line| line.starts_with("route:")));
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Gateway);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateway_approved_from_a_gateway_link_is_saved_with_the_gateway_route() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("gateway").unwrap();
+    let (echo, token) = agent.asks(request).await;
+    assert!(!echo.iter().any(|line| line.starts_with("route:")));
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert!(!lines.iter().any(|line| line.starts_with("route:")));
+    assert_eq!(agent.linked()[0].route, gateinto::proxy::Route::Gateway);
     let (plain, plain_browser) = agent
         .opened(Request::Launch(
             LaunchRequest::new("newco", "session_credentials").unwrap(),
         ))
         .await;
     assert!(!plain.iter().any(|line| line.starts_with("route:")));
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
     let (mut stream, response) = send(
         plain_browser.proxy(),
         &connect_with(&target.to_string(), Some(&session_auth(&plain))),
@@ -747,6 +828,8 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
             browser: None,
             profiles_root: root,
             limits: limits(),
+            logbook: Default::default(),
+            config: ConfigSource::Defaults,
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -771,6 +854,107 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
     assert!(foreign.exists());
     ipc::send(&endpoint, &Request::Stop).await.unwrap();
     tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_answers_log_requests_from_its_logbook() {
+    let dir = temp_dir("logbook");
+    let logbook = Logbook::default();
+    let subscriber = tracing_subscriber::registry().with(logbook.layer());
+    tracing::subscriber::with_default(subscriber, || tracing::warn!("kept for the log page"));
+    let agent = Agent::new(
+        AgentOptions {
+            browser: None,
+            profiles_root: dir.join("profiles"),
+            limits: limits(),
+            logbook,
+            config: ConfigSource::Defaults,
+        },
+        TestProfiles {
+            plans: BTreeMap::new(),
+            template: agent_config(
+                SocketAddr::from((LOOPBACK, 1)),
+                rustls::RootCertStore::empty(),
+                PROXY_NAME,
+            ),
+            linked: Linked::default(),
+        },
+    );
+    let endpoint = endpoint(&dir);
+    let server = Server::bind(&endpoint).unwrap();
+    let serving = tokio::spawn(async move { agent.serve(server, std::future::pending()).await });
+
+    let page = |response| match response {
+        Ok(Response::Ok(lines)) => LogPage::parse(&lines).unwrap(),
+        other => panic!("unexpected log answer: {other:?}"),
+    };
+    let first = page(ipc::send(&endpoint, &Request::Log { after: 0 }).await);
+    assert_eq!(first.last, 1);
+    let messages: Vec<&str> = first
+        .events
+        .iter()
+        .map(|event| event.message.as_str())
+        .collect();
+    assert_eq!(messages, ["kept for the log page"]);
+    let next = page(ipc::send(&endpoint, &Request::Log { after: 1 }).await);
+    assert_eq!((next.last, next.events.len()), (1, 0));
+
+    ipc::send(&endpoint, &Request::Stop).await.unwrap();
+    tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_reports_only_the_config_path_it_was_given() {
+    let dir = temp_dir("config-path");
+    let config = dir.join("gateinto.toml");
+    let agent = Agent::new(
+        AgentOptions {
+            browser: None,
+            profiles_root: dir.join("profiles"),
+            limits: limits(),
+            logbook: Logbook::default(),
+            config: ConfigSource::File(config.clone()),
+        },
+        TestProfiles {
+            plans: BTreeMap::new(),
+            template: agent_config(
+                SocketAddr::from((LOOPBACK, 1)),
+                rustls::RootCertStore::empty(),
+                PROXY_NAME,
+            ),
+            linked: Linked::default(),
+        },
+    );
+    let endpoint = endpoint(&dir);
+    let server = Server::bind(&endpoint).unwrap();
+    let serving = tokio::spawn(async move { agent.serve(server, std::future::pending()).await });
+
+    let reply = ipc::send(&endpoint, &Request::Config).await.unwrap();
+
+    assert_eq!(
+        reply,
+        Response::Ok(vec![format!("config: {}", config.display())])
+    );
+    let Response::Ok(lines) = reply else {
+        unreachable!()
+    };
+    assert_eq!(ipc::config_source(&lines), Some(ConfigSource::File(config)));
+    ipc::send(&endpoint, &Request::Stop).await.unwrap();
+    tokio::time::timeout(WAIT, serving).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_the_agent_does_not_know_is_answered_as_invalid() {
+    let agent = TestAgent::start(limits()).await;
+
+    let response = agent.raw(b"config-file\n").await;
+
+    assert_eq!(response, format!("error: {}\n", ipc::INVALID_REQUEST));
+    assert_eq!(
+        Response::decode(&response),
+        Ok(Response::Error(ipc::INVALID_REQUEST.to_owned()))
+    );
+    agent.stop().await;
 }
 
 #[cfg(windows)]
@@ -1096,5 +1280,93 @@ async fn an_approval_is_kept_when_the_session_cap_is_reached_meanwhile() {
     let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
     let again = wait_for_browser(&agent.profiles_root, listen).await;
     assert_eq!(again.start_page(), NEW_PORTAL);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_link_to_a_gateway_saved_with_all_opens_a_mixed_session_only_once_approved() {
+    let agent = TestAgent::start(limits()).await;
+    let mixed = || {
+        LaunchRequest::new("main", "session_credentials")
+            .unwrap()
+            .with_route("mixed")
+            .unwrap()
+    };
+    let (echo, token) = agent.asks(mixed()).await;
+    assert_eq!(field(&echo, "gateway"), "main");
+    assert_eq!(field(&echo, "route"), "mixed");
+    assert_eq!(field(&echo, "saved-route"), "gateway");
+    let (lines, _browser) = agent.opened(Request::Approve(token)).await;
+    assert_eq!(field(&lines, "route"), "mixed");
+    assert_eq!(agent.listed(&lines).await.route, SessionRoute::Mixed);
+    assert!(agent.linked().is_empty());
+    let (plain, _plain_browser) = agent.launched("main").await;
+    assert_eq!(agent.listed(&plain).await.route, SessionRoute::All);
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_denied_switch_to_mixed_opens_no_session() {
+    let agent = TestAgent::start(limits()).await;
+    let request = LaunchRequest::new("main", "session_credentials")
+        .unwrap()
+        .with_route("mixed")
+        .unwrap();
+    let (_, token) = agent.asks(request).await;
+    assert_eq!(
+        agent.send(Request::Deny(token)).await,
+        Response::Ok(Vec::new())
+    );
+    assert!(agent.sessions().await.is_empty());
+    assert!(agent.linked().is_empty());
+    agent.stop().await;
+}
+
+const CHANGED: &str =
+    "the gateways changed while the confirmation was open; nothing was done, open the link again";
+
+fn newco(agent: &TestAgent, route: gateinto::proxy::Route) -> LinkedGateway {
+    LinkedGateway {
+        name: "newco".parse().unwrap(),
+        display_name: None,
+        address: agent.gateway().parse().unwrap(),
+        portal_url: Some(NEW_PORTAL.parse().unwrap()),
+        approved_at: Some(unix_now()),
+        route,
+    }
+}
+
+async fn approves_nothing(agent: &TestAgent, token: ConfirmToken, linked: &[LinkedGateway]) {
+    let response = agent.send(Request::Approve(token)).await;
+    assert!(refused(&response, CHANGED), "{response:?}");
+    assert!(agent.sessions().await.is_empty());
+    assert_eq!(agent.linked(), linked);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_gateway_is_refused_once_the_gateway_was_saved_with_all_meanwhile() {
+    let agent = TestAgent::start(limits()).await;
+    let request = agent.new_link(None).with_route("mixed").unwrap();
+    let (echo, token) = agent.asks(request).await;
+    assert!(!echo.iter().any(|line| line.starts_with("saved-route:")));
+    let saved = newco(&agent, gateinto::proxy::Route::Gateway);
+    agent.linked.lock().unwrap().push(saved.clone());
+    approves_nothing(&agent, token, &[saved]).await;
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switch_to_mixed_is_refused_once_its_gateway_was_removed_meanwhile() {
+    let agent = TestAgent::start(limits()).await;
+    let named = agent.new_link(None).with_route("mixed").unwrap();
+    let unnamed = link("newco", None, None, None).with_route("mixed").unwrap();
+    for request in [named, unnamed] {
+        let saved = newco(&agent, gateinto::proxy::Route::Gateway);
+        agent.linked.lock().unwrap().push(saved);
+        let (echo, token) = agent.asks(request).await;
+        assert_eq!(field(&echo, "saved-route"), "gateway");
+        agent.linked.lock().unwrap().clear();
+        approves_nothing(&agent, token, &[]).await;
+    }
     agent.stop().await;
 }

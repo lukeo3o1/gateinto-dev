@@ -19,7 +19,7 @@ proxy's status line.
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
 | `408` | The request head was not complete within `[limits] connect_timeout_seconds`. | A client that opens the connection but does not send a request, or a very slow client. |
 | `431` | The request header block was larger than `[limits] header_max_bytes`. | Clients that send many or large headers with `CONNECT`. |
-| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
+| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the target `host:port` and the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
 | `503` | `[limits] max_concurrent_tunnels` connections are already open in this session. | Raise `max_concurrent_tunnels` in the configuration file, or find the client holding connections open. |
 | `504` | The upstream TCP connect, TLS handshake and `CONNECT` reply did not finish within `[limits] connect_timeout_seconds`. | Network reachability of the upstream proxy, firewalls that drop instead of reject, or a slow upstream. |
 
@@ -65,7 +65,7 @@ With `--tls-mode hybrid_required` (or `tls_mode = "hybrid_required"` in the gate
 complete the handshake: every tunnel gets `502`, and the log shows
 
 ```text
-WARN ... upstream refused tunnel error=TLS handshake failed: received fatal alert: HandshakeFailure
+WARN ... upstream refused tunnel target=example.com:443 error=TLS handshake failed: received fatal alert: HandshakeFailure
 ```
 
 or a similar handshake error. Gateinto never falls back to `X25519` in this
@@ -189,12 +189,16 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   gateway's portal; a gateway without a portal accepts no `url`.
 - `... its address is already set up as "<other>"; use profile=<other> in
   the link`: the gateway in the link is known under another name.
-- `cannot ask whether to add the gateway: no desktop or terminal to ask on`:
+- `cannot ask to confirm the link: no desktop or terminal to ask on`:
   `gateinto open` was started without a visible desktop or terminal, so it
   could not ask. Click the link in a desktop session, or run `gateinto open
   -- "<link>"` in a terminal and type `yes`.
 - `adding the gateway "<name>" was not allowed; nothing was stored`: the
   dialog was answered Cancel or closed, or something other than `yes` was typed.
+- `the mixed route for the gateway "<name>" was not allowed; no session was
+  opened ...`: the link asked to use the mixed route for a gateway saved with
+  the gateway route (All), and the switch was refused. Open the link without
+  `route=mixed`, or change the gateway's saved route.
 - `another gateway confirmation is already waiting for an answer`: answer
   the open dialog first; an unanswered confirmation expires after 120
   seconds.
@@ -202,8 +206,9 @@ Messages from `gateinto open`, `gateinto agent`, `gateinto session list`,
   answered after its 120 seconds, or the agent restarted in between. Open
   the link again.
 - `linked-gateway: error: <file>: ...`: one file in `gateways/` is damaged,
-  was edited by hand (only `name`, `host`, `port`, `portal_url` and
-  `approved_at` are allowed), was renamed (its name must match its own host
+  was edited by hand (only `name`, `display_name`, `host`, `port`,
+  `portal_url`, `approved_at` and `route` are allowed, and `display_name`
+  must be 1 to 64 characters with single spaces between words), was renamed (its name must match its own host
   and port), is not a regular file, or uses a profile name that another
   file uses too. Only that gateway is disabled, and links to its name or
   address are refused until the file is fixed or deleted; delete it to

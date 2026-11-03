@@ -452,6 +452,7 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
         .join(format!("127.0.0.1_{}.toml", launcher.upstream_port));
     let stored = std::fs::read_to_string(&file).unwrap();
     assert!(!stored.contains("portal_url"));
+    assert!(stored.contains("\nroute = \"mixed\"\n"), "{stored}");
     assert!(stored.contains(generated.as_str()));
     launcher.run(&["stop"]).await.success();
     let request = request.with_route("gateway").unwrap();
@@ -503,6 +504,97 @@ async fn address_only_open_verifies_the_portalless_confirmation_before_refusing_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
+    use gateinto::ipc::{self, Request, Response};
+
+    let launcher = Launcher::new("").await;
+    let text = std::fs::read_to_string(&launcher.config).unwrap().replace(
+        &format!("portal_url = \"{PORTAL}\"\n"),
+        &format!("portal_url = \"{PORTAL}\"\nroute = \"gateway\"\n"),
+    );
+    std::fs::write(&launcher.config, &text).unwrap();
+    let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
+    let saved = launcher
+        .open("gateinto://connect?profile=main")
+        .await
+        .success()
+        .lines();
+    assert!(!saved.iter().any(|line| line.starts_with("route:")));
+    let mixed = "gateinto://connect?profile=main&route=mixed";
+    #[cfg(not(windows))]
+    {
+        let refused = launcher.open(mixed).await;
+        assert!(
+            refused.failure().stderr.contains("no desktop or terminal"),
+            "{}",
+            refused.stderr
+        );
+        assert!(refused.stdout.is_empty(), "{}", refused.stdout);
+    }
+    let endpoint = launcher.endpoint();
+    let Response::Ok(asked) = ipc::send(&endpoint, &Request::Launch(mixed.parse().unwrap()))
+        .await
+        .unwrap()
+    else {
+        panic!("not a confirmation")
+    };
+    assert_eq!(field(&asked, "route"), "mixed");
+    assert_eq!(field(&asked, "saved-route"), "gateway");
+    let token = ipc::confirm_token(&asked).unwrap();
+    let Response::Ok(forced) = ipc::send(&endpoint, &Request::Approve(token))
+        .await
+        .unwrap()
+    else {
+        panic!("approval failed")
+    };
+    assert_eq!(field(&forced, "route"), "mixed");
+    let mut browsers = Vec::new();
+    for lines in [&saved, &forced] {
+        let listen: SocketAddr = field(lines, "listen").parse().unwrap();
+        let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+        let auth = launcher.session_auth(browser.proxy()).await;
+        let (mut stream, response) = send(
+            browser.proxy(),
+            &connect_with(&target.to_string(), Some(&auth)),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        stream.shutdown().await.unwrap();
+        let _ = read_to_end_within(&mut stream, WAIT).await;
+        browsers.push(browser);
+    }
+    assert_eq!(launcher._upstream.as_ref().unwrap().requests().len(), 1);
+    let list = launcher.list().await;
+    let route = |lines: &[String]| listed_session(&list, lines).map(|session| session.route);
+    assert_eq!(route(&saved), Some(SessionRoute::All), "{list:?}");
+    assert_eq!(route(&forced), Some(SessionRoute::Mixed), "{list:?}");
+    assert_eq!(std::fs::read_to_string(&launcher.config).unwrap(), text);
+    for browser in browsers {
+        browser.exit();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_without_a_route_for_a_gateway_saved_without_one_is_mixed() {
+    let launcher = Launcher::new("").await;
+    let lines = launcher
+        .open("gateinto://connect?profile=main")
+        .await
+        .success()
+        .lines();
+    assert_eq!(field(&lines, "route"), "mixed");
+    let listen: SocketAddr = field(&lines, "listen").parse().unwrap();
+    let browser = wait_for_browser(&launcher.profiles_root, listen).await;
+    let list = launcher.list().await;
+    assert_eq!(
+        listed_session(&list, &lines).map(|session| session.route),
+        Some(SessionRoute::Mixed),
+        "{list:?}"
+    );
+    browser.exit();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_session() {
     let launcher = Launcher::new("").await;
     let target = echo_server_on(std::net::Ipv4Addr::new(127, 0, 0, 2)).await;
@@ -513,7 +605,12 @@ async fn uri_route_mode_reaches_the_agent_and_is_isolated_to_each_browser_sessio
     assert_eq!(field(&mixed, "route"), "mixed");
     let listen: SocketAddr = field(&mixed, "listen").parse().unwrap();
     let mixed_browser = wait_for_browser(&launcher.profiles_root, listen).await;
-    let (gateway, gateway_browser) = launcher.opened("main").await;
+    let output = launcher
+        .open("gateinto://connect?profile=main&route=gateway")
+        .await;
+    let gateway = output.success().lines();
+    let listen: SocketAddr = field(&gateway, "listen").parse().unwrap();
+    let gateway_browser = wait_for_browser(&launcher.profiles_root, listen).await;
     for browser in [&mixed_browser, &gateway_browser] {
         let auth = launcher.session_auth(browser.proxy()).await;
         let (mut stream, response) = send(
@@ -842,6 +939,67 @@ async fn agent_detach_starts_a_background_agent_once_and_returns() {
     );
     let (_, browser) = launcher.opened("main").await;
     assert_eq!(browser.start_page(), PORTAL);
+    launcher.run(&["stop"]).await.success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_reports_the_absolute_path_of_a_relative_config() {
+    use gateinto::ipc::{self, ConfigSource, Request, Response};
+    let launcher = Launcher::new("").await;
+    let mut command = launcher.command(&["agent", "--detach", "--config", "gateinto.toml"]);
+    command
+        .current_dir(&launcher.dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let status = tokio::task::spawn_blocking(move || command.status().unwrap())
+        .await
+        .unwrap();
+    assert!(status.success());
+
+    let reply = ipc::send(&launcher.endpoint(), &Request::Config).await;
+
+    let Ok(Response::Ok(lines)) = reply else {
+        panic!("the config path was not reported: {reply:?}");
+    };
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        ipc::config_source(&lines),
+        Some(ConfigSource::File(launcher.dir.join("gateinto.toml")))
+    );
+    launcher.run(&["stop"]).await.success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_without_a_config_file_reports_none() {
+    use gateinto::ipc::{self, ConfigSource, Request, Response};
+    let launcher = Launcher::without_gateways().await;
+    launcher.run(&["agent", "--detach"]).await.success();
+
+    let reply = ipc::send(&launcher.endpoint(), &Request::Config).await;
+
+    assert!(
+        matches!(&reply, Ok(Response::Ok(lines)) if ipc::config_source(lines) == Some(ConfigSource::Defaults)),
+        "{reply:?}"
+    );
+    launcher.run(&["stop"]).await.success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_on_the_default_config_file_reports_its_path() {
+    use gateinto::ipc::{self, ConfigSource, Request, Response};
+    let launcher = Launcher::without_gateways().await;
+    let default = launcher.linked_store().with_file_name("gateinto.toml");
+    std::fs::create_dir_all(default.parent().unwrap()).unwrap();
+    std::fs::copy(&launcher.config, &default).unwrap();
+    launcher.run(&["agent", "--detach"]).await.success();
+
+    let reply = ipc::send(&launcher.endpoint(), &Request::Config).await;
+
+    assert!(
+        matches!(&reply, Ok(Response::Ok(lines)) if ipc::config_source(lines) == Some(ConfigSource::File(default.clone()))),
+        "{reply:?}"
+    );
     launcher.run(&["stop"]).await.success();
 }
 
@@ -1184,7 +1342,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
         .await;
     assert_eq!(
         output.success().stdout,
-        format!("newco: {gateway}, portal https://portal.newco.example (linked)\n")
+        format!("newco: {gateway}, portal https://portal.newco.example, route mixed (linked)\n")
     );
 }
 

@@ -5,7 +5,7 @@ what does not exist.
 
 ## Data path
 
-The default `gateway` route follows this path:
+The `gateway` route ("All" in the GUI) follows this path:
 
 ```text
  client (browser, curl, ...)
@@ -40,7 +40,25 @@ replaced on a later request. HTTP/1.1, including no ALPN, keeps one TLS
 connection per tunnel. See [upstream HTTP CONNECT](protocol/http-connect.md)
 for connection ownership, flow control, reconnect, draining and timeouts.
 
-A launch URI can select `route=mixed` only for its new browser session.
+Each gateway has a saved default route (`KnownGateway::route`), read from
+`route` in its configuration section or linked gateway file and `mixed`
+when missing (`proxy::Route::default`). `link::resolve` gives a new session
+the launch's `route` if it names one, otherwise the saved default. A launch
+URI's `route` applies only to its new browser session; a gateway approved
+from a link is stored with the route the link named, or `mixed` when it named
+none. A launch that asks for `mixed` on a gateway saved as `gateway` is a
+loosening (`link::Loosening`): `resolve` returns it as an `Ask` to confirm
+through the same token flow as a new gateway, and only an approval opens
+that one mixed session; the saved route never changes.
+
+A gateway may also carry an optional display name
+(`KnownGateway::display_name`, a `config::DisplayName`), read from
+`display_name` in its configuration section or linked gateway file. It is
+only shown by the GUI; the command line, IPC and `gateinto://` links keep
+using the identifier (`GatewayName`), and a link can never set it. Loading
+refuses a display name that is not already normalized (trimmed, single
+spaces), longer than 64 characters or containing control or text direction
+characters.
 `proxy::routing` resolves target and gateway concurrently, selects gateway on
 missing/error answers or a canonical IP intersection, and otherwise tries TCP
 to the resolved target addresses. Discovery and direct TCP share half the
@@ -48,8 +66,8 @@ opening deadline; failure falls through to the ordinary gateway pool within
 the original total deadline. A direct success uses the same authenticated
 local CONNECT response and byte relay with no upstream TLS. Gateway failures
 and established tunnels cannot switch routes. The mode is held by the
-session and reported for mixed launches and session listings; gateway files
-never store it. See [session routing](protocol/launch-uri.md#session-routing)
+session and reported for mixed launches and session listings; a launch's
+route is never written to a gateway file. See [session routing](protocol/launch-uri.md#session-routing)
 for the heuristic's limits and DNS/source-IP exposure.
 
 `dns` owns the process-wide budget of 64 queued or running system lookups for
@@ -225,7 +243,8 @@ browser outside any job; its `launch` answer carries the credentials.
         |  parse again, rate limit, session cap
         |  link::resolve against the config file + gateways/*.toml
         |    known gateway ----------------------------------------------.
-        |    new gateway: answer "confirm: <token>", keep the request     |
+        |    new gateway, or mixed for a gateway saved with All:          |
+        |       answer "confirm: <token>", keep the request               |
         |       <- gateinto open asks the user (MessageBoxW / terminal)   |
         |       <- "approve <token>": LinkedStore::add, then -------------|
         |       <- "deny <token>": forget the request                     v
@@ -307,6 +326,138 @@ The full protocol, limits and guarantees are in
   request; if no agent answers it starts one (Windows: `DETACHED_PROCESS`
   and `CREATE_NEW_PROCESS_GROUP`, standard handles made non-inheritable; Unix:
   a new process group) and retries with backoff for up to 30 seconds.
+- The GUI (`gateinto-gui.exe`) starts an agent only when the user clicks
+  Start agent, which it offers on the sessions page and in the tray flyout
+  only while its last poll found no agent. It runs `gateinto.exe agent
+  --detach` from the GUI's own directory by absolute path, without a shell or
+  `--config`, with null standard handles and, on Windows, `CREATE_NO_WINDOW`.
+  At most one start is in flight; the button stays disabled until it ends.
+  The GUI waits for that command to exit, off the UI thread, for up to 45
+  seconds (then kills it), and polls the agent again at the next allowed
+  poll after a clean exit.
+  A nonzero exit, a failure to start it or the timeout shows a fixed message,
+  never the command's output or error, on the sessions page and in the tray
+  flyout until the next start or until a poll finds the agent no longer
+  stopped; there are no retries. After a timeout, an agent the command had
+  already started may still come up, so the next poll can find it running.
+  Quitting the GUI while a start is in flight normally ends the `agent
+  --detach` command as the GUI's worker shuts down, so whether an agent comes
+  up depends on how far it got. If
+  `gateinto.exe` is not a file next to the GUI, it shows a fixed message and
+  starts nothing. Demo mode never starts an agent. This is unit-tested but has
+  not been tried on a real Windows desktop.
+- The GUI's link-approval dialog (`gui/src/approval.rs`,
+  `gui/src/win/approval.rs`) shows a link's new gateway or route switch and
+  sends Approve only from its Allow button. Allow answers only a mouse press
+  and release on it, both after a 1-second arming delay
+  (`approval::ARMING`) that restarts whenever the dialog is activated,
+  focused, moved or resized, so that an Enter meant for another window
+  cannot approve. Enter, Space and Escape always Deny, as do closing the
+  dialog and its timeout; other keys do nothing. Keyboard-only and
+  screen-reader users therefore cannot approve a link there, only Deny it.
+  The dialog widens up to the work area to show the whole notice; when even
+  that cannot hold it, it shows a fixed message instead and no Allow button,
+  so the details are never cut off (`gui/src/board/approval.rs`). Not yet
+  verified on Windows.
+- The GUI worker asks the agent for `list` (and `config`, and the log page
+  while the Log page is open) at most once every 2 seconds
+  (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
+  change, a dialog answer, a credentials reveal, a link or a start delivers
+  the last polled state at once, and a command that changes the agent (a
+  launch, a revoke, a stop) shows its result from the next poll, which comes
+  2 seconds after the previous one; a gateway added or removed in the GUI
+  shows up at that poll too. Clicking repeatedly never makes the GUI poll
+  faster.
+- The agent remembers which config file it loaded (`ipc::ConfigSource`): the
+  absolute form of `--config`, the default file when it existed at start, or
+  none. The `config` request answers `config: <path>` or `config: none` and
+  nothing else (`ipc::config_line`, `ipc::config_source`, which accepts only
+  an absolute path). The GUI worker sends it right after each `list` that
+  finds the agent running, in the same 2-second poll, and passes the answer
+  (`gui/src/agent.rs` `Config`) to the loaders. An absolute path from the
+  agent replaces the default path; `none` means no file; a stopped or
+  unreachable agent, an error such as `invalid request` from an older agent,
+  or any other answer leaves the default path in use. Gateways, agent
+  settings, the device key name and the add-gateway name check use that path.
+  Open config file uses the file the agent reported, and the default path in
+  every other case, including when the agent loaded no file. Settings shows
+  the path, with a fixed note when it is not the default one. When the agent
+  loaded no file, it shows the default path with "not created yet", or
+  "restart the agent to use it" when a file exists there now. The agent card
+  says "From the config file" when the agent reports a file, "Built-in
+  defaults" when it reports none, and, while it reports nothing, "From the
+  config file" only if the default file exists. The GUI only reads the file
+  and opens it in the system's editor on request; when the file is missing,
+  Open config file opens its folder in Explorer if the folder exists, and
+  shows a fixed failure message otherwise. It never creates or writes the
+  file. This is unit-tested but has not been tried on a real Windows desktop.
+- Settings shows whether the agent starts at sign-in, read-only. On Windows
+  `gui/src/win/run.rs` reads, with `RegGetValueW` and no expansion, the
+  installer's `Gateinto` value in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the `Gateinto`
+  value in
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`,
+  where Windows records whether the user turned the entry off. It does not
+  use the string helper of the app's own `Gateinto App` value, which treats
+  a value of another type as missing. `sys::reg_value` returns each value as
+  absent, a string, binary data or another type, and `settings::agent_start`
+  decides the state without Windows calls. Only a missing Run value is Off.
+  A Run value of another type, any command other than a program named
+  `gateinto.exe` followed exactly by `agent --detach`, or a read error is
+  Unknown. When the command matches, a missing StartupApproved value or one
+  whose first byte is `02` is On, a first byte of `03` is Off, and any other
+  first byte, an empty value, another type or a read error is Unknown. Each
+  state is a fixed translated text; the values and their paths are never
+  shown. A fixed note says the installer sets it, for example with
+  `AUTOSTART=1`. The GUI has no control for it and never writes, creates or
+  deletes either value. This note, and the one saying the app's own switch
+  opens the app and not the agent, are not drawn as text: each sits behind a
+  small info icon after the row's label. The icon is a keyboard focus stop
+  with no action. Hovering it shows the sentence in the window's standard
+  tooltip; focusing it with the keyboard shows the same sentence in a second,
+  tracked tooltip placed below the icon while the window is active
+  (`board::focused_tip`, `win/tips.rs`); while that tooltip is shown, the
+  icon has no hover tooltip, so only one appears (`board::unpinned`). The
+  GUI has no accessibility tree of
+  its own, so a screen reader gets the sentence only if it reads tooltip
+  windows; this has not been tried. It reads it when Settings is
+  selected and, while Settings stays selected, on worker updates at most once
+  per 2-second poll (`settings::reread`); there is no extra timer. Demo mode
+  shows a fixed On and never reads the registry. The app's own switch is
+  labelled as starting the app, not the agent. This is unit-tested but has
+  not been tried on a real Windows desktop.
+- The GUI removes a gateway added from a link without the agent: its gateway
+  details offer Remove only when the listed gateway's source is the link
+  store (a config gateway, including one that shadows a linked entry of the
+  same name, has no such control). A confirmation dialog names the gateway
+  as the list shows it, with Cancel first in the tab order. Confirming reads
+  the config file from the same path as the list and calls
+  `LinkedStore::forget_gateway` on `store::default_dir()`, the decision
+  `gateinto gateway forget` uses: a name in the config file, a name held by
+  several files, a damaged entry or a missing name removes nothing, and an
+  unreadable config file or store refuses too. Each refusal maps to a fixed
+  message in the dialog (`gui/src/remove.rs`), never the error, which can
+  hold paths. Only that gateway's file is deleted. Sessions are not stopped,
+  as with the command line. The list changes at the next 2-second poll. Demo
+  mode only shows a fixed note. This is unit-tested but has not been tried
+  on a real Windows desktop.
+- The GUI adds a gateway without the agent: its Add dialog asks for a
+  display name, the gateway address, an optional portal and the route.
+  The display name is trimmed, its whitespace collapsed, and an empty,
+  over-long or already shown name is refused (`gui/src/add.rs`). The
+  identifier the command line and links use is generated from it, or from
+  the host when nothing usable is left, made unique against the listed
+  gateways and never shown (`gui/src/naming.rs`). Mixed is preselected and
+  the disclosure then carries the link approval's direct-connection warning
+  (`link::MIXED_WARNING`); All uses its all-traffic wording
+  (`link::ALL_TRAFFIC`). In Chinese the disclosure uses the phrases of the
+  approval window's Chinese notice (`i18n::chinese_disclosure`). The gateway is written with `LinkedStore::add` on
+  `store::default_dir()` with its approval time and chosen route; the config
+  file is never written. The list and details show the saved route of each
+  gateway, and a browser started from the GUI asks for that saved route
+  (`route=saved`). Everywhere else the GUI names a gateway by its display
+  name, falling back to the identifier. This is unit-tested but not yet
+  verified on Windows.
 
 ## Modules
 
@@ -316,13 +467,14 @@ The full protocol, limits and guarantees are in
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
-| `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting and purging. |
+| `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting (with the `gateway forget` decision shared with the GUI) and purging. |
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
+| `src/logbook.rs` | The agent's in-memory logbook: a `tracing` layer that keeps the last 500 events at `info` and above, each message cut to 1000 characters and scoped to its session or module, and the page of events after a sequence number for the IPC `log` request. Never written to disk. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
 | `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
@@ -338,6 +490,11 @@ The full protocol, limits and guarantees are in
 | `src/proxy/relay.rs` | Bidirectional copy between client and upstream with an idle timeout that any traffic in either direction resets. |
 | `src/tls.rs` | TLS modes and their key exchange groups, the post-handshake negotiation check, the TLS 1.3 client configuration, the client certificate resolver; default roots from `webpki-roots`; loading `--ca-file` PEM bundles. |
 | `src/identity/` | Device key lifecycle including the confirmed purge (`device_key.rs`), client certificate selection and binding to the device key (`client_cert.rs`, `x509.rs`), self-signed client certificates issued and renewed with the device key (`certificates.rs`), CNG status classification, and the Windows CNG store (`windows_cng.rs`, `cfg(windows)` only). |
+| `gui/src/add.rs`, `gui/src/naming.rs` | The GUI's Add for gateways on this device: the form, its limits and route choice, the disclosure, the generated identifier and the store write. |
+| `gui/src/log.rs`, `gui/src/board/log.rs`, `gui/src/wrap.rs` | The GUI's log view: the journal of agent log events, the filter, copying, and the drawn rows. A long message wraps onto continuation lines under its message column: `wrap.rs` breaks at the last space that fits and cuts tokens wider than a line, measured with per-character advances of the mono font. Shown scopes and messages drop text direction controls and the invisible U+200B, U+2060 and U+FEFF, and show control characters and the U+2028 and U+2029 separators as spaces; copying keeps the text as it was. |
+| `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
+| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
+| `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
 
 ## Local 200 only after upstream 2xx
 
@@ -427,16 +584,33 @@ and port have no default. See the README for the schema.
 ## Installation and the device identity
 
 The per-user MSI ([packaging/wix](../packaging/wix/README.md),
-[install.md](install.md)) installs `gateinto.exe` under
-`%LOCALAPPDATA%\Programs\Gateinto`, the `HKCU` `gateinto://` handler and an
-optional `HKCU` Run entry. Installing binaries is separate from creating the
-device key: no custom action touches a key, and the only uninstall custom
-action runs `gateinto stop --remove-stale-profiles` as the user. The key is
+[install.md](install.md)) installs `gateinto.exe` and `gateinto-gui.exe` side
+by side under `%LOCALAPPDATA%\Programs\Gateinto`, so the GUI's Start agent
+finds `gateinto.exe` next to it, a per-user Start Menu shortcut to the GUI,
+the `HKCU` `gateinto://` handler and an optional `HKCU` Run entry for the
+agent. It never runs the GUI or the agent after installing and never writes
+the GUI's own `Gateinto App` Run value. Installing binaries is separate from creating the
+device key: no custom action touches a key. The uninstall custom actions,
+all deferred, impersonated and run only on removal, are
+`gateinto stop --remove-stale-profiles`, and `gateinto-gui.exe --uninstall`
+on a full uninstall or `gateinto-gui.exe --quit` when a major upgrade removes
+the old version. Both GUI flags are accepted only alone and never show a
+window (`gui/src/uninstall.rs`); `gui/src/win/instance.rs` posts the private
+`message::EXIT` to windows of the GUI's classes owned by the same user and
+image, whose window procedure destroys the window as the tray's Exit does,
+and waits at most 5 seconds. `--uninstall` then lets `gui/src/win/run.rs`
+delete `Gateinto App` and its StartupApproved entry only when
+`uninstall::removes` finds a plain string that launches the running
+`gateinto-gui.exe`. The key is
 created by `gateinto setup` (or `key init`) as the user who will use it;
 `setup` refuses the LocalSystem, LocalService and NetworkService accounts.
-Other commands only open the key. The key and the config file
-(`%APPDATA%\Gateinto\gateinto.toml` by default) are not MSI components, so an
-uninstall keeps them and a reinstall keeps the SPKI. Only
+Other commands only open the key. The key is not an MSI component, so an
+uninstall keeps it and a reinstall keeps the SPKI. The MSI creates the config
+file (`%APPDATA%\Gateinto\gateinto.toml`) from a template with every setting
+commented out only when it does not exist. That component is permanent, its
+condition is evaluated only on first install, and it is never reinstalled
+while its `HKCU` marker exists, so by design the installer never overwrites or
+removes the file; this is not yet verified on Windows. Only
 `gateinto reset --purge-device-identity` deletes the key: it requires the SPKI
 prefix, stops the agent, reopens the named key with `NCryptOpenKey`, checks
 the SPKI again and deletes that handle with `NCryptDeleteKey`.

@@ -56,6 +56,13 @@ impl CaptionButtons {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Banner {
+    pub card: Rect,
+    pub title: Rect,
+    pub note: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub rail: Rect,
     pub rail_edge: Rect,
@@ -63,9 +70,11 @@ pub struct Layout {
     pub logo: Rect,
     pub brand_text: Rect,
     pub nav: [NavItem; 5],
+    pub banner: Banner,
     pub caption_row: Rect,
     pub buttons: Option<CaptionButtons>,
     pub title: Rect,
+    pub content: Rect,
 }
 
 impl Layout {
@@ -79,10 +88,11 @@ impl Layout {
 
         let gutter = s.px(10.0);
         let item_h = s.px(40.0);
+        let step = s.px(44.0);
         let nav = std::array::from_fn(|i| {
             let page = Page::ALL[i];
             let y = if page.at_bottom() {
-                height - s.px(14.0) - item_h * (Page::ALL.len() - i) as i32
+                height - s.px(14.0) - item_h - step * (Page::ALL.len() - 1 - i) as i32
             } else {
                 s.px(64.0 + 44.0 * i as f32)
             };
@@ -108,6 +118,21 @@ impl Layout {
             }
         });
 
+        let card_h = s.px(52.0);
+        let card = Rect::new(
+            gutter,
+            nav[Page::Log as usize].frame.y - s.px(12.0) - card_h,
+            inner - 2 * gutter,
+            card_h,
+        );
+        let pad = s.px(12.0);
+        let line = |y: f32| Rect::new(card.x + pad, card.y + s.px(y), card.w - 2 * pad, s.px(16.0));
+        let banner = Banner {
+            card,
+            title: line(9.0),
+            note: line(27.0),
+        };
+
         let content_w = width - rail.w;
         let (caption_h, title_gap) = if caption_buttons {
             (s.px(40.0), s.px(4.0))
@@ -120,6 +145,13 @@ impl Layout {
             Rect::new(width - w * i, 0, w, caption_row.h)
         };
         let pad = s.px(28.0);
+        let title = Rect::new(
+            rail.w + pad,
+            caption_row.h + title_gap,
+            content_w - 2 * pad,
+            s.px(32.0),
+        );
+        let top = title.bottom() + s.px(4.0);
         Self {
             rail,
             rail_edge: Rect::new(inner, 0, edge, height),
@@ -127,6 +159,7 @@ impl Layout {
             logo: Rect::new(s.px(16.0), (brand.h - logo_size) / 2, logo_size, logo_size),
             brand_text: Rect::new(text_x, 0, inner - text_x - gutter, brand.h),
             nav,
+            banner,
             caption_row,
             buttons: caption_buttons.then(|| CaptionButtons {
                 minimize: button(3),
@@ -134,12 +167,8 @@ impl Layout {
                 close: button(1),
                 glyph: s.px(10.0),
             }),
-            title: Rect::new(
-                rail.w + pad,
-                caption_row.h + title_gap,
-                content_w - 2 * pad,
-                s.px(32.0),
-            ),
+            title,
+            content: Rect::new(title.x, top, title.w, height - top - s.px(24.0)),
         }
     }
 
@@ -196,10 +225,25 @@ mod tests {
                 (Page::Sessions, Rect::new(10, 64, 199, 40)),
                 (Page::Gateways, Rect::new(10, 108, 199, 40)),
                 (Page::Device, Rect::new(10, 152, 199, 40)),
-                (Page::Log, Rect::new(10, 586, 199, 40)),
+                (Page::Log, Rect::new(10, 582, 199, 40)),
                 (Page::Settings, Rect::new(10, 626, 199, 40)),
             ]
         );
+    }
+
+    #[test]
+    fn every_rail_item_keeps_the_same_gap_to_the_next_at_any_size() {
+        for (dpi, h) in [(96, 680), (96, 520), (144, 780), (192, 1040)] {
+            let s = Scale::new(dpi);
+            let l = Layout::new(s.px(1040.0), h, s, true);
+            let gap = s.px(44.0) - s.px(40.0);
+            for pair in l.nav.windows(2) {
+                let space = pair[1].frame.y - pair[0].frame.bottom();
+                assert!(space >= gap, "{dpi} dpi, {h} px: {pair:?}");
+            }
+            let bottom = &l.nav[Page::ALL.len() - 2..];
+            assert_eq!(bottom[1].frame.y - bottom[0].frame.bottom(), gap);
+        }
     }
 
     #[test]
@@ -235,6 +279,14 @@ mod tests {
     }
 
     #[test]
+    fn content_fills_the_space_under_the_title() {
+        assert_eq!(at(96).content, Rect::new(248, 80, 764, 576));
+        let system = Layout::new(1040, 680, Scale::new(96), false);
+        assert_eq!(system.content, Rect::new(248, 56, 764, 600));
+        assert_eq!(at(192).content, Rect::new(496, 160, 488, 472));
+    }
+
+    #[test]
     fn scales_every_offset_from_design_units() {
         let l = Layout::new(1560, 1020, Scale::new(144), true);
         assert_eq!(l.rail, Rect::new(0, 0, 330, 1020));
@@ -251,6 +303,23 @@ mod tests {
         assert_eq!(Layout::default_size(Scale::new(144)), (1560, 1020));
         assert_eq!(Layout::min_size(Scale::new(96)), (760, 520));
         assert_eq!(Layout::min_size(Scale::new(192)), (1520, 1040));
+    }
+
+    #[test]
+    fn the_demo_banner_sits_in_the_rail_between_both_groups() {
+        for (dpi, h) in [(96, 520), (96, 680), (144, 780), (192, 1040)] {
+            let s = Scale::new(dpi);
+            let l = Layout::new(s.px(1040.0), h, s, true);
+            let b = l.banner;
+            assert!(b.card.x >= l.rail.x && b.card.right() <= l.rail_edge.x);
+            assert!(b.card.y > l.item(Page::Device).frame.bottom() + s.px(8.0));
+            assert!(b.card.bottom() < l.item(Page::Log).frame.y);
+            for line in [b.title, b.note] {
+                assert!(line.x > b.card.x && line.right() < b.card.right());
+                assert!(line.y > b.card.y && line.bottom() < b.card.bottom());
+            }
+            assert!(b.title.bottom() <= b.note.y);
+        }
     }
 
     #[test]

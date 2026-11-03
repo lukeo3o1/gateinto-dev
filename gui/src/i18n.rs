@@ -1,0 +1,831 @@
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::fmt;
+
+use gateinto::link::{Ask, Confirmation, Loosening, Origin};
+use gateinto::proxy::Route;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Language {
+    #[default]
+    English,
+    Chinese,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Choice {
+    #[default]
+    System,
+    English,
+    Chinese,
+}
+
+pub const KEY: &str = "Software\\Gateinto\\App";
+pub const VALUE: &str = "Language";
+
+impl Choice {
+    pub const ALL: [Choice; 3] = [Choice::System, Choice::English, Choice::Chinese];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Choice::System => "System",
+            Choice::English => "English",
+            Choice::Chinese => "zh-TW",
+        }
+    }
+
+    pub fn parse(value: Option<&str>) -> Choice {
+        Choice::ALL
+            .into_iter()
+            .find(|c| Some(c.name()) == value)
+            .unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Choice::System => tr(Text::System),
+            Choice::English => "English",
+            Choice::Chinese => "繁體中文",
+        }
+    }
+
+    pub fn language(self, system: Language) -> Language {
+        match self {
+            Choice::System => system,
+            Choice::English => Language::English,
+            Choice::Chinese => Language::Chinese,
+        }
+    }
+}
+
+pub fn names(list: &[u16]) -> Vec<String> {
+    list.split(|&unit| unit == 0)
+        .take_while(|name| !name.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
+pub fn from_tags<S: AsRef<str>>(tags: &[S]) -> Option<Language> {
+    let tag = tags.first()?.as_ref().to_ascii_lowercase();
+    let mut parts = tag.split('-');
+    let traditional = parts.next() == Some("zh")
+        && parts
+            .next()
+            .is_some_and(|part| ["tw", "hant", "hk", "mo"].contains(&part));
+    Some(if traditional {
+        Language::Chinese
+    } else {
+        Language::English
+    })
+}
+
+pub fn from_langid(id: u16) -> Language {
+    match id {
+        0x0404 | 0x0C04 | 0x1404 | 0x7C04 => Language::Chinese,
+        _ => Language::English,
+    }
+}
+
+thread_local! {
+    static CURRENT: Cell<Language> = const { Cell::new(Language::English) };
+}
+
+pub fn set(language: Language) {
+    CURRENT.set(language);
+}
+
+pub fn current() -> Language {
+    CURRENT.get()
+}
+
+#[cfg(test)]
+pub struct Speaking;
+
+#[cfg(test)]
+pub fn speaking(language: Language) -> Speaking {
+    set(language);
+    Speaking
+}
+
+#[cfg(test)]
+impl Drop for Speaking {
+    fn drop(&mut self) {
+        set(Language::English);
+    }
+}
+
+macro_rules! table {
+    ($($key:ident => $en:literal, $zh:literal;)*) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Text {
+            $($key,)*
+        }
+
+        impl Text {
+            #[cfg(test)]
+            pub const ALL: &[Text] = &[$(Text::$key,)*];
+            const ENGLISH: &[&str] = &[$($en,)*];
+            const CHINESE: &[&str] = &[$($zh,)*];
+        }
+    };
+}
+
+table! {
+    System => "System", "系統";
+    Sessions => "Sessions", "工作階段";
+    Gateways => "Gateways", "閘道";
+    Device => "Device", "裝置";
+    Log => "Log", "記錄";
+    Settings => "Settings", "設定";
+    ThisDevice => "This device", "這台裝置";
+    Demo => "Demo", "示範";
+    DemoNote => "Sample data only", "僅為範例資料";
+    Relaying => "Relaying", "轉送中";
+    Idle => "Idle", "閒置";
+    RunningOne => "Agent running on loopback only · {0} session · {1} active", "代理程式僅在本機回送位址執行 · {0} 個工作階段 · {1} 個使用中";
+    RunningMany => "Agent running on loopback only · {0} sessions · {1} active", "代理程式僅在本機回送位址執行 · {0} 個工作階段 · {1} 個使用中";
+    Stopped => "Stopped", "已停止";
+    AgentStopped => "The agent is not running", "代理程式未執行";
+    AgentUnreachable => "Agent unreachable", "無法連線到代理程式";
+    Browser => "Browser", "瀏覽器";
+    Session => "Session", "工作階段";
+    OsUser => "OS user", "作業系統使用者";
+    Password => "Password", "密碼";
+    NoAuthentication => "No authentication", "不驗證";
+    Unknown => "Unknown", "未知";
+    All => "All", "全部";
+    Mixed => "Mixed", "混合";
+    UnderMinute => "<1 min", "<1 分鐘";
+    Minutes => "{0} min", "{0} 分鐘";
+    Hours => "{0} h", "{0} 小時";
+    Days => "{0} d", "{0} 天";
+    NoSessionsHint => "No sessions. Start one with Start browser on the Gateways page.", "沒有工作階段。請在「閘道」頁面使用「啟動瀏覽器」啟動。";
+    StopAgent => "Stop agent", "停止代理程式";
+    StartAgent => "Start agent", "啟動代理程式";
+    StartingAgent => "Starting the agent…", "正在啟動代理程式…";
+    AgentStartFailed => "Could not start the agent. Run `gateinto agent` to see why.", "無法啟動代理程式。請執行 `gateinto agent` 查看原因。";
+    AgentCommandMissing => "gateinto.exe was not found next to Gateinto.", "在 Gateinto 旁找不到 gateinto.exe。";
+    StartBrowser => "Start browser", "啟動瀏覽器";
+    RevokeSession => "Revoke session", "撤銷工作階段";
+    More => "More", "更多";
+    ShowPassword => "Show password", "顯示密碼";
+    HidePassword => "Hide password", "隱藏密碼";
+    Gateway => "Gateway", "閘道";
+    Uptime => "Uptime", "運作時間";
+    Activity => "Activity", "活動";
+    Active => "Active", "使用中";
+    GatewaysSubtitle => "Remote HTTPS proxies this device can relay through", "這台裝置可透過其轉送的遠端 HTTPS 代理";
+    NoGatewaysHint => "No gateways. Use Add gateway, or add one to the config file.", "沒有閘道。請使用「新增閘道」，或在設定檔中新增。";
+    ConfigReadOnly => "From the config file, read-only here.", "來自設定檔，此處為唯讀。";
+    AddGateway => "Add gateway", "新增閘道";
+    NotSet => "Not set", "未設定";
+    Name => "Name", "名稱";
+    NoValue => "None", "無";
+    Host => "Host", "主機";
+    Port => "Port", "連接埠";
+    ServerName => "Server name", "伺服器名稱";
+    Source => "Source", "來源";
+    ConfigFile => "Config file", "設定檔";
+    AddedHere => "Added on this device", "在這台裝置上新增";
+    Route => "Route", "路由";
+    PortalPage => "Portal page", "入口網頁";
+    TlsMode => "TLS mode", "TLS 模式";
+    HybridPreferred => "Hybrid preferred", "優先使用混合";
+    HybridRequired => "Hybrid required", "必須使用混合";
+    ClassicalOnly => "Classical only", "僅限傳統";
+    ClientCertificate => "Client certificate", "用戶端憑證";
+    ActiveSessions => "Active sessions", "使用中的工作階段";
+    NoSessions => "No sessions", "沒有工作階段";
+    SessionCount => "{0} session", "{0} 個工作階段";
+    SessionsCount => "{0} sessions", "{0} 個工作階段";
+    On => "On", "開啟";
+    Off => "Off", "關閉";
+    Optional => "Optional", "選用";
+    Required => "Required", "必要";
+    SelfSigned => "{0}, self-signed", "{0}，自我簽署";
+    DeviceSubtitle => "What gateways see when this PC signs in", "這台電腦登入時閘道看到的資訊";
+    Storage => "Storage", "儲存位置";
+    DeviceId => "Device ID", "裝置識別碼";
+    UsedWith => "Used with", "用於";
+    CopyDeviceIdFailed => "Could not copy the device ID", "無法複製裝置識別碼";
+    NoDeviceKey => "No device key yet. Run `gateinto setup` to create one.", "尚無裝置金鑰。請執行 `gateinto setup` 建立。";
+    ReadingDeviceKey => "Reading the device key…", "正在讀取裝置金鑰…";
+    HardwareKey => "Hardware key", "硬體金鑰";
+    DeviceKey => "Device key", "裝置金鑰";
+    KeyName => "Key name", "金鑰名稱";
+    CopyDeviceId => "Copy device ID", "複製裝置識別碼";
+    Copied => "Copied", "已複製";
+    ThisPc => "This PC", "這台電腦";
+    Software => "Software", "軟體";
+    Algorithm => "Algorithm", "演算法";
+    Agent => "Agent", "代理程式";
+    SignedInAs => "Signed in as {0}", "登入身分：{0}";
+    AgentOlder => "The running agent is older than this version of Gateinto and cannot show its log. Restart it to see its messages here.", "執行中的代理程式比這個版本的 Gateinto 舊，無法顯示記錄。請重新啟動代理程式以在此查看訊息。";
+    NoMessages => "No messages yet", "尚無訊息";
+    NoWarnings => "No warnings", "沒有警告";
+    LogSubtitle => "Messages from the running agent. Passwords and page contents are never logged.", "來自執行中代理程式的訊息。密碼與網頁內容一律不會記錄。";
+    Copy => "Copy", "複製";
+    CopyLogFailed => "Could not copy the log", "無法複製記錄";
+    Warnings => "Warnings", "警告";
+    NoGateways => "No gateways", "沒有閘道";
+    PortalFailed => "Could not open the portal page", "無法開啟入口網頁";
+    ShowCredentials => "Show credentials", "顯示登入資訊";
+    OpenPortal => "Open portal page", "開啟入口網頁";
+    GatewayDetails => "Gateway details", "閘道詳細資料";
+    NotFound => "Not found", "找不到";
+    NoConfigPath => "No config file location", "沒有設定檔位置";
+    AgentConfig => "{0} (used by the running agent)", "{0}（執行中的代理程式所用）";
+    ConfigNotCreated => "{0} (not created yet)", "{0}（尚未建立）";
+    ConfigRestart => "{0} (restart the agent to use it)", "{0}（請重新啟動代理程式以使用）";
+    OpenConfig => "Open config file", "開啟設定檔";
+    OpenConfigFailed => "Could not open the config file", "無法開啟設定檔";
+    App => "App", "應用程式";
+    Theme => "Theme", "主題";
+    ThemeFailed => "Could not save the theme setting", "無法儲存主題設定";
+    SignIn => "Start the app at sign-in", "登入時啟動應用程式";
+    SignInNote => "Opens this app when you sign in, not the agent", "登入時開啟此應用程式，不會啟動代理程式";
+    AgentSignIn => "Agent starts at sign-in", "代理程式於登入時啟動";
+    AgentSignInNote => "Installer-set, for example AUTOSTART=1; read-only", "由安裝程式設定（例如 AUTOSTART=1），此處僅供檢視";
+    SignInUnread => "Could not read the sign-in setting", "無法讀取登入時啟動設定";
+    SignInFailed => "Could not change the sign-in setting", "無法變更登入時啟動設定";
+    FromConfig => "From the config file", "來自設定檔";
+    BuiltInDefaults => "Built-in defaults", "內建預設值";
+    Detected => "{0} (detected)", "{0}（已偵測）";
+    Kilobytes => "{0} KB", "{0} KB";
+    Bytes => "{0} bytes", "{0} 位元組";
+    Seconds => "{0} s", "{0} 秒";
+    ConcurrentTunnels => "Concurrent tunnels", "同時通道數";
+    ConnectTimeout => "Connect timeout", "連線逾時";
+    IdleTimeout => "Idle timeout", "閒置逾時";
+    HeaderLimit => "Request header limit", "請求標頭上限";
+    Light => "Light", "淺色";
+    Dark => "Dark", "深色";
+    CredentialsTitle => "Session credentials", "工作階段登入資訊";
+    Close => "Close", "關閉";
+    Add => "Add", "新增";
+    Cancel => "Cancel", "取消";
+    Username => "Username", "使用者名稱";
+    AskingCredentials => "Asking the agent for this session's credentials…", "正在向代理程式索取此工作階段的登入資訊…";
+    CredentialsUnavailable => "The agent did not hand out this session's credentials. Close this and try again.", "代理程式未提供此工作階段的登入資訊。請關閉後再試一次。";
+    CredentialsSubtitle => "Shown when this PC cannot check the OS user, so the browser asks for a proxy sign-in.", "這台電腦無法確認作業系統使用者，瀏覽器因此要求代理登入時顯示。";
+    ClipboardFailed => "Could not copy to the clipboard", "無法複製到剪貼簿";
+    HyphenHint => "Type it exactly, including the hyphens.", "請完整輸入，包括連字號。";
+    DialogNames => "sign-in dialog names {0}", "登入對話框會顯示 {0}";
+    CredentialsWarning => "Enter these only in the proxy sign-in prompt for {0}. Never enter them in a website's sign-in page or dialog.", "只能在 {0} 的代理登入提示中輸入。切勿在網站的登入頁面或對話框中輸入。";
+    GatewayAddress => "Gateway address", "閘道位址";
+    AddressHint => "Host name or IP address. Port 443 is the default.", "主機名稱或 IP 位址。預設連接埠為 443。";
+    NameHint => "Shown in the app. Spaces are allowed.", "顯示在應用程式中，可包含空格。";
+    PortalHint => "Optional. An https:// page the browser opens first.", "選用。瀏覽器最先開啟的 https:// 網頁。";
+    NoFolder => "This device has no folder for added gateways.", "這台裝置沒有存放新增閘道的資料夾。";
+    Damaged => "A damaged gateway entry on this device uses this name or address. Fix or remove it, then try again.", "這台裝置上有一筆損毀的閘道項目使用這個名稱或位址。請修正或移除後再試一次。";
+    Unstorable => "This address is too long to store on this device.", "這個位址太長，無法存放在這台裝置上。";
+    StoreUnavailable => "The gateways added on this device cannot be read, so no gateway can be added now.", "無法讀取這台裝置上新增的閘道，因此目前無法新增閘道。";
+    Taken => "Another gateway with this name or address was just added. Nothing was changed.", "剛才已新增另一個使用這個名稱或位址的閘道。未做任何變更。";
+    Full => "This device holds as many added gateways as it can. Remove one first.", "這台裝置可新增的閘道已達上限。請先移除一個。";
+    NotSaved => "The gateway could not be saved on this device.", "無法在這台裝置上儲存閘道。";
+    Unlisted => "The gateway list cannot be read.", "無法讀取閘道清單。";
+    RemoveGateway => "Remove gateway", "移除閘道";
+    Remove => "Remove", "移除";
+    RemoveAsk => "Remove \"{0}\" from the gateways added on this device?", "要從這台裝置上新增的閘道中移除「{0}」嗎？";
+    RemoveKeeps => "Browser sessions already open through it stay open until they are closed. This device's key and identity are not changed.", "已透過它開啟的瀏覽器工作階段會保持開啟，直到關閉為止。這台裝置的金鑰與身分不會變更。";
+    NotAddedHere => "No gateway added on this device has this name. Nothing was removed.", "這台裝置上新增的閘道中沒有這個名稱。未移除任何項目。";
+    NameHeldTwice => "Several entries on this device use this name. Nothing was removed.", "這台裝置上有多筆項目使用這個名稱。未移除任何項目。";
+    NotRemoved => "The gateway could not be removed from this device.", "無法從這台裝置上移除閘道。";
+    Unusable => "These values cannot be used for a gateway.", "這些值無法用於閘道。";
+    EnterHost => "Enter a host name or IP address, with an optional :port.", "請輸入主機名稱或 IP 位址，可加上 :連接埠。";
+    ReservedHost => "The host may not start with a Windows device name such as CON or NUL.", "主機名稱不可用 CON 或 NUL 等 Windows 裝置名稱開頭。";
+    NameRule => "Use at most {0} characters, without control or text direction characters.", "最多 {0} 個字元，且不可包含控制字元或文字方向字元。";
+    EnterHttps => "Enter an https:// address.", "請輸入 https:// 位址。";
+    AlreadySetUp => "Already set up as \"{0}\".", "已設定為「{0}」。";
+    NameUsed => "\"{0}\" is already used by another gateway.", "「{0}」已被其他閘道使用。";
+    StartSession => "Start a browser session", "啟動瀏覽器工作階段";
+    NoGatewaysYet => "No gateways yet.", "尚無閘道。";
+    StartingSession => "Starting a browser session…", "正在啟動瀏覽器工作階段…";
+    SessionStarted => "Browser session started", "已啟動瀏覽器工作階段";
+    OpenApp => "Open Gateinto", "開啟 Gateinto";
+    AddGatewayMenu => "Add gateway…", "新增閘道…";
+    Exit => "Exit", "結束";
+    FlyoutTitle => "Gateinto status", "Gateinto 狀態";
+    OneSessionTraffic => "1 session · {0} with traffic", "1 個工作階段 · {0} 個有流量";
+    SessionsTraffic => "{0} sessions · {1} with traffic", "{0} 個工作階段 · {1} 個有流量";
+    Checking => "Checking", "檢查中";
+    WaitingStatus => "Waiting for the agent status", "正在等候代理程式狀態";
+    OpenCount => "{0} open", "{0} 個已開啟";
+    MoreInApp => "{0} more in Gateinto", "Gateinto 中還有 {0} 個";
+    TrayTip => "Gateinto: {0}\n{1}", "Gateinto：{0}\n{1}";
+    DemoTitle => "Gateinto Demo", "Gateinto 示範";
+    DemoFlyoutTitle => "Gateinto Demo status", "Gateinto 示範狀態";
+    DemoTrayTip => "Gateinto Demo: {0}\n{1}", "Gateinto 示範：{0}\n{1}";
+    DemoNotStarted => "Demo: nothing was started", "示範：未啟動任何項目";
+    DemoNotRevoked => "Demo: nothing was revoked", "示範：未撤銷任何項目";
+    DemoNotStopped => "Demo: the agent was not stopped", "示範：未停止代理程式";
+    DemoAgentNotStarted => "Demo: the agent was not started", "示範：未啟動代理程式";
+    DemoNotSaved => "Demo: nothing was saved", "示範：未儲存任何項目";
+    DemoNotOpened => "Demo: nothing was opened", "示範：未開啟任何項目";
+    DemoNotRemoved => "Demo: nothing was removed", "示範：未移除任何項目";
+    NoRendering => "Gateinto could not start Direct2D and DirectWrite rendering.", "Gateinto 無法啟動 Direct2D 與 DirectWrite 繪製。";
+    NoWindowClass => "Gateinto could not register its window class.", "Gateinto 無法登錄視窗類別。";
+    NoWindow => "Gateinto could not create its window.", "Gateinto 無法建立視窗。";
+    OpenRefused => "Gateinto could not open this link.", "Gateinto 無法開啟此連結。";
+    LanguageRow => "Language", "語言";
+    LanguageFailed => "Could not save the language setting", "無法儲存語言設定";
+    AgentNotRunning => "no agent is running", "沒有正在執行的代理程式";
+    LinkAgentNotRunning => "the agent is not running; start it, then open the link again", "代理程式未在執行；請先啟動它，再重新開啟連結";
+    LinkUnnamed => "the link names no gateway to confirm", "連結未指定要確認的閘道";
+    LinkNotEchoed => "the agent asked to confirm another gateway than the link names; nothing was stored", "代理程式要求確認的閘道與連結指定的不同；未儲存任何項目";
+    ApprovalTitle => "Confirm gateway", "確認閘道";
+    Allow => "Allow", "允許";
+    Deny => "Deny", "拒絕";
+    AllowIn => "Allow ({0})", "允許（{0}）";
+    NoticeTooLong => "This link's details do not fit on this screen, so it cannot be allowed here. Choose Deny.", "此連結的詳細資料無法在這個螢幕上完整顯示，因此無法在此允許。請選擇「拒絕」。";
+    AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
+    AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
+    Confirmation => "the agent asked to confirm this gateway; open the gateway's link again to confirm it", "代理程式要求確認此閘道；請重新開啟該閘道的連結以確認";
+}
+
+impl Text {
+    pub fn english(self) -> &'static str {
+        Self::ENGLISH[self as usize]
+    }
+
+    pub fn chinese(self) -> &'static str {
+        Self::CHINESE[self as usize]
+    }
+
+    pub fn get(self) -> &'static str {
+        match current() {
+            Language::English => self.english(),
+            Language::Chinese => self.chinese(),
+        }
+    }
+}
+
+pub fn tr(text: Text) -> &'static str {
+    text.get()
+}
+
+pub fn fill(text: Text, args: &[&dyn fmt::Display]) -> String {
+    fill_with(text.get(), args)
+}
+
+fn fill_with(template: &str, args: &[&dyn fmt::Display]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        let arg = tail
+            .find('}')
+            .and_then(|close| Some((tail[1..close].parse::<usize>().ok()?, close)))
+            .and_then(|(i, close)| Some((args.get(i)?, close)));
+        match arg {
+            Some((arg, close)) => {
+                out.push_str(&arg.to_string());
+                rest = &tail[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Note {
+    Gui(Text),
+    Agent(String),
+}
+
+impl Note {
+    pub fn shown(&self) -> &str {
+        match self {
+            Note::Gui(text) => tr(*text),
+            Note::Agent(message) => message,
+        }
+    }
+}
+
+impl From<Text> for Note {
+    fn from(text: Text) -> Self {
+        Note::Gui(text)
+    }
+}
+
+impl From<Text> for Cow<'static, str> {
+    fn from(text: Text) -> Self {
+        Cow::Borrowed(text.get())
+    }
+}
+
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.get())
+    }
+}
+
+pub fn confirmation_notice(ask: &Ask) -> String {
+    match (current(), ask) {
+        (Language::English, _) => ask.message(),
+        (Language::Chinese, Ask::Add(confirmation)) => chinese_notice(confirmation),
+        (Language::Chinese, Ask::Loosen(loosening)) => chinese_loosening(loosening),
+    }
+}
+
+const ZH_IDENTITY: &str = "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）";
+const ZH_TRUST: &str = "只有在您信任營運此閘道的組織時";
+const ZH_ROUTED: &str = "轉送給它的流量。";
+const ZH_ALL_TRAFFIC: &str = "隔離瀏覽器的所有流量：每個連線都會經過閘道。";
+const ZH_MIXED_WARNING: &str = "警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+     這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。";
+
+pub fn chinese_disclosure(route: Route) -> String {
+    let traffic = match route {
+        Route::Gateway => ZH_ALL_TRAFFIC.to_owned(),
+        Route::Mixed => format!("{ZH_ROUTED}{ZH_MIXED_WARNING}"),
+    };
+    format!("{ZH_IDENTITY}以及{traffic}{ZH_TRUST}才新增。")
+}
+
+fn chinese_notice(confirmation: &Confirmation) -> String {
+    let local = if confirmation.gateway.is_local() {
+        "\n此位址位於您的電腦或區域網路上。"
+    } else {
+        ""
+    };
+    let portal = confirmation
+        .portal
+        .as_ref()
+        .and_then(Origin::of)
+        .map_or_else(|| "無".to_owned(), |origin| origin.to_string());
+    let traffic = match confirmation.route {
+        Route::Gateway => format!("{ZH_ALL_TRAFFIC}此閘道將以閘道路由（應用程式中的「全部」）儲存"),
+        Route::Mixed => format!("{ZH_ROUTED}{ZH_MIXED_WARNING}此閘道將以混合路由儲存"),
+    };
+    format!(
+        "有網站要求將閘道「{}」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+         閘道：{}{local}\n\
+         入口網站：{portal}\n\n\
+         {ZH_IDENTITY}以及{traffic}，\
+         之後未指定路由的連結也會使用此路由。\
+         {ZH_TRUST}才允許。",
+        confirmation.profile, confirmation.gateway,
+    )
+}
+
+fn chinese_loosening(loosening: &Loosening) -> String {
+    let gateway = loosening
+        .gateway
+        .as_ref()
+        .map_or_else(String::new, |gateway| format!("閘道：{gateway}\n\n"));
+    format!(
+        "有連結要求在此瀏覽器工作階段中，將閘道「{}」從「全部」切換為「混合」。\n\n\
+         {gateway}\
+         此閘道以「全部」儲存：每個連線都會經過閘道。在「混合」模式下，只有轉送給閘道的流量會經過它。\
+         {ZH_MIXED_WARNING}\n\n\
+         此閘道仍以「全部」儲存；只有此工作階段使用「混合」。\
+         只有在您信任開啟此連結的網站時才允許。",
+        loosening.profile,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placeholders(s: &str) -> Vec<usize> {
+        let mut found: Vec<usize> = (0..10)
+            .filter(|i| s.contains(&format!("{{{i}}}")))
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    #[test]
+    fn every_key_has_both_languages_and_no_entry_is_empty() {
+        assert_eq!(Text::ALL.len(), Text::ENGLISH.len());
+        assert_eq!(Text::ALL.len(), Text::CHINESE.len());
+        for &text in Text::ALL {
+            assert!(!text.english().trim().is_empty(), "{text:?}");
+            assert!(!text.chinese().trim().is_empty(), "{text:?}");
+            assert_eq!(
+                placeholders(text.english()),
+                placeholders(text.chinese()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_text_names_the_launch_uri() {
+        for &text in Text::ALL {
+            for shown in [text.english(), text.chinese()] {
+                assert!(!shown.contains("gateinto:"), "{text:?}: {shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_current_language_picks_the_entry() {
+        assert_eq!(current(), Language::English);
+        assert_eq!(tr(Text::Demo), "Demo");
+        set(Language::Chinese);
+        assert_eq!(tr(Text::Demo), "示範");
+        assert_eq!(Cow::from(Text::DemoNote), "僅為範例資料");
+        assert_eq!(Text::Demo.to_string(), "示範");
+        set(Language::English);
+        assert_eq!(Cow::from(Text::DemoNote), "Sample data only");
+    }
+
+    #[test]
+    fn placeholders_are_filled_by_position() {
+        assert_eq!(fill_with("{1} of {0}, {1}", &[&3, &"x"]), "x of 3, x");
+        assert_eq!(fill_with("none", &[&3]), "none");
+        assert_eq!(fill_with("{0} {1}", &[&"{1}", &"b"]), "{1} b");
+        assert_eq!(fill_with("{x} {9} {", &[&1]), "{x} {9} {");
+    }
+
+    #[test]
+    fn gui_notes_follow_the_language_and_agent_notes_stay_as_worded() {
+        let gui = Note::from(Text::DemoNote);
+        let agent = Note::Agent("Sample data only".to_owned());
+        set(Language::Chinese);
+        assert_eq!(gui.shown(), "僅為範例資料");
+        assert_eq!(agent.shown(), "Sample data only");
+        set(Language::English);
+        assert_eq!(gui.shown(), "Sample data only");
+    }
+
+    #[test]
+    fn choices_round_trip_through_their_stored_names() {
+        for choice in Choice::ALL {
+            assert_eq!(Choice::parse(Some(choice.name())), choice);
+        }
+        assert_eq!(Choice::parse(None), Choice::System);
+        assert_eq!(Choice::parse(Some("")), Choice::System);
+        assert_eq!(Choice::parse(Some("Klingon")), Choice::System);
+        assert_eq!(Choice::parse(Some("english")), Choice::System);
+    }
+
+    #[test]
+    fn choices_resolve_against_the_system_language() {
+        for system in [Language::English, Language::Chinese] {
+            assert_eq!(Choice::System.language(system), system);
+            assert_eq!(Choice::English.language(system), Language::English);
+            assert_eq!(Choice::Chinese.language(system), Language::Chinese);
+        }
+    }
+
+    #[test]
+    fn language_names_read_the_same_in_every_language() {
+        for language in [Language::English, Language::Chinese] {
+            set(language);
+            assert_eq!(Choice::English.label(), "English");
+            assert_eq!(Choice::Chinese.label(), "繁體中文");
+        }
+        assert_eq!(Choice::System.label(), "系統");
+        set(Language::English);
+        assert_eq!(Choice::System.label(), "System");
+    }
+
+    #[test]
+    fn traditional_chinese_ui_tags_pick_chinese() {
+        for tag in [
+            "zh-TW",
+            "zh-tw",
+            "zh-Hant",
+            "zh-Hant-TW",
+            "zh-HK",
+            "zh-MO",
+            "zh-Hant-HK",
+        ] {
+            assert_eq!(from_tags(&[tag]), Some(Language::Chinese), "{tag}");
+        }
+        for tag in [
+            "en-US", "zh-CN", "zh-Hans", "zh-SG", "zh", "ja-JP", "zh-TWX",
+        ] {
+            assert_eq!(from_tags(&[tag]), Some(Language::English), "{tag}");
+        }
+        assert_eq!(from_tags(&["en-US", "zh-TW"]), Some(Language::English));
+        assert_eq!(from_tags::<&str>(&[]), None);
+    }
+
+    #[test]
+    fn traditional_chinese_language_ids_pick_chinese() {
+        for id in [0x0404, 0x0C04, 0x1404, 0x7C04] {
+            assert_eq!(from_langid(id), Language::Chinese, "{id:#x}");
+        }
+        for id in [0x0409, 0x0804, 0x1004, 0x0411, 0] {
+            assert_eq!(from_langid(id), Language::English, "{id:#x}");
+        }
+    }
+
+    #[test]
+    fn a_preferred_language_list_reads_up_to_its_first_empty_name() {
+        let list: Vec<u16> = "zh-TW\0en-US\0\0".encode_utf16().collect();
+        assert_eq!(names(&list), ["zh-TW", "en-US"]);
+        assert_eq!(from_tags(&names(&list)), Some(Language::Chinese));
+        assert!(names(&[0, 0]).is_empty());
+        assert_eq!(from_tags(&names(&[])), None);
+    }
+
+    fn loosenings() -> Vec<Loosening> {
+        [None, Some("proxy.corp.example"), Some("[fd00::1]:8443")]
+            .into_iter()
+            .map(|gateway| Loosening {
+                profile: "corp".parse().unwrap(),
+                gateway: gateway.map(|gateway| gateway.parse().unwrap()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_chinese_switch_notice_says_what_the_english_one_does() {
+        for loosening in loosenings() {
+            let english = loosening.message();
+            let chinese = chinese_loosening(&loosening);
+            assert!(english.contains(gateinto::link::MIXED_WARNING), "{english}");
+            for part in [
+                "將閘道「corp」從「全部」切換為「混合」",
+                "此瀏覽器工作階段",
+                ZH_MIXED_WARNING,
+                "此閘道仍以「全部」儲存；只有此工作階段使用「混合」。",
+                "只有在您信任開啟此連結的網站時才允許。",
+            ] {
+                assert!(chinese.contains(part), "{part} in {chinese}");
+            }
+            match &loosening.gateway {
+                Some(gateway) => {
+                    assert!(
+                        english.contains(&format!("Gateway: {gateway}")),
+                        "{english}"
+                    );
+                    assert!(chinese.contains(&format!("閘道：{gateway}")), "{chinese}");
+                }
+                None => {
+                    assert!(!english.contains("Gateway:"), "{english}");
+                    assert!(!chinese.contains("閘道："), "{chinese}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_notice_of_an_ask_is_the_one_of_its_kind() {
+        let loosening = loosenings().remove(1);
+        let confirmation = confirmations().remove(0);
+        set(Language::English);
+        assert_eq!(
+            confirmation_notice(&Ask::Loosen(loosening.clone())),
+            loosening.message()
+        );
+        assert_eq!(
+            confirmation_notice(&Ask::Add(confirmation.clone())),
+            confirmation.message()
+        );
+        set(Language::Chinese);
+        assert_eq!(
+            confirmation_notice(&Ask::Loosen(loosening.clone())),
+            chinese_loosening(&loosening)
+        );
+        assert_eq!(
+            confirmation_notice(&Ask::Add(confirmation.clone())),
+            chinese_notice(&confirmation)
+        );
+        set(Language::English);
+    }
+
+    fn confirmations() -> Vec<Confirmation> {
+        let mut all = Vec::new();
+        for gateway in [
+            "proxy.newco.example",
+            "proxy.newco.example:8443",
+            "192.168.1.10",
+            "[fd00::1]:8443",
+        ] {
+            for portal in [
+                None,
+                Some("https://portal.newco.example/home"),
+                Some("https://portal.newco.example:8443/app?x=1"),
+            ] {
+                for route in [Route::Gateway, Route::Mixed] {
+                    all.push(Confirmation {
+                        route,
+                        profile: "newco".parse().unwrap(),
+                        gateway: gateway.parse().unwrap(),
+                        portal: portal.map(|portal| portal.parse().unwrap()),
+                    });
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn the_chinese_confirmation_notice_names_every_field_the_english_one_does() {
+        for confirmation in confirmations() {
+            let english = confirmation.message();
+            let chinese = chinese_notice(&confirmation);
+            let mut fields = vec![
+                format!("「{}」", confirmation.profile),
+                format!("閘道：{}", confirmation.gateway),
+            ];
+            match &confirmation.portal {
+                Some(_) => fields.push(format!("入口網站：{}", confirmation.portal_origin())),
+                None => fields.push("入口網站：無".to_owned()),
+            }
+            for field in [
+                confirmation.profile.to_string(),
+                confirmation.gateway.to_string(),
+                confirmation.portal_origin(),
+            ] {
+                assert!(english.contains(&field), "{field} in {english}");
+            }
+            for field in fields {
+                assert!(chinese.contains(&field), "{field} in {chinese}");
+            }
+            assert_eq!(
+                english.contains(gateinto::link::LOCAL_ADDRESS),
+                chinese.contains("此位址位於您的電腦或區域網路上。"),
+                "{chinese}"
+            );
+            for part in [
+                "閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）",
+                "只有在您信任營運此閘道的組織時才允許。",
+            ] {
+                assert!(chinese.contains(part), "{part} in {chinese}");
+            }
+            assert!(!chinese.contains("none"), "{chinese}");
+        }
+    }
+
+    #[test]
+    fn the_chinese_notice_warns_about_direct_connections_only_in_mixed_mode() {
+        for confirmation in confirmations() {
+            let english = confirmation.message();
+            let chinese = chinese_notice(&confirmation);
+            let mixed = confirmation.route == Route::Mixed;
+            for (english_part, chinese_part, shown) in [
+                (
+                    "sites may be reached directly instead of through the gateway",
+                    "網站可能會被直接連線，而不經過閘道",
+                    mixed,
+                ),
+                (
+                    "exposes your local DNS lookups and your IP address",
+                    "暴露您的本機 DNS 查詢與 IP 位址",
+                    mixed,
+                ),
+                ("bypasses the gateway's policy", "繞過閘道的政策", mixed),
+                (
+                    "saved with the mixed route",
+                    "此閘道將以混合路由儲存",
+                    mixed,
+                ),
+                (
+                    "every connection goes through the gateway",
+                    "每個連線都會經過閘道",
+                    !mixed,
+                ),
+                (
+                    "saved with the gateway route (All in the app)",
+                    "此閘道將以閘道路由（應用程式中的「全部」）儲存",
+                    !mixed,
+                ),
+            ] {
+                assert_eq!(english.contains(english_part), shown, "{english}");
+                assert_eq!(chinese.contains(chinese_part), shown, "{chinese}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_confirmation_notice_follows_the_language() {
+        let confirmation = &Ask::Add(confirmations().remove(1));
+        assert_eq!(confirmation_notice(confirmation), confirmation.message());
+        let _zh = speaking(Language::Chinese);
+        assert_eq!(
+            confirmation_notice(confirmation),
+            "有網站要求將閘道「newco」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+             閘道：proxy.newco.example:443\n\
+             入口網站：無\n\n\
+             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及轉送給它的流量。\
+             警告：在混合模式下，網站可能會被直接連線，而不經過閘道，\
+             這會向它們暴露您的本機 DNS 查詢與 IP 位址，並繞過閘道的政策。\
+             此閘道將以混合路由儲存，之後未指定路由的連結也會使用此路由。\
+             只有在您信任營運此閘道的組織時才允許。"
+        );
+        assert_eq!(
+            chinese_notice(&confirmations()[0]),
+            "有網站要求將閘道「newco」加入 Gateinto，並透過它開啟瀏覽器工作階段。\n\n\
+             閘道：proxy.newco.example:443\n\
+             入口網站：無\n\n\
+             閘道將能看到此裝置的身分（其用戶端憑證，若已安裝）以及隔離瀏覽器的所有流量：\
+             每個連線都會經過閘道。此閘道將以閘道路由（應用程式中的「全部」）儲存，\
+             之後未指定路由的連結也會使用此路由。\
+             只有在您信任營運此閘道的組織時才允許。"
+        );
+    }
+}

@@ -15,7 +15,8 @@ use crate::clock::unix_now;
 use crate::config::GatewayName;
 use crate::ipc::{self, BrowserKind, ConfirmToken, Connection, Request, Response, Server};
 use crate::job::{Job, SpawnError};
-use crate::link::{self, Decision, Known, Launch, LinkedGateway, Resolution};
+use crate::link::{self, Ask, Confirm, Decision, Known, Launch, LinkedGateway, Resolution};
+use crate::logbook::Logbook;
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use crate::uri::LaunchRequest;
@@ -93,7 +94,24 @@ pub trait Profiles: Send + Sync + 'static {
 struct Pending {
     token: ConfirmToken,
     request: LaunchRequest,
+    ask: Ask,
     expires: Instant,
+}
+
+struct Asked<'a> {
+    ask: &'a Ask,
+    approved: bool,
+}
+
+impl Confirm for Asked<'_> {
+    fn decide(&mut self, ask: &Ask) -> Decision {
+        self.approved = ask == self.ask;
+        if self.approved {
+            Decision::Approve
+        } else {
+            Decision::Deny
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +119,8 @@ pub struct AgentOptions {
     pub browser: Option<PathBuf>,
     pub profiles_root: PathBuf,
     pub limits: AgentLimits,
+    pub logbook: Logbook,
+    pub config: ipc::ConfigSource,
 }
 
 #[derive(Debug)]
@@ -293,6 +313,10 @@ impl Agent {
                 self.close_all().await;
                 Ok(vec![ipc::agent_pid_line()])
             }
+            Request::Log { after } => return self.inner.options.logbook.response(after),
+            Request::Config => ipc::config_line(&self.inner.options.config)
+                .map(|line| vec![line])
+                .ok_or_else(|| "the config path cannot be sent over IPC".to_owned()),
         };
         match result {
             Ok(lines) => Response::Ok(lines),
@@ -321,11 +345,11 @@ impl Agent {
         let known = self.inner.profiles.known()?;
         let resolution = link::resolve(&request, &known, &mut Decision::Defer, unix_now())
             .map_err(|error| error.to_string())?;
-        let confirmation = match resolution {
+        let ask = match resolution {
             Resolution::Launch(launch) => {
                 return self.start(launch).await.map(|lines| warned(lines, &known));
             }
-            Resolution::Confirm(confirmation) => confirmation,
+            Resolution::Confirm(ask) => ask,
         };
         let now = Instant::now();
         if pending
@@ -339,18 +363,26 @@ impl Agent {
             );
         }
         let token = ConfirmToken::random().map_err(|error| error.to_string())?;
+        match &ask {
+            Ask::Add(confirmation) => info!(
+                gateway = %confirmation.profile,
+                address = %confirmation.gateway,
+                "a link asks to add a gateway; waiting for the user's confirmation"
+            ),
+            Ask::Loosen(loosening) => info!(
+                gateway = %loosening.profile,
+                "a link asks for the mixed route on a gateway saved with the gateway route; \
+                 waiting for the user's confirmation"
+            ),
+        }
+        let mut lines = vec![ipc::confirm_line(&token)];
+        lines.extend(ask.echo());
         *pending = Some(Pending {
             token,
             request,
+            ask,
             expires: now + limits.confirm_timeout,
         });
-        info!(
-            gateway = %confirmation.profile,
-            address = %confirmation.gateway,
-            "a link asks to add a gateway; waiting for the user's confirmation"
-        );
-        let mut lines = vec![ipc::confirm_line(&token)];
-        lines.extend(confirmation.echo());
         Ok(warned(lines, &known))
     }
 
@@ -371,13 +403,23 @@ impl Agent {
         let mut pending = self.inner.launching.lock().await;
         let answered = Self::answered(&mut pending, token)?;
         let known = self.inner.profiles.known()?;
-        let resolution = link::resolve(
-            &answered.request,
-            &known,
-            &mut Decision::Approve,
-            unix_now(),
-        )
-        .map_err(|error| error.to_string())?;
+        let mut asked = Asked {
+            ask: &answered.ask,
+            approved: false,
+        };
+        let resolution = link::resolve(&answered.request, &known, &mut asked, unix_now());
+        if !asked.approved {
+            warn!(
+                gateway = %answered.ask.profile(),
+                "refused an approval: the link asks for something else than when it was confirmed"
+            );
+            return Err(
+                "the gateways changed while the confirmation was open; nothing was done, open \
+                 the link again"
+                    .to_owned(),
+            );
+        }
+        let resolution = resolution.map_err(|error| error.to_string())?;
         let Resolution::Launch(launch) = resolution else {
             return Err("the gateway could not be approved".to_owned());
         };
@@ -404,7 +446,14 @@ impl Agent {
     async fn deny(&self, token: ConfirmToken) -> Result<(), String> {
         let mut pending = self.inner.launching.lock().await;
         let answered = Self::answered(&mut pending, token)?;
-        info!(gateway = ?answered.request.profile, "the user did not allow a gateway from a link");
+        match &answered.ask {
+            Ask::Add(_) => {
+                info!(gateway = ?answered.request.profile, "the user did not allow a gateway from a link");
+            }
+            Ask::Loosen(loosening) => {
+                info!(gateway = %loosening.profile, "the user did not allow a link to use the mixed route");
+            }
+        }
         Ok(())
     }
 
@@ -845,6 +894,8 @@ mod tests {
                     browser: Some(PathBuf::from("/bin/sleep")),
                     profiles_root: root.clone(),
                     limits: AgentLimits::default(),
+                    logbook: Default::default(),
+                    config: ipc::ConfigSource::Defaults,
                 },
                 Plan(proxy_config()),
                 launcher.clone(),

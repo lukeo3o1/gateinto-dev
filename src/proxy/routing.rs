@@ -11,8 +11,8 @@ use crate::http::{Authority, Host};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Route {
-    #[default]
     Gateway,
+    #[default]
     Mixed,
 }
 
@@ -34,6 +34,14 @@ impl FromStr for Route {
             "mixed" => Ok(Self::Mixed),
             _ => Err("route must be gateway or mixed"),
         }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Route {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -99,6 +107,11 @@ mod tests {
 
     fn addr(ip: &str, port: u16) -> SocketAddr {
         SocketAddr::new(ip.parse().unwrap(), port)
+    }
+
+    #[test]
+    fn the_default_route_is_mixed() {
+        assert_eq!(Route::default(), Route::Mixed);
     }
 
     #[tokio::test]

@@ -28,8 +28,14 @@ response to the local client.
 
 ## Mixed routing
 
-All CONNECTs use the gateway by default. A launch URI with `route=mixed`
-selects an opt-in DNS/IP heuristic for that browser session; see
+A browser session uses the mixed DNS/IP heuristic described here unless its
+route is `gateway` ("All" in the GUI), the strict option, under which every
+CONNECT uses the gateway. A gateway's saved default route is `mixed` unless
+its configuration section or linked gateway file says `gateway`; an explicit
+`route` in the launch wins over the saved default. A gateway approved from a
+link is saved with the route the link named, or `mixed` when it named none.
+**Mixed mode may reach sites directly instead of through the gateway, which
+exposes local DNS and the user's source IP and bypasses gateway policy**; see
 [session routing](launch-uri.md#session-routing) for the rules and exposure.
 Local request parsing, authentication and the tunnel permit precede route
 selection. Distinct, nonempty target and gateway DNS answers permit a direct

@@ -136,11 +136,11 @@ expect_notes() {
   fi
 }
 
-common=$'`'"$sha"$'`\n2026-10-18 09:30 UTC\nnot code-signed\nhttps://github.com/lukeo3o1/gateinto-dev/issues/23\nTPM\nreal browsers\nphysical Windows machines\nWindows 7'
+common=$'`'"$sha"$'`\n2026-10-18 09:30 UTC\nnot code-signed\nhttps://github.com/lukeo3o1/gateinto-dev/issues/23\nTPM\nreal browsers\nphysical Windows machines\nWindows 7\nPre-release, not externally security reviewed.'
 win7=$'i686-win7-windows-msvc-experimental.exe\nexperimental\nSoftware Key Storage Provider'
-expect_notes 'latest notes' latest "$common"$'\n`latest`' "$win7"
-expect_notes 'beta notes' beta "$common"$'\n`beta`\n'"$win7" ''
-expect_notes 'alpha notes' alpha "$common"$'\n`alpha`\n'"$win7" ''
+expect_notes 'latest notes' latest "$common"$'\n`latest`' "$win7"$'\nstable'
+expect_notes 'beta notes' beta "$common"$'\n`beta`\n'"$win7" 'stable'
+expect_notes 'alpha notes' alpha "$common"$'\n`alpha`\n'"$win7" 'stable'
 
 expect_notes_fail() {
   local name=$1
@@ -156,6 +156,16 @@ expect_notes_fail 'notes for an unknown channel' stable "$sha" '2026-10-18 09:30
 expect_notes_fail 'notes for a short commit' alpha "$short" '2026-10-18 09:30 UTC'
 expect_notes_fail 'notes without a build date' alpha "$sha" ''
 expect_notes_fail 'notes without arguments'
+
+workflow="$here/../workflows/release.yml"
+create=$(sed -n '/gh release create/,/[^\\]$/p' "$workflow")
+if [[ -z $create ]]; then
+  fail 'release workflow publishes a prerelease' 'no gh release create command'
+elif ! grep -qF -- '--prerelease' <<< "$create" || grep -qE -- '--latest($|[^=])' "$workflow"; then
+  fail 'release workflow publishes a prerelease' "every channel must use --prerelease and never --latest:"$'\n'"$create"
+else
+  pass 'release workflow publishes a prerelease'
+fi
 
 if (( failures )); then
   echo "$failures failed"

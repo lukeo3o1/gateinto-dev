@@ -56,18 +56,28 @@ purge. The MSI can also be built with `packaging/wix/build.ps1`. There is no
 WinGet package; `winget install` does not install Gateinto. `packaging/winget`
 holds manifest templates that have not been submitted.
 
+The MSI installs `gateinto.exe` and the GUI, `gateinto-gui.exe`, side by
+side in `%LOCALAPPDATA%\Programs\Gateinto`, and adds a per-user Start Menu
+shortcut named **Gateinto** that opens the GUI. Installing starts neither the
+GUI nor the agent, and does not turn on the GUI's own **Start the app at
+sign-in** value. Uninstalling or upgrading closes a running GUI of the
+current user and stops the agent. A full uninstall also removes the GUI's
+`Gateinto App` sign-in value when it opens the installed GUI; an upgrade
+keeps it. See [docs/install.md](docs/install.md).
+
 ## Releases
 
 The repository is private, so its GitHub Releases are for the owner's own
 downloads. There are three rolling releases, each with a tag of the same name
 that moves to the commit it was built from
-([details](docs/install.md#releases)):
+([details](docs/install.md#releases)). Every release, `latest` included, is
+marked as a prerelease and its notes say "Pre-release, not externally
+security reviewed.":
 
 - `alpha`: replaced automatically after CI passes on a push to `master` and
-  the release build and tests pass; a prerelease.
-- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref;
-  a prerelease.
-- `latest`: replaced by hand the same way; marked as the latest release.
+  the release build and tests pass.
+- `beta`: replaced by hand through `workflow_dispatch` with a commit or ref.
+- `latest`: replaced by hand the same way.
 
 Every release has the x64 and x86 MSIs and the x64 and i686 executables;
 `alpha` and `beta` also have the experimental Windows 7 executable for
@@ -91,7 +101,7 @@ be uninstalled before a release MSI is installed.
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped, its profile deleted and its credentials revoked). |
 | `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
 | `gateinto stop` | Close all of the agent's sessions and stop it. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
-| `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
+| `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their default route and their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
@@ -140,7 +150,12 @@ Every session listens on a loopback address only; there is no option to
 listen on any other address.
 
 Logging goes to stderr and is filtered with `RUST_LOG` (default `info`). Tunnel
-payload is never logged; target `host:port` is logged only at `debug`.
+payload is never logged. A successful tunnel logs its selected route and
+`tunnel established` only at `debug`, so at the default level and in the
+GUI's log view a tunnel that opens and closes normally adds no line. The
+target `host:port` of an established tunnel is logged only at `debug`; when
+the gateway or the target refuses a tunnel, the `warn` line names the target. Credentials and the `Proxy-Authorization` header
+are never logged.
 
 When more than `max_concurrent_tunnels` connections are open, further connections get a
 `503`. At most 64 such rejections are handled at a time; beyond that, new
@@ -357,16 +372,34 @@ The format, its limits and everything it can never do are specified in
 - `url` must have exactly the origin (https, host, port) of the gateway's
   portal and applies to that launch only; a gateway without a portal refuses
   it.
-- Routing defaults to `gateway`: every CONNECT goes through the gateway.
-  `gateinto://connect?profile=office&route=mixed` selects mixed routing for only
-  that new browser session. Target and gateway DNS answers are compared by IP;
+- **Browser sessions default to `mixed` routing, which may reach sites
+  directly instead of through the gateway: that exposes your local DNS
+  lookups and your source IP address to those sites and bypasses the
+  gateway's policy.** The strict option is `gateway` ("All" in the GUI):
+  every CONNECT goes through the gateway.
+  Each gateway has a saved default route, `mixed` unless its `route` in the
+  configuration file or its gateway file says `gateway`. **After upgrading
+  from an agent without a saved `route` key, such as earlier `alpha` builds,
+  gateways already on disk without `route`, including linked gateways approved
+  with the wording that all traffic goes through the gateway, load as `mixed`;
+  add `route = "gateway"` to keep them strict.** A link without `route` uses
+  that saved default; `route=gateway` or `route=mixed` applies to only that
+  new browser session and changes nothing saved. A `route=mixed` link for a
+  gateway saved as `gateway` asks first whether to switch it from All to
+  Mixed for that session; without an explicit yes no session opens.
+  In mixed mode, target and gateway DNS answers are compared by IP;
   any shared IP, missing answers or DNS failure selects gateway CONNECT.
   Other targets try direct TCP, falling back to the gateway on TCP error or
   timeout before local `200`. Gateway errors and established tunnels never
   switch routes. DNS and direct opening get at most half the existing total
   opening deadline. This heuristic can misclassify services with different or
   shared IPs; mixed mode exposes local DNS and the user's source IP and can
-  bypass gateway policy. It is not saved to the gateway. See
+  bypass gateway policy. A gateway added from a link is saved with the route
+  the link names, or with `mixed` when it names none; the confirmation names
+  that route and, for `mixed`, warns about the exposure. The GUI's Add
+  dialog preselects Mixed, with the same warning, offers All (`gateway`) and
+  saves the chosen route; `gateinto session browser` always uses the
+  `gateway` route. See
   [session routing](docs/protocol/launch-uri.md#session-routing).
 - System DNS work is limited to 64 queued or running lookups per process,
   shared by discovery and gateway connections. Timeouts do not release a
@@ -380,11 +413,15 @@ The format, its limits and everything it can never do are specified in
   matches canonical host and port without DNS and refuses ambiguous profiles.
   Known trust settings and portals are never changed. A new gateway needs
   approval first: a Windows dialog naming the internal or explicit profile,
-  gateway and portal origin (or `none`), with Cancel as the
-  default button (a `yes` prompt on a terminal elsewhere; no desktop or
-  terminal means refusal). On approval the gateway is stored in its own
+  gateway, portal origin (or `none`) and the route it is saved with, with
+  Cancel as the default button (a `yes` prompt on a terminal elsewhere; no
+  desktop or terminal means refusal). For the `mixed` route the dialog warns
+  that sites may be reached directly instead of through the gateway, exposing
+  local DNS lookups and the IP address and bypassing the gateway's policy; for
+  the `gateway` route it says that all traffic goes through the gateway. On
+  approval the gateway is stored in its own
   file under `%APPDATA%\Gateinto\gateways\`, named after its address, with
-  its name, host, port and optional portal, and later links to it do not ask
+  its name, host, port, optional portal and route, and later links to it do not ask
   again. A damaged file there disables only its own gateway. It uses the default TLS
   settings: public roots, `hybrid_preferred`, `client_certificate =
   "optional"`. The configuration file is never written, and its gateways win
@@ -492,9 +529,10 @@ Details of `session_credentials`:
   object; that session then accepts only session credentials and `open`
   shows them. On Windows with an interactive desktop they appear in a
   message box; elsewhere on the command's terminal (stderr). The prompt
-  names the proxy address (`127.0.0.1:<port>`) the browser's sign-in dialog
-  shows, and says to enter the credentials only there and never in a
-  website's sign-in page or dialog.
+  names the proxy address (`127.0.0.1:<port>`) and says to enter the
+  credentials only in the proxy sign-in prompt for it, never in a website's
+  sign-in page or dialog. Whether the browser's prompt shows that address
+  is not yet verified on Windows.
   `gateinto session credentials <id>` asks the agent for them over its
   per-user IPC endpoint and shows the same prompt again. Without a desktop or
   terminal `gateinto open` prints a warning naming that command instead, and
@@ -574,6 +612,7 @@ See [config.example.toml](config.example.toml).
 [gateways.default]               # one table per upstream; any name of 1-64 [A-Za-z0-9_-]
 host = "proxy.example.invalid"   # required, here or with --upstream-host
 port = 443                       # required, here or with --upstream-port
+display_name = "Head Office"     # name shown by the GUI; defaults to the gateway name
 server_name = "proxy.example.invalid"
 ca_file = "upstream-ca.pem"
 tls_mode = "hybrid_preferred"    # hybrid_preferred | hybrid_required | classical_only
@@ -581,6 +620,7 @@ client_certificate = "optional"  # optional | required | off
 client_cert_file = "client.pem"
 self_signed_client_cert = false  # true: issue self-signed certificates instead of client_cert_file
 portal_url = "https://portal.example.invalid/"  # start page of browser sessions; https only
+route = "gateway"                # mixed (default) | gateway: default route of its browser sessions
 
 [browser]
 executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # default: Chrome, then Edge
@@ -617,7 +657,7 @@ table, the flags alone describe the upstream, as an unnamed gateway
 | `[device_key] name` | `--key-name` (`check-upstream`, `session browser`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
-| `[gateways.<name>] portal_url`, `[browser] executable` | none |
+| `[gateways.<name>] display_name`, `portal_url`, `route`, `[browser] executable` | none |
 | `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | none |
 
 Rules:
@@ -640,6 +680,21 @@ Rules:
   of at most 2048 printable ASCII characters without spaces, quotes or
   backslashes. A launch URI cannot change it; a gateway added from a link
   brings its own portal, checked by the same rules.
+- `display_name` is only shown by the GUI, in place of the gateway name;
+  the command line, IPC and `gateinto://` links keep using the gateway name,
+  and a link cannot set it. It must already be trimmed with single spaces,
+  hold at most 64 characters and no control or text direction characters;
+  otherwise the file is refused. An agent older than this key refuses a file
+  that contains it, so remove the line before downgrading.
+- `route` is `mixed` (the default, also when the key is missing) or
+  `gateway` (the strict option, "All" in the GUI); any other value is an
+  error naming the gateway. It is the route of the gateway's browser sessions
+  when a launch does not choose one (see
+  [session routing](docs/protocol/launch-uri.md#session-routing)).
+  **`mixed` may reach sites directly instead of through the gateway: that
+  exposes your local DNS lookups and source IP address to those sites, and
+  those connections bypass the gateway's policy.** Set `route = "gateway"`
+  when all traffic must go through the gateway.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
@@ -810,6 +865,75 @@ isolated browser's connections and, if it asks for one, the device
 certificate; this deliberately relaxes the original rule that a link never
 introduces a proxy host. See
 [docs/security-model.md](docs/security-model.md#gateways-added-from-links).
+
+## Starting the agent from the GUI
+
+When the GUI (`gateinto-gui.exe`) finds no running agent, its sessions page
+and tray flyout offer **Start agent**. Only a click starts it, and only one
+start runs at a time. The GUI runs `gateinto.exe agent --detach` from its own
+directory by absolute path, without a shell, without `--config` and without
+a console window, and waits up to 45 seconds for it to exit. On success it
+refreshes at once; otherwise it shows a fixed message, never the command's
+output, until the next start or until the agent is no longer stopped. It does
+not retry. After a timeout, an agent the command had already started may
+still come up and show as running at the next refresh. Quitting the GUI
+during a start normally ends the `agent --detach` command, so whether an agent
+comes up depends on how far it got. If `gateinto.exe` is missing it shows a fixed
+message and starts nothing. The demo never starts an agent. This is
+unit-tested but has not been tried on a real Windows desktop.
+
+## Which config file the GUI reads
+
+While an agent runs, the GUI asks it on every refresh (every 2 seconds)
+which config file it loaded, and reads gateways, agent settings and the
+device key name from that file. When no agent runs, or the agent is too old
+to answer, the GUI reads the default config file. If the running agent uses
+another file, Settings shows its path marked as used by the running agent; if
+it runs without one, Settings says so. The GUI never writes the config file.
+This is unit-tested but has not been tried on a real Windows desktop.
+
+## Agent at sign-in in the GUI
+
+Settings shows, read-only, whether the agent starts at sign-in, from the
+installer's `Gateinto` string value in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the `Gateinto`
+value Windows keeps in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`
+when the entry is turned on or off in Task Manager or Settings. It shows:
+
+- **On** when the Run value runs `gateinto.exe agent --detach` and the
+  StartupApproved value is absent or its first byte is `02`;
+- **Off** when the Run value is missing, or when it runs that command and the
+  StartupApproved value's first byte is `03`;
+- **Unknown** otherwise: the Run value holds any other command, has another
+  type than a plain string, or cannot be read, or the StartupApproved value
+  is empty, starts with another byte, has another type than binary, or cannot
+  be read.
+
+Only that fixed text is shown, never the values themselves. A note says the
+installer sets it, for example when installed with `AUTOSTART=1` (see
+[docs/install.md](docs/install.md)). The GUI never writes, creates or deletes
+either value and never starts the agent on its own. It reads the value when Settings opens and at most once per 2-second
+refresh while Settings is shown. The separate **Start the app at sign-in**
+switch only controls the GUI's own `Gateinto App` value, which opens the app,
+not the agent; a full uninstall removes that value (see
+[docs/install.md](docs/install.md)). The demo shows **On** without reading the registry. This is
+unit-tested but has not been tried on a real Windows desktop.
+
+## Removing a gateway in the GUI
+
+The gateway details in the GUI offer **Remove** only for a gateway added on
+this device from a `gateinto://` link. Gateways from the config file stay
+read-only there. Remove first asks for confirmation in a dialog that names
+the gateway and has Cancel first; it then does what `gateinto gateway forget
+<name>` does, with the same refusals: a name defined in the config file, a
+name held by several files, a damaged file or no such gateway removes
+nothing and shows a fixed message. Only that gateway's file in `gateways/` is
+deleted; the config file, the device key and its identity are not touched.
+Browser sessions already open through the gateway stay open until they are
+closed. The list shows the change at the next refresh, within 2 seconds. The
+demo never removes anything. This is unit-tested but has not been tried on a
+real Windows desktop.
 
 ## Verification status
 

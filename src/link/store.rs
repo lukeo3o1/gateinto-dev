@@ -8,8 +8,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 
 use super::{DEFAULT_PORT, GatewayAddress, LinkedGateway, Origin};
-use crate::config::{self, GatewayName, PortalUrl};
+use crate::config::{self, DisplayName, GatewayName, PortalUrl};
 use crate::ipc::ConfirmToken;
+use crate::proxy::Route;
 
 pub const DIR_NAME: &str = "gateways";
 pub const MAX_LINKED: usize = 32;
@@ -173,14 +174,36 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forgotten {
+    pub path: PathBuf,
+    pub configured: bool,
+}
+
+#[derive(Debug)]
+pub enum ForgetError {
+    Store(StoreError),
+    Damaged(InvalidEntry),
+    Configured,
+    Missing,
+}
+
+impl From<StoreError> for ForgetError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     name: GatewayName,
+    display_name: Option<DisplayName>,
     host: String,
     port: NonZeroU16,
     portal_url: Option<PortalUrl>,
     approved_at: Option<u64>,
+    route: Option<Route>,
 }
 
 fn plain(metadata: &Metadata) -> bool {
@@ -374,12 +397,19 @@ impl LinkedStore {
             gateway.address.host(),
             gateway.address.port()
         );
+        if let Some(display_name) = &gateway.display_name {
+            text.push_str(&format!(
+                "display_name = {}\n",
+                quoted(display_name.as_str())
+            ));
+        }
         if let Some(portal) = &gateway.portal_url {
             text.push_str(&format!("portal_url = \"{portal}\"\n"));
         }
         if let Some(approved_at) = gateway.approved_at {
             text.push_str(&format!("approved_at = {approved_at}\n"));
         }
+        text.push_str(&format!("route = \"{}\"\n", gateway.route));
         let temp = self.dir.join(format!(
             ".{}.{}.tmp",
             std::process::id(),
@@ -434,6 +464,27 @@ impl LinkedStore {
         std::fs::remove_file(&path).map_err(self.io(&path))?;
         self.sync_dir()?;
         Ok(Some(path))
+    }
+
+    pub fn forget_gateway(
+        &self,
+        config: &config::ConfigFile,
+        name: &GatewayName,
+    ) -> Result<Forgotten, ForgetError> {
+        let configured = config.gateways.iter().any(|(known, _)| known == name);
+        if let Some(path) = self.forget(name)? {
+            return Ok(Forgotten { path, configured });
+        }
+        let damaged = self
+            .load()?
+            .invalid
+            .into_iter()
+            .find(|entry| entry.name.as_ref() == Some(name));
+        Err(match damaged {
+            Some(entry) => ForgetError::Damaged(entry),
+            None if configured => ForgetError::Configured,
+            None => ForgetError::Missing,
+        })
     }
 
     pub fn purge_candidates(&self) -> Result<Vec<PathBuf>, StoreError> {
@@ -573,10 +624,16 @@ fn read_entry(path: &Path, file: &str) -> Result<LinkedGateway, InvalidEntry> {
     }
     Ok(LinkedGateway {
         name: entry.name,
+        display_name: entry.display_name,
         address,
         portal_url: entry.portal_url,
         approved_at: entry.approved_at,
+        route: entry.route.unwrap_or_default(),
     })
+}
+
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn temp_file_name(name: &str) -> bool {
@@ -716,9 +773,11 @@ mod tests {
     fn gateway(profile: &str, host: &str) -> LinkedGateway {
         LinkedGateway {
             name: name(profile),
+            display_name: None,
             address: address(host),
             portal_url: Some(format!("https://{profile}.example/").parse().unwrap()),
             approved_at: Some(NOW),
+            route: Route::Gateway,
         }
     }
 
@@ -894,7 +953,8 @@ mod tests {
             "# A gateway added from a gateinto:// link after confirmation.\n\
              # Remove it with `gateinto gateway forget newco`.\n\
              name = \"newco\"\nhost = \"proxy.newco.example\"\nport = 8443\n\
-             portal_url = \"https://newco.example/\"\napproved_at = 1760000000\n"
+             portal_url = \"https://newco.example/\"\napproved_at = 1760000000\n\
+             route = \"gateway\"\n"
         );
         assert_eq!(
             store.load().unwrap(),
@@ -1138,6 +1198,146 @@ mod tests {
         assert_eq!(store.forget(&name("newco")).unwrap(), None);
         assert_eq!(store.forget(&name("broken")).unwrap(), None);
         assert_eq!(files(&store), vec!["b.example.toml", "c.example.toml"]);
+    }
+
+    #[test]
+    fn forgetting_a_known_gateway_explains_why_nothing_was_removed() {
+        let store = store();
+        let config = config::ConfigFile::parse("[gateways.main]\nhost = \"m.example\"\n").unwrap();
+        store.add(&gateway("newco", "a.example")).unwrap();
+        store.add(&gateway("main", "b.example")).unwrap();
+        let damaged = plant(
+            &store,
+            "c.example.toml",
+            &format!("{}ca_file = \"x\"\n", entry("broken", "c.example", 443)),
+        );
+        plant(&store, "d.example.toml", &entry("twin", "d.example", 443));
+        plant(&store, "e.example.toml", &entry("twin", "e.example", 443));
+        assert!(matches!(
+            store.forget_gateway(&config, &name("broken")),
+            Err(ForgetError::Damaged(entry)) if entry.file == damaged
+        ));
+        assert!(matches!(
+            store.forget_gateway(&config, &name("twin")),
+            Err(ForgetError::Store(StoreError::Ambiguous(..)))
+        ));
+        assert!(matches!(
+            store.forget_gateway(&config, &name("nope")),
+            Err(ForgetError::Missing)
+        ));
+        assert_eq!(
+            store.forget_gateway(&config, &name("newco")).unwrap(),
+            Forgotten {
+                path: store.dir().join("a.example.toml"),
+                configured: false,
+            }
+        );
+        assert_eq!(
+            store.forget_gateway(&config, &name("main")).unwrap(),
+            Forgotten {
+                path: store.dir().join("b.example.toml"),
+                configured: true,
+            }
+        );
+        assert!(matches!(
+            store.forget_gateway(&config, &name("main")),
+            Err(ForgetError::Configured)
+        ));
+        assert_eq!(
+            files(&store),
+            vec!["c.example.toml", "d.example.toml", "e.example.toml"]
+        );
+    }
+
+    #[test]
+    fn the_route_is_stored_and_a_file_without_one_uses_the_mixed_route() {
+        let store = store();
+        let mixed = LinkedGateway {
+            route: Route::Mixed,
+            ..gateway("mixed", "m.example")
+        };
+        store.add(&mixed).unwrap();
+        store.add(&gateway("plain", "p.example")).unwrap();
+        let read = |file: &str| std::fs::read_to_string(store.dir().join(file)).unwrap();
+        assert!(read("m.example.toml").contains("\nroute = \"mixed\"\n"));
+        assert!(read("p.example.toml").contains("\nroute = \"gateway\"\n"));
+        plant(&store, "o.example.toml", &entry("old", "o.example", 443));
+        let bad = plant(
+            &store,
+            "b.example.toml",
+            &format!("{}route = \"direct\"\n", entry("bad", "b.example", 443)),
+        );
+        let loaded = store.load().unwrap();
+        let routes: Vec<(&str, Route)> = loaded
+            .gateways
+            .iter()
+            .map(|gateway| (gateway.name.as_str(), gateway.route))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                ("mixed", Route::Mixed),
+                ("old", Route::Mixed),
+                ("plain", Route::Gateway)
+            ]
+        );
+        assert_eq!(loaded.invalid.len(), 1);
+        assert_eq!(loaded.invalid[0].file, bad);
+        assert_eq!(loaded.invalid[0].name, Some(name("bad")));
+        assert!(
+            loaded.invalid[0]
+                .reason
+                .contains("route must be gateway or mixed"),
+            "{}",
+            loaded.invalid[0].reason
+        );
+    }
+
+    #[test]
+    fn the_display_name_is_stored_quoted_and_a_file_without_one_has_none() {
+        let store = store();
+        let named = LinkedGateway {
+            display_name: Some(DisplayName::normalize(r#"台北 "Main" \ Office"#).unwrap()),
+            ..gateway("main", "m.example")
+        };
+        store.add(&named).unwrap();
+        store.add(&gateway("plain", "p.example")).unwrap();
+        let read = |file: &str| std::fs::read_to_string(store.dir().join(file)).unwrap();
+        assert!(
+            read("m.example.toml").contains("\ndisplay_name = \"台北 \\\"Main\\\" \\\\ Office\"\n"),
+            "{}",
+            read("m.example.toml")
+        );
+        assert!(!read("p.example.toml").contains("display_name"));
+        let bad = plant(
+            &store,
+            "b.example.toml",
+            &format!(
+                "{}display_name = \"two  spaces\"\n",
+                entry("bad", "b.example", 443)
+            ),
+        );
+        let loaded = store.load().unwrap();
+        let names: Vec<(&str, Option<&str>)> = loaded
+            .gateways
+            .iter()
+            .map(|gateway| {
+                let shown = gateway.display_name.as_ref().map(DisplayName::as_str);
+                (gateway.name.as_str(), shown)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [("main", Some(r#"台北 "Main" \ Office"#)), ("plain", None)]
+        );
+        assert_eq!(loaded.invalid.len(), 1);
+        assert_eq!(loaded.invalid[0].file, bad);
+        assert_eq!(loaded.invalid[0].name, Some(name("bad")));
+        assert!(
+            loaded.invalid[0].reason.contains("display_name"),
+            "{}",
+            loaded.invalid[0].reason
+        );
     }
 
     #[test]

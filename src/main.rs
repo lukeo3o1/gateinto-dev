@@ -18,10 +18,16 @@ use gateinto::identity::client_cert::{
 use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
-use gateinto::ipc::{self, Endpoint, Request, RequestError, Response, Server, SessionInfo};
+use gateinto::ipc::{
+    self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
+};
 use gateinto::lifecycle::{self, Purge};
-use gateinto::link::store::{self, LinkedStore, Loaded, StoreError};
-use gateinto::link::{self, Confirmation, Known, KnownGateway, LinkedGateway, Source};
+use gateinto::link::store::{self, ForgetError, Forgotten, LinkedStore, Loaded, StoreError};
+use gateinto::link::{
+    Known, KnownGateway, LinkedGateway, Source, approval,
+    handoff::{self, Handoff},
+};
+use gateinto::logbook::Logbook;
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
 use gateinto::registration;
@@ -30,6 +36,9 @@ use gateinto::tls::{self, TlsMode};
 use gateinto::uri::LaunchRequest;
 use rustls::pki_types::{ServerName, UnixTime};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -553,13 +562,19 @@ fn key_info<S: ClientIdentityStore>(store: &S, name: &KeyName, args: KeyInfoArgs
 }
 
 fn init_logging(default_filter: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
+    init_logging_into(default_filter, None);
+}
+
+fn init_logging_into(default_filter: &str, logbook: Option<&Logbook>) {
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                // Otherwise a closed stderr makes tracing-subscriber panic inside connection tasks.
+                .log_internal_errors(false),
         )
-        .with_writer(std::io::stderr)
-        // Otherwise a closed stderr makes tracing-subscriber panic inside connection tasks.
-        .log_internal_errors(false)
+        .with(logbook.map(|logbook| logbook.layer().with_filter(LevelFilter::INFO)))
         .init();
 }
 
@@ -789,10 +804,22 @@ impl Profiles for ConfigProfiles {
     }
 }
 
+fn agent_config(path: Option<PathBuf>) -> std::io::Result<ConfigSource> {
+    Ok(match path {
+        Some(path) => ConfigSource::File(std::path::absolute(path)?),
+        None => ConfigSource::Defaults,
+    })
+}
+
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
-    let file = args.load()?;
-    init_logging("info");
+    let config = agent_config(args.path().map(|(path, _)| path))?;
+    let file = match &config {
+        ConfigSource::File(path) => ConfigFile::load(path)?,
+        ConfigSource::Defaults => ConfigFile::default(),
+    };
+    let logbook = Logbook::default();
+    init_logging_into("info", Some(&logbook));
     args.log_default();
     let endpoint = Endpoint::for_current_user()?;
     let server = Server::bind(&endpoint)?;
@@ -802,6 +829,8 @@ async fn agent(args: ConfigArg) -> Result {
         browser: file.browser.executable.clone(),
         profiles_root,
         limits: AgentLimits::default(),
+        logbook,
+        config,
     };
     let profiles = ConfigProfiles {
         file: file.clone(),
@@ -843,57 +872,51 @@ fn agent_start_help(config: Option<&Path>) -> String {
 
 async fn open(args: OpenArgs) -> Result {
     let launch = args.uri.parse::<LaunchRequest>()?;
-    let request = Request::Launch(launch.clone());
     let endpoint = Endpoint::for_current_user()?;
+    let config = args.config.config.as_deref();
+    let gui = if cfg!(windows) {
+        handoff::installed(&std::env::current_exe()?)
+    } else {
+        None
+    };
+    let ensure_agent = async || -> Result {
+        match ipc::send(&endpoint, &Request::List).await {
+            Err(RequestError::NotRunning | RequestError::Closed) => {
+                start_agent_and_send(&endpoint, &Request::List, config).await?;
+            }
+            result => {
+                result?;
+            }
+        }
+        Ok(())
+    };
+    let hand = async |gui: &Path| {
+        #[cfg(windows)]
+        stop_inheriting_standard_handles();
+        handoff::hand(gui, &args.uri, handoff::TIMEOUT).await
+    };
+    match handoff::offer(gui.as_deref(), ensure_agent, hand).await? {
+        Handoff::Handed => return Ok(()),
+        Handoff::Pending => return Err(handoff::PENDING_HELP.into()),
+        Handoff::Kept => {}
+    }
+    let request = Request::Launch(launch.clone());
     let response = match ipc::send(&endpoint, &request).await {
         Err(RequestError::NotRunning | RequestError::Closed) => {
-            start_agent_and_send(&endpoint, &request, args.config.config.as_deref()).await?
+            start_agent_and_send(&endpoint, &request, config).await?
         }
         result => result?,
     };
-    let lines = match &response {
-        Response::Ok(lines) => lines.clone(),
-        Response::Error(_) => Vec::new(),
+    let send = |request| {
+        let endpoint = &endpoint;
+        async move { ipc::send(endpoint, &request).await }
     };
-    let Some(token) = ipc::confirm_token(&lines) else {
-        return print_launched(response).await;
+    let ask = async |asked| {
+        tokio::task::spawn_blocking(move || prompt::ask(&asked).map_err(|e| e.to_string()))
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
     };
-    let profile = launch
-        .proposed_profile()
-        .ok_or("the launch has no gateway selector")?;
-    let Some(gateway) = launch.gateway else {
-        ipc::send(&endpoint, &Request::Deny(token)).await?;
-        return Err("the agent asked to confirm a gateway the link does not name".into());
-    };
-    let confirmation = Confirmation {
-        route: launch.route,
-        profile: profile.clone(),
-        gateway,
-        portal: launch.portal,
-    };
-    if !confirmation.echoed_by(&lines) {
-        ipc::send(&endpoint, &Request::Deny(token)).await?;
-        return Err(
-            "the agent asked to confirm another gateway than the link names; nothing \
-                    was stored"
-                .into(),
-        );
-    }
-    let answer = tokio::task::spawn_blocking(move || {
-        prompt::ask(&confirmation).map_err(|error| error.to_string())
-    })
-    .await?;
-    match answer {
-        Ok(true) => print_launched(ipc::send(&endpoint, &Request::Approve(token)).await?).await,
-        Ok(false) => {
-            ipc::send(&endpoint, &Request::Deny(token)).await?;
-            Err(link::LinkError::Denied(profile).into())
-        }
-        Err(error) => {
-            ipc::send(&endpoint, &Request::Deny(token)).await?;
-            Err(error.into())
-        }
-    }
+    print_launched(approval::settle(&launch, response, send, ask).await?).await
 }
 
 fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
@@ -1215,35 +1238,35 @@ fn gateway(command: GatewayCommand) -> Result {
         GatewayCommand::Forget { config, name } => {
             let file = config.load()?;
             let store = linked_store().ok_or("cannot find the per-user config directory")?;
-            let configured = file.gateways.iter().any(|(known, _)| *known == name);
-            if let Some(path) = store.forget(&name)? {
-                println!(
-                    "removed the gateway \"{name}\" added from a link ({})",
-                    path.display()
-                );
-                if configured {
-                    println!("the config file still defines a gateway \"{name}\"");
+            match store.forget_gateway(&file, &name) {
+                Ok(Forgotten { path, configured }) => {
+                    println!(
+                        "removed the gateway \"{name}\" added from a link ({})",
+                        path.display()
+                    );
+                    if configured {
+                        println!("the config file still defines a gateway \"{name}\"");
+                    }
+                    println!("open browser sessions of this gateway stay open until closed");
                 }
-                println!("open browser sessions of this gateway stay open until closed");
-            } else if let Some(entry) = store
-                .load()?
-                .invalid
-                .into_iter()
-                .find(|entry| entry.name.as_ref() == Some(&name))
-            {
-                return Err(format!(
-                    "the gateway \"{name}\" is in a damaged file ({entry}); delete that file to \
-                     remove it"
-                )
-                .into());
-            } else if configured {
-                return Err(format!(
-                    "the gateway \"{name}\" is defined in the config file, not added from a \
-                     link; edit the config file to change it"
-                )
-                .into());
-            } else {
-                return Err(format!("no gateway added from a link named \"{name}\"").into());
+                Err(ForgetError::Store(error)) => return Err(error.into()),
+                Err(ForgetError::Damaged(entry)) => {
+                    return Err(format!(
+                        "the gateway \"{name}\" is in a damaged file ({entry}); delete that file \
+                         to remove it"
+                    )
+                    .into());
+                }
+                Err(ForgetError::Configured) => {
+                    return Err(format!(
+                        "the gateway \"{name}\" is defined in the config file, not added from a \
+                         link; edit the config file to change it"
+                    )
+                    .into());
+                }
+                Err(ForgetError::Missing) => {
+                    return Err(format!("no gateway added from a link named \"{name}\"").into());
+                }
             }
         }
     }
@@ -1455,6 +1478,17 @@ async fn reset(args: ResetArgs) -> Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_agent_config_is_resolved_to_one_absolute_path_before_loading() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            agent_config(Some(PathBuf::from("gateinto.toml"))).unwrap(),
+            ConfigSource::File(cwd.join("gateinto.toml"))
+        );
+        assert_eq!(agent_config(None).unwrap(), ConfigSource::Defaults);
+        assert!(agent_config(Some(PathBuf::new())).is_err());
+    }
+
     use super::*;
 
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;

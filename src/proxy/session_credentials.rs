@@ -7,6 +7,8 @@ use aws_lc_rs::error::Unspecified;
 use aws_lc_rs::hmac;
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 
+use zeroize::Zeroize;
+
 use crate::http::is_token;
 
 const MAX_ENCODED_BYTES: usize = 1024;
@@ -40,6 +42,13 @@ pub struct SessionCredentials {
 impl fmt::Debug for SessionCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SessionCredentials { .. }")
+    }
+}
+
+impl Drop for SessionCredentials {
+    fn drop(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
     }
 }
 

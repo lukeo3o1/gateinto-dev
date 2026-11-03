@@ -12,7 +12,7 @@ built=$3
 case $channel in
   alpha) summary='rolling prerelease, replaced on every push to master that passes CI and the release build' ;;
   beta) summary='prerelease, replaced when the owner publishes a commit to beta' ;;
-  latest) summary='stable release, replaced when the owner publishes a commit to latest' ;;
+  latest) summary='prerelease, replaced when the owner publishes a commit to latest' ;;
   *)
     echo "unknown release channel '$channel': expected alpha, beta or latest" >&2
     exit 1
@@ -24,6 +24,8 @@ if [[ ! $commit =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 cat <<NOTES
+Pre-release, not externally security reviewed.
+
 Channel: \`$channel\` ($summary)
 Commit: \`$commit\`
 Built: $built

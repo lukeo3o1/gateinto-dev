@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory)] [string] $Path,
   [Parameter(Mandatory)] [string] $Imports,
-  [string] $AllowList = (Join-Path $PSScriptRoot 'win7-imports.txt')
+  [string[]] $AllowList = @(Join-Path $PSScriptRoot 'win7-imports.txt')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,14 +30,14 @@ if (-not ($found | Where-Object { $_ -like 'kernel32.dll *' })) { throw "No kern
 Write-Output "== Static imports of ${Path}: $($found.Count)"
 $found | ForEach-Object { $_.Split(' ')[0] } | Sort-Object -Unique | ForEach-Object { "  $_" }
 
-$win8 = 'ProcessPrng|GetSystemTimePreciseAsFileTime|WaitOnAddress|WakeByAddressSingle|WakeByAddressAll|CreateFile2|GetCurrentThreadStackLimits|SetThreadDescription|GetThreadDescription|GetTempPath2W|Tbsi_GetDeviceInfo|BCryptHash|bcryptprimitives|api-ms-win-core-synch-l1-2-0'
+$win8 = 'ProcessPrng|GetSystemTimePreciseAsFileTime|WaitOnAddress|WakeByAddressSingle|WakeByAddressAll|CreateFile2|GetCurrentThreadStackLimits|SetThreadDescription|GetThreadDescription|GetTempPath2W|Tbsi_GetDeviceInfo|BCryptHash|bcryptprimitives|api-ms-win-core-synch-l1-2-0|SetProcessDpiAwarenessContext|GetDpiForWindow|GetDpiForMonitor|GetSystemMetricsForDpi|AdjustWindowRectExForDpi'
 $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($Path))
 $strings = @([regex]::Matches($text, "($win8)") | ForEach-Object { $_.Value } | Sort-Object -Unique)
 Write-Output '== Names of Windows 8+ APIs present as strings in the binary (possible GetProcAddress lookups)'
 $strings | ForEach-Object { "  $_" }
 
 $unknown = @($found | Where-Object { -not $allowed.Contains($_) })
-Write-Output "== Static imports not in the Windows 7 allow-list $AllowList"
+Write-Output "== Static imports not in the Windows 7 allow-lists $($AllowList -join ', ')"
 $unknown | ForEach-Object { "  $_" }
 
 $failed = $false

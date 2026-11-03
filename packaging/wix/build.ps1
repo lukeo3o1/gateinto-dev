@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $Binary = (Join-Path $PSScriptRoot '..\..\target\release\gateinto.exe'),
+    [string] $GuiBinary = (Join-Path $PSScriptRoot '..\..\target\release\gateinto-gui.exe'),
     [string] $Output = (Join-Path $PSScriptRoot '..\..\target\wix\gateinto.msi'),
     [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $Version,
     [ValidatePattern('^[0-9A-Za-z.+-]+$')] [ValidateLength(1, 64)] [string] $DisplayVersion,
@@ -25,6 +26,7 @@ if ($major -gt 255 -or $minor -gt 255 -or $build -gt 65535) {
 $name = if ($DisplayVersion) { "Gateinto $DisplayVersion" } else { 'Gateinto' }
 
 $binary = (Resolve-Path $Binary).Path
+$guiBinary = (Resolve-Path $GuiBinary).Path
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Output) | Out-Null
 
 wix build (Join-Path $PSScriptRoot 'gateinto.wxs') `
@@ -32,6 +34,7 @@ wix build (Join-Path $PSScriptRoot 'gateinto.wxs') `
     -d "Version=$Version" `
     -d "ProductName=$name" `
     -d "BinaryPath=$binary" `
+    -d "GuiBinaryPath=$guiBinary" `
     -pdbtype none `
     -o $Output
 if ($LASTEXITCODE -ne 0) { throw "wix build exited with $LASTEXITCODE" }

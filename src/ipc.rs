@@ -5,13 +5,18 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use zeroize::Zeroizing;
+
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::proxy::SessionCredentials;
+use crate::proxy::{Route, SessionCredentials};
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
-pub use gateinto_ipc_types::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
+pub use gateinto_ipc_types::{
+    BrowserKind, LogError, LogEvent, LogLevel, LogPage, SessionAuth, SessionInfo, SessionKind,
+    SessionRoute,
+};
 
 pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -28,6 +33,8 @@ pub enum Request {
     Close(SessionId),
     Credentials(SessionId),
     Stop,
+    Log { after: u64 },
+    Config,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,8 +117,10 @@ impl fmt::Display for Request {
                     write!(f, "{profile} ")?;
                 }
                 write!(f, "{}", request.auth)?;
-                if request.route != crate::proxy::Route::Gateway {
-                    write!(f, " route={}", request.route)?;
+                match request.route {
+                    None => f.write_str(" route=saved")?,
+                    Some(Route::Gateway) => {}
+                    Some(route) => write!(f, " route={route}")?,
                 }
                 if let Some(url) = &request.url {
                     write!(f, " url={url}")?;
@@ -130,6 +139,8 @@ impl fmt::Display for Request {
             Self::Close(id) => write!(f, "close {id}"),
             Self::Credentials(id) => write!(f, "credentials {id}"),
             Self::Stop => f.write_str("stop"),
+            Self::Log { after } => write!(f, "log {after}"),
+            Self::Config => f.write_str("config"),
         }
     }
 }
@@ -138,7 +149,7 @@ impl FromStr for Request {
     type Err = ProtocolError;
 
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let invalid = ProtocolError("invalid request");
+        let invalid = ProtocolError(INVALID_REQUEST);
         let words: Vec<&str> = line.split(' ').collect();
         match words.as_slice() {
             ["launch", profile, auth @ "session_credentials", link @ ..] => {
@@ -162,6 +173,13 @@ impl FromStr for Request {
             ["close", id] => id.parse().map(Self::Close).map_err(|_| invalid),
             ["credentials", id] => id.parse().map(Self::Credentials).map_err(|_| invalid),
             ["stop"] => Ok(Self::Stop),
+            ["config"] => Ok(Self::Config),
+            ["log", word] => word
+                .parse()
+                .ok()
+                .filter(|after: &u64| after.to_string() == *word)
+                .map(|after| Self::Log { after })
+                .ok_or(invalid),
             _ => Err(invalid),
         }
     }
@@ -180,11 +198,16 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
         next = index + 1;
     }
     let [route, url, gateway, portal] = values;
-    LaunchRequest::from_fields(profile, auth, url, gateway, portal)
-        .ok()?
-        .with_route(route.unwrap_or("gateway"))
-        .ok()
-        .map(Request::Launch)
+    let request = LaunchRequest::from_fields(profile, auth, url, gateway, portal).ok()?;
+    match route {
+        Some("saved") => Some(request),
+        Some(route) => request.with_route(route).ok(),
+        None => Some(LaunchRequest {
+            route: Some(Route::Gateway),
+            ..request
+        }),
+    }
+    .map(Request::Launch)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +249,22 @@ impl Response {
     }
 }
 
+pub const INVALID_REQUEST: &str = "invalid request";
+
+pub fn log_response(last: u64, events: impl IntoIterator<Item = LogEvent>) -> Response {
+    let mut lines = vec![agent_pid_line(), LogPage::last_line(last)];
+    let mut size = "ok\n".len() + lines.iter().map(|line| line.len() + 1).sum::<usize>();
+    for event in events {
+        let line = event.to_line();
+        size += line.len() + 1;
+        if size > MAX_RESPONSE_BYTES {
+            break;
+        }
+        lines.push(line);
+    }
+    Response::Ok(lines)
+}
+
 const USERNAME: &str = "username: ";
 const PASSWORD: &str = "password: ";
 
@@ -246,6 +285,34 @@ pub fn without_credentials(lines: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|line| !line.starts_with(USERNAME) && !line.starts_with(PASSWORD))
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    File(PathBuf),
+    Defaults,
+}
+
+const CONFIG: &str = "config: ";
+const NO_CONFIG: &str = "none";
+
+pub fn config_line(source: &ConfigSource) -> Option<String> {
+    let text = match source {
+        ConfigSource::File(path) => path
+            .to_str()
+            .filter(|text| path.is_absolute() && !text.contains(['\r', '\n']))?,
+        ConfigSource::Defaults => NO_CONFIG,
+    };
+    Some(format!("{CONFIG}{text}"))
+}
+
+pub fn config_source(lines: &[String]) -> Option<ConfigSource> {
+    let text = lines.iter().find_map(|line| line.strip_prefix(CONFIG))?;
+    if text == NO_CONFIG {
+        return Some(ConfigSource::Defaults);
+    }
+    let path = PathBuf::from(text);
+    path.is_absolute().then_some(ConfigSource::File(path))
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
@@ -532,8 +599,9 @@ fn closed_or_io(error: io::Error) -> RequestError {
 
 async fn exchange(endpoint: &Endpoint, request: &Request) -> Result<Response, RequestError> {
     let mut stream = connect(endpoint).await?;
+    let line = Zeroizing::new(format!("{request}\n"));
     stream
-        .write_all(format!("{request}\n").as_bytes())
+        .write_all(line.as_bytes())
         .await
         .map_err(closed_or_io)?;
     stream.flush().await.map_err(closed_or_io)?;
@@ -548,19 +616,19 @@ async fn exchange(endpoint: &Endpoint, request: &Request) -> Result<Response, Re
             "the agent's response is too long",
         )));
     }
-    let response = String::from_utf8(response)
+    let response = std::str::from_utf8(&response)
         .map_err(|_| RequestError::Protocol(ProtocolError("invalid response from the agent")))?;
-    Response::decode(&response).map_err(RequestError::Protocol)
+    Response::decode(response).map_err(RequestError::Protocol)
 }
 
 pub async fn read_to_close(
     stream: &mut (impl AsyncRead + Unpin),
     limit: usize,
-) -> io::Result<Vec<u8>> {
-    let mut received = Vec::new();
-    let mut buffer = [0; 4096];
+) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut buffer = Zeroizing::new([0; 4096]);
+    let mut received = Zeroizing::new(Vec::with_capacity(limit + buffer.len()));
     while received.len() <= limit {
-        match stream.read(&mut buffer).await {
+        match stream.read(&mut buffer[..]).await {
             Ok(0) => break,
             Ok(n) => received.extend_from_slice(&buffer[..n]),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
@@ -960,6 +1028,7 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::Route;
     use std::collections::HashMap;
 
     fn launch(profile: &str) -> Request {
@@ -977,6 +1046,57 @@ mod tests {
             assert_eq!(agent_pid(&[line.to_owned()]), None, "{line}");
         }
         assert_eq!(agent_pid(&[]), None);
+    }
+
+    fn logged(seq: u64, message: &str) -> LogEvent {
+        LogEvent {
+            seq,
+            time: 1_700_000_000_000 + seq,
+            level: LogLevel::Info,
+            scope: "agent".to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_log_response_names_the_agent_and_its_last_sequence_number() {
+        let events = vec![logged(4, "agent ready"), logged(5, "session started")];
+        let Response::Ok(lines) = log_response(5, events.clone()) else {
+            panic!("a log response is ok");
+        };
+        assert_eq!(agent_pid(&lines), Some(std::process::id()));
+        assert_eq!(LogPage::parse(&lines).unwrap(), LogPage { last: 5, events });
+    }
+
+    #[test]
+    fn a_log_response_keeps_the_oldest_events_that_fit() {
+        let message = "x".repeat(1000);
+        let events: Vec<LogEvent> = (1..=200).map(|seq| logged(seq, &message)).collect();
+        let response = log_response(200, events.clone());
+        assert!(response.encode().len() <= MAX_RESPONSE_BYTES);
+        let Response::Ok(lines) = response else {
+            panic!("a log response is ok");
+        };
+        let page = LogPage::parse(&lines).unwrap();
+        assert_eq!(page.last, 200);
+        assert!(page.events.len() > 50, "{}", page.events.len());
+        assert_eq!(page.events[..], events[..page.events.len()]);
+        let next = log_response(200, events[page.events.len()..].to_vec());
+        assert!(next.encode().len() <= MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn unknown_words_are_rejected_with_the_invalid_request_message() {
+        assert_eq!(
+            "log 1"
+                .parse::<Request>()
+                .map_err(|error| error.to_string()),
+            Ok(Request::Log { after: 1 })
+        );
+        assert_eq!(
+            "logs 1".parse::<Request>().unwrap_err().to_string(),
+            INVALID_REQUEST
+        );
     }
 
     #[test]
@@ -1034,25 +1154,30 @@ mod tests {
     }
 
     #[test]
-    fn mixed_launch_route_round_trips_without_changing_legacy_requests() {
-        let line = "launch corp session_credentials route=mixed";
-        let parsed: Request = line.parse().unwrap();
-        assert_eq!(parsed.to_string(), line);
-        let Request::Launch(link) = parsed else {
-            panic!("not a launch")
-        };
-        assert!(link.to_string().contains("&route=mixed"));
-        assert_eq!(
-            "launch corp session_credentials"
-                .parse::<Request>()
-                .unwrap()
-                .to_string(),
-            "launch corp session_credentials"
-        );
+    fn a_launch_line_without_a_route_means_gateway_and_saved_names_the_saved_route() {
+        for (line, route) in [
+            ("launch corp session_credentials", Some(Route::Gateway)),
+            ("launch corp session_credentials route=saved", None),
+            (
+                "launch corp session_credentials route=mixed",
+                Some(Route::Mixed),
+            ),
+        ] {
+            let parsed: Request = line.parse().unwrap();
+            assert_eq!(parsed.to_string(), line);
+            let Request::Launch(link) = parsed else {
+                panic!("not a launch")
+            };
+            assert_eq!(link.route, route, "{line}");
+        }
         for invalid in [
             "launch corp session_credentials route=direct",
-            "launch corp session_credentials route=mixed route=mixed",
             "launch corp session_credentials route=gateway",
+            "launch corp session_credentials route=Saved",
+            "launch corp session_credentials route=mixed route=mixed",
+            "launch corp session_credentials route=saved route=mixed",
+            "launch corp session_credentials route=",
+            "launch corp session_credentials gateway=proxy.example:443 route=mixed",
         ] {
             assert!(invalid.parse::<Request>().is_err());
         }
@@ -1061,11 +1186,17 @@ mod tests {
     #[test]
     fn requests_round_trip_as_single_lines() {
         for (request, line) in [
-            (launch("office"), "launch office session_credentials"),
+            (
+                launch("office"),
+                "launch office session_credentials route=saved",
+            ),
             (Request::List, "list"),
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
             (Request::Stop, "stop"),
+            (Request::Config, "config"),
+            (Request::Log { after: 0 }, "log 0"),
+            (Request::Log { after: u64::MAX }, "log 18446744073709551615"),
         ] {
             assert_eq!(request.to_string(), line);
             assert_eq!(line.parse::<Request>(), Ok(request));
@@ -1098,12 +1229,12 @@ mod tests {
         for (request, line) in [
             (
                 linked_launch(),
-                "launch corp session_credentials url=https://p.example/app?a=b&c=d \
+                "launch corp session_credentials route=saved url=https://p.example/app?a=b&c=d \
                  gateway=proxy.example:443 portal=https://p.example/",
             ),
             (
                 start,
-                "launch corp session_credentials url=https://p.example/",
+                "launch corp session_credentials route=saved url=https://p.example/",
             ),
             (
                 Request::Approve(TOKEN.parse().unwrap()),
@@ -1218,6 +1349,46 @@ mod tests {
     }
 
     #[test]
+    fn the_config_source_is_read_from_its_line() {
+        let path = std::env::temp_dir().join("gateinto.toml");
+        let line = config_line(&ConfigSource::File(path.clone())).unwrap();
+        assert_eq!(line, format!("config: {}", path.display()));
+        assert_eq!(
+            config_source(&["other".to_owned(), line]),
+            Some(ConfigSource::File(path))
+        );
+        let none = config_line(&ConfigSource::Defaults).unwrap();
+        assert_eq!(none, "config: none");
+        assert_eq!(config_source(&[none]), Some(ConfigSource::Defaults));
+    }
+
+    #[test]
+    fn only_absolute_single_line_config_paths_are_sent_or_read() {
+        let dir = std::env::temp_dir();
+        for path in [
+            PathBuf::from("gateinto.toml"),
+            PathBuf::new(),
+            dir.join("a\nconfig: none"),
+            dir.join("a\rb"),
+        ] {
+            assert_eq!(
+                config_line(&ConfigSource::File(path.clone())),
+                None,
+                "{path:?}"
+            );
+        }
+        for lines in [
+            vec![],
+            vec!["config: gateinto.toml".to_owned()],
+            vec!["config: ".to_owned()],
+            vec!["config:none".to_owned()],
+            vec!["config: None".to_owned()],
+        ] {
+            assert_eq!(config_source(&lines), None, "{lines:?}");
+        }
+    }
+
+    #[test]
     fn credential_lines_are_stripped_from_what_is_shown() {
         let credentials = issued();
         let mut lines = vec!["session: 1".to_owned()];
@@ -1263,6 +1434,17 @@ mod tests {
             "credentials x",
             "credentials 1 2",
             "credentials  1",
+            "log",
+            "log x",
+            "log -1",
+            "log +1",
+            "log 01",
+            "log 1 2",
+            "log  1",
+            "log 18446744073709551616",
+            "config ",
+            "config x",
+            "CONFIG",
             "open gateinto://connect?profile=office",
         ] {
             assert!(line.parse::<Request>().is_err(), "{line:?}");
@@ -1322,9 +1504,17 @@ mod tests {
     async fn a_pipe_closed_after_the_response_ends_it() {
         let mut pipe = ClosedPipe(Some(b"ok\nsession: 1\n"));
         assert_eq!(
-            read_to_close(&mut pipe, MAX_RESPONSE_BYTES).await.unwrap(),
+            &read_to_close(&mut pipe, MAX_RESPONSE_BYTES).await.unwrap()[..],
             b"ok\nsession: 1\n"
         );
+    }
+
+    #[tokio::test]
+    async fn the_response_is_read_into_one_wiped_allocation() {
+        let mut long: &[u8] = &[b'a'; 10_000];
+        let read: Zeroizing<Vec<u8>> = read_to_close(&mut long, 6000).await.unwrap();
+        assert!(read.capacity() >= 6000 + 4096, "{}", read.capacity());
+        assert_eq!(&read[..], &[b'a'; 8192]);
     }
 
     #[tokio::test]

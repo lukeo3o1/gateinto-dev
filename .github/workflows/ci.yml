@@ -32,10 +32,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -74,15 +75,16 @@ jobs:
       TARGET: i686-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ env.TARGET }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-i686
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install NASM ${{ env.NASM_VERSION }}
-        uses: ilammy/setup-nasm@v1
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
         with:
           version: ${{ env.NASM_VERSION }}
       - run: cargo test --workspace --target $env:TARGET --all-targets --all-features --locked
@@ -95,7 +97,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-i686-debug
-          path: target/${{ env.TARGET }}/debug/gateinto.exe
+          path: |
+            target/${{ env.TARGET }}/debug/gateinto.exe
+            target/${{ env.TARGET }}/debug/gateinto-gui.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -108,20 +112,26 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-release
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo build --release --locked
       - run: cargo build --release --locked --example test_upstream
+      - run: cargo build --release --locked -p gateinto-gui
       - name: Check that gateinto.exe links the C runtime statically
         run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto.exe
+      - name: Check that gateinto-gui.exe links the C runtime statically
+        run: .github/scripts/assert-static-crt.ps1 -Path target\release\gateinto-gui.exe
       - uses: actions/upload-artifact@v7
         with:
           name: windows-release
           path: |
             target/release/gateinto.exe
+            target/release/gateinto-gui.exe
             target/release/examples/test_upstream.exe
           if-no-files-found: error
           retention-days: 1
@@ -273,6 +283,7 @@ jobs:
       WIX_VERSION: '5.0.2'
       MSI_ARCH: ${{ matrix.arch }}
       EXE: ${{ matrix.dir }}/gateinto.exe
+      GUI_EXE: ${{ matrix.dir }}/gateinto-gui.exe
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -286,14 +297,26 @@ jobs:
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
       - name: Build the MSI
         run: |
-          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
       - name: Check that the MSI build writes only the MSI
         run: |
           $files = @(Get-ChildItem -Force -Name "$env:RUNNER_TEMP\msi-build")
           if ($files.Count -ne 1 -or $files[0] -ne 'gateinto.msi') { throw "build.ps1 wrote $($files -join ', ')" }
-      - name: Install, set up, uninstall, reinstall and purge (Software KSP)
-        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\msi-build\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi"
+      - name: Build a second MSI of the same version for the upgrade check
+        run: |
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -Output "$env:RUNNER_TEMP\msi-upgrade\gateinto.msi"
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
+      - name: Install, set up, repair, upgrade, uninstall, reinstall and purge (Software KSP)
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\msi-build\gateinto.msi" -UpgradeMsi "$env:RUNNER_TEMP\msi-upgrade\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi"
+      - name: Upload the x64 MSI
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateinto-msi-x64
+          path: ${{ runner.temp }}/msi-build/gateinto.msi
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload the installer logs
         if: failure()
         uses: actions/upload-artifact@v7

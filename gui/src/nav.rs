@@ -1,3 +1,5 @@
+use crate::i18n::{Text, tr};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
     #[default]
@@ -18,18 +20,18 @@ impl Page {
     ];
 
     pub fn label(self) -> &'static str {
-        match self {
-            Page::Sessions => "Sessions",
-            Page::Gateways => "Gateways",
-            Page::Device => "Device",
-            Page::Log => "Log",
-            Page::Settings => "Settings",
-        }
+        tr(match self {
+            Page::Sessions => Text::Sessions,
+            Page::Gateways => Text::Gateways,
+            Page::Device => Text::Device,
+            Page::Log => Text::Log,
+            Page::Settings => Text::Settings,
+        })
     }
 
     pub fn title(self) -> &'static str {
         match self {
-            Page::Device => "This device",
+            Page::Device => tr(Text::ThisDevice),
             other => other.label(),
         }
     }
@@ -37,6 +39,15 @@ impl Page {
     pub fn at_bottom(self) -> bool {
         matches!(self, Page::Log | Page::Settings)
     }
+}
+
+// AltGr arrives as Ctrl+Alt, so a held Alt keeps AltGr digits out.
+pub fn shortcut(key: u16, ctrl: bool, alt: bool) -> Option<Page> {
+    if !ctrl || alt {
+        return None;
+    }
+    let i = key.checked_sub(u16::from(b'1'))?;
+    Page::ALL.get(usize::from(i)).copied()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,6 +70,16 @@ impl Nav {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_digits_pick_pages_but_altgr_digits_do_not() {
+        assert_eq!(shortcut(u16::from(b'1'), true, false), Some(Page::Sessions));
+        assert_eq!(shortcut(u16::from(b'5'), true, false), Some(Page::Settings));
+        assert_eq!(shortcut(u16::from(b'6'), true, false), None);
+        assert_eq!(shortcut(u16::from(b'0'), true, false), None);
+        assert_eq!(shortcut(u16::from(b'2'), false, false), None);
+        assert_eq!(shortcut(u16::from(b'2'), true, true), None);
+    }
 
     #[test]
     fn rail_order_matches_the_board() {

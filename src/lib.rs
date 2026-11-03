@@ -10,6 +10,7 @@ pub mod ipc;
 pub mod job;
 pub mod lifecycle;
 pub mod link;
+pub mod logbook;
 pub mod process;
 pub mod prompt;
 pub mod proxy;

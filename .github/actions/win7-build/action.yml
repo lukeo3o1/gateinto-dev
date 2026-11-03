@@ -1,10 +1,16 @@
 name: Build gateinto for a Windows 7 target
-description: Builds gateinto.exe for a -win7-windows-msvc target with a pinned nightly and build-std.
+description: Builds a gateinto binary for a -win7-windows-msvc target with a pinned nightly and build-std.
 
 inputs:
   target:
     description: A -win7-windows-msvc target, such as i686-win7-windows-msvc
     required: true
+  package:
+    description: Cargo package of the binary
+    default: gateinto
+  bin:
+    description: Binary to build
+    default: gateinto
   nasm-version:
     description: NASM version for i686 targets
     required: true
@@ -17,23 +23,23 @@ inputs:
 
 outputs:
   exe:
-    description: Path of the built gateinto.exe
-    value: target/${{ inputs.target }}/release/gateinto.exe
+    description: Path of the built executable
+    value: target/${{ inputs.target }}/release/${{ inputs.bin }}.exe
 
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@master
+    - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
       with:
         toolchain: ${{ inputs.toolchain }}
         components: rust-src
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         shared-key: win7-nightly-${{ inputs.target }}
         save-if: ${{ inputs.cache-save }}
     - name: Install NASM ${{ inputs.nasm-version }}
       if: ${{ startsWith(inputs.target, 'i686-') }}
-      uses: ilammy/setup-nasm@v1
+      uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
       with:
         version: ${{ inputs.nasm-version }}
     - shell: pwsh
@@ -45,5 +51,7 @@ runs:
       env:
         NIGHTLY_TOOLCHAIN: ${{ inputs.toolchain }}
         WIN7_TARGET: ${{ inputs.target }}
+        WIN7_PACKAGE: ${{ inputs.package }}
+        WIN7_BIN: ${{ inputs.bin }}
         AWS_LC_SYS_CMAKE_BUILDER: '0'
-      run: cargo +$env:NIGHTLY_TOOLCHAIN build -Z build-std=std,panic_abort --target $env:WIN7_TARGET --locked --release --bin gateinto
+      run: cargo +$env:NIGHTLY_TOOLCHAIN build -Z build-std=std,panic_abort --target $env:WIN7_TARGET --locked --release --package $env:WIN7_PACKAGE --bin $env:WIN7_BIN
