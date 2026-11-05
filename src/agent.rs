@@ -303,6 +303,9 @@ impl Agent {
     pub async fn handle(&self, request: Request) -> Response {
         let result = match request {
             Request::Launch(request) => self.launch(request).await,
+            Request::Terminal(_) => {
+                Err("terminal sessions from the agent are not supported yet".to_owned())
+            }
             Request::Approve(token) => self.approve(token).await,
             Request::Deny(token) => self.deny(token).await.map(|()| Vec::new()),
             Request::List => Ok(self.list().await),
