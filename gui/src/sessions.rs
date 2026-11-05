@@ -166,7 +166,7 @@ pub fn browser_title(kind: Option<BrowserKind>) -> &'static str {
 pub fn row(session: &SessionInfo, now: u64, names: &Names) -> Row {
     let (kind, title) = match session.kind {
         SessionKind::Browser => (Kind::Browser, browser_title(session.browser)),
-        SessionKind::Unknown => (Kind::Other, tr(Text::Session)),
+        SessionKind::Terminal | SessionKind::Unknown => (Kind::Other, tr(Text::Session)),
     };
     Row {
         id: session.id,

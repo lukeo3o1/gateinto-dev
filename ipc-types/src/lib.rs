@@ -31,6 +31,7 @@ macro_rules! named {
 
 named!(SessionKind {
     Browser => "browser",
+    Terminal => "terminal",
 });
 
 named!(SessionRoute {
@@ -248,6 +249,21 @@ mod tests {
             }]
         );
         assert_eq!(BrowserKind::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn a_terminal_session_round_trips() {
+        let line = SessionInfo {
+            kind: SessionKind::Terminal,
+            ..info(None)
+        }
+        .to_line();
+        assert!(line.contains(r#""kind":"terminal""#), "{line}");
+        assert_eq!(
+            SessionInfo::parse_list(&[line]).unwrap()[0].kind,
+            SessionKind::Terminal
+        );
+        assert_eq!(SessionKind::Terminal.to_string(), "terminal");
     }
 
     #[test]
