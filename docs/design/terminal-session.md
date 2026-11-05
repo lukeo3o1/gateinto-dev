@@ -193,7 +193,10 @@ gateinto session terminal --agent --gateway NAME [--route saved|gateway|mixed]
 - `--shell`: executable to start, overriding the
   [shell preference](#shell-selection). A value containing a path separator
   (`\` or `/`) or a drive is a path, resolved against the current directory
-  when relative. A bare name (no separator) is searched in the directories of
+  when relative. A drive-relative value (a drive prefix without a root, for
+  example `C:tools\sh.exe`) is refused: `Path::join` with a drive prefix
+  discards the base, and Windows resolves it against the process's per-drive
+  current directory. A bare name (no separator) is searched in the directories of
   `PATH` only, never in the current directory, trying the name as given and
   then with each extension of `PATHEXT`. The result must be an existing file.
   `ARGS` after `--` are passed to it, quoted by the existing `command_line`
@@ -245,9 +248,13 @@ default is `%ComSpec%` on Windows, and on Linux `$SHELL`, then `pw_shell` from
 Resolution of `shell`, never against the current directory:
 
 - an absolute path is used as is;
-- a relative path with a separator (`\` or `/`) or a drive, for example
+- a relative path with a separator (`\` or `/`), for example
   `tools\sh.exe`, is resolved against the directory of the configuration
   file, like other relative paths in it;
+- a drive-relative value (a drive prefix without a root, for example
+  `C:tools\sh.exe`) is refused, as for `--shell`: joining it would discard
+  the configuration file's directory and depend on a per-drive current
+  directory;
 - a bare name (no separator), for example `pwsh.exe`, is searched in the
   directories of `PATH`, trying the name as given and then with each
   extension of `PATHEXT` on Windows, as for `--shell`.
@@ -432,7 +439,8 @@ Proposed fix *(needs verification)*: the agent calls
 terminal, so that children inherit normal Ctrl-C processing. To verify: that
 the call succeeds in a process without a console, and that it really clears
 the inherited attribute for children. In a foreground agent the attribute is
-not set, so the call changes nothing there. If the call fails, the agent logs
+normally not set, unless inherited from its parent, so the call normally
+changes nothing there. If the call fails, the agent logs
 a warning and terminal windows work without Ctrl-C; that is a usability
 defect, not a security one, but it blocks shipping the agent-hosted variant.
 
@@ -950,12 +958,13 @@ TDD order: each item starts as a failing test.
 - `[terminal] shell` resolution: a bare `pwsh.exe` is searched on `PATH`
   with `PATHEXT` and is not joined with the configuration file's directory;
   `tools\sh.exe` is resolved against the configuration file's directory, not
-  the current directory; an absolute path is kept; a missing file is an
-  error. `[browser] executable` keeps its current join.
+  the current directory; a drive-relative `C:tools\sh.exe` is refused; an
+  absolute path is kept; a missing file is an error. `[browser] executable` keeps its current join.
 - CLI parsing of `session terminal` with `--shell` and arguments after `--`;
   shell resolution searches `PATH` with `PATHEXT` for bare names but not the
   current directory, and resolves a relative path with a separator (for
-  example `.\tools\sh.exe`) against the current directory. `--agent` refuses
+  example `.\tools\sh.exe`) against the current directory; a drive-relative
+  `C:tools\sh.exe` is refused. `--agent` refuses
   `--shell`, `ARGS`, `--config` and upstream options, and requires
   `--gateway`.
 - IPC: `terminal <gateway> route=<saved|gateway|mixed>` round-trips for every
