@@ -760,7 +760,7 @@ async fn terminal_session(_args: TerminalSessionArgs) -> Result {
 #[cfg(windows)]
 async fn terminal_session(args: TerminalSessionArgs) -> Result {
     use gateinto::job::Job;
-    use gateinto::terminal::{self, Shell, System};
+    use gateinto::terminal::{self, System};
 
     let file = args.upstream.config.load()?;
     let mut overrides = args.upstream.overrides();
@@ -768,18 +768,15 @@ async fn terminal_session(args: TerminalSessionArgs) -> Result {
     let settings = file.settings(&overrides)?;
     init_logging("warn");
     args.upstream.config.log_default();
-    let shell = match &args.shell {
-        Some(value) => Shell {
-            executable: terminal::resolve_shell(
-                value,
-                std::env::current_dir().ok().as_deref(),
-                &System,
-            )?,
-            args: args.args.clone(),
-        },
-        None => terminal::configured_shell(&file, &System)?,
-    };
+    let shell = terminal::terminal_shell(
+        args.shell.as_deref(),
+        args.args,
+        std::env::current_dir,
+        &file,
+        &System,
+    )?;
     let route = terminal::terminal_route(args.route.requested(), settings.gateway.route);
+    let mut events = terminal::console_events()?;
     let job = terminal::terminal_job(Job::new())?;
     let proxy = terminal::terminal_proxy(proxy_config(&settings)?, route, job.clone());
     let mut sessions = SessionManager::new();
@@ -790,11 +787,13 @@ async fn terminal_session(args: TerminalSessionArgs) -> Result {
             proxy,
         })
         .await?;
-    let status = run_terminal(&sessions, id, &shell, route, &job).await;
+    let status = run_terminal(&sessions, id, &shell, route, &job, &mut events).await;
     sessions.close_all().await;
     let status = status?;
     let _ = std::io::stdout().flush();
-    std::process::exit(terminal::exit_code(status))
+    let code = terminal::exit_code(status);
+    drop(events);
+    std::process::exit(code)
 }
 
 #[cfg(windows)]
@@ -804,6 +803,7 @@ async fn run_terminal(
     shell: &gateinto::terminal::Shell,
     route: gateinto::proxy::Route,
     job: &std::sync::Arc<gateinto::job::Job>,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<gateinto::terminal::ConsoleEvent>,
 ) -> Result<std::process::ExitStatus> {
     use gateinto::job::SpawnOptions;
     use gateinto::terminal::{self, Supervised};
@@ -823,7 +823,6 @@ async fn run_terminal(
     if let Some(warning) = terminal::route_warning(route) {
         eprintln!("{warning}");
     }
-    let mut events = terminal::console_events()?;
     let mut process = job.spawn_with(
         &shell.executable,
         &shell.args,
@@ -831,11 +830,10 @@ async fn run_terminal(
             environment: Some(&environment),
         },
     )?;
-    let supervised = terminal::supervise(&mut events, process.wait()).await;
+    let supervised = terminal::supervise(events, process.wait()).await;
     if let Err(error) = process.kill().await {
         tracing::warn!("stopping the terminal's job failed: {error}");
     }
-    drop(events);
     match supervised {
         Supervised::Exited(status) => Ok(status?),
         Supervised::Ended(event) => {
