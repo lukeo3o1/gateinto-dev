@@ -520,6 +520,7 @@ async fn the_session_list_is_one_json_object_per_session_without_secrets() {
         started: listed.started,
         tunnels: 0,
         browser: None,
+        shell: None,
     };
     assert_eq!(listed, expected);
     let list = agent.list().await;

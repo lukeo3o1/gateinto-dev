@@ -894,7 +894,7 @@ async fn session_list_prints_an_aligned_table_or_json_objects_without_secrets() 
     assert_eq!(
         table[0].split_whitespace().collect::<Vec<_>>(),
         [
-            "ID", "KIND", "GATEWAY", "LISTEN", "ROUTE", "AUTH", "TUNNELS", "UPTIME", "BROWSER"
+            "ID", "KIND", "GATEWAY", "LISTEN", "ROUTE", "AUTH", "TUNNELS", "UPTIME", "PROGRAM"
         ]
     );
     assert!(in_table(&table, &lines), "{table:?}");

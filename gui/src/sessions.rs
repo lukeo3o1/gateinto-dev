@@ -257,6 +257,7 @@ mod tests {
             started: 1_000,
             tunnels,
             browser: Some(BrowserKind::Edge),
+            shell: None,
         }
     }
 

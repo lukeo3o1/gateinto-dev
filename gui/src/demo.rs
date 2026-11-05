@@ -162,6 +162,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             started: now - s.age,
             tunnels: s.tunnels,
             browser: s.browser,
+            shell: None,
         })
         .collect()
 }
