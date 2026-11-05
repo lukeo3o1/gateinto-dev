@@ -1,17 +1,52 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::ConfigFile;
+use crate::job::Job;
 use crate::link::MIXED_WARNING;
-use crate::proxy::Route;
+use crate::proxy::{self, LocalAuth, Route};
 
 const EQUALS: u16 = b'=' as u16;
 
 pub const NO_PROXY_HOSTS: &str = "localhost,127.0.0.1,::1";
 
 pub type Variables = Vec<(OsString, OsString)>;
+
+pub fn terminal_job(created: io::Result<Job>) -> Result<Arc<Job>, JobError> {
+    created.map(Arc::new).map_err(JobError)
+}
+
+#[derive(Debug)]
+pub struct JobError(io::Error);
+
+impl fmt::Display for JobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "creating the job object for the terminal failed: {}; nothing was started",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for JobError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub fn terminal_proxy(proxy: proxy::Config, route: Route, job: Arc<Job>) -> proxy::Config {
+    proxy::Config {
+        local_auth: LocalAuth::OS_USER,
+        route,
+        os_user_job: Some(job),
+        ..proxy
+    }
+}
 
 pub fn terminal_route(requested: Option<Route>, saved: Route) -> Route {
     requested.unwrap_or(saved)
@@ -398,6 +433,55 @@ mod tests {
 
     const PROXY: &str = "http://127.0.0.1:49152";
     const LOOPBACK: &str = "localhost,127.0.0.1,::1";
+
+    #[cfg(not(windows))]
+    fn proxy_config() -> proxy::Config {
+        proxy::Config {
+            listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+            local_auth: LocalAuth::SESSION_CREDENTIALS,
+            route: Route::Gateway,
+            upstream: proxy::Upstream {
+                host: "127.0.0.1".to_owned(),
+                port: 9,
+                server_name: rustls::pki_types::ServerName::try_from("upstream.test").unwrap(),
+                roots: rustls::RootCertStore::empty(),
+            },
+            tls_mode: crate::tls::TlsMode::default(),
+            client_certificate: None,
+            limits: proxy::Limits::default(),
+            os_user_job: None,
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_terminal_session_accepts_only_processes_in_its_job() {
+        let job = Arc::new(Job::fake());
+        let config = terminal_proxy(proxy_config(), Route::Mixed, job.clone());
+        assert_eq!(config.local_auth, LocalAuth::OS_USER);
+        assert!(
+            config
+                .os_user_job
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &job))
+        );
+        assert_eq!(config.route, Route::Mixed);
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_created_is_an_error_and_never_a_fallback() {
+        let error = terminal_job(Err(io::Error::other("refused"))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "creating the job object for the terminal failed: refused; nothing was started"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn terminal_sessions_have_no_job_outside_windows() {
+        assert!(terminal_job(Job::new()).is_err());
+    }
 
     #[test]
     fn a_requested_route_wins_over_the_saved_route() {
