@@ -218,7 +218,7 @@ pub fn configured_shell(file: &ConfigFile, lookup: &impl Lookup) -> Result<Shell
         });
     };
     Ok(Shell {
-        executable: resolve_shell(shell, file.dir(), lookup)?,
+        executable: resolve_shell(shell, file.dir().as_deref(), lookup)?,
         args: file.terminal.args.iter().map(OsString::from).collect(),
     })
 }

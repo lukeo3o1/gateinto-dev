@@ -531,8 +531,13 @@ impl ConfigFile {
         Ok(file)
     }
 
-    pub fn dir(&self) -> Option<&Path> {
-        self.path.as_deref().and_then(Path::parent)
+    pub fn dir(&self) -> Option<PathBuf> {
+        let dir = self.path.as_deref()?.parent()?;
+        if dir.as_os_str().is_empty() {
+            std::env::current_dir().ok()
+        } else {
+            std::path::absolute(dir).ok()
+        }
     }
 
     pub fn with_linked(&self, linked: &[LinkedGateway]) -> Self {
@@ -1493,8 +1498,23 @@ port = 443
         assert_eq!(other.client_cert_file, Some(dir.join("keys/client.pem")));
         assert_eq!(file.browser.executable, Some(dir.join("bin/chrome")));
         assert_eq!(file.terminal.shell, Some(PathBuf::from("tools/sh")));
-        assert_eq!(file.dir(), Some(dir.as_path()));
+        assert_eq!(file.dir(), Some(dir.clone()));
         assert_eq!(ConfigFile::parse("").unwrap().dir(), None);
+    }
+
+    #[test]
+    fn the_directory_of_a_relative_file_is_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        for (path, expected) in [
+            ("gateinto.toml", cwd.clone()),
+            ("conf/gateinto.toml", cwd.join("conf")),
+        ] {
+            let file = ConfigFile {
+                path: Some(PathBuf::from(path)),
+                ..ConfigFile::default()
+            };
+            assert_eq!(file.dir(), Some(expected), "{path}");
+        }
     }
 
     #[test]
