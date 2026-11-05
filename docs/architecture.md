@@ -463,7 +463,7 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
@@ -477,13 +477,14 @@ The full protocol, limits and guarantees are in
 | `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
 | `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
 | `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
+| `src/terminal.rs` | Terminal sessions: the shell (`--shell`, `[terminal] shell`, the platform default; a bare name is searched in `PATH` only, never in the current directory), the proxy variables and the Windows environment block, the route, the job and `os_user`-only proxy configuration, and supervising the shell through console control events. |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
 | `src/proxy/session_credentials.rs` | `session_credentials` local proxy authentication of one session: credential generation, realm, strict Basic and base64 parsing, keyed constant-time comparison with the issued credentials, failure rate limit. |
 | `src/proxy/local_auth.rs` | The configured local authentication methods (`LocalAuth`) and the per-connection decision between `os_user` and `session_credentials`. |
 | `src/proxy/os_user.rs`, `src/proxy/os_user/windows.rs` | `os_user`: denial reasons, the owner lookup interface, TCP table row matching, and the Windows lookup of the owning process, its user SID and its job. |
-| `src/job.rs` | Job objects for browser sessions and starting a process inside one (Windows only); command-line quoting. |
+| `src/job.rs` | Job objects for browser and terminal sessions and starting a process inside one, optionally with its own environment block (Windows only); command-line quoting. |
 | `src/token.rs` | The current process token and the user SID of a token (Windows only), shared by the named pipe, the elevation check and `os_user`. |
 | `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, on-demand PING liveness checks, certificate rotation and owned connection drivers. |
 | `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
