@@ -342,9 +342,10 @@ the target, around the gateway.
 **Decision for the first version:** set `HTTP_PROXY` anyway and keep these
 refusals, so plain HTTP fails closed instead of silently bypassing the
 tunnel. A notice on standard error says that `http://` URLs are refused.
-Forwarding absolute-form requests (for example by opening a `CONNECT` to `host:80` and
-relaying one rewritten request per connection) would add request parsing,
-framing and smuggling risks to the proxy core; it is an open question.
+Forwarding absolute-form requests (for example by opening a `CONNECT` to
+`host:80` and relaying one rewritten request per connection) would add
+request parsing, framing and smuggling risks to the proxy core; it is an
+open question.
 
 ## Security
 
