@@ -78,6 +78,31 @@ impl fmt::Display for ConsoleEvent {
     }
 }
 
+#[cfg(windows)]
+pub fn console_events() -> io::Result<mpsc::UnboundedReceiver<ConsoleEvent>> {
+    use tokio::signal::windows;
+    let (sender, events) = mpsc::unbounded_channel();
+    macro_rules! forward {
+        ($listener:expr, $event:expr) => {{
+            let mut listener = $listener?;
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                while listener.recv().await.is_some() {
+                    if sender.send($event).is_err() {
+                        break;
+                    }
+                }
+            });
+        }};
+    }
+    forward!(windows::ctrl_c(), ConsoleEvent::CtrlC);
+    forward!(windows::ctrl_break(), ConsoleEvent::CtrlBreak);
+    forward!(windows::ctrl_close(), ConsoleEvent::Close);
+    forward!(windows::ctrl_logoff(), ConsoleEvent::Logoff);
+    forward!(windows::ctrl_shutdown(), ConsoleEvent::Shutdown);
+    Ok(events)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Supervised<T> {
     Exited(T),

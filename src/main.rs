@@ -150,6 +150,10 @@ enum SessionCommand {
     /// Start a browser session with session credentials on an ephemeral loopback port, show the
     /// credentials, and run it until interrupted
     Browser(BrowserSessionArgs),
+    /// Start a shell in this console whose proxy variables point to a new session on an
+    /// ephemeral loopback port, accepting only the shell and its child processes, and close the
+    /// session when the shell exits; Windows only
+    Terminal(TerminalSessionArgs),
     /// List the sessions of the running agent as a table: id, kind, gateway, listen address,
     /// route, local auth, open tunnels, uptime and browser; never credentials
     List {
@@ -212,6 +216,49 @@ struct BrowserSessionArgs {
     /// Gateway from --config to relay through [default: the only gateway]
     #[arg(long)]
     gateway: Option<GatewayName>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Args)]
+struct TerminalSessionArgs {
+    #[command(flatten)]
+    upstream: UpstreamArgs,
+
+    /// Gateway from --config to relay through [default: the only gateway]
+    #[arg(long)]
+    gateway: Option<GatewayName>,
+
+    /// Route of this session: the gateway's saved route, everything through the gateway, or
+    /// mixed
+    #[arg(long, value_enum, default_value_t = RouteArg::Saved)]
+    route: RouteArg,
+
+    /// Shell to start instead of [terminal] shell from --config or the default shell; a bare
+    /// name is searched in PATH only, never in the current directory
+    #[arg(long)]
+    shell: Option<PathBuf>,
+
+    /// Arguments for the --shell executable; put -- before them
+    #[arg(last = true, requires = "shell")]
+    args: Vec<std::ffi::OsString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RouteArg {
+    Saved,
+    Gateway,
+    Mixed,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl RouteArg {
+    fn requested(self) -> Option<gateinto::proxy::Route> {
+        match self {
+            Self::Saved => None,
+            Self::Gateway => Some(gateinto::proxy::Route::Gateway),
+            Self::Mixed => Some(gateinto::proxy::Route::Mixed),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -472,6 +519,7 @@ async fn run() -> ExitCode {
         Command::CheckUpstream(args) => check_upstream(args).await,
         Command::Key(command) => key(command),
         Command::Session(SessionCommand::Browser(args)) => browser_session(args).await,
+        Command::Session(SessionCommand::Terminal(args)) => terminal_session(args).await,
         Command::Session(SessionCommand::List { json }) => session_list(json).await,
         Command::Session(SessionCommand::Credentials { id }) => session_credentials(id).await,
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
@@ -702,6 +750,111 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     let result = shown.await;
     sessions.close_all().await;
     result
+}
+
+#[cfg(not(windows))]
+async fn terminal_session(_args: TerminalSessionArgs) -> Result {
+    Err("terminal sessions are not supported on this platform".into())
+}
+
+#[cfg(windows)]
+async fn terminal_session(args: TerminalSessionArgs) -> Result {
+    use gateinto::job::Job;
+    use gateinto::terminal::{self, Shell, System};
+
+    let file = args.upstream.config.load()?;
+    let mut overrides = args.upstream.overrides();
+    overrides.gateway = args.gateway.clone();
+    let settings = file.settings(&overrides)?;
+    init_logging("warn");
+    args.upstream.config.log_default();
+    let shell = match &args.shell {
+        Some(value) => Shell {
+            executable: terminal::resolve_shell(
+                value,
+                std::env::current_dir().ok().as_deref(),
+                &System,
+            )?,
+            args: args.args.clone(),
+        },
+        None => terminal::configured_shell(&file, &System)?,
+    };
+    let route = terminal::terminal_route(args.route.requested(), settings.gateway.route);
+    let job = terminal::terminal_job(Job::new())?;
+    let proxy = terminal::terminal_proxy(proxy_config(&settings)?, route, job.clone());
+    let mut sessions = SessionManager::new();
+    let id = sessions
+        .start(SessionConfig {
+            kind: SessionKind::Terminal,
+            gateway: settings.gateway.name,
+            proxy,
+        })
+        .await?;
+    let status = run_terminal(&sessions, id, &shell, route, &job).await;
+    sessions.close_all().await;
+    let status = status?;
+    let _ = std::io::stdout().flush();
+    std::process::exit(terminal::exit_code(status))
+}
+
+#[cfg(windows)]
+async fn run_terminal(
+    sessions: &SessionManager,
+    id: SessionId,
+    shell: &gateinto::terminal::Shell,
+    route: gateinto::proxy::Route,
+    job: &std::sync::Arc<gateinto::job::Job>,
+) -> Result<std::process::ExitStatus> {
+    use gateinto::job::SpawnOptions;
+    use gateinto::terminal::{self, Supervised};
+
+    let session = sessions.session(id).expect("the session just started");
+    let (vars, replaced) =
+        terminal::terminal_environment(std::env::vars_os().collect(), session.local_addr());
+    let environment = terminal::environment_block(&vars)?;
+    println!("session: {id}");
+    println!("kind: {}", session.kind());
+    println!("gateway: {}", session.gateway());
+    println!("listen: {}", session.local_addr());
+    println!("route: {route}");
+    println!("auth: os_user");
+    println!("{}", replaced_line(&replaced));
+    eprintln!("{HTTP_REFUSED_NOTICE}");
+    if let Some(warning) = terminal::route_warning(route) {
+        eprintln!("{warning}");
+    }
+    let mut events = terminal::console_events()?;
+    let mut process = job.spawn_with(
+        &shell.executable,
+        &shell.args,
+        SpawnOptions {
+            environment: Some(&environment),
+        },
+    )?;
+    let supervised = terminal::supervise(&mut events, process.wait()).await;
+    if let Err(error) = process.kill().await {
+        tracing::warn!("stopping the terminal's job failed: {error}");
+    }
+    drop(events);
+    match supervised {
+        Supervised::Exited(status) => Ok(status?),
+        Supervised::Ended(event) => {
+            Err(format!("the terminal session was stopped because {event}").into())
+        }
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+const HTTP_REFUSED_NOTICE: &str = "Note: plain http:// URLs are refused by this session; only \
+     https:// and other tunneled connections go through it.";
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replaced_line(names: &[std::ffi::OsString]) -> String {
+    if names.is_empty() {
+        return "replaced: none".to_owned();
+    }
+    let names: Vec<_> = names.iter().map(|name| name.to_string_lossy()).collect();
+    format!("replaced: {}", names.join(", "))
 }
 
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
@@ -1530,6 +1683,62 @@ mod tests {
         assert_eq!(
             proxy_config(&settings).unwrap().local_auth,
             LocalAuth::SESSION_CREDENTIALS
+        );
+    }
+
+    fn terminal_args(flags: &[&str]) -> std::result::Result<TerminalSessionArgs, clap::Error> {
+        let args = ["gateinto", "session", "terminal"].iter().chain(flags);
+        Cli::try_parse_from(args).map(|cli| match cli.command {
+            Command::Session(SessionCommand::Terminal(args)) => args,
+            _ => unreachable!(),
+        })
+    }
+
+    #[test]
+    fn a_terminal_passes_the_arguments_after_the_separator_to_its_shell() {
+        let args = terminal_args(&["--shell", "sh", "--", "-l", "--route", "x y"]).unwrap();
+        assert_eq!(args.shell, Some(PathBuf::from("sh")));
+        assert_eq!(args.args, ["-l", "--route", "x y"]);
+        assert_eq!(args.route.requested(), None);
+    }
+
+    #[test]
+    fn terminal_arguments_need_an_explicit_shell() {
+        let error = terminal_args(&["--", "-l"]).err().unwrap();
+        assert!(error.to_string().contains("--shell"), "{error}");
+    }
+
+    #[test]
+    fn a_terminal_route_is_saved_unless_one_is_requested() {
+        assert_eq!(terminal_args(&[]).unwrap().route.requested(), None);
+        for (flag, route) in [
+            ("saved", None),
+            ("gateway", Some(gateinto::proxy::Route::Gateway)),
+            ("mixed", Some(gateinto::proxy::Route::Mixed)),
+        ] {
+            let args = terminal_args(&["--route", flag]).unwrap();
+            assert_eq!(args.route.requested(), route, "{flag}");
+        }
+        assert!(terminal_args(&["--route", "direct"]).is_err());
+    }
+
+    #[test]
+    fn the_replaced_line_names_variables_without_values() {
+        assert_eq!(replaced_line(&[]), "replaced: none");
+        assert_eq!(
+            replaced_line(&["https_proxy".into(), "NO_PROXY".into()]),
+            "replaced: https_proxy, NO_PROXY"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn terminal_sessions_are_refused_before_anything_is_bound_outside_windows() {
+        let args = terminal_args(&["--config", "/nonexistent/gateinto.toml"]).unwrap();
+        let error = terminal_session(args).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "terminal sessions are not supported on this platform"
         );
     }
 
