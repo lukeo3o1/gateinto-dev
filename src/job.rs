@@ -139,7 +139,7 @@ mod windows {
         QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        CREATE_NEW_CONSOLE, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
         DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
         PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread,
@@ -230,21 +230,75 @@ mod windows {
     #[derive(Debug, Default, Clone, Copy)]
     pub struct SpawnOptions<'a> {
         pub environment: Option<&'a [u16]>,
+        pub new_console: bool,
+        pub current_dir: Option<&'a Path>,
+        pub title: Option<&'a str>,
     }
 
     impl SpawnOptions<'_> {
         fn flags(&self) -> PROCESS_CREATION_FLAGS {
-            if self.environment.is_some() {
-                CREATE_UNICODE_ENVIRONMENT
+            let environment = match self.environment {
+                Some(_) => CREATE_UNICODE_ENVIRONMENT,
+                None => 0,
+            };
+            let console = if self.new_console {
+                CREATE_NEW_CONSOLE
             } else {
                 0
-            }
+            };
+            environment | console
         }
 
         fn environment(&self) -> *const std::ffi::c_void {
             self.environment
                 .map_or(null(), |block| block.as_ptr().cast())
         }
+    }
+
+    struct Strings {
+        current_dir: Option<Vec<u16>>,
+        title: Option<Vec<u16>>,
+    }
+
+    impl Strings {
+        fn new(options: SpawnOptions<'_>) -> io::Result<Self> {
+            Ok(Self {
+                current_dir: options
+                    .current_dir
+                    .map(|dir| nul_terminated(dir.as_os_str().encode_wide()))
+                    .transpose()?,
+                title: options
+                    .title
+                    .map(|title| nul_terminated(title.encode_utf16()))
+                    .transpose()?,
+            })
+        }
+
+        fn current_dir(&self) -> *const u16 {
+            self.current_dir.as_ref().map_or(null(), |dir| dir.as_ptr())
+        }
+
+        fn startup(&self, cb: u32) -> STARTUPINFOW {
+            STARTUPINFOW {
+                cb,
+                lpTitle: self
+                    .title
+                    .as_ref()
+                    .map_or(null_mut(), |title| title.as_ptr().cast_mut()),
+                ..Default::default()
+            }
+        }
+    }
+
+    fn nul_terminated(text: impl Iterator<Item = u16>) -> io::Result<Vec<u16>> {
+        let text: Vec<u16> = text.collect();
+        if text.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a process title or directory contains NUL",
+            ));
+        }
+        Ok(text.into_iter().chain([0]).collect())
     }
 
     struct Created {
@@ -258,11 +312,12 @@ mod windows {
         line: &[u16],
         flags: PROCESS_CREATION_FLAGS,
         options: SpawnOptions<'_>,
+        strings: &Strings,
         startup: &STARTUPINFOW,
     ) -> io::Result<Created> {
         let mut line = line.to_vec();
         let mut info = PROCESS_INFORMATION::default();
-        // SAFETY: both strings are NUL-terminated and outlive the call, an environment
+        // SAFETY: all strings are NUL-terminated and outlive the call, an environment
         // block is double-NUL-terminated UTF-16 as CREATE_UNICODE_ENVIRONMENT says, the
         // startup information matches the flags, and no handles are inherited.
         if unsafe {
@@ -274,7 +329,7 @@ mod windows {
                 0,
                 flags | options.flags(),
                 options.environment(),
-                null(),
+                strings.current_dir(),
                 startup,
                 &mut info,
             )
@@ -315,10 +370,11 @@ mod windows {
             let program: Vec<u16> = executable.as_os_str().encode_wide().collect();
             let args: Vec<Vec<u16>> = args.iter().map(|arg| arg.encode_wide().collect()).collect();
             let line = command_line(&program, &args).map_err(SpawnError::Process)?;
+            let strings = Strings::new(options).map_err(SpawnError::Process)?;
             let application: Vec<u16> = program.into_iter().chain([0]).collect();
-            let created = match self.create_in_job(&application, &line, options) {
+            let created = match self.create_in_job(&application, &line, options, &strings) {
                 Ok(created) => created,
-                Err(_) => self.create_and_assign(&application, &line, options)?,
+                Err(_) => self.create_and_assign(&application, &line, options, &strings)?,
             };
             Ok(self.watch(created))
         }
@@ -328,14 +384,12 @@ mod windows {
             application: &[u16],
             line: &[u16],
             options: SpawnOptions<'_>,
+            strings: &Strings,
         ) -> io::Result<Created> {
             let jobs = [self.handle()];
             let mut attributes = Attributes::job_list(&jobs)?;
             let startup = STARTUPINFOEXW {
-                StartupInfo: STARTUPINFOW {
-                    cb: size_of::<STARTUPINFOEXW>() as u32,
-                    ..Default::default()
-                },
+                StartupInfo: strings.startup(size_of::<STARTUPINFOEXW>() as u32),
                 lpAttributeList: attributes.list(),
             };
             create_process(
@@ -343,6 +397,7 @@ mod windows {
                 line,
                 EXTENDED_STARTUPINFO_PRESENT,
                 options,
+                strings,
                 &startup.StartupInfo,
             )
         }
@@ -352,13 +407,18 @@ mod windows {
             application: &[u16],
             line: &[u16],
             options: SpawnOptions<'_>,
+            strings: &Strings,
         ) -> Result<Created, SpawnError> {
-            let startup = STARTUPINFOW {
-                cb: size_of::<STARTUPINFOW>() as u32,
-                ..Default::default()
-            };
-            let created = create_process(application, line, CREATE_SUSPENDED, options, &startup)
-                .map_err(SpawnError::Process)?;
+            let startup = strings.startup(size_of::<STARTUPINFOW>() as u32);
+            let created = create_process(
+                application,
+                line,
+                CREATE_SUSPENDED,
+                options,
+                strings,
+                &startup,
+            )
+            .map_err(SpawnError::Process)?;
             // SAFETY: both handles are open.
             if unsafe { AssignProcessToJobObject(self.handle(), created.process.0) } == 0 {
                 let error = io::Error::last_os_error();
@@ -540,6 +600,7 @@ mod windows {
                     &args,
                     SpawnOptions {
                         environment: Some(&environment),
+                        ..SpawnOptions::default()
                     },
                 )
                 .unwrap();
@@ -558,11 +619,101 @@ mod windows {
                     &[],
                     SpawnOptions {
                         environment: Some(&environment),
+                        ..SpawnOptions::default()
                     },
                 )
                 .unwrap_err();
             assert!(matches!(error, SpawnError::Process(_)), "{error}");
             assert_eq!(job.active_processes().unwrap(), 0);
+        }
+
+        #[test]
+        fn creation_flags_follow_the_options() {
+            let environment: Vec<u16> = "A=1\0\0".encode_utf16().collect();
+            for (options, flags) in [
+                (SpawnOptions::default(), 0),
+                (
+                    SpawnOptions {
+                        environment: Some(&environment),
+                        ..SpawnOptions::default()
+                    },
+                    CREATE_UNICODE_ENVIRONMENT,
+                ),
+                (
+                    SpawnOptions {
+                        new_console: true,
+                        ..SpawnOptions::default()
+                    },
+                    CREATE_NEW_CONSOLE,
+                ),
+                (
+                    SpawnOptions {
+                        environment: Some(&environment),
+                        new_console: true,
+                        ..SpawnOptions::default()
+                    },
+                    CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+                ),
+            ] {
+                assert_eq!(options.flags(), flags, "{options:?}");
+            }
+        }
+
+        #[test]
+        fn the_title_is_passed_in_the_startup_information() {
+            let strings = Strings::new(SpawnOptions {
+                title: Some("Gateinto: office"),
+                ..SpawnOptions::default()
+            })
+            .unwrap();
+            let startup = strings.startup(size_of::<STARTUPINFOW>() as u32);
+            assert_eq!(startup.cb, size_of::<STARTUPINFOW>() as u32);
+            // SAFETY: lpTitle points into strings, which is alive and NUL-terminated.
+            let title = unsafe { std::slice::from_raw_parts(startup.lpTitle, 17) };
+            assert_eq!(String::from_utf16(title).unwrap(), "Gateinto: office\0");
+            let none = Strings::new(SpawnOptions::default()).unwrap();
+            assert!(none.startup(0).lpTitle.is_null());
+        }
+
+        #[test]
+        fn a_nul_in_the_title_or_directory_is_refused_before_anything_starts() {
+            let job = Arc::new(Job::new().unwrap());
+            let shell = std::path::PathBuf::from(std::env::var_os("ComSpec").unwrap());
+            let directory = std::path::PathBuf::from("C:\\a\0b");
+            for options in [
+                SpawnOptions {
+                    title: Some("a\0b"),
+                    ..SpawnOptions::default()
+                },
+                SpawnOptions {
+                    current_dir: Some(&directory),
+                    ..SpawnOptions::default()
+                },
+            ] {
+                let error = job.spawn_with(&shell, &[], options).unwrap_err();
+                assert!(matches!(error, SpawnError::Process(_)), "{error}");
+            }
+            assert_eq!(job.active_processes().unwrap(), 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_spawned_process_starts_in_the_given_directory() {
+            let job = Arc::new(Job::new().unwrap());
+            let shell = std::path::PathBuf::from(std::env::var_os("ComSpec").unwrap());
+            let directory = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+            let args = ["/d", "/c", "if /i %CD%==%SystemRoot% exit 3"].map(OsString::from);
+            let mut process = job
+                .spawn_with(
+                    &shell,
+                    &args,
+                    SpawnOptions {
+                        current_dir: Some(&directory),
+                        ..SpawnOptions::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(process.wait().await.unwrap().code(), Some(3));
+            process.kill().await.unwrap();
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -576,8 +727,10 @@ mod windows {
                 .collect();
             let line = command_line(&program, &args).unwrap();
             let application: Vec<u16> = program.into_iter().chain([0]).collect();
+            let options = SpawnOptions::default();
+            let strings = Strings::new(options).unwrap();
             let created = job
-                .create_and_assign(&application, &line, SpawnOptions::default())
+                .create_and_assign(&application, &line, options, &strings)
                 .unwrap();
             let mut process = job.watch(created);
             assert!(job.active_processes().unwrap() >= 1);

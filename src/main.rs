@@ -828,6 +828,7 @@ async fn run_terminal(
         &shell.args,
         SpawnOptions {
             environment: Some(&environment),
+            ..SpawnOptions::default()
         },
     )?;
     let supervised = terminal::supervise(events, process.wait()).await;
