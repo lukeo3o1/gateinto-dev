@@ -668,7 +668,9 @@ On Linux the list is passed to `execve` as is; no sorting or hidden entries.
   *before* spawning the shell and keeps both alive, draining them in a loop,
   until the shell has exited and the job is torn down. `ctrl_close`,
   `ctrl_logoff` and `ctrl_shutdown` remain shutdown events and end the
-  session. Gateinto must not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose
+  session. The implementation creates all five listeners before it creates
+  the job and starts the session, so Ctrl-C and Ctrl-Break are ignored by
+  Gateinto from then until the shell has exited and the command exits. Gateinto must not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose
   ignore flag the shell would inherit, and must not start the shell with
   `CREATE_NEW_PROCESS_GROUP`, which disables Ctrl-C in the new process.
 - **Shell exits.** Gateinto terminates the job, which also ends background

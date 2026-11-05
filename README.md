@@ -343,7 +343,8 @@ share only the device key.
   on real Windows) runs one terminal session in the console it was started
   from: it creates a job object, starts a session on an ephemeral port of
   `127.0.0.1` that accepts only processes in that job (`os_user`, no
-  credentials; any other program gets `403`), and starts the shell in the
+  credentials; any other program gets `403`, or `408` when the owner lookup
+  times out), and starts the shell in the
   job with `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` (both
   spellings) pointing at it. The shell is `--shell` with the arguments after
   `--`, else `[terminal] shell` and `args`, else `%ComSpec%`. `--route
