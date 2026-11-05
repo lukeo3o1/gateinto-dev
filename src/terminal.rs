@@ -180,8 +180,8 @@ impl Lookup for System {
                     &mut found,
                 )
             };
-            if status == libc::ERANGE && buffer.len() < 1 << 20 {
-                buffer.resize(buffer.len() * 2, 0);
+            if let Some(len) = retry_len(status, buffer.len()) {
+                buffer.resize(len, 0);
                 continue;
             }
             if status != 0 || found.is_null() {
@@ -201,6 +201,15 @@ impl Lookup for System {
     #[cfg(not(unix))]
     fn login_shell(&self) -> Option<PathBuf> {
         None
+    }
+}
+
+#[cfg(unix)]
+fn retry_len(status: libc::c_int, len: usize) -> Option<usize> {
+    match status {
+        libc::EINTR => Some(len),
+        libc::ERANGE if len < 1 << 20 => Some(len * 2),
+        _ => None,
     }
 }
 
@@ -876,6 +885,16 @@ mod tests {
         .file(&shell);
         assert_eq!(unix_default_shell(&lookup), shell);
         assert_eq!(lookup.login_queries.get(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_user_database_query_is_retried_on_a_small_buffer_or_an_interruption() {
+        assert_eq!(retry_len(libc::ERANGE, 1024), Some(2048));
+        assert_eq!(retry_len(libc::ERANGE, 1 << 20), None);
+        assert_eq!(retry_len(libc::EINTR, 1024), Some(1024));
+        assert_eq!(retry_len(0, 1024), None);
+        assert_eq!(retry_len(libc::EIO, 1024), None);
     }
 
     #[cfg(unix)]
