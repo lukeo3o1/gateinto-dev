@@ -142,7 +142,7 @@ is CLI-only (in-process), without an agent-hosted variant. See
   deserialize as `Unknown`. `SessionInfo` has no `deny_unknown_fields`, so
   older readers ignore new optional fields.
 
-## Design decisions
+## Design
 
 ### Two variants
 
