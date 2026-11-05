@@ -420,6 +420,9 @@ impl TryFrom<RawTerminalSection> for TerminalSection {
 
     fn try_from(raw: RawTerminalSection) -> Result<Self, Self::Error> {
         match (raw.shell, raw.args) {
+            (Some(shell), _) if shell.as_os_str().is_empty() => {
+                Err("[terminal] shell is empty; name a shell or remove the key")
+            }
             (None, Some(_)) => Err("[terminal] args is used only together with shell; set \
                                     shell or remove args"),
             (shell, args) => Ok(Self {
@@ -1290,6 +1293,20 @@ port = 443
             ConfigFile::parse("[terminal]\n").unwrap().terminal,
             TerminalSection::default()
         );
+    }
+
+    #[test]
+    fn an_empty_terminal_shell_is_refused() {
+        for text in [
+            "[terminal]\nshell = \"\"\n",
+            "[terminal]\nshell = \"\"\nargs = [\"-l\"]\n",
+        ] {
+            let error = ConfigFile::parse(text).unwrap_err().to_string();
+            assert!(
+                error.contains("[terminal] shell is empty; name a shell or remove the key"),
+                "{text}: {error}"
+            );
+        }
     }
 
     #[test]
