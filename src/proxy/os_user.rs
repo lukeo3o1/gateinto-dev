@@ -20,9 +20,7 @@ impl fmt::Display for Denial {
         match self {
             Self::NotFound => f.write_str("no process owns the connection"),
             Self::OtherUser => f.write_str("the connection comes from another OS user"),
-            Self::NotInJob => {
-                f.write_str("the connection comes from outside the session's browser")
-            }
+            Self::NotInJob => f.write_str("the connection comes from outside the session's job"),
             Self::Lookup(error) => write!(f, "looking up the connection owner failed: {error}"),
             Self::TimedOut => {
                 f.write_str("the owner lookup did not finish within the handshake timeout")
@@ -335,7 +333,7 @@ pub(crate) mod tests {
         for (denial, reason) in [
             (Denial::NotFound, "no process owns"),
             (Denial::OtherUser, "another OS user"),
-            (Denial::NotInJob, "outside the session's browser"),
+            (Denial::NotInJob, "outside the session's job"),
             (
                 Denial::Lookup("access denied".to_owned()),
                 "failed: access denied",

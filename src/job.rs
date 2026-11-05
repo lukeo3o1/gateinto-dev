@@ -462,7 +462,7 @@ mod windows {
     impl Drop for Process {
         fn drop(&mut self) {
             if let Err(error) = self.job.terminate() {
-                warn!("stopping the browser's job failed: {error}");
+                warn!("stopping the session's job failed: {error}");
                 return;
             }
             let job = self.job.clone();
