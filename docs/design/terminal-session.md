@@ -992,15 +992,15 @@ TDD order: each item starts as a failing test.
   with `PATHEXT` and is not joined with the configuration file's directory;
   `tools\sh.exe` is resolved against the configuration file's directory, not
   the current directory; a drive-relative `C:tools\sh.exe` and a
-  root-relative `\tools\sh.exe` are refused; an absolute path is kept; a missing file is an error. `[browser] executable`
-  keeps its current join.
+  root-relative `\tools\sh.exe` are refused; an absolute path is kept; a
+  missing file is an error. `[browser] executable` keeps its current join.
 - CLI parsing of `session terminal` with `--shell` and arguments after `--`;
   shell resolution searches `PATH` with `PATHEXT` for bare names but not the
   current directory, and resolves a relative path with a separator (for
   example `.\tools\sh.exe`) against the current directory; a drive-relative
-  `C:tools\sh.exe` and a root-relative `\tools\sh.exe` are refused. `--agent` refuses
-  `--shell`, `ARGS`, `--config` and upstream options, and requires
-  `--gateway`.
+  `C:tools\sh.exe` and a root-relative `\tools\sh.exe` are refused.
+  `--agent` refuses `--shell`, `ARGS`, `--config` and upstream options, and
+  requires `--gateway`.
 - IPC: `terminal <gateway> route=<saved|gateway|mixed>` round-trips for every
   route; missing `route=`, an unknown route, an extra word (`shell=...`,
   `command=...`, `args=...`, `env=...`), a second space, an invalid gateway
