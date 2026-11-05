@@ -1212,6 +1212,10 @@ above and must be checked on real systems before it ships. Results go to
   and which entry Windows APIs return for a duplicated name.
 - Whether cmd sets the hidden `=<drive>:` entries again in an agent-hosted
   window.
+- In-process, on `CTRL_CLOSE_EVENT` (and logoff or shutdown) Windows may end
+  the process before the job is terminated and the session closed; the job
+  handle then closes with the process and `KILL_ON_JOB_CLOSE` still ends the
+  shell.
 - In-process console handles while `bInheritHandles` is false, also with
   redirected standard handles; behaviour when started from mintty or another
   pipe-based host.
