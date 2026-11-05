@@ -209,7 +209,8 @@ gateinto session terminal --agent --gateway NAME [--route saved|gateway|mixed]
   existing file.
   `ARGS` after `--` are passed to it, quoted by the existing `command_line`
   (`src/job.rs`), which already refuses quotes in the executable path and NUL
-  characters.
+  characters. `ARGS` require `--shell`; without it the arguments come from
+  `[terminal] args`.
 - `--agent`: send a [`terminal` request](#ipc) to the running agent instead of
   running in-process, print the agent's answer and return. It requires
   `--gateway` and refuses `--shell`, `ARGS`, `--config` and upstream options,
