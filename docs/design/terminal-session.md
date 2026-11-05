@@ -209,7 +209,8 @@ gateinto session terminal --agent --gateway NAME [--route saved|gateway|mixed]
   existing file.
   `ARGS` after `--` are passed to it, quoted by the existing `command_line`
   (`src/job.rs`), which already refuses quotes in the executable path and NUL
-  characters.
+  characters. `ARGS` require `--shell`; without it the arguments come from
+  `[terminal] args`.
 - `--agent`: send a [`terminal` request](#ipc) to the running agent instead of
   running in-process, print the agent's answer and return. It requires
   `--gateway` and refuses `--shell`, `ARGS`, `--config` and upstream options,
@@ -667,7 +668,9 @@ On Linux the list is passed to `execve` as is; no sorting or hidden entries.
   *before* spawning the shell and keeps both alive, draining them in a loop,
   until the shell has exited and the job is torn down. `ctrl_close`,
   `ctrl_logoff` and `ctrl_shutdown` remain shutdown events and end the
-  session. Gateinto must not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose
+  session. The implementation creates all five listeners before it creates
+  the job and starts the session, so Ctrl-C and Ctrl-Break are ignored by
+  Gateinto from then until the shell has exited and the command exits. Gateinto must not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose
   ignore flag the shell would inherit, and must not start the shell with
   `CREATE_NEW_PROCESS_GROUP`, which disables Ctrl-C in the new process.
 - **Shell exits.** Gateinto terminates the job, which also ends background
@@ -992,15 +995,15 @@ TDD order: each item starts as a failing test.
   with `PATHEXT` and is not joined with the configuration file's directory;
   `tools\sh.exe` is resolved against the configuration file's directory, not
   the current directory; a drive-relative `C:tools\sh.exe` and a
-  root-relative `\tools\sh.exe` are refused; an absolute path is kept; a missing file is an error. `[browser] executable`
-  keeps its current join.
+  root-relative `\tools\sh.exe` are refused; an absolute path is kept; a
+  missing file is an error. `[browser] executable` keeps its current join.
 - CLI parsing of `session terminal` with `--shell` and arguments after `--`;
   shell resolution searches `PATH` with `PATHEXT` for bare names but not the
   current directory, and resolves a relative path with a separator (for
   example `.\tools\sh.exe`) against the current directory; a drive-relative
-  `C:tools\sh.exe` and a root-relative `\tools\sh.exe` are refused. `--agent` refuses
-  `--shell`, `ARGS`, `--config` and upstream options, and requires
-  `--gateway`.
+  `C:tools\sh.exe` and a root-relative `\tools\sh.exe` are refused.
+  `--agent` refuses `--shell`, `ARGS`, `--config` and upstream options, and
+  requires `--gateway`.
 - IPC: `terminal <gateway> route=<saved|gateway|mixed>` round-trips for every
   route; missing `route=`, an unknown route, an extra word (`shell=...`,
   `command=...`, `args=...`, `env=...`), a second space, an invalid gateway
@@ -1211,6 +1214,10 @@ above and must be checked on real systems before it ships. Results go to
   and which entry Windows APIs return for a duplicated name.
 - Whether cmd sets the hidden `=<drive>:` entries again in an agent-hosted
   window.
+- In-process, on `CTRL_CLOSE_EVENT` (and logoff or shutdown) Windows may end
+  the process before the job is terminated and the session closed; the job
+  handle then closes with the process and `KILL_ON_JOB_CLOSE` still ends the
+  shell.
 - In-process console handles while `bInheritHandles` is false, also with
   redirected standard handles; behaviour when started from mintty or another
   pipe-based host.

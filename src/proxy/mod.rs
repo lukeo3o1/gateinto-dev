@@ -804,6 +804,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_connection_from_outside_the_job_is_forbidden_without_session_credentials() {
+        let proxy = start(OS_USER, fake(Err(Denial::NotInJob)), Duration::from_secs(5)).await;
+        let (response, _) = exchange(proxy, CONNECT).await;
+        assert_eq!(
+            response,
+            "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+    }
+
+    #[tokio::test]
     async fn a_denied_connection_is_challenged_when_session_credentials_are_offered() {
         let proxy = start(BOTH, fake(Err(Denial::NotFound)), Duration::from_secs(5)).await;
         let realm = proxy.realm().unwrap().to_owned();

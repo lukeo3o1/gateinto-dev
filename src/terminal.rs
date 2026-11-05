@@ -1,15 +1,142 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::process::ExitStatus;
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
 
 use crate::config::ConfigFile;
+use crate::job::Job;
+use crate::link::MIXED_WARNING;
+use crate::proxy::{self, LocalAuth, Route};
 
 const EQUALS: u16 = b'=' as u16;
 
 pub const NO_PROXY_HOSTS: &str = "localhost,127.0.0.1,::1";
 
 pub type Variables = Vec<(OsString, OsString)>;
+
+pub fn terminal_job(created: io::Result<Job>) -> Result<Arc<Job>, JobError> {
+    created.map(Arc::new).map_err(JobError)
+}
+
+#[derive(Debug)]
+pub struct JobError(io::Error);
+
+impl fmt::Display for JobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "creating the job object for the terminal failed: {}; nothing was started",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for JobError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub fn terminal_proxy(proxy: proxy::Config, route: Route, job: Arc<Job>) -> proxy::Config {
+    proxy::Config {
+        local_auth: LocalAuth::OS_USER,
+        route,
+        os_user_job: Some(job),
+        ..proxy
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleEvent {
+    CtrlC,
+    CtrlBreak,
+    Close,
+    Logoff,
+    Shutdown,
+}
+
+impl ConsoleEvent {
+    pub fn ends_session(self) -> bool {
+        matches!(self, Self::Close | Self::Logoff | Self::Shutdown)
+    }
+}
+
+impl fmt::Display for ConsoleEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CtrlC => "Ctrl-C",
+            Self::CtrlBreak => "Ctrl-Break",
+            Self::Close => "the console was closed",
+            Self::Logoff => "the user logged off",
+            Self::Shutdown => "the system is shutting down",
+        })
+    }
+}
+
+#[cfg(windows)]
+pub fn console_events() -> io::Result<mpsc::UnboundedReceiver<ConsoleEvent>> {
+    use tokio::signal::windows;
+    let (sender, events) = mpsc::unbounded_channel();
+    macro_rules! forward {
+        ($listener:expr, $event:expr) => {{
+            let mut listener = $listener?;
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                while listener.recv().await.is_some() {
+                    if sender.send($event).is_err() {
+                        break;
+                    }
+                }
+            });
+        }};
+    }
+    forward!(windows::ctrl_c(), ConsoleEvent::CtrlC);
+    forward!(windows::ctrl_break(), ConsoleEvent::CtrlBreak);
+    forward!(windows::ctrl_close(), ConsoleEvent::Close);
+    forward!(windows::ctrl_logoff(), ConsoleEvent::Logoff);
+    forward!(windows::ctrl_shutdown(), ConsoleEvent::Shutdown);
+    Ok(events)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Supervised<T> {
+    Exited(T),
+    Ended(ConsoleEvent),
+}
+
+pub async fn supervise<T>(
+    events: &mut mpsc::UnboundedReceiver<ConsoleEvent>,
+    exit: impl Future<Output = T>,
+) -> Supervised<T> {
+    tokio::pin!(exit);
+    loop {
+        tokio::select! {
+            outcome = &mut exit => return Supervised::Exited(outcome),
+            Some(event) = events.recv() => {
+                if event.ends_session() {
+                    return Supervised::Ended(event);
+                }
+            }
+        }
+    }
+}
+
+pub fn exit_code(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
+}
+
+pub fn terminal_route(requested: Option<Route>, saved: Route) -> Route {
+    requested.unwrap_or(saved)
+}
+
+pub fn route_warning(route: Route) -> Option<&'static str> {
+    (route == Route::Mixed).then_some(MIXED_WARNING)
+}
 
 pub fn terminal_environment(
     inherited: Variables,
@@ -167,6 +294,7 @@ impl Lookup for System {
         use std::ffi::CStr;
         use std::os::unix::ffi::OsStrExt;
         let mut buffer = vec![0; 1024];
+        let mut interruptions = 0;
         loop {
             let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
             let mut found = std::ptr::null_mut();
@@ -180,7 +308,8 @@ impl Lookup for System {
                     &mut found,
                 )
             };
-            if let Some(len) = retry_len(status, buffer.len()) {
+            if let Some(len) = retry_len(status, buffer.len(), interruptions) {
+                interruptions += u32::from(status == libc::EINTR);
                 buffer.resize(len, 0);
                 continue;
             }
@@ -205,9 +334,12 @@ impl Lookup for System {
 }
 
 #[cfg(unix)]
-fn retry_len(status: libc::c_int, len: usize) -> Option<usize> {
+const MAX_INTERRUPTIONS: u32 = 8;
+
+#[cfg(unix)]
+fn retry_len(status: libc::c_int, len: usize, interruptions: u32) -> Option<usize> {
     match status {
-        libc::EINTR => Some(len),
+        libc::EINTR if interruptions < MAX_INTERRUPTIONS => Some(len),
         libc::ERANGE if len < 1 << 20 => Some(len * 2),
         _ => None,
     }
@@ -227,9 +359,34 @@ pub fn configured_shell(file: &ConfigFile, lookup: &impl Lookup) -> Result<Shell
         });
     };
     Ok(Shell {
-        executable: resolve_shell(shell, file.dir().as_deref(), lookup)?,
+        executable: resolve_shell(shell, file.dir(), lookup)?,
         args: file.terminal.args.iter().map(OsString::from).collect(),
     })
+}
+
+pub fn terminal_shell(
+    requested: Option<&Path>,
+    args: Vec<OsString>,
+    current_dir: impl FnOnce() -> io::Result<PathBuf>,
+    file: &ConfigFile,
+    lookup: &impl Lookup,
+) -> Result<Shell, ShellError> {
+    let Some(value) = requested else {
+        return configured_shell(file, lookup);
+    };
+    let base = current_dir();
+    let executable =
+        resolve_shell(value, base.as_deref().ok(), lookup).map_err(|error| {
+            match (error, base) {
+                (ShellError::NotFound(path), Err(error))
+                    if path == value && value.is_relative() =>
+                {
+                    ShellError::CurrentDirectory(path, error)
+                }
+                (error, _) => error,
+            }
+        })?;
+    Ok(Shell { executable, args })
 }
 
 pub fn default_shell(lookup: &impl Lookup) -> Result<PathBuf, ShellError> {
@@ -331,6 +488,7 @@ pub enum ShellError {
     NotOnPath(PathBuf),
     DriveRelative(PathBuf),
     RootRelative(PathBuf),
+    CurrentDirectory(PathBuf, io::Error),
     NoDefault,
 }
 
@@ -353,6 +511,11 @@ impl fmt::Display for ShellError {
                 f,
                 "shell {} names a root directory without a drive; use an absolute path or a \
                  path without a root directory",
+                path.display()
+            ),
+            Self::CurrentDirectory(path, error) => write!(
+                f,
+                "shell {} is relative, but the current directory cannot be read: {error}",
                 path.display()
             ),
             Self::NoDefault => f.write_str(
@@ -383,6 +546,151 @@ mod tests {
 
     const PROXY: &str = "http://127.0.0.1:49152";
     const LOOPBACK: &str = "localhost,127.0.0.1,::1";
+
+    #[cfg(not(windows))]
+    fn proxy_config() -> proxy::Config {
+        proxy::Config {
+            listen: SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+            local_auth: LocalAuth::SESSION_CREDENTIALS,
+            route: Route::Gateway,
+            upstream: proxy::Upstream {
+                host: "127.0.0.1".to_owned(),
+                port: 9,
+                server_name: rustls::pki_types::ServerName::try_from("upstream.test").unwrap(),
+                roots: rustls::RootCertStore::empty(),
+            },
+            tls_mode: crate::tls::TlsMode::default(),
+            client_certificate: None,
+            limits: proxy::Limits::default(),
+            os_user_job: None,
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_terminal_session_accepts_only_processes_in_its_job() {
+        let job = Arc::new(Job::fake());
+        let config = terminal_proxy(proxy_config(), Route::Mixed, job.clone());
+        assert_eq!(config.local_auth, LocalAuth::OS_USER);
+        assert!(
+            config
+                .os_user_job
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &job))
+        );
+        assert_eq!(config.route, Route::Mixed);
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_created_is_an_error_and_never_a_fallback() {
+        let error = terminal_job(Err(io::Error::other("refused"))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "creating the job object for the terminal failed: refused; nothing was started"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn terminal_sessions_have_no_job_outside_windows() {
+        assert!(terminal_job(Job::new()).is_err());
+    }
+
+    #[test]
+    fn only_close_logoff_and_shutdown_end_the_session() {
+        for (event, ends) in [
+            (ConsoleEvent::CtrlC, false),
+            (ConsoleEvent::CtrlBreak, false),
+            (ConsoleEvent::Close, true),
+            (ConsoleEvent::Logoff, true),
+            (ConsoleEvent::Shutdown, true),
+        ] {
+            assert_eq!(event.ends_session(), ends, "{event}");
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_ctrl_c_and_ctrl_break_wait_for_the_shell() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (exit, exited) = tokio::sync::oneshot::channel();
+        for event in [
+            ConsoleEvent::CtrlC,
+            ConsoleEvent::CtrlC,
+            ConsoleEvent::CtrlBreak,
+            ConsoleEvent::CtrlC,
+        ] {
+            events.send(event).unwrap();
+        }
+        let supervised = tokio::spawn(async move {
+            let outcome = supervise(&mut received, exited).await;
+            (outcome, received)
+        });
+        tokio::task::yield_now().await;
+        assert!(!supervised.is_finished());
+        exit.send(0xC000_013A_u32).unwrap();
+        let (outcome, mut received) = supervised.await.unwrap();
+        assert_eq!(outcome, Supervised::Exited(Ok(0xC000_013A)));
+        assert!(received.try_recv().is_err());
+        events.send(ConsoleEvent::CtrlC).unwrap();
+        assert_eq!(received.try_recv(), Ok(ConsoleEvent::CtrlC));
+    }
+
+    #[tokio::test]
+    async fn a_closing_console_ends_the_session() {
+        for event in [
+            ConsoleEvent::Close,
+            ConsoleEvent::Logoff,
+            ConsoleEvent::Shutdown,
+        ] {
+            let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+            events.send(ConsoleEvent::CtrlC).unwrap();
+            events.send(event).unwrap();
+            let outcome = supervise(&mut received, std::future::pending::<()>()).await;
+            assert_eq!(outcome, Supervised::Ended(event));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_shell_is_awaited_when_the_event_sources_end() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        drop(events);
+        let outcome = supervise(&mut received, async { 7 }).await;
+        assert_eq!(outcome, Supervised::Exited(7));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_exit_code_above_255_is_passed_through_unchanged() {
+        use std::os::windows::process::ExitStatusExt;
+        for code in [0, 1, 255, 256, 0xC000_013A, u32::MAX] {
+            assert_eq!(exit_code(ExitStatus::from_raw(code)) as u32, code);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_ended_by_a_signal_fails() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(exit_code(ExitStatus::from_raw(3 << 8)), 3);
+        assert_eq!(exit_code(ExitStatus::from_raw(9)), 1);
+    }
+
+    #[test]
+    fn a_requested_route_wins_over_the_saved_route() {
+        for saved in [Route::Gateway, Route::Mixed] {
+            assert_eq!(terminal_route(None, saved), saved);
+            for requested in [Route::Gateway, Route::Mixed] {
+                assert_eq!(terminal_route(Some(requested), saved), requested);
+            }
+        }
+        assert_eq!(terminal_route(None, Route::default()), Route::Mixed);
+    }
+
+    #[test]
+    fn only_the_mixed_route_warns_about_direct_connections() {
+        assert_eq!(route_warning(Route::Mixed), Some(MIXED_WARNING));
+        assert_eq!(route_warning(Route::Gateway), None);
+    }
 
     #[test]
     fn the_proxy_variables_are_set_in_both_spellings_once_each() {
@@ -827,6 +1135,65 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_shell_takes_the_given_arguments_and_never_the_configured_ones() {
+        let scratch = Scratch::new("requested");
+        let dir = &scratch.0;
+        let cwd = root("work");
+        let lookup = Fake::default()
+            .file(cwd.join("tools").join("sh"))
+            .file(dir.join("cfg-sh"));
+        let file = config(dir, "[terminal]\nshell = \"./cfg-sh\"\nargs = [\"-l\"]\n");
+        let args = ["-c", "x"].map(OsString::from).to_vec();
+        assert_eq!(
+            terminal_shell(
+                Some(Path::new("tools/sh")),
+                args.clone(),
+                || Ok(cwd.clone()),
+                &file,
+                &lookup
+            )
+            .unwrap(),
+            Shell {
+                executable: cwd.join("tools").join("sh"),
+                args,
+            }
+        );
+        assert_eq!(
+            terminal_shell(None, Vec::new(), || unreachable!(), &file, &lookup)
+                .unwrap()
+                .args,
+            ["-l"]
+        );
+    }
+
+    #[test]
+    fn a_relative_shell_without_a_current_directory_says_so() {
+        let lookup = Fake::default();
+        let error = terminal_shell(
+            Some(Path::new("tools/sh")),
+            Vec::new(),
+            || Err(io::Error::other("gone")),
+            &ConfigFile::default(),
+            &lookup,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "shell tools/sh is relative, but the current directory cannot be read: gone"
+        );
+        let absolute = root("missing").join("sh");
+        let error = terminal_shell(
+            Some(&absolute),
+            Vec::new(),
+            || Err(io::Error::other("gone")),
+            &ConfigFile::default(),
+            &lookup,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ShellError::NotFound(_)), "{error}");
+    }
+
+    #[test]
     fn without_a_configured_shell_the_platform_default_has_no_arguments() {
         let default = root("default").join("shell");
         let name = if cfg!(windows) { "ComSpec" } else { "SHELL" };
@@ -901,11 +1268,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_user_database_query_is_retried_on_a_small_buffer_or_an_interruption() {
-        assert_eq!(retry_len(libc::ERANGE, 1024), Some(2048));
-        assert_eq!(retry_len(libc::ERANGE, 1 << 20), None);
-        assert_eq!(retry_len(libc::EINTR, 1024), Some(1024));
-        assert_eq!(retry_len(0, 1024), None);
-        assert_eq!(retry_len(libc::EIO, 1024), None);
+        assert_eq!(retry_len(libc::ERANGE, 1024, 0), Some(2048));
+        assert_eq!(retry_len(libc::ERANGE, 1 << 20, 0), None);
+        assert_eq!(retry_len(libc::EINTR, 1024, 0), Some(1024));
+        assert_eq!(retry_len(0, 1024, 0), None);
+        assert_eq!(retry_len(libc::EIO, 1024, 0), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_user_database_query_is_retried_after_a_bounded_number_of_interruptions() {
+        assert_eq!(
+            retry_len(libc::EINTR, 1024, MAX_INTERRUPTIONS - 1),
+            Some(1024)
+        );
+        assert_eq!(retry_len(libc::EINTR, 1024, MAX_INTERRUPTIONS), None);
+        assert_eq!(retry_len(libc::ERANGE, 1024, MAX_INTERRUPTIONS), Some(2048));
     }
 
     #[cfg(unix)]

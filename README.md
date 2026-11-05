@@ -96,6 +96,7 @@ be uninstalled before a release MSI is installed.
 | --- | --- |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
 | `gateinto session browser` | Run one browser session with `session_credentials` local proxy authentication on an ephemeral loopback port and show its credentials. |
+| `gateinto session terminal` | Windows only, pre-release: start a shell in this console whose proxy variables point to a new session that accepts only the shell and the processes it starts (`os_user` with a job object, no credentials), and close the session when the shell exits. |
 | `gateinto agent` | Run the per-user agent: the endpoint that starts browser sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped, its profile deleted and its credentials revoked). |
@@ -338,6 +339,22 @@ share only the device key.
   Ctrl+C. If the credentials cannot be shown it closes the session and exits
   with an error. Each start is a new session with a new realm and
   credentials, on a new ephemeral port.
+- `gateinto session terminal` (Windows only, pre-release, not yet verified
+  on real Windows) runs one terminal session in the console it was started
+  from: it creates a job object, starts a session on an ephemeral port of
+  `127.0.0.1` that accepts only processes in that job (`os_user`, no
+  credentials; any other program gets `403`, or `408` when the owner lookup
+  times out), and starts the shell in the
+  job with `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` (both
+  spellings) pointing at it. The shell is `--shell` with the arguments after
+  `--`, else `[terminal] shell` and `args`, else `%ComSpec%`. `--route
+  saved|gateway|mixed` picks the route, by default the gateway's saved one.
+  It prints `session`, `kind`, `gateway`, `listen`, `route`, `auth` and the
+  names of the proxy variables it replaced on stdout, and notices on
+  stderr. When the shell exits it terminates the job, closes the session and
+  exits with the shell's exit code. Like `session browser`, the session is
+  not shown by `gateinto session list`. On other platforms the command
+  fails.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or
@@ -847,12 +864,14 @@ and residual risks. [docs/security-boundaries.md](docs/security-boundaries.md)
 maps each security acceptance item to the code that enforces it and the tests
 that prove it.
 
-Every session listens on loopback only and accepts only the random
-credentials issued to it and shown to the user, which keeps out other
+Every session listens on loopback only. Browser sessions accept the random
+credentials issued to them and shown to the user, which keeps out other
 programs that do not know them but not malware running as the same user.
 On Windows a browser session also accepts, without credentials, a program of
 the Windows user running Gateinto that is inside the browser's job object.
-There is no shared local proxy and no session without authentication. Do not
+Terminal sessions (Windows only) have no credentials and accept only
+processes in the terminal's job object. There is no shared local proxy and
+no session without authentication. Do not
 run Gateinto on shared hosts you do not trust.
 
 Any website can open a `gateinto://` link. With the handler registered, such a

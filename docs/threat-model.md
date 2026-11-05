@@ -21,13 +21,19 @@ meant to protect, against whom, and what it does not protect.
 
 ## Trust boundaries
 
-- **Local processes and the loopback listener.** Every session requires
-  `session_credentials`: it accepts only the user name `gateinto` with the
-  random password generated for it, so it excludes local processes that do
-  not know the password. On Windows browser sessions also offer `os_user`: it
-  accepts a connection whose owning process runs as the Windows account
-  running Gateinto and is inside the job object the browser was started in.
-  There is no shared session and no setting that removes authentication.
+- **Local processes and the loopback listener.** Every browser session
+  requires `session_credentials`: it accepts only the user name `gateinto`
+  with the random password generated for it, so it excludes local processes
+  that do not know the password. On Windows browser sessions also offer
+  `os_user`: it accepts a connection whose owning process runs as the
+  Windows account running Gateinto and is inside the job object the browser
+  was started in. Terminal sessions (`gateinto session terminal`, Windows
+  only) are the one exception: they accept only `os_user` with the job
+  object the shell was started in and have no session credentials; a denied
+  connection gets `403` (or `408` when the owner lookup times out) and is
+  closed, never a `407` challenge. If the job cannot be created or the shell
+  cannot be put in it, nothing is started. There is no shared session and
+  no setting that removes authentication.
   The credentials are shown to the user, who types them into
   the browser's proxy sign-in dialog; a program running as the user can get
   them from the agent or from memory.
@@ -76,7 +82,7 @@ meant to protect, against whom, and what it does not protect.
 | An attacker on the network, or a misconfigured upstream, downgrades the key exchange to classical `X25519`. | `hybrid_required` offers only `X25519MLKEM768`, so the handshake fails (`502`) instead of downgrading, and every tunnel is also checked after the handshake and refused unless the negotiated group is one the mode offers. TLS 1.3 signs the handshake transcript, so an attacker without the server key cannot alter the negotiated group in the other modes either; `hybrid_preferred` still accepts `X25519` from an upstream that only offers it. `check-upstream` shows which group an upstream negotiates. |
 | Another local program uses a browser session's port. | `session_credentials`: the session accepts only the fixed user name `gateinto` with the password generated for it from the system CSPRNG (about 59.4 bits); any other credential gets `407` and is never learned, however early it arrives. The check is an HMAC-SHA-256 under a per-session key compared in constant time, and it runs before any DNS lookup, routing decision, upstream connection or device key signature. Failures beyond 10 a minute get `429`. Closing the session revokes the credentials: the port closes, its tunnels end, and a new session has new credentials. |
 | Another user of the machine, or a service under another account, uses a session's port on Windows with `os_user`. | Gateinto finds the process that owns the client's end of the connection in the TCP connection table, opens it, checks the row again while it holds the handle, and requires the user SID of its token to equal that of Gateinto's own token (`EqualSid`). Any failure denies: `403` and close, or the `Basic` challenge when `session_credentials` is offered. The check runs before the request is read and within the connect timeout, so before any DNS lookup, routing decision, upstream connection or device key signature. Denials do not count toward the `session_credentials` failure limit. |
-| Another program of the same user uses a browser session's port on Windows with `os_user`. | The browser is started inside an unnamed, non-inheritable job object created for the session (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, or created suspended and assigned to the job before it runs), and the session also requires `IsProcessInJob`, so a process outside the job is denied. A browser that cannot be put in a job gets a session that accepts only `session_credentials`. Not a boundary: see residual risks. |
+| Another program of the same user uses a browser or terminal session's port on Windows with `os_user`. | The browser is started inside an unnamed, non-inheritable job object created for the session (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, or created suspended and assigned to the job before it runs), and the session also requires `IsProcessInJob`, so a process outside the job is denied. A browser that cannot be put in a job gets a session that accepts only `session_credentials`. A terminal session's shell is started in its job the same way, and if that fails the command fails and nothing is started; there is no session without the job. Not a boundary: see residual risks. |
 | A website phishes the session credentials with a page or dialog that imitates the browser's proxy sign-in. | The prompt that shows the credentials names the proxy address and says to enter them only in the proxy sign-in prompt for it, never in a website; whether the browser's prompt shows that address is not yet verified on Windows. Credentials typed into a page are useful only from this machine, because the port listens on loopback, and only until the session closes. Not prevented technically (see residual risks). |
 | A website uses a `gateinto://` link to add a trust anchor or TLS setting, inject a credential, change a known gateway, open an arbitrary page or run a command. | The URI has no field for a CA, TLS mode, client certificate, server name, listen address, credential or command; `auth` is only `session_credentials`, and the removed `basic_tofu` is refused. A link that disagrees with the host, port or portal of a known gateway is refused, and the configuration file is never written. `url` must have the origin of the gateway's portal. Strict parser (allowed characters, no duplicates or unknown fields, 8192 bytes), applied by `open` and again by the agent. The handler passes the URI after `--` as one argument and nothing starts a shell. |
 | A website uses a `gateinto://` link to route the user through its own proxy (deliberate, user-approved deviation from the plan's rule that a URI never introduces a proxy host). | Only after an explicit first-time confirmation in `gateinto open` that names the profile, gateway `host:port` and portal origin or `none`, with OK and Cancel, Cancel as the default and no access keys, so no single keystroke approves it; no desktop or terminal means refusal. The agent never prompts, rate-limits before asking, keeps one confirmation open and needs the one-time token of that request (which binds the answer to the request but does not prove a person gave it). The gateway gets only default settings (public roots, host as server name); it is stored separately, listed with its source and removable with `gateinto gateway forget`. Remaining: phishing and the device certificate's SPKI (see residual risks). |
@@ -101,18 +107,20 @@ meant to protect, against whom, and what it does not protect.
 - A website can draw a dialog or page that looks like the browser's proxy
   sign-in and ask for the session credentials. The prompt warns against it
   and names the proxy address, but nothing stops a user from typing them in.
-- The job check of browser sessions is not a boundary against code of the
-  same user: such code can inject into the browser, or duplicate the job
+- The job check of browser and terminal sessions is not a boundary against
+  code of the same user: such code can inject into the browser or the shell, or duplicate the job
   handle out of Gateinto's process and assign its own processes to the job,
   or create a process with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` set to the
-  browser, which inherits the job.
-  Every process the browser starts inherits the job and is accepted too.
+  browser or the shell, which inherits the job.
+  Every process the browser or the shell starts inherits the job and is
+  accepted too.
 - The owner is checked once per connection; an open tunnel is not
   re-checked.
 - A Gateinto that is not elevated may fail to open the process of an
   elevated client of the same user under a real UAC split token; the check
   then fails closed (`403`, or the `Basic` challenge). This, domain-joined
-  machines and Chrome inside the job have not been verified.
+  machines, Chrome inside the job and terminal sessions on real Windows have
+  not been verified.
 - A user who copies the password puts it on the clipboard, where every
   program of the user, and clipboard history or sync if enabled, can read it.
 - Session credentials give no isolation from programs running as the same
@@ -210,8 +218,8 @@ meant to protect, against whom, and what it does not protect.
 - Protecting against administrators, malware running as the user, or physical
   attacks on an unlocked machine.
 - Proving which local program is connecting. `os_user` checks the Windows
-  account of the owning process and, in browser sessions, membership in the
-  browser's job, not the program itself.
+  account of the owning process and, in browser and terminal sessions,
+  membership in the session's job, not the program itself.
 - Acting as a general-purpose HTTP proxy (only `CONNECT` is supported).
 - Post-quantum authentication.
 - Forcing system-wide traffic through the proxy; only clients configured to

@@ -44,6 +44,8 @@ pub fn default_path_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathB
 pub struct ConfigFile {
     #[serde(skip)]
     path: Option<PathBuf>,
+    #[serde(skip)]
+    dir: Option<PathBuf>,
     #[serde(
         default,
         rename = "device_session",
@@ -456,6 +458,7 @@ pub struct GatewayProfile {
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: bool,
     pub portal_url: Option<PortalUrl>,
+    pub route: Route,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,17 +530,20 @@ impl ConfigFile {
         if let Some(executable) = &mut file.browser.executable {
             *executable = base.join(&*executable);
         }
-        file.path = Some(path.to_owned());
+        file.locate(path).map_err(in_file)?;
         Ok(file)
     }
 
-    pub fn dir(&self) -> Option<PathBuf> {
-        let dir = self.path.as_deref()?.parent()?;
-        if dir.as_os_str().is_empty() {
-            std::env::current_dir().ok()
-        } else {
-            std::path::absolute(dir).ok()
-        }
+    fn locate(&mut self, path: &Path) -> Result<(), ConfigError> {
+        let absolute = std::path::absolute(path)
+            .map_err(|error| ConfigError::new(ErrorKind::Directory(error)))?;
+        self.dir = absolute.parent().map(Path::to_owned);
+        self.path = Some(path.to_owned());
+        Ok(())
+    }
+
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
     pub fn with_linked(&self, linked: &[LinkedGateway]) -> Self {
@@ -636,6 +642,7 @@ impl ConfigFile {
                 kind,
             })
         };
+        let route = section.route();
         let (Some(host), Some(port)) = (section.host, section.port) else {
             return Err(invalid(GatewayErrorKind::NoUpstream));
         };
@@ -663,6 +670,7 @@ impl ConfigFile {
             client_cert_file: section.client_cert_file,
             self_signed_client_cert,
             portal_url: section.portal_url,
+            route,
         })
     }
 
@@ -683,6 +691,7 @@ pub struct ConfigError {
 #[derive(Debug)]
 enum ErrorKind {
     Read(io::Error),
+    Directory(io::Error),
     Parse(toml::de::Error),
     UnknownGateway {
         name: GatewayName,
@@ -720,6 +729,10 @@ impl fmt::Display for ConfigError {
         }
         match &self.kind {
             ErrorKind::Read(error) => write!(f, "{error}"),
+            ErrorKind::Directory(error) => write!(
+                f,
+                "cannot find the absolute directory of the config file: {error}"
+            ),
             ErrorKind::TunnelLimit(limit) => write!(
                 f,
                 "max_concurrent_tunnels is {limit}; the maximum is {}",
@@ -906,6 +919,7 @@ port = 443
                             .parse()
                             .unwrap()
                     ),
+                    route: Route::Mixed,
                 },
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
@@ -1498,23 +1512,33 @@ port = 443
         assert_eq!(other.client_cert_file, Some(dir.join("keys/client.pem")));
         assert_eq!(file.browser.executable, Some(dir.join("bin/chrome")));
         assert_eq!(file.terminal.shell, Some(PathBuf::from("tools/sh")));
-        assert_eq!(file.dir(), Some(dir.clone()));
+        assert_eq!(file.dir(), Some(dir.as_path()));
         assert_eq!(ConfigFile::parse("").unwrap().dir(), None);
     }
 
     #[test]
-    fn the_directory_of_a_relative_file_is_absolute() {
+    fn the_directory_of_a_relative_file_is_made_absolute_when_it_is_located() {
         let cwd = std::env::current_dir().unwrap();
         for (path, expected) in [
             ("gateinto.toml", cwd.clone()),
             ("conf/gateinto.toml", cwd.join("conf")),
         ] {
-            let file = ConfigFile {
-                path: Some(PathBuf::from(path)),
-                ..ConfigFile::default()
-            };
-            assert_eq!(file.dir(), Some(expected), "{path}");
+            let mut file = ConfigFile::default();
+            file.locate(Path::new(path)).unwrap();
+            assert_eq!(file.dir(), Some(expected.as_path()), "{path}");
         }
+    }
+
+    #[test]
+    fn a_file_whose_directory_cannot_be_made_absolute_is_refused() {
+        let error = ConfigFile::default()
+            .locate(Path::new(""))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot find the absolute directory of the config file"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1582,6 +1606,25 @@ port = 443
             assert!(component.contains(wanted), "{wanted}");
         }
         assert!(!component.contains("Transitive"), "{component}");
+    }
+
+    #[test]
+    fn the_selected_gateway_carries_its_saved_route() {
+        let file = ConfigFile::parse(&format!(
+            "{MINIMAL}[gateways.forced]\nhost = \"f.example.test\"\nport = 1\nroute = \"gateway\"\n"
+        ))
+        .unwrap();
+        let route = |gateway: &str| {
+            file.settings(&Overrides {
+                gateway: Some(name(gateway)),
+                ..Overrides::default()
+            })
+            .unwrap()
+            .gateway
+            .route
+        };
+        assert_eq!(route("forced"), Route::Gateway);
+        assert_eq!(route("main"), Route::Mixed);
     }
 
     #[test]
