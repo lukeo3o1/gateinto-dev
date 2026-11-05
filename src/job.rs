@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 
 #[cfg(windows)]
-pub use windows::Process;
+pub use windows::{Process, SpawnOptions};
 
 pub struct Job {
     #[cfg(windows)]
@@ -139,8 +139,8 @@ mod windows {
         QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList,
-        EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
         InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
         PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread,
         STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, UpdateProcThreadAttribute,
@@ -227,6 +227,26 @@ mod windows {
         }
     }
 
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct SpawnOptions<'a> {
+        pub environment: Option<&'a [u16]>,
+    }
+
+    impl SpawnOptions<'_> {
+        fn flags(&self) -> PROCESS_CREATION_FLAGS {
+            if self.environment.is_some() {
+                CREATE_UNICODE_ENVIRONMENT
+            } else {
+                0
+            }
+        }
+
+        fn environment(&self) -> *const std::ffi::c_void {
+            self.environment
+                .map_or(null(), |block| block.as_ptr().cast())
+        }
+    }
+
     struct Created {
         process: Handle,
         thread: Handle,
@@ -237,12 +257,14 @@ mod windows {
         application: &[u16],
         line: &[u16],
         flags: PROCESS_CREATION_FLAGS,
+        options: SpawnOptions<'_>,
         startup: &STARTUPINFOW,
     ) -> io::Result<Created> {
         let mut line = line.to_vec();
         let mut info = PROCESS_INFORMATION::default();
-        // SAFETY: both strings are NUL-terminated and outlive the call, the startup
-        // information matches the flags, and no handles are inherited.
+        // SAFETY: both strings are NUL-terminated and outlive the call, an environment
+        // block is double-NUL-terminated UTF-16 as CREATE_UNICODE_ENVIRONMENT says, the
+        // startup information matches the flags, and no handles are inherited.
         if unsafe {
             CreateProcessW(
                 application.as_ptr(),
@@ -250,8 +272,8 @@ mod windows {
                 null(),
                 null(),
                 0,
-                flags,
-                null(),
+                flags | options.flags(),
+                options.environment(),
                 null(),
                 startup,
                 &mut info,
@@ -273,18 +295,40 @@ mod windows {
             executable: &Path,
             args: &[OsString],
         ) -> Result<Process, SpawnError> {
+            self.spawn_with(executable, args, SpawnOptions::default())
+        }
+
+        pub fn spawn_with(
+            self: &Arc<Self>,
+            executable: &Path,
+            args: &[OsString],
+            options: SpawnOptions<'_>,
+        ) -> Result<Process, SpawnError> {
+            if let Some(block) = options.environment
+                && !block.ends_with(&[0, 0])
+            {
+                return Err(SpawnError::Process(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the environment block is not terminated",
+                )));
+            }
             let program: Vec<u16> = executable.as_os_str().encode_wide().collect();
             let args: Vec<Vec<u16>> = args.iter().map(|arg| arg.encode_wide().collect()).collect();
             let line = command_line(&program, &args).map_err(SpawnError::Process)?;
             let application: Vec<u16> = program.into_iter().chain([0]).collect();
-            let created = match self.create_in_job(&application, &line) {
+            let created = match self.create_in_job(&application, &line, options) {
                 Ok(created) => created,
-                Err(_) => self.create_and_assign(&application, &line)?,
+                Err(_) => self.create_and_assign(&application, &line, options)?,
             };
             Ok(self.watch(created))
         }
 
-        fn create_in_job(&self, application: &[u16], line: &[u16]) -> io::Result<Created> {
+        fn create_in_job(
+            &self,
+            application: &[u16],
+            line: &[u16],
+            options: SpawnOptions<'_>,
+        ) -> io::Result<Created> {
             let jobs = [self.handle()];
             let mut attributes = Attributes::job_list(&jobs)?;
             let startup = STARTUPINFOEXW {
@@ -298,6 +342,7 @@ mod windows {
                 application,
                 line,
                 EXTENDED_STARTUPINFO_PRESENT,
+                options,
                 &startup.StartupInfo,
             )
         }
@@ -306,12 +351,13 @@ mod windows {
             &self,
             application: &[u16],
             line: &[u16],
+            options: SpawnOptions<'_>,
         ) -> Result<Created, SpawnError> {
             let startup = STARTUPINFOW {
                 cb: size_of::<STARTUPINFOW>() as u32,
                 ..Default::default()
             };
-            let created = create_process(application, line, CREATE_SUSPENDED, &startup)
+            let created = create_process(application, line, CREATE_SUSPENDED, options, &startup)
                 .map_err(SpawnError::Process)?;
             // SAFETY: both handles are open.
             if unsafe { AssignProcessToJobObject(self.handle(), created.process.0) } == 0 {
@@ -483,6 +529,43 @@ mod windows {
         use super::*;
 
         #[tokio::test(flavor = "multi_thread")]
+        async fn a_spawned_process_gets_the_given_environment() {
+            let job = Arc::new(Job::new().unwrap());
+            let shell = std::path::PathBuf::from(std::env::var_os("ComSpec").unwrap());
+            let environment: Vec<u16> = "GATEINTO_PROBE=7\0\0".encode_utf16().collect();
+            let args = ["/d", "/c", "exit %GATEINTO_PROBE%"].map(OsString::from);
+            let mut process = job
+                .spawn_with(
+                    &shell,
+                    &args,
+                    SpawnOptions {
+                        environment: Some(&environment),
+                    },
+                )
+                .unwrap();
+            assert_eq!(process.wait().await.unwrap().code(), Some(7));
+            process.kill().await.unwrap();
+        }
+
+        #[test]
+        fn an_unterminated_environment_is_refused_before_anything_starts() {
+            let job = Arc::new(Job::new().unwrap());
+            let shell = std::path::PathBuf::from(std::env::var_os("ComSpec").unwrap());
+            let environment: Vec<u16> = "A=1\0".encode_utf16().collect();
+            let error = job
+                .spawn_with(
+                    &shell,
+                    &[],
+                    SpawnOptions {
+                        environment: Some(&environment),
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(error, SpawnError::Process(_)), "{error}");
+            assert_eq!(job.active_processes().unwrap(), 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
         async fn the_suspended_fallback_runs_the_process_inside_the_job() {
             let job = Arc::new(Job::new().unwrap());
             let shell = std::env::var_os("ComSpec").unwrap();
@@ -493,7 +576,9 @@ mod windows {
                 .collect();
             let line = command_line(&program, &args).unwrap();
             let application: Vec<u16> = program.into_iter().chain([0]).collect();
-            let created = job.create_and_assign(&application, &line).unwrap();
+            let created = job
+                .create_and_assign(&application, &line, SpawnOptions::default())
+                .unwrap();
             let mut process = job.watch(created);
             assert!(job.active_processes().unwrap() >= 1);
             process.kill().await.unwrap();
