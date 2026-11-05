@@ -19,6 +19,7 @@ pub mod registration;
 mod registry;
 pub mod session_table;
 pub mod sessions;
+pub mod terminal;
 #[cfg(test)]
 mod test_logs;
 #[cfg(test)]

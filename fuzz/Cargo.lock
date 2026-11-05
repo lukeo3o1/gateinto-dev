@@ -243,6 +243,7 @@ dependencies = [
  "gateinto-ipc-types",
  "h2",
  "http",
+ "libc",
  "rustls",
  "rustls-cng",
  "serde",
