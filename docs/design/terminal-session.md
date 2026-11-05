@@ -90,7 +90,8 @@ without any credential.
 `gateinto session terminal` creates the job, binds the session with that job
 as `proxy::Config::os_user_job` (it must exist before `SessionManager::start`,
 as in `Agent::start`), and then starts the shell in the job, in the console it
-was run from; the shell replaces the interactive prompt until it exits. No agent is needed and no IPC request is added.
+was run from; the shell replaces the interactive prompt until it exits. No
+agent is needed and no IPC request is added.
 
 Reasons: the shell needs a console, and the CLI already has the user's
 console; the agent is detached and has none. The lifetime is obvious (the
@@ -133,7 +134,9 @@ gateinto session terminal [--config PATH] [--gateway NAME] [upstream options]
   truncate it). Gateinto's own errors before the shell starts use its usual
   exit codes; a shell can return the same values, so the exit code alone does
   not tell a Gateinto error from a shell result, but Gateinto's errors are
-  always printed on standard error.
+  always printed on standard error. `std::process::exit` skips destructors,
+  so it is called only after the job has been terminated (and found empty or
+  the 5-second wait has ended) and the session has been closed.
 
 New code *(proposed)*: `SessionCommand::Terminal(TerminalSessionArgs)` in
 `src/main.rs`, a `terminal` module with pure helpers
@@ -338,8 +341,8 @@ the target, around the gateway.
 
 **Decision for the first version:** set `HTTP_PROXY` anyway and keep these
 refusals, so plain HTTP fails closed instead of silently bypassing the
-tunnel. A notice on standard error says that `http://` URLs are refused. Forwarding
-absolute-form requests (for example by opening a `CONNECT` to `host:80` and
+tunnel. A notice on standard error says that `http://` URLs are refused.
+Forwarding absolute-form requests (for example by opening a `CONNECT` to `host:80` and
 relaying one rewritten request per connection) would add request parsing,
 framing and smuggling risks to the proxy core; it is an open question.
 
@@ -360,8 +363,9 @@ framing and smuggling risks to the proxy core; it is an open question.
   already-running instance (for example opening a URL in the existing
   browser), daemons started before the session, elevated processes started
   through UAC, and WSL 2 or container workloads run outside the job. If they
-  use the port they are denied (`403`, or `408` on an owner lookup timeout); if they never see the variables they use their
-  usual network path.
+  use the port they are denied (`403`, or `408` on an owner lookup
+  timeout); if they never see the variables they use their usual network
+  path.
 - **Loopback only.** The listener is `127.0.0.1:0`, as for every session.
 - **Environment contains no secret**, only the port. It is readable by any
   process of the same user, which is acceptable.
@@ -457,8 +461,13 @@ probe binary like `tests/fake_browser.rs` run as `--shell`:
 - `CREATE_BREAKAWAY_FROM_JOB` from the probe fails;
 - an absolute-form `HTTP/1.1` `GET` gets `405` with `Allow: CONNECT`, and an
   `HTTP/1.0` one gets `400`;
-- `GenerateConsoleCtrlEvent` sends Ctrl-C to the console group three times:
-  the probe sees each, and Gateinto, the session and the shell keep running;
+- Ctrl-C does not end the session (needs verification that this setup works
+  on `windows-latest`): `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` can only
+  target process group 0, every process on the caller's console, so a test
+  helper starts `gateinto session terminal` with `CREATE_NEW_CONSOLE`,
+  attaches to that console with `AttachConsole`, ignores Ctrl-C itself, sends
+  the event three times, and then checks that Gateinto, the shell and the
+  session's listener are still alive and that the probe saw each event;
 - shell exit with a lingering grandchild: job empty within 5 seconds, port
   closed, exit code propagated;
 - killing `gateinto.exe` ends the shell and its children;
