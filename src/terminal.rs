@@ -31,6 +31,13 @@ pub fn terminal_environment(
     (vars, replaced.into_iter().map(|(name, _)| name).collect())
 }
 
+pub fn without_hidden_entries(inherited: Variables) -> Variables {
+    inherited
+        .into_iter()
+        .filter(|(name, _)| !name.as_encoded_bytes().starts_with(b"="))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +121,21 @@ mod tests {
                 .all(|(_, value)| !value.to_string_lossy().contains('@')),
             "{vars:?}"
         );
+    }
+
+    #[test]
+    fn hidden_entries_are_kept_in_process_and_dropped_for_the_agent() {
+        let inherited = pairs(&[
+            ("=C:", r"C:\work"),
+            ("=D:", r"D:\"),
+            ("Path", r"C:\Windows"),
+            ("=ExitCode", "00000000"),
+            ("=ExitCodeAscii", ""),
+        ]);
+        let (in_process, _) = terminal_environment(inherited.clone(), listen());
+        assert_eq!(in_process[..5], inherited[..]);
+
+        let agent = without_hidden_entries(inherited);
+        assert_eq!(agent, pairs(&[("Path", r"C:\Windows")]));
     }
 }
