@@ -167,6 +167,7 @@ impl Lookup for System {
         use std::ffi::CStr;
         use std::os::unix::ffi::OsStrExt;
         let mut buffer = vec![0; 1024];
+        let mut interruptions = 0;
         loop {
             let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
             let mut found = std::ptr::null_mut();
@@ -180,7 +181,8 @@ impl Lookup for System {
                     &mut found,
                 )
             };
-            if let Some(len) = retry_len(status, buffer.len()) {
+            if let Some(len) = retry_len(status, buffer.len(), interruptions) {
+                interruptions += u32::from(status == libc::EINTR);
                 buffer.resize(len, 0);
                 continue;
             }
@@ -205,9 +207,12 @@ impl Lookup for System {
 }
 
 #[cfg(unix)]
-fn retry_len(status: libc::c_int, len: usize) -> Option<usize> {
+const MAX_INTERRUPTIONS: u32 = 8;
+
+#[cfg(unix)]
+fn retry_len(status: libc::c_int, len: usize, interruptions: u32) -> Option<usize> {
     match status {
-        libc::EINTR => Some(len),
+        libc::EINTR if interruptions < MAX_INTERRUPTIONS => Some(len),
         libc::ERANGE if len < 1 << 20 => Some(len * 2),
         _ => None,
     }
@@ -901,11 +906,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_user_database_query_is_retried_on_a_small_buffer_or_an_interruption() {
-        assert_eq!(retry_len(libc::ERANGE, 1024), Some(2048));
-        assert_eq!(retry_len(libc::ERANGE, 1 << 20), None);
-        assert_eq!(retry_len(libc::EINTR, 1024), Some(1024));
-        assert_eq!(retry_len(0, 1024), None);
-        assert_eq!(retry_len(libc::EIO, 1024), None);
+        assert_eq!(retry_len(libc::ERANGE, 1024, 0), Some(2048));
+        assert_eq!(retry_len(libc::ERANGE, 1 << 20, 0), None);
+        assert_eq!(retry_len(libc::EINTR, 1024, 0), Some(1024));
+        assert_eq!(retry_len(0, 1024, 0), None);
+        assert_eq!(retry_len(libc::EIO, 1024, 0), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_user_database_query_is_retried_after_a_bounded_number_of_interruptions() {
+        assert_eq!(
+            retry_len(libc::EINTR, 1024, MAX_INTERRUPTIONS - 1),
+            Some(1024)
+        );
+        assert_eq!(retry_len(libc::EINTR, 1024, MAX_INTERRUPTIONS), None);
+        assert_eq!(retry_len(libc::ERANGE, 1024, MAX_INTERRUPTIONS), Some(2048));
     }
 
     #[cfg(unix)]
