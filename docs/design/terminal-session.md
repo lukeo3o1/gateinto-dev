@@ -66,12 +66,17 @@ without any credential.
   seconds for `JobObjectBasicAccountingInformation` to report no active
   process.
 - With `LocalAuth::OS_USER` alone, a connection the owner check denies gets
-  `403 Forbidden` with `Connection: close` (`Authenticator::check`).
-- Non-`CONNECT` requests: `parse_connect_request` (`src/http.rs`) returns
-  `ParseError::MethodNotAllowed` for any other method, and the session answers
-  `405 Method Not Allowed` with `Allow: CONNECT`. Absolute-form requests such
-  as `GET http://example.com/ HTTP/1.1` are therefore refused locally and
-  never reach DNS, routing or the gateway.
+  `403 Forbidden` with `Connection: close` (`Authenticator::check`), or `408`
+  when the owner lookup does not finish before the handshake deadline
+  (`Shared::handle` in `src/proxy/mod.rs`).
+- Non-`CONNECT` requests: `parse_connect_request` (`src/http.rs`) first
+  requires a well-formed `HTTP/1.1` request line; anything else, for example
+  an `HTTP/1.0` absolute-form request, is `ParseError::Malformed` and gets
+  `400`. A well-formed `HTTP/1.1` head with any other method is
+  `ParseError::MethodNotAllowed` and gets `405 Method Not Allowed` with
+  `Allow: CONNECT`. Absolute-form requests such as
+  `GET http://example.com/ HTTP/1.1` are therefore refused locally and never
+  reach DNS, routing or the gateway.
 - Link and IPC launch auth is `LaunchAuth::SessionCredentials` only
   (`src/uri.rs`); the URI parser refuses unknown fields.
 - `SessionKind` (`ipc-types/src/lib.rs`) has only `Browser`; unknown values
@@ -82,9 +87,10 @@ without any credential.
 ### Where the session runs
 
 **Decision: in the CLI process, like `gateinto session browser`.**
-`gateinto session terminal` binds the session, creates the job and starts the
-shell in the console it was run from; the shell replaces the interactive
-prompt until it exits. No agent is needed and no IPC request is added.
+`gateinto session terminal` creates the job, binds the session with that job
+as `proxy::Config::os_user_job` (it must exist before `SessionManager::start`,
+as in `Agent::start`), and then starts the shell in the job, in the console it
+was run from; the shell replaces the interactive prompt until it exits. No agent is needed and no IPC request is added.
 
 Reasons: the shell needs a console, and the CLI already has the user's
 console; the agent is detached and has none. The lifetime is obvious (the
@@ -107,17 +113,27 @@ gateinto session terminal [--config PATH] [--gateway NAME] [upstream options]
   `--gateway` as `BrowserSessionArgs` (config-file gateways only).
 - `--route`: `saved` (default), `gateway` or `mixed`; see
   [Routes](#routes).
-- `--shell`: executable to start, default `%ComSpec%`. A bare name is
-  searched in `PATH` only, never in the current directory; the result must be
+- `--shell`: executable to start, default `%ComSpec%`. A value containing a
+  path separator (`\` or `/`) or a drive is a path, resolved against the
+  current directory when relative. A bare name (no separator) is searched in
+  the directories of `PATH` only, never in the current directory, trying the
+  name as given and then with each extension of `PATHEXT`. The result must be
   an existing file. `ARGS` after `--` are passed to it, quoted by the existing
-  `command_line` (`src/job.rs`), which already refuses quotes in the executable
-  path and NUL characters.
+  `command_line` (`src/job.rs`), which already refuses quotes in the
+  executable path and NUL characters.
 - Before starting the shell it prints, on standard output: `session`, `kind:
-  terminal`, `gateway`, `listen`, `route`, `auth: os_user`, and the names (not
-  values) of proxy variables it replaced. It prints no credential because there
-  is none.
-- Exit code: the shell's exit code; Gateinto's own errors use its usual exit
-  codes.
+  terminal`, `gateway`, `listen`, `route`, `auth: os_user`, and
+  `replaced: <names>` with the names (not values) of proxy variables it
+  replaced. On standard error it prints notices: that `http://` URLs are
+  refused ([Plain HTTP](#plain-http-absolute-form-requests)), and, when the
+  route is `mixed`, the direct-connection warning ([Routes](#routes)). It
+  prints no credential because there is none.
+- Exit code: the shell's exit code, a 32-bit Windows value passed through
+  unchanged with `std::process::exit` (an `ExitCode` built from a `u8` would
+  truncate it). Gateinto's own errors before the shell starts use its usual
+  exit codes; a shell can return the same values, so the exit code alone does
+  not tell a Gateinto error from a shell result, but Gateinto's errors are
+  always printed on standard error.
 
 New code *(proposed)*: `SessionCommand::Terminal(TerminalSessionArgs)` in
 `src/main.rs`, a `terminal` module with pure helpers
@@ -168,8 +184,9 @@ The URI parser already refuses unknown fields; tests pin that `kind`,
   fails and starts nothing. There is no fallback, unlike browser launches,
   because the fallback would be `session_credentials`.
 - **No `session_credentials`.** The session offers none, so there is nothing to
-  show, store or leak, and a process outside the job gets `403` and close
-  instead of a `Basic` challenge.
+  show, store or leak, and a process outside the job is denied (`403` and
+  close, or `408` when the owner lookup times out) instead of getting a
+  `Basic` challenge.
 - **Never in environment variables.** Credentials must not be put into proxy
   URLs (`http://user:pass@127.0.0.1:<port>`): every child inherits the
   environment, any process of the same user can read it, crash dumps and
@@ -178,9 +195,13 @@ The URI parser already refuses unknown fields; tests pin that `kind`,
 - **Documentation change required.** The [security
   model](../security-model.md#local-proxy-authentication-session_credentials)
   says that every session accepts `session_credentials` and that no setting
-  removes them. Terminal sessions are the exception; that text, the threat
-  model's trust boundary and `docs/verification.md` must be updated with the
-  implementation.
+  removes them. Terminal sessions are the exception. With the implementation,
+  update that text; the [`os_user`
+  section](../security-model.md#local-proxy-authentication-os_user), which
+  says `os_user` is offered by browser sessions next to
+  `session_credentials` and that "`session_credentials` is always offered
+  too" (the "Clear fallback" guarantee); the threat model's trust boundary;
+  and `docs/verification.md`.
 - Small wording changes: `Denial::NotInJob` says "outside the session's
   browser" and `Drop for Process` says "the browser's job"; both become
   neutral ("the session's job").
@@ -205,11 +226,22 @@ The shell's environment is Gateinto's environment with these changes
   `Https_Proxy`) is removed first. Keeping a user's proxy would send traffic
   around the tunnel. The replaced names are printed; their values are not,
   because proxy URLs often contain credentials.
-- **Both spellings.** Windows treats environment names case-insensitively, but
-  MSYS2 and Cygwin programs (Git Bash) import the block case-sensitively and
-  some only read the lowercase names. The block therefore contains both
-  spellings with identical values. Whether Windows APIs and each runtime handle
-  the duplicate names as expected needs verification.
+- **Spellings (open question 4).** Windows treats environment names
+  case-insensitively, but MSYS2 and Cygwin programs (Git Bash) import the
+  block case-sensitively and some only read the lowercase names. The proposal
+  is to write both spellings with identical values. Risks that need
+  verification before choosing it:
+  - .NET Framework's `ProcessStartInfo.EnvironmentVariables` builds a
+    case-insensitive dictionary and throws "Item has already been added" on
+    names that differ only in case (the known `Path`/`PATH` problem), which
+    can break Windows PowerShell 5.1 `Start-Process`, MSBuild and other .NET
+    Framework programs that start processes from the shell;
+  - `set HTTPS_PROXY=` in cmd may clear only one of the two entries, leaving
+    the other in effect;
+  - which entry Windows APIs return for a duplicated name.
+
+  The alternative is one spelling per name; it avoids these risks and relies
+  on case-insensitive lookup everywhere except MSYS2 and Cygwin.
 - **`NO_PROXY`.** Loopback only, so tools reaching local development servers
   do not tunnel them; under the `gateway` route such a request would otherwise
   reach the gateway's own loopback. Inherited `NO_PROXY` entries are dropped,
@@ -224,9 +256,19 @@ The shell's environment is Gateinto's environment with these changes
 `Job::spawn` needs an environment parameter *(proposed `Job::spawn_with`
 taking an environment, or an options struct)*, passing
 `CREATE_UNICODE_ENVIRONMENT` and a block built by a pure, cross-platform
-`environment_block` *(proposed)*: entries sorted case-insensitively,
-`NAME=value\0` each, terminated by an extra NUL, refusing names that are empty
-or contain `=` or NUL and values that contain NUL.
+`environment_block` *(proposed)*:
+
+- `NAME=value\0` each, terminated by an extra NUL.
+- Sorted by name with an ordinal, case-insensitive comparison that folds to
+  uppercase (as `CompareStringOrdinal` with `bIgnoreCase` and Rust std's
+  Windows `EnvKey` do), not by folding to lowercase: under uppercase folding
+  `_` (0x5F) sorts after letters, so `NODE_ENV` comes before `NO_PROXY`.
+- Names must be non-empty and contain no NUL and no `=` after the first
+  character; values contain no NUL. A leading `=` is allowed: the inherited
+  environment contains hidden entries such as `=C:=C:\work` (per-drive current
+  directories) and `=ExitCode=...`, which `std::env::vars_os` returns with the
+  leading `=`. They are passed through unchanged so the shell keeps its
+  per-drive directories.
 
 ### Job object and lifetime
 
@@ -237,13 +279,24 @@ or contain `=` or NUL and values that contain NUL.
   console, which is what `Job::spawn` does now. Whether the shell gets usable
   console standard handles while `bInheritHandles` is false needs
   verification, also when Gateinto's own standard handles are redirected.
+  When Gateinto is started from mintty (Git Bash's default window) or another
+  pipe-based host, it may have no console to share, and the shell would then
+  get Windows' default for a console program without one; what happens there
+  needs verification, and the command may have to refuse to start or require
+  `winpty`.
 - **Console control events.** Ctrl-C and Ctrl-Break are delivered to every
-  process on the console. While the shell runs, Gateinto must handle them
-  without ending the session (the tokio listeners already used by
-  `shutdown_signal` mark them handled; the terminal command simply does not
-  treat them as shutdown). It must not call `SetConsoleCtrlHandler(NULL,
-  TRUE)`, whose ignore flag the shell would inherit. Close, logoff and
-  shutdown events end the session.
+  process on the console. Tokio's Windows handler reports an event as handled
+  only while a receiver for it exists; with none, Windows runs the default
+  handler, which calls `ExitProcess`, closing the job and killing the shell.
+  `shutdown_signal` (`src/main.rs`) must not be reused: it returns after the
+  first event and drops its listeners. Instead the terminal command creates
+  `tokio::signal::windows::ctrl_c()` and `ctrl_break()` listeners *before*
+  spawning the shell and keeps both alive, draining them in a loop, until the
+  shell has exited and the job is torn down. `ctrl_close`, `ctrl_logoff` and
+  `ctrl_shutdown` remain shutdown events and end the session. Gateinto must
+  not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose ignore flag the shell
+  would inherit, and must not start the shell with
+  `CREATE_NEW_PROCESS_GROUP`, which disables Ctrl-C in the new process.
 - **Shell exits.** Gateinto terminates the job, which also ends background
   processes the shell left (build daemons, `start /b` jobs), waits up to 5
   seconds as `Process::kill` does, closes the session and exits with the
@@ -258,29 +311,34 @@ or contain `=` or NUL and values that contain NUL.
 
 ### Routes
 
-The route is resolved like a link's, with the CLI flag in the link's place:
+The route is resolved like a link's, with the CLI flag in the link's place.
+The route of a new terminal session is, in this order:
 
-1. `--route gateway` or `--route mixed`, for this session only;
-2. otherwise the gateway's saved route (`GatewaySection::route()`, `mixed`
-   when unset);
-3. so `mixed` is the default and `gateway` ("All" in the GUI) is opt-in.
+1. the `--route` flag (`gateway` or `mixed`), for that session only;
+2. otherwise the gateway's saved route (`GatewaySection::route()`);
+3. otherwise `mixed`.
+
+So `mixed` is the default and `gateway` ("All" in the GUI) is opt-in.
 
 `--route mixed` for a gateway saved as `gateway` needs no prompt: the flag is
 typed by the user, not supplied by a link. Whenever the route is `mixed`, the
-CLI prints the same direct-connection warning the link approval shows. This
+CLI prints the same direct-connection warning the link approval shows, on
+standard error, before starting the shell. This
 differs from `gateinto session browser`, which always uses `gateway`; the
 difference is deliberate and documented.
 
 ### Plain HTTP (absolute-form requests)
 
-Today any non-`CONNECT` request gets `405` with `Allow: CONNECT`. With
-`HTTP_PROXY` set, a tool fetching an `http://` URL sends an absolute-form
-request and fails with `405`; with it unset, the same request would go
-directly to the target, around the gateway.
+Today a well-formed `HTTP/1.1` request with any method other than `CONNECT`
+gets `405` with `Allow: CONNECT`, and a request line with another version
+(for example `HTTP/1.0`) gets `400`. With `HTTP_PROXY` set, a tool fetching
+an `http://` URL sends an absolute-form request and fails with `405` (or
+`400` for `HTTP/1.0`); with it unset, the same request would go directly to
+the target, around the gateway.
 
-**Decision for the first version:** set `HTTP_PROXY` anyway and keep the
-`405`, so plain HTTP fails closed instead of silently bypassing the tunnel.
-The startup output says that `http://` URLs are refused. Forwarding
+**Decision for the first version:** set `HTTP_PROXY` anyway and keep these
+refusals, so plain HTTP fails closed instead of silently bypassing the
+tunnel. A notice on standard error says that `http://` URLs are refused. Forwarding
 absolute-form requests (for example by opening a `CONNECT` to `host:80` and
 relaying one rewritten request per connection) would add request parsing,
 framing and smuggling risks to the proxy core; it is an open question.
@@ -302,7 +360,7 @@ framing and smuggling risks to the proxy core; it is an open question.
   already-running instance (for example opening a URL in the existing
   browser), daemons started before the session, elevated processes started
   through UAC, and WSL 2 or container workloads run outside the job. If they
-  use the port they get `403`; if they never see the variables they use their
+  use the port they are denied (`403`, or `408` on an owner lookup timeout); if they never see the variables they use their
   usual network path.
 - **Loopback only.** The listener is `127.0.0.1:0`, as for every session.
 - **Environment contains no secret**, only the port. It is readable by any
@@ -319,11 +377,11 @@ Threat-model additions *(to be made with the implementation)*:
 
 | Threat | Mitigation |
 | --- | --- |
-| A program of the same user outside the terminal's job uses its port. | Owner check with `IsProcessInJob`; `403` and close; no `session_credentials` to fall back to or steal. |
+| A program of the same user outside the terminal's job uses its port. | Owner check with `IsProcessInJob`; denied with `403` and close, or `408` on an owner lookup timeout; no `session_credentials` to fall back to or steal. |
 | Code run inside the terminal (a malicious dependency) reaches gateway-protected hosts. | None; every process in the job is trusted. Residual risk, documented. |
 | A web page starts a terminal or a command through a link. | No link field selects a terminal, shell or command; unknown fields are refused. |
 | A local proxy credential leaks through the environment or logs. | Terminal sessions have no credential; proxy URLs carry none. |
-| Plain-HTTP traffic bypasses the gateway. | `HTTP_PROXY` points to the session, which refuses absolute-form requests with `405`. |
+| Plain-HTTP traffic bypasses the gateway. | `HTTP_PROXY` points to the session, which refuses absolute-form `HTTP/1.1` requests with `405` and other versions with `400`. |
 | Background processes outlive the session with a stale proxy port. | Shell exit, session end or Gateinto exit terminate the job. |
 
 ## Compatibility
@@ -345,8 +403,8 @@ manual check.
 | Java | Ignores the variables (uses system properties) | Not covered |
 | Windows PowerShell 5.1, `winget`, BITS, Windows Update, browsers started from the shell | Use WinINet/WinHTTP or system settings | Not covered |
 | `ssh`, `git` over SSH, raw TCP tools | No HTTP proxy | Not covered |
-| `http://` URLs in any tool | `405` from the session | Fails closed by design |
-| WSL, Docker, elevated (`runas`) children | Outside the job | Not covered; `403` if they use the port |
+| `http://` URLs in any tool | `405` from the session (`400` for `HTTP/1.0`) | Fails closed by design |
+| WSL, Docker, elevated (`runas`) children | Outside the job | Not covered; denied (`403`, or `408` on lookup timeout) if they use the port |
 
 ## Test plan
 
@@ -354,21 +412,33 @@ TDD order: each item starts as a failing test.
 
 **Unit tests (all platforms, `cargo test`):**
 
-- `terminal_environment`: sets the eight names to the listen URL and the
-  loopback `NO_PROXY`; removes case variants of inherited names; reports
+- `terminal_environment`: sets each proxy name to the listen URL and the
+  loopback `NO_PROXY`, in the spelling or spellings chosen for open question
+  4 (both spellings once each, or exactly one); removes case variants of
+  inherited names; reports
   replaced names without values; keeps unrelated variables; formats the
   address from `local_addr()`.
-- `environment_block`: sorting, separators, final double NUL, refusal of `=`,
-  NUL and empty names.
+- `environment_block`: separators and final double NUL; ordinal uppercase
+  case-insensitive sorting, including `NODE_ENV` before `NO_PROXY`; hidden
+  entries with a leading `=` (`=C:=C:\work`, `=ExitCode=00000000`) passed
+  through unchanged; refusal of empty names, NUL, and `=` after the first
+  character of a name.
 - Terminal local auth is exactly `LocalAuth::OS_USER`; a missing job is an
   error, never a fallback to `session_credentials`.
 - Route resolution: flag, then saved route, then `mixed`; `--route` accepts
   only `saved`, `gateway`, `mixed`; mixed prints the warning.
 - CLI parsing of `session terminal` with `--shell` and arguments after `--`;
-  shell resolution searches `PATH` but not the current directory.
+  shell resolution searches `PATH` with `PATHEXT` for bare names but not the
+  current directory, and resolves a relative path with a separator (for
+  example `.\tools\sh.exe`) against the current directory.
+- Exit code: a shell code above 255 (for example `0xC000013A`) is passed
+  through unchanged.
 - On non-Windows the command fails with an unsupported error before binding.
 - Console events: Ctrl-C and Ctrl-Break do not end the session; close, logoff
-  and shutdown do (mapping tested as a pure function).
+  and shutdown do (mapping tested as a pure function). The Ctrl-C and
+  Ctrl-Break listeners exist before the shell is spawned and stay alive until
+  teardown (tested through the terminal's event loop with fake event
+  sources): a second and a third Ctrl-C do not end the session either.
 - Links: `kind`, `shell`, `command` and `args` fields are refused.
 - `SessionKind::Terminal` round-trips; an older client reads `unknown`.
 - `Denial::NotInJob` text no longer mentions a browser.
@@ -385,7 +455,10 @@ probe binary like `tests/fake_browser.rs` run as `--shell`:
 - the probe sees exactly the expected variables, inherited proxy variables
   replaced, and no `@` in any proxy URL;
 - `CREATE_BREAKAWAY_FROM_JOB` from the probe fails;
-- an absolute-form `GET` gets `405` with `Allow: CONNECT`;
+- an absolute-form `HTTP/1.1` `GET` gets `405` with `Allow: CONNECT`, and an
+  `HTTP/1.0` one gets `400`;
+- `GenerateConsoleCtrlEvent` sends Ctrl-C to the console group three times:
+  the probe sees each, and Gateinto, the session and the shell keep running;
 - shell exit with a lingering grandchild: job empty within 5 seconds, port
   closed, exit code propagated;
 - killing `gateinto.exe` ends the shell and its children;
@@ -397,7 +470,8 @@ probe binary like `tests/fake_browser.rs` run as `--shell`:
 
 - [ ] cmd, PowerShell 7, Windows PowerShell 5.1 and Git Bash as `--shell`, in
       conhost and in Windows Terminal.
-- [ ] Ctrl-C stops a running `ping -t` but not the session; closing the
+- [ ] Ctrl-C, pressed several times, stops a running `ping -t` but not the
+      session; closing the
       window ends the shell, its children and the listener.
 - [ ] `curl.exe https://...`, `git clone https://...`, `pip install`,
       `npm install`, `dotnet restore`, `cargo fetch`, PowerShell 7
@@ -419,9 +493,10 @@ probe binary like `tests/fake_browser.rs` run as `--shell`:
    until the job is empty?
 3. `NO_PROXY`: replace (proposed) or merge with the user's value; add
    `127.0.0.0/8` or `[::1]`?
-4. Write both spellings of each variable (proposed), or only one?
-5. Keep `405` for plain HTTP (proposed), or implement absolute-form
-   forwarding later?
+4. Write both spellings of each variable (proposed), or only one, given the
+   .NET Framework and cmd risks listed under [Environment](#environment)?
+5. Keep the `405`/`400` refusals for plain HTTP (proposed), or implement
+   absolute-form forwarding later?
 6. Config-file gateways only (as `session browser`), or also gateways approved
    from links?
 7. Log to the shared console while the shell runs, or only to a file or the
