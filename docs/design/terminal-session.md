@@ -196,9 +196,10 @@ gateinto session terminal --agent --gateway NAME [--route saved|gateway|mixed]
   when relative. A drive-relative value (a drive prefix without a root, for
   example `C:tools\sh.exe`) is refused: `Path::join` with a drive prefix
   discards the base, and Windows resolves it against the process's per-drive
-  current directory. A bare name (no separator) is searched in the directories of
-  `PATH` only, never in the current directory, trying the name as given and
-  then with each extension of `PATHEXT`. The result must be an existing file.
+  current directory. A bare name (no separator) is searched in the
+  directories of `PATH` only, never in the current directory, trying the name
+  as given and then with each extension of `PATHEXT`. The result must be an
+  existing file.
   `ARGS` after `--` are passed to it, quoted by the existing `command_line`
   (`src/job.rs`), which already refuses quotes in the executable path and NUL
   characters.
@@ -959,7 +960,8 @@ TDD order: each item starts as a failing test.
   with `PATHEXT` and is not joined with the configuration file's directory;
   `tools\sh.exe` is resolved against the configuration file's directory, not
   the current directory; a drive-relative `C:tools\sh.exe` is refused; an
-  absolute path is kept; a missing file is an error. `[browser] executable` keeps its current join.
+  absolute path is kept; a missing file is an error. `[browser] executable`
+  keeps its current join.
 - CLI parsing of `session terminal` with `--shell` and arguments after `--`;
   shell resolution searches `PATH` with `PATHEXT` for bare names but not the
   current directory, and resolves a relative path with a separator (for
