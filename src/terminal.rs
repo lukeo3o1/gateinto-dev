@@ -773,23 +773,34 @@ mod tests {
         ConfigFile::load(&path).unwrap()
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("gateinto-terminal-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("gateinto-terminal-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
     fn the_configured_shell_takes_its_arguments_and_resolves_against_the_file() {
-        let dir = temp_dir("configured");
+        let scratch = Scratch::new("configured");
+        let dir = &scratch.0;
         let bin = root("bin");
         let lookup = Fake::default()
             .path(&[&bin])
             .file(bin.join("zsh"))
             .file(dir.join("tools").join("sh"));
         let file = config(
-            &dir,
+            dir,
             "[terminal]\nshell = \"zsh\"\nargs = [\"-l\", \"two words\"]\n",
         );
         assert_eq!(
@@ -799,7 +810,7 @@ mod tests {
                 args: ["-l", "two words"].map(OsString::from).to_vec(),
             }
         );
-        let file = config(&dir, "[terminal]\nshell = \"tools/sh\"\n");
+        let file = config(dir, "[terminal]\nshell = \"tools/sh\"\n");
         assert_eq!(
             configured_shell(&file, &lookup).unwrap(),
             Shell {
@@ -807,7 +818,7 @@ mod tests {
                 args: Vec::new(),
             }
         );
-        let file = config(&dir, "[terminal]\nshell = \"missing/sh\"\n");
+        let file = config(dir, "[terminal]\nshell = \"missing/sh\"\n");
         let error = configured_shell(&file, &lookup).unwrap_err().to_string();
         assert_eq!(
             error,
@@ -916,7 +927,9 @@ mod tests {
                 assert_eq!(System.login_shell(), Some(PathBuf::from(fields[6])));
             }
             _ => {
-                let _ = System.login_shell();
+                if let Some(shell) = System.login_shell() {
+                    assert!(shell.is_absolute(), "{}", shell.display());
+                }
             }
         }
     }
