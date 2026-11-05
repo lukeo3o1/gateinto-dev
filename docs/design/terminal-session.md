@@ -201,7 +201,9 @@ gateinto session terminal --agent --gateway NAME [--route saved|gateway|mixed]
   when relative. A drive-relative value (a drive prefix without a root, for
   example `C:tools\sh.exe`) is refused: `Path::join` with a drive prefix
   discards the base, and Windows resolves it against the process's per-drive
-  current directory. A bare name (no separator) is searched in the
+  current directory. A root-relative value (a root without a drive, for
+  example `\tools\sh.exe`) is refused too: Windows resolves it against the
+  current drive. A bare name (no separator) is searched in the
   directories of `PATH` only, never in the current directory, trying the name
   as given and then with each extension of `PATHEXT`. The result must be an
   existing file.
@@ -262,6 +264,9 @@ Resolution of `shell`, never against the current directory:
   `C:tools\sh.exe`) is refused, as for `--shell`: joining it would discard
   the configuration file's directory and depend on a per-drive current
   directory;
+- a root-relative value (a root without a drive, for example
+  `\tools\sh.exe`) is refused, as for `--shell`: joining it would discard
+  the configuration file's directory and depend on the current drive;
 - a bare name (no separator), for example `pwsh.exe`, is searched in the
   directories of `PATH`, trying the name as given and then with each
   extension of `PATHEXT` on Windows, as for `--shell`.
@@ -986,14 +991,14 @@ TDD order: each item starts as a failing test.
 - `[terminal] shell` resolution: a bare `pwsh.exe` is searched on `PATH`
   with `PATHEXT` and is not joined with the configuration file's directory;
   `tools\sh.exe` is resolved against the configuration file's directory, not
-  the current directory; a drive-relative `C:tools\sh.exe` is refused; an
-  absolute path is kept; a missing file is an error. `[browser] executable`
+  the current directory; a drive-relative `C:tools\sh.exe` and a
+  root-relative `\tools\sh.exe` are refused; an absolute path is kept; a missing file is an error. `[browser] executable`
   keeps its current join.
 - CLI parsing of `session terminal` with `--shell` and arguments after `--`;
   shell resolution searches `PATH` with `PATHEXT` for bare names but not the
   current directory, and resolves a relative path with a separator (for
   example `.\tools\sh.exe`) against the current directory; a drive-relative
-  `C:tools\sh.exe` is refused. `--agent` refuses
+  `C:tools\sh.exe` and a root-relative `\tools\sh.exe` are refused. `--agent` refuses
   `--shell`, `ARGS`, `--config` and upstream options, and requires
   `--gateway`.
 - IPC: `terminal <gateway> route=<saved|gateway|mixed>` round-trips for every

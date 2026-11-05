@@ -265,6 +265,9 @@ pub fn resolve_shell(
     if matches!(value.components().next(), Some(Component::Prefix(_))) && !value.has_root() {
         return Err(ShellError::DriveRelative(value.to_owned()));
     }
+    if value.has_root() {
+        return Err(ShellError::RootRelative(value.to_owned()));
+    }
     let separated = value
         .as_os_str()
         .as_encoded_bytes()
@@ -316,6 +319,7 @@ pub enum ShellError {
     NotFound(PathBuf),
     NotOnPath(PathBuf),
     DriveRelative(PathBuf),
+    RootRelative(PathBuf),
     NoDefault,
 }
 
@@ -332,6 +336,12 @@ impl fmt::Display for ShellError {
                 f,
                 "shell {} names a drive without a root directory; use an absolute path or a \
                  path without a drive",
+                path.display()
+            ),
+            Self::RootRelative(path) => write!(
+                f,
+                "shell {} names a root directory without a drive; use an absolute path or a \
+                 path without a root directory",
                 path.display()
             ),
             Self::NoDefault => f.write_str(
@@ -699,7 +709,8 @@ mod tests {
             .env("PATHEXT", ".COM;.EXE")
             .file(bin.join("pwsh.EXE"))
             .file(base.join(r"tools\sh.exe"))
-            .file(r"C:tools\sh.exe");
+            .file(r"C:tools\sh.exe")
+            .file(r"C:\tools\sh.exe");
         assert_eq!(
             resolve_shell(Path::new("pwsh"), Some(&base), &lookup).unwrap(),
             bin.join("pwsh.EXE")
@@ -715,6 +726,16 @@ mod tests {
                 format!(
                     "shell {value} names a drive without a root directory; use an absolute path \
                      or a path without a drive"
+                )
+            );
+        }
+        for value in [r"\tools\sh.exe", "/tools/sh.exe", r"\sh.exe"] {
+            let error = resolve_shell(Path::new(value), Some(&base), &lookup).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "shell {value} names a root directory without a drive; use an absolute path \
+                     or a path without a root directory"
                 )
             );
         }
