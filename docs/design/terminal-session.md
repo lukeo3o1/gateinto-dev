@@ -1,9 +1,11 @@
 # Design: terminal sessions
 
-Status: proposal. Nothing in this document is implemented, and none of the
-behaviour it expects from shells, terminals or tools has been tried on a real
-Windows or Linux system. Names marked *(proposed)* do not exist in the code
-yet; every other name refers to code on `master` at the time of writing.
+Status: design decided, not implemented; the decisions are listed in
+[Decisions](#decisions). None of the behaviour it expects from shells,
+terminals or tools has been tried on a real Windows or Linux system; what
+must be checked first is under [Needs verification](#needs-verification).
+Names marked *(proposed)* do not exist in the code yet; every other name
+refers to code on `master` at the time of writing.
 
 ## Summary
 
@@ -25,7 +27,10 @@ The first version has two entry points on Windows:
   `gateinto session list`, and closes it on `gateinto session close` or
   `gateinto stop`.
 
-Linux is a later phase, in-process only; see [Linux](#linux).
+The first version is Windows-only. Linux is a later phase that starts with
+a prototype of option (i), a systemd user scope, verified on real systems; it
+is CLI-only (in-process), without an agent-hosted variant. See
+[Linux](#linux).
 
 ## Goals
 
@@ -242,8 +247,9 @@ args = ["-NoLogo"]
 
 *(proposed)* `TerminalSection { shell: Option<PathBuf>, args: Vec<String> }`
 in `src/config.rs`, `deny_unknown_fields` like the other sections. `args` are
-passed like `ARGS` and are used only together with `shell`. The platform
-default is `%ComSpec%` on Windows, and on Linux `$SHELL`, then `pw_shell` from
+passed like `ARGS` and are used only together with `shell`; both keys ship
+in the first version. The platform default is `%ComSpec%` on Windows; for the
+later Linux phase it is `$SHELL`, then `pw_shell` from
 `getpwuid_r(getuid())`, then `/bin/sh`.
 
 Resolution of `shell`, never against the current directory:
@@ -271,7 +277,7 @@ Options considered:
 | Option | Assessment |
 | --- | --- |
 | `[terminal] shell` key, edited by the user | **Recommended.** Same model as `[browser] executable`: a user-owned file read by the CLI on each run and by the agent at start. Not settable from links, IPC or the GUI. |
-| Linux `$SHELL`, then `pw_shell` | Recommended as the Linux default. Both are the user's own choice; `$SHELL` comes from the environment the agent or CLI was started with. |
+| Linux `$SHELL`, then `pw_shell` | Recommended as the default for the later Linux phase. Both are the user's own choice; `$SHELL` comes from the environment the agent or CLI was started with. |
 | Windows `%ComSpec%` | Recommended as the Windows default; normally `cmd.exe`. Comes from Gateinto's environment, like `PATH`. |
 | `pwsh.exe` found on `PATH` | Not as a default: the default shell would change silently when PowerShell 7 is installed or removed, without the user choosing it. A user who wants it writes `shell = "pwsh.exe"`; that is the user's explicit choice, and its `PATH` search works like that of any bare name (in the agent, with the agent's start-time `PATH`). |
 | Windows Terminal's default profile | Not worth it: `settings.json` lives in a package directory with a changing schema, profiles hold full command lines (not an executable) that would have to run verbatim, and dynamic profiles (WSL, Azure Cloud Shell) do not map to a local executable in a job. |
@@ -303,8 +309,8 @@ terminal <gateway> route=<saved|gateway|mixed>
 Option<Route> })`, `None` meaning `saved`)*
 
 - `<gateway>` is required and must parse as a `GatewayName`; it names a gateway
-  the agent already knows (whether linked gateways count is
-  [open question 4](#open-questions)). There is no gateway address, URL or
+  in the agent's configuration file. Gateways approved from links are refused
+  ([Decisions](#decisions), 4). There is no gateway address, URL or
   portal field, so a `terminal` request can never add a gateway and never
   needs a confirmation; `Approve` and `Deny` are not involved.
 - `route=` is always present, so the line has one spelling and no default to
@@ -340,15 +346,13 @@ Option<Route> })`, `None` meaning `saved`)*
    `AgentLimits::max_terminal_sessions` *(proposed, default 4)*, against the
    number of terminals.
 2. Resolve the gateway, the route ([Routes](#routes)) and the shell
-   ([Shell selection](#shell-selection)). The gateway lookup depends on
-   [open question 4](#open-questions):
-   - config-file gateways only: refuse a name that is not in the file's
-     gateways, the check `ConfigProfiles::browser_session` already makes as
-     `configured` (`src/main.rs`), then build the plan from the file alone;
-   - linked gateways too: use `Profiles::browser_session` as it is, which
-     merges linked gateways with `ConfigFile::with_linked`.
-
-   The first is the proposal, matching `gateinto session browser`.
+   ([Shell selection](#shell-selection)). Only configuration-file gateways
+   are accepted, in both variants, matching `gateinto session browser`: a
+   name that is not in the file's gateways is refused, the check
+   `ConfigProfiles::browser_session` already makes as `configured`
+   (`src/main.rs`), and the plan is built from the file alone, without
+   `ConfigFile::with_linked`. A gateway approved from a link is refused even
+   though the agent knows it.
 3. Create a job with `Job::new`. On failure, answer an error and start
    nothing; there is no fallback.
 4. Start a session with `kind: SessionKind::Terminal`, `LocalAuth::OS_USER`,
@@ -388,8 +392,9 @@ Lifetime:
   including unsaved work in editors.
 - **`gateinto stop`**: `Request::Stop` runs `close_all`, which closes
   terminals like browsers. `gateinto stop` and the GUI's Stop button say how
-  many terminal sessions are closed *(proposed)*; whether to ask first is
-  [open question 8](#open-questions).
+  many terminal sessions are closed *(proposed)*. The GUI asks for
+  confirmation first while terminals are open ([GUI](#gui)); `gateinto stop`
+  and `gateinto session close` do not ask.
 - **Agent ends** (killed, crash, logoff): the job handles close with the
   process and `KILL_ON_JOB_CLOSE` ends every shell. The handles are
   non-inheritable and Gateinto never duplicates or passes them on. A process
@@ -414,14 +419,17 @@ Lifetime:
 - Whether the console host and, on Windows 11, a Windows Terminal window
   chosen as the default terminal application close when the job is killed,
   and whether the console host itself runs inside the job, needs
-  verification.
+  verification. Proposed fallback if a window outlives the job or the
+  console host runs outside it: the agent forces the classic console host
+  (conhost) for terminal windows. How to force it for one process without
+  changing the user's default terminal setting needs verification too.
 
-Environment source: the agent's environment is the one it was started with
-(by the GUI, a login task or a CLI). Variables the user changed later, such
-as `PATH`, are not seen until the agent restarts. Rebuilding the user's
-environment with `CreateEnvironmentBlock` would avoid that but needs a user
-token and differs from the in-process variant; this is
-[open question 9](#open-questions).
+Environment source (decided): the agent's environment is the one it was
+started with (by the GUI, the autostart `Run` value or a CLI). Variables the
+user changed later, such as `PATH`, are not seen until the agent restarts.
+Rebuilding the user's environment with `CreateEnvironmentBlock` would avoid
+that but needs a user token and differs from the in-process variant, so it
+is not done.
 
 #### Ctrl-C in the agent-hosted console
 
@@ -451,7 +459,10 @@ as the documentation shows; the attribute lives in undocumented process
 parameters, which Gateinto must not write. Dropping
 `CREATE_NEW_PROCESS_GROUP` from `spawn_agent` may also work, since a
 detached agent has no console to receive events anyway, but it changes
-existing behaviour and is [open question 16](#open-questions).
+existing behaviour. Decision: if verification shows that the reset does not
+restore Ctrl-C for the agent's children, `spawn_agent` drops
+`CREATE_NEW_PROCESS_GROUP` and keeps `DETACHED_PROCESS`; that this restores
+Ctrl-C needs verification too.
 
 ### GUI
 
@@ -475,11 +486,21 @@ the agent.
   buttons.
 - New strings in `gui/src/i18n.rs`, in English and Chinese *(proposed
   `Text` variants)*: the "Open terminal" action, the "Terminal" session
-  title fallback, the "agent too old" note and the demo refusal.
+  title fallback, the "agent too old" note, the demo refusal, and the two
+  confirmations (closing a terminal; stopping the agent with terminals
+  open) with their buttons.
 - `gui/src/sessions.rs` maps `SessionKind::Terminal` to a terminal row whose
   title is the shell name; its close button sends the existing
   `Command::Close`. There is no credentials button, because the session has
   none.
+- **Confirmation (decided).** Closing a terminal row always asks first,
+  because it kills the shell, everything started from it and unsaved work.
+  The Stop button asks first when the last session list contains at least
+  one terminal, naming how many; with none it stops at once, as today.
+  Cancelling sends nothing. The dialog follows the existing remove-gateway
+  confirmation in `gui/src/board/dialog.rs` (`Zone::ConfirmRemove`).
+  Closing a browser row does not ask. The CLI's `gateinto stop` and
+  `gateinto session close` never ask.
 - The GUI has no shell setting and shows no TOML editor; its own settings
   stay in the registry. `[terminal]` is edited only by the user.
 - Demo mode: `demo::answer` answers `Request::Terminal` with an empty `ok`
@@ -698,12 +719,15 @@ refusals, so plain HTTP fails closed instead of silently bypassing the
 tunnel. A notice on standard error says that `http://` URLs are refused.
 Forwarding absolute-form requests (for example by opening a `CONNECT` to
 `host:80` and relaying one rewritten request per connection) would add
-request parsing, framing and smuggling risks to the proxy core; it is an
-open question.
+request parsing, framing and smuggling risks to the proxy core; it is not
+planned for the first version.
 
 ## Linux
 
-Linux is a later phase. Today `Job::new` and `os_user::system` return
+Linux is not in the first version, which is Windows-only. The later Linux
+phase starts with a prototype of option (i), verified on real systems, and is
+CLI-only, without an agent-hosted variant. The analysis below is kept for
+that phase. Today `Job::new` and `os_user::system` return
 `Unsupported` there, `browser_job` returns `None`, and browser sessions offer
 `session_credentials` only. A terminal session needs a replacement for "this
 connection comes from a process in the session's job" that an unprivileged
@@ -827,8 +851,8 @@ write to `cgroup.procs`.
   creates, and without a reliable way to wait for that shell. The agent
   answers `terminal` requests with "terminal sessions from the agent are not
   supported on this platform", and the GUI is Windows-only today. A
-  user-configured emulator command that is verified to run the shell as its
-  own child (for example `xterm -e`) can be reconsidered later.
+  user-configured emulator command (for example `xterm -e`, which runs the
+  shell as its own child) is not part of the Linux phase either.
 
 ### Environment on Linux
 
@@ -877,13 +901,15 @@ the same as on Windows.
   A process outside the job that copied the variables could later send
   traffic to whatever binds that port. Processes in the job are terminated,
   so this needs a process that escaped the job.
-- **Logging.** The in-process variant logs to the shared console at `warn`
-  while the shell runs (for example the first `os_user` denial); the agent
-  logs to its logbook as for browsers. Neither logs environment values other
-  than the listen address.
-- **Linux (later phase).** A process in the scope can leave it and escape
-  teardown; a killed Gateinto leaves the scope running until the sweep. Both
-  are weaker than the Windows job and must be documented with that phase.
+- **Logging (decided).** The in-process variant logs to the shared console,
+  at `warn` and above only, while the shell runs (for example the first
+  `os_user` denial); it writes no log file. The agent logs to its logbook as
+  for browsers. Neither logs environment values other than the listen
+  address.
+- **Linux (later phase, not in the first version).** A process in the scope
+  can leave it and escape teardown; a killed Gateinto leaves the scope running
+  until the sweep. Both are weaker than the Windows job; the prototype must
+  measure them and the phase must document them.
 
 Threat-model additions *(to be made with the implementation)*:
 
@@ -925,8 +951,8 @@ manual check.
 | Agent-hosted window with Windows Terminal as default terminal (Windows 11) | Opens as a Windows Terminal tab or window; closing behaviour on job kill unknown | Needs verification |
 | Configuration file with `[terminal]` read by an older Gateinto | Refused (unknown section) | Expected, by `deny_unknown_fields` |
 | Older agent receiving `terminal` | `invalid request`; CLI and GUI ask for an agent restart | Expected, needs verification |
-| Linux (later phase): systemd user scope, cgroup v2 | Owner check by cgroup | Needs a prototype |
-| Linux without a systemd user manager (containers, some WSL setups) | Command refuses to start | Expected by design |
+| Linux (later phase, not in the first version): systemd user scope, cgroup v2 | Owner check by cgroup | Needs a prototype |
+| Linux without a systemd user manager (containers, some WSL setups), later phase | Command refuses to start | Expected by design |
 
 ## Test plan
 
@@ -953,8 +979,9 @@ TDD order: each item starts as a failing test.
   `--route` accepts only `saved`, `gateway`, `mixed`; mixed produces the
   warning.
 - Shell selection: `--shell` over `[terminal] shell` over the platform
-  default; `args` used only with `shell`; on Windows `%ComSpec%`; on Linux
-  `$SHELL`, then `pw_shell`, then `/bin/sh` (with injected lookups).
+  default; `args` used only with `shell`; on Windows `%ComSpec%`; the Linux
+  default (`$SHELL`, then `pw_shell`, then `/bin/sh`, with injected lookups)
+  is tested with the Linux phase.
   `[terminal]` with an unknown key is refused.
 - `[terminal] shell` resolution: a bare `pwsh.exe` is searched on `PATH`
   with `PATHEXT` and is not joined with the configuration file's directory;
@@ -1010,9 +1037,8 @@ platform check goes through the proposed `Launcher::terminals()` seam, not
   that it has none;
 - `close <id>` kills the fake process and closes the session; a fake shell
   exit closes it too; `stop` closes terminals and browsers;
-- an unknown gateway is refused without a confirmation token; with the
-  proposed config-only answer to open question 4, a linked gateway is
-  refused too.
+- an unknown gateway is refused without a confirmation token, and so is a
+  linked gateway that is not in the configuration file.
 
 **GUI tests (`gui`, existing patterns):**
 
@@ -1024,7 +1050,14 @@ platform check goes through the proposed `Launcher::terminals()` seam, not
 - demo mode answers it without changes and the sample sessions include a
   terminal row;
 - the sessions page shows a terminal row with the shell name and no
-  credentials button.
+  credentials button;
+- closing a terminal row opens the confirmation and sends `Command::Close`
+  only after it is confirmed; cancelling sends nothing; closing a browser
+  row sends `Command::Close` without asking;
+- Stop with a terminal in the last session list opens the confirmation and
+  sends `Command::Stop` only after it is confirmed; Stop without terminals
+  sends it at once;
+- both confirmations exist in English and Chinese.
 
 **Windows CI integration (`windows-latest`, proposed
 `tests/terminal_windows.rs`)** against the existing upstream fixture, with a
@@ -1095,41 +1128,90 @@ probe binary like `tests/fake_browser.rs` run as `--shell` or as
       runs; the window title; close from the GUI and from
       `gateinto session close`; `gateinto stop`; Windows 11 with Windows
       Terminal as the default terminal application.
+- [ ] GUI: closing a terminal row and pressing Stop with a terminal open both
+      ask first, and cancelling leaves the terminal running;
+      `gateinto stop` and `gateinto session close` close it without asking.
 
-## Open questions
+## Decisions
 
-1. On shell exit, terminate leftover background processes (proposed) or wait
-   until the job is empty?
-2. `NO_PROXY`: replace (proposed) or merge with the user's value; add
-   `127.0.0.0/8` or `[::1]`?
-3. Keep the `405`/`400` refusals for plain HTTP (proposed), or implement
-   absolute-form forwarding later?
-4. Config-file gateways only (as `session browser`), or also gateways approved
-   from links? This applies to both variants.
-5. In-process: log to the shared console while the shell runs, or only to a
-   file or the agent's logbook?
-6. Set a non-secret `GATEINTO_SESSION=<id>` marker so prompts and nested
-   sessions can detect the session?
-7. Name of the CLI entry for the agent-hosted variant: `--agent` (proposed),
-   `--window`, or a separate subcommand?
-8. Should `gateinto stop`, the GUI's Stop button and `session close` ask for
-   confirmation while terminal sessions are open, since they kill the shell
-   and unsaved work?
-9. Agent-hosted environment: the agent's start-time environment (proposed),
-   or the user's current environment rebuilt with `CreateEnvironmentBlock`?
-10. Agent-hosted current directory: `%USERPROFILE%` (proposed), or a
-    `[terminal] directory` key?
-11. Are `max_terminal_sessions` = 4 and a shared launch rate limit the right
-    limits?
-12. With Windows Terminal as the default terminal application, does a job
-    kill close the tab or window, and does the console host run in the job?
-    If not, should the agent force conhost?
-13. `[terminal] args`: keep it, or only `shell` in the first version?
-14. Linux: is option (i) acceptable given that processes can leave the scope
-    and that a killed Gateinto leaves the scope running until the next sweep?
-    Is the per-connection cost acceptable?
-15. Linux: should the agent-hosted variant ever be offered through a
-    user-configured terminal emulator, and with which verified emulators?
-16. If `SetConsoleCtrlHandler(NULL, FALSE)` in the agent does not restore
-    Ctrl-C for its children, drop `CREATE_NEW_PROCESS_GROUP` from
-    `spawn_agent`, given that a detached agent has no console anyway?
+Numbered in the order the questions were raised during design. Where the
+earlier proposal was not explicit, the conservative option is chosen and
+marked as such.
+
+1. **Leftovers are terminated.** On shell exit the job is terminated, ending
+   background processes the shell left, then Gateinto waits up to 5 seconds;
+   it does not wait for the job to empty on its own.
+2. **`NO_PROXY` is replaced.** Its final value is
+   `localhost,127.0.0.1,::1`, written as both `NO_PROXY` and `no_proxy`.
+   Inherited entries are dropped, not merged; no CIDR form such as
+   `127.0.0.0/8` and no bracketed `[::1]` is added.
+3. **Plain HTTP fails closed.** The `405` (other methods over `HTTP/1.1`)
+   and `400` (other versions) refusals stay; absolute-form forwarding is not
+   planned for the first version.
+4. **Configuration-file gateways only**, in both variants. A gateway
+   approved from a link is refused, even by the agent that knows it; the
+   agent test for that refusal stays.
+5. **In-process logging** goes to the shared console at `warn` and above
+   while the shell runs, with no log file; the agent logs to its logbook.
+   Neither logs environment values other than the listen address
+   (conservative: the proposal did not name a level filter or rule out a
+   file).
+6. **No `GATEINTO_SESSION` marker.** No variable other than the proxy names
+   is set (conservative: the proposal only asked the question). Nested
+   sessions need no detection, and a prompt can test `HTTPS_PROXY`.
+7. **`--agent`** is the flag that selects the agent-hosted variant of
+   `gateinto session terminal`.
+8. **Confirmation in the GUI only.** The GUI asks before closing a terminal
+   session and before Stop while terminal sessions are open. `gateinto stop`
+   and `gateinto session close` do not ask.
+9. **Agent-hosted environment** is the agent's start-time environment;
+   `CreateEnvironmentBlock` is not used.
+10. **Agent-hosted current directory** is `%USERPROFILE%`; there is no
+    `[terminal] directory` key.
+11. **Limits:** `max_terminal_sessions` = 4, counted separately from
+    browsers, and the launch rate limit is shared by `launch` and
+    `terminal`.
+12. **Windows Terminal as default terminal** needs verification (below).
+    Proposed fallback: the agent forces conhost for terminal windows.
+13. **`[terminal] args` is kept** next to `shell` and is used only together
+    with `shell`.
+14. **Linux is not in the first version**, which is Windows-only. The later
+    phase starts with a prototype of option (i), a systemd user scope with
+    the cgroup-based owner check, verified on real systems; whether its
+    escape and stale-scope weaknesses and its per-connection cost are
+    acceptable is decided from that prototype.
+15. **No agent-hosted variant on Linux.** The Linux phase is CLI-only
+    (in-process); no terminal emulator is launched by the agent.
+16. **Ctrl-C in agent-hosted windows:** the agent calls
+    `SetConsoleCtrlHandler(NULL, FALSE)` at start. If verification shows the
+    reset does not restore Ctrl-C for its children, `CREATE_NEW_PROCESS_GROUP`
+    is dropped from `spawn_agent` (needs verification too).
+
+### Needs verification
+
+These are not open design questions; each has a decided answer or fallback
+above and must be checked on real systems before it ships. Results go to
+`docs/verification.md`.
+
+- With Windows Terminal as the default terminal application (Windows 11):
+  whether a job kill closes the tab or window, whether the console host runs
+  in the job, and, if the conhost fallback is needed, how to force conhost
+  for one process.
+- `SetConsoleCtrlHandler(NULL, FALSE)` in a process without a console:
+  whether it succeeds and clears the inherited "ignore Ctrl-C" attribute for
+  children; if not, whether dropping `CREATE_NEW_PROCESS_GROUP` from
+  `spawn_agent` restores Ctrl-C.
+- Both spellings on Windows: .NET Framework programs that start processes
+  (Windows PowerShell 5.1 `Start-Process`, MSBuild), cmd `set HTTPS_PROXY=`,
+  and which entry Windows APIs return for a duplicated name.
+- Whether cmd sets the hidden `=<drive>:` entries again in an agent-hosted
+  window.
+- In-process console handles while `bInheritHandles` is false, also with
+  redirected standard handles; behaviour when started from mintty or another
+  pipe-based host.
+- The Windows CI setups for Ctrl-C (in-process and agent-hosted) on
+  `windows-latest`.
+- Every row of the [compatibility table](#compatibility).
+- For the Linux phase, in the prototype: the fork-hold-move-exec sequence,
+  the PID-reuse guard, the owner check's per-connection cost, stale-scope
+  cleanup, and escape from the scope.
