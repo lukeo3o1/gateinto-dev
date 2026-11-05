@@ -304,11 +304,13 @@ style and answer handling and by integration tests of the agent's side.
 
 ### Local proxy authentication (`session_credentials`)
 
-Every session accepts the user name and password generated for it when it
-starts; no setting removes them, and there is no shared session for
+Every browser session accepts the user name and password generated for it
+when it starts; no setting removes them, and there is no shared session for
 background programs. On Windows browser sessions in a job object also offer `os_user`
 ([below](#local-proxy-authentication-os_user)), and passing either method is
-enough. This is local proxy access
+enough. Terminal sessions (`gateinto session terminal`, Windows only) are the
+one exception: they accept only `os_user` with the terminal's job and have
+no session credentials at all, so there is nothing to show, store or leak. This is local proxy access
 control, not authorization by the upstream, and it does not identify a user.
 The trust-on-first-use mode `basic_tofu` it replaces is refused in the
 configuration file, in links and in IPC requests with an error naming
@@ -414,7 +416,7 @@ Non-guarantees:
 ### Local proxy authentication (`os_user`)
 
 `os_user` is available on Windows only. It is offered by browser sessions on
-Windows, next to `session_credentials`. The client sends nothing for
+Windows, next to `session_credentials`, and by terminal sessions, alone. The client sends nothing for
 it: Gateinto identifies the process at the other end of the connection.
 
 Guarantees:
@@ -445,6 +447,14 @@ Guarantees:
   not inheritable, and the session additionally requires `IsProcessInJob` to
   place the connecting process in that job. Other programs of the same user,
   which run outside the job, are denied.
+- **Terminal sessions: only the terminal's job, never without one.**
+  `gateinto session terminal` creates the job before it binds the session
+  and starts the shell in it the same way, with the same fallback to a
+  suspended start and `AssignProcessToJobObject`. If the job cannot be
+  created or the shell cannot be put in it, the command fails and nothing is
+  started; unlike browser launches there is no fallback to a session
+  without a job. The shell and the processes it starts are accepted; every
+  other program is denied. The job is terminated when the shell exits.
 - **No job, no `os_user`.** If no job can be created or the browser cannot
   be put in one (for example on a Windows version that does not allow the
   process into another job), the agent logs one warning for that launch and
@@ -470,15 +480,18 @@ Guarantees:
   the blocking thread pool, not on the async runtime, and shares the connect
   timeout with reading the request; a check that does not finish in time
   gets `408` and is logged with its reason.
-- **Clear fallback.** `session_credentials` is always offered too, so a
-  denied connection is handled exactly like a request without credentials
-  (`407` with the `Basic` challenge), and the session credentials keep
-  working. Denials do not count toward the `session_credentials` failure
+- **Clear fallback in browser sessions.** Browser sessions always offer
+  `session_credentials` too, so a denied connection is handled exactly like
+  a request without credentials (`407` with the `Basic` challenge), and the
+  session credentials keep working. Terminal sessions have no fallback: a
+  denied connection gets `403 Forbidden` (or `408` when the owner lookup
+  does not finish in time) and is closed, never a `407` challenge. Denials do not count toward the `session_credentials` failure
   limit, because they involve no guess; that limit is unchanged.
 - **Nothing secret in logs.** No credentials are involved. The first denial
   of a session logs a warning with its reason (no owner found, another user,
-  outside the browser's job, a lookup past the deadline, or the Windows
-  error) and the fallback: the command that shows the session credentials.
+  outside the session's job, a lookup past the deadline, or the Windows
+  error) and the fallback: the command that shows the session credentials,
+  or, in a terminal session, that there are none to fall back to.
   Later denials of the same
   session are logged at debug level.
 
@@ -499,9 +512,11 @@ Non-guarantees:
 - **Elevation is not verified.** With a real UAC split token, a Gateinto that
   is not elevated may be unable to open the process or token of an elevated
   client. The check then fails closed, so such a client gets the `Basic`
-  challenge. See
+  challenge in a browser session and `403` in a terminal session. See
   [verification.md](verification.md#local-proxy-authentication-os_user).
-- **Not verified:** domain-joined machines, Chrome inside the job,
+- **Not verified:** terminal sessions on real Windows (the shell in the
+  job, its console, console control events and the exit code),
+  domain-joined machines, Chrome inside the job,
   browsers launched by Gateinto itself rather than by a test probe, a run on
   Windows CI, and the suspended-and-assign fallback and the launch without a
   job on real Windows 7 and 8.1.
@@ -601,11 +616,13 @@ Non-guarantees:
 ## What it does not protect
 
 - **Local users and processes.** `session_credentials`, required by every
-  session, keeps out programs that do not know the issued credentials, not
-  programs of the same user, which can ask the agent for them or read them
-  from the prompt. `os_user` keeps out other users and, in browser
-  sessions, programs outside the browser's job, but not code of the same user
-  that injects into the browser or takes the job handle. See
+  browser session, keeps out programs that do not know the issued
+  credentials, not programs of the same user, which can ask the agent for
+  them or read them from the prompt. Terminal sessions have no credentials
+  and rely on `os_user` alone. `os_user` keeps out other users and, in
+  browser and terminal sessions, programs outside the session's job, but not
+  code of the same user that injects into a process in the job or takes the
+  job handle. See
   [above](#local-proxy-authentication-session_credentials) and
   [`os_user`](#local-proxy-authentication-os_user).
 - **Administrators and malware running as the user.** They can use or steal
