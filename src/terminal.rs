@@ -3,7 +3,10 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::process::ExitStatus;
 use std::sync::Arc;
+
+use tokio::sync::mpsc;
 
 use crate::config::ConfigFile;
 use crate::job::Job;
@@ -46,6 +49,60 @@ pub fn terminal_proxy(proxy: proxy::Config, route: Route, job: Arc<Job>) -> prox
         os_user_job: Some(job),
         ..proxy
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleEvent {
+    CtrlC,
+    CtrlBreak,
+    Close,
+    Logoff,
+    Shutdown,
+}
+
+impl ConsoleEvent {
+    pub fn ends_session(self) -> bool {
+        matches!(self, Self::Close | Self::Logoff | Self::Shutdown)
+    }
+}
+
+impl fmt::Display for ConsoleEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CtrlC => "Ctrl-C",
+            Self::CtrlBreak => "Ctrl-Break",
+            Self::Close => "the console was closed",
+            Self::Logoff => "the user logged off",
+            Self::Shutdown => "the system is shutting down",
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Supervised<T> {
+    Exited(T),
+    Ended(ConsoleEvent),
+}
+
+pub async fn supervise<T>(
+    events: &mut mpsc::UnboundedReceiver<ConsoleEvent>,
+    exit: impl Future<Output = T>,
+) -> Supervised<T> {
+    tokio::pin!(exit);
+    loop {
+        tokio::select! {
+            outcome = &mut exit => return Supervised::Exited(outcome),
+            Some(event) = events.recv() => {
+                if event.ends_session() {
+                    return Supervised::Ended(event);
+                }
+            }
+        }
+    }
+}
+
+pub fn exit_code(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
 }
 
 pub fn terminal_route(requested: Option<Route>, saved: Route) -> Route {
@@ -481,6 +538,85 @@ mod tests {
     #[test]
     fn terminal_sessions_have_no_job_outside_windows() {
         assert!(terminal_job(Job::new()).is_err());
+    }
+
+    #[test]
+    fn only_close_logoff_and_shutdown_end_the_session() {
+        for (event, ends) in [
+            (ConsoleEvent::CtrlC, false),
+            (ConsoleEvent::CtrlBreak, false),
+            (ConsoleEvent::Close, true),
+            (ConsoleEvent::Logoff, true),
+            (ConsoleEvent::Shutdown, true),
+        ] {
+            assert_eq!(event.ends_session(), ends, "{event}");
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_ctrl_c_and_ctrl_break_wait_for_the_shell() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (exit, exited) = tokio::sync::oneshot::channel();
+        for event in [
+            ConsoleEvent::CtrlC,
+            ConsoleEvent::CtrlC,
+            ConsoleEvent::CtrlBreak,
+            ConsoleEvent::CtrlC,
+        ] {
+            events.send(event).unwrap();
+        }
+        let supervised = tokio::spawn(async move {
+            let outcome = supervise(&mut received, exited).await;
+            (outcome, received)
+        });
+        tokio::task::yield_now().await;
+        assert!(!supervised.is_finished());
+        exit.send(0xC000_013A_u32).unwrap();
+        let (outcome, mut received) = supervised.await.unwrap();
+        assert_eq!(outcome, Supervised::Exited(Ok(0xC000_013A)));
+        assert!(received.try_recv().is_err());
+        events.send(ConsoleEvent::CtrlC).unwrap();
+        assert_eq!(received.try_recv(), Ok(ConsoleEvent::CtrlC));
+    }
+
+    #[tokio::test]
+    async fn a_closing_console_ends_the_session() {
+        for event in [
+            ConsoleEvent::Close,
+            ConsoleEvent::Logoff,
+            ConsoleEvent::Shutdown,
+        ] {
+            let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+            events.send(ConsoleEvent::CtrlC).unwrap();
+            events.send(event).unwrap();
+            let outcome = supervise(&mut received, std::future::pending::<()>()).await;
+            assert_eq!(outcome, Supervised::Ended(event));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_shell_is_awaited_when_the_event_sources_end() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        drop(events);
+        let outcome = supervise(&mut received, async { 7 }).await;
+        assert_eq!(outcome, Supervised::Exited(7));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_exit_code_above_255_is_passed_through_unchanged() {
+        use std::os::windows::process::ExitStatusExt;
+        for code in [0, 1, 255, 256, 0xC000_013A, u32::MAX] {
+            assert_eq!(exit_code(ExitStatus::from_raw(code)) as u32, code);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_ended_by_a_signal_fails() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(exit_code(ExitStatus::from_raw(3 << 8)), 3);
+        assert_eq!(exit_code(ExitStatus::from_raw(9)), 1);
     }
 
     #[test]
