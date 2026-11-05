@@ -240,10 +240,12 @@ fn windows_default_shell(lookup: &impl Lookup) -> Result<PathBuf, ShellError> {
 }
 
 fn unix_default_shell(lookup: &impl Lookup) -> PathBuf {
-    [lookup.var("SHELL").map(PathBuf::from), lookup.login_shell()]
-        .into_iter()
-        .flatten()
-        .find(|path| path.is_absolute() && lookup.is_file(path))
+    let usable = |path: &PathBuf| path.is_absolute() && lookup.is_file(path);
+    lookup
+        .var("SHELL")
+        .map(PathBuf::from)
+        .filter(usable)
+        .or_else(|| lookup.login_shell().filter(usable))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
@@ -556,6 +558,7 @@ mod tests {
         vars: Vec<(&'static str, OsString)>,
         files: Vec<PathBuf>,
         login: Option<PathBuf>,
+        login_queries: std::cell::Cell<usize>,
     }
 
     impl Fake {
@@ -566,6 +569,7 @@ mod tests {
         }
 
         fn env(mut self, name: &'static str, value: &str) -> Self {
+            self.vars.retain(|(key, _)| *key != name);
             self.vars.push((name, value.into()));
             self
         }
@@ -589,6 +593,7 @@ mod tests {
         }
 
         fn login_shell(&self) -> Option<PathBuf> {
+            self.login_queries.set(self.login_queries.get() + 1);
             self.login.clone()
         }
     }
@@ -858,6 +863,19 @@ mod tests {
             unix_default_shell(&Fake::default()),
             PathBuf::from("/bin/sh")
         );
+    }
+
+    #[test]
+    fn the_users_database_is_not_queried_when_shell_names_an_existing_file() {
+        let shell = root("usr/bin/fish");
+        let lookup = Fake {
+            login: Some(root("bin/zsh")),
+            ..Fake::default()
+        }
+        .env("SHELL", shell.to_str().unwrap())
+        .file(&shell);
+        assert_eq!(unix_default_shell(&lookup), shell);
+        assert_eq!(lookup.login_queries.get(), 0);
     }
 
     #[cfg(unix)]
