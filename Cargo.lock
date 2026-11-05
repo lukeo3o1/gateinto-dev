@@ -335,6 +335,7 @@ dependencies = [
  "gateinto-ipc-types",
  "h2",
  "http",
+ "libc",
  "rcgen",
  "rustls",
  "rustls-cng",

@@ -3,6 +3,8 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
+use crate::config::ConfigFile;
+
 const EQUALS: u16 = b'=' as u16;
 
 pub const NO_PROXY_HOSTS: &str = "localhost,127.0.0.1,::1";
@@ -146,6 +148,7 @@ impl std::error::Error for EnvironmentError {}
 pub trait Lookup {
     fn var(&self, name: &str) -> Option<OsString>;
     fn is_file(&self, path: &Path) -> bool;
+    fn login_shell(&self) -> Option<PathBuf>;
 }
 
 pub struct System;
@@ -158,6 +161,90 @@ impl Lookup for System {
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
     }
+
+    #[cfg(unix)]
+    fn login_shell(&self) -> Option<PathBuf> {
+        use std::ffi::CStr;
+        use std::os::unix::ffi::OsStrExt;
+        let mut buffer = vec![0; 1024];
+        loop {
+            let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+            let mut found = std::ptr::null_mut();
+            // SAFETY: entry and buffer outlive the call, and buffer.len() is its size in bytes.
+            let status = unsafe {
+                libc::getpwuid_r(
+                    libc::getuid(),
+                    entry.as_mut_ptr(),
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    &mut found,
+                )
+            };
+            if status == libc::ERANGE && buffer.len() < 1 << 20 {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
+            }
+            if status != 0 || found.is_null() {
+                return None;
+            }
+            // SAFETY: on success found points to entry, whose strings point into buffer.
+            let shell = unsafe { (*found).pw_shell };
+            if shell.is_null() {
+                return None;
+            }
+            // SAFETY: pw_shell is a NUL-terminated string in buffer, which is still alive.
+            let shell = unsafe { CStr::from_ptr(shell) }.to_bytes();
+            return (!shell.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(shell)));
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn login_shell(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shell {
+    pub executable: PathBuf,
+    pub args: Vec<OsString>,
+}
+
+pub fn configured_shell(file: &ConfigFile, lookup: &impl Lookup) -> Result<Shell, ShellError> {
+    let Some(shell) = &file.terminal.shell else {
+        return default_shell(lookup).map(|executable| Shell {
+            executable,
+            args: Vec::new(),
+        });
+    };
+    Ok(Shell {
+        executable: resolve_shell(shell, file.dir(), lookup)?,
+        args: file.terminal.args.iter().map(OsString::from).collect(),
+    })
+}
+
+pub fn default_shell(lookup: &impl Lookup) -> Result<PathBuf, ShellError> {
+    if cfg!(windows) {
+        windows_default_shell(lookup)
+    } else {
+        Ok(unix_default_shell(lookup))
+    }
+}
+
+fn windows_default_shell(lookup: &impl Lookup) -> Result<PathBuf, ShellError> {
+    lookup
+        .var("ComSpec")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && lookup.is_file(path))
+        .ok_or(ShellError::NoDefault)
+}
+
+fn unix_default_shell(lookup: &impl Lookup) -> PathBuf {
+    [lookup.var("SHELL").map(PathBuf::from), lookup.login_shell()]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_absolute() && lookup.is_file(path))
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
 pub fn resolve_shell(
@@ -229,6 +316,7 @@ pub enum ShellError {
     NotFound(PathBuf),
     NotOnPath(PathBuf),
     DriveRelative(PathBuf),
+    NoDefault,
 }
 
 impl fmt::Display for ShellError {
@@ -245,6 +333,10 @@ impl fmt::Display for ShellError {
                 "shell {} names a drive without a root directory; use an absolute path or a \
                  path without a drive",
                 path.display()
+            ),
+            Self::NoDefault => f.write_str(
+                "the default shell %ComSpec% does not name an existing file by its absolute path; \
+                 set shell in the [terminal] section",
             ),
         }
     }
@@ -453,6 +545,7 @@ mod tests {
     struct Fake {
         vars: Vec<(&'static str, OsString)>,
         files: Vec<PathBuf>,
+        login: Option<PathBuf>,
     }
 
     impl Fake {
@@ -483,6 +576,10 @@ mod tests {
 
         fn is_file(&self, path: &Path) -> bool {
             self.files.iter().any(|file| file == path)
+        }
+
+        fn login_shell(&self) -> Option<PathBuf> {
+            self.login.clone()
         }
     }
 
@@ -633,5 +730,136 @@ mod tests {
             .file(bin.join("sh.EXE"));
         let error = resolve_shell(Path::new("sh"), None, &lookup).unwrap_err();
         assert!(error.to_string().contains("PATH"), "{error}");
+    }
+
+    fn config(dir: &Path, text: &str) -> ConfigFile {
+        let path = dir.join("gateinto.toml");
+        std::fs::write(&path, text).unwrap();
+        ConfigFile::load(&path).unwrap()
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gateinto-terminal-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_configured_shell_takes_its_arguments_and_resolves_against_the_file() {
+        let dir = temp_dir("configured");
+        let bin = root("bin");
+        let lookup = Fake::default()
+            .path(&[&bin])
+            .file(bin.join("zsh"))
+            .file(dir.join("tools").join("sh"));
+        let file = config(
+            &dir,
+            "[terminal]\nshell = \"zsh\"\nargs = [\"-l\", \"two words\"]\n",
+        );
+        assert_eq!(
+            configured_shell(&file, &lookup).unwrap(),
+            Shell {
+                executable: bin.join("zsh"),
+                args: ["-l", "two words"].map(OsString::from).to_vec(),
+            }
+        );
+        let file = config(&dir, "[terminal]\nshell = \"tools/sh\"\n");
+        assert_eq!(
+            configured_shell(&file, &lookup).unwrap(),
+            Shell {
+                executable: dir.join("tools").join("sh"),
+                args: Vec::new(),
+            }
+        );
+        let file = config(&dir, "[terminal]\nshell = \"missing/sh\"\n");
+        let error = configured_shell(&file, &lookup).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!("shell {} not found", dir.join("missing/sh").display())
+        );
+    }
+
+    #[test]
+    fn without_a_configured_shell_the_platform_default_has_no_arguments() {
+        let default = root("default").join("shell");
+        let name = if cfg!(windows) { "ComSpec" } else { "SHELL" };
+        let lookup = Fake::default()
+            .env(name, default.to_str().unwrap())
+            .file(&default);
+        assert_eq!(
+            configured_shell(&ConfigFile::default(), &lookup).unwrap(),
+            Shell {
+                executable: default,
+                args: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_windows_default_is_comspec_naming_an_existing_absolute_file() {
+        let cmd = root("Windows").join("cmd.exe");
+        let lookup = Fake::default()
+            .env("ComSpec", cmd.to_str().unwrap())
+            .file(&cmd);
+        assert_eq!(windows_default_shell(&lookup).unwrap(), cmd);
+        for lookup in [
+            Fake::default(),
+            Fake::default().env("ComSpec", cmd.to_str().unwrap()),
+            Fake::default().env("ComSpec", "cmd.exe").file("cmd.exe"),
+        ] {
+            assert_eq!(
+                windows_default_shell(&lookup).unwrap_err().to_string(),
+                "the default shell %ComSpec% does not name an existing file by its absolute \
+                 path; set shell in the [terminal] section"
+            );
+        }
+    }
+
+    #[test]
+    fn the_unix_default_is_shell_then_the_login_shell_then_bin_sh() {
+        let (shell, login) = (root("usr/bin/fish"), root("bin/zsh"));
+        let both = || {
+            Fake {
+                login: Some(login.clone()),
+                ..Fake::default()
+            }
+            .env("SHELL", shell.to_str().unwrap())
+        };
+        assert_eq!(unix_default_shell(&both().file(&shell).file(&login)), shell);
+        assert_eq!(unix_default_shell(&both().file(&login)), login);
+        assert_eq!(
+            unix_default_shell(&both().env("SHELL", "fish").file("fish").file(&login)),
+            login
+        );
+        assert_eq!(unix_default_shell(&both()), PathBuf::from("/bin/sh"));
+        assert_eq!(
+            unix_default_shell(&Fake::default()),
+            PathBuf::from("/bin/sh")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_login_shell_is_the_users_database_entry() {
+        let uid = std::fs::metadata("/proc/self").map(|meta| {
+            use std::os::unix::fs::MetadataExt;
+            meta.uid()
+        });
+        let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let entry = uid.ok().and_then(|uid| {
+            passwd
+                .lines()
+                .map(|line| line.split(':').collect::<Vec<_>>())
+                .find(|fields| fields.len() == 7 && fields[2] == uid.to_string())
+        });
+        match entry {
+            Some(fields) if !fields[6].is_empty() => {
+                assert_eq!(System.login_shell(), Some(PathBuf::from(fields[6])));
+            }
+            _ => {
+                let _ = System.login_shell();
+            }
+        }
     }
 }
