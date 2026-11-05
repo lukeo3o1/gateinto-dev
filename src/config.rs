@@ -458,6 +458,7 @@ pub struct GatewayProfile {
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: bool,
     pub portal_url: Option<PortalUrl>,
+    pub route: Route,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,6 +642,7 @@ impl ConfigFile {
                 kind,
             })
         };
+        let route = section.route();
         let (Some(host), Some(port)) = (section.host, section.port) else {
             return Err(invalid(GatewayErrorKind::NoUpstream));
         };
@@ -668,6 +670,7 @@ impl ConfigFile {
             client_cert_file: section.client_cert_file,
             self_signed_client_cert,
             portal_url: section.portal_url,
+            route,
         })
     }
 
@@ -916,6 +919,7 @@ port = 443
                             .parse()
                             .unwrap()
                     ),
+                    route: Route::Mixed,
                 },
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
@@ -1602,6 +1606,25 @@ port = 443
             assert!(component.contains(wanted), "{wanted}");
         }
         assert!(!component.contains("Transitive"), "{component}");
+    }
+
+    #[test]
+    fn the_selected_gateway_carries_its_saved_route() {
+        let file = ConfigFile::parse(&format!(
+            "{MINIMAL}[gateways.forced]\nhost = \"f.example.test\"\nport = 1\nroute = \"gateway\"\n"
+        ))
+        .unwrap();
+        let route = |gateway: &str| {
+            file.settings(&Overrides {
+                gateway: Some(name(gateway)),
+                ..Overrides::default()
+            })
+            .unwrap()
+            .gateway
+            .route
+        };
+        assert_eq!(route("forced"), Route::Gateway);
+        assert_eq!(route("main"), Route::Mixed);
     }
 
     #[test]

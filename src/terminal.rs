@@ -4,12 +4,22 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::ConfigFile;
+use crate::link::MIXED_WARNING;
+use crate::proxy::Route;
 
 const EQUALS: u16 = b'=' as u16;
 
 pub const NO_PROXY_HOSTS: &str = "localhost,127.0.0.1,::1";
 
 pub type Variables = Vec<(OsString, OsString)>;
+
+pub fn terminal_route(requested: Option<Route>, saved: Route) -> Route {
+    requested.unwrap_or(saved)
+}
+
+pub fn route_warning(route: Route) -> Option<&'static str> {
+    (route == Route::Mixed).then_some(MIXED_WARNING)
+}
 
 pub fn terminal_environment(
     inherited: Variables,
@@ -388,6 +398,23 @@ mod tests {
 
     const PROXY: &str = "http://127.0.0.1:49152";
     const LOOPBACK: &str = "localhost,127.0.0.1,::1";
+
+    #[test]
+    fn a_requested_route_wins_over_the_saved_route() {
+        for saved in [Route::Gateway, Route::Mixed] {
+            assert_eq!(terminal_route(None, saved), saved);
+            for requested in [Route::Gateway, Route::Mixed] {
+                assert_eq!(terminal_route(Some(requested), saved), requested);
+            }
+        }
+        assert_eq!(terminal_route(None, Route::default()), Route::Mixed);
+    }
+
+    #[test]
+    fn only_the_mixed_route_warns_about_direct_connections() {
+        assert_eq!(route_warning(Route::Mixed), Some(MIXED_WARNING));
+        assert_eq!(route_warning(Route::Gateway), None);
+    }
 
     #[test]
     fn the_proxy_variables_are_set_in_both_spellings_once_each() {
