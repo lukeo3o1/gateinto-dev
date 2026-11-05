@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::{Component, Path, PathBuf};
 
 const EQUALS: u16 = b'=' as u16;
 
@@ -142,9 +143,119 @@ impl fmt::Display for EnvironmentError {
 
 impl std::error::Error for EnvironmentError {}
 
+pub trait Lookup {
+    fn var(&self, name: &str) -> Option<OsString>;
+    fn is_file(&self, path: &Path) -> bool;
+}
+
+pub struct System;
+
+impl Lookup for System {
+    fn var(&self, name: &str) -> Option<OsString> {
+        std::env::var_os(name)
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+}
+
+pub fn resolve_shell(
+    value: &Path,
+    base: Option<&Path>,
+    lookup: &impl Lookup,
+) -> Result<PathBuf, ShellError> {
+    let existing = |path: PathBuf| {
+        if lookup.is_file(&path) {
+            Ok(path)
+        } else {
+            Err(ShellError::NotFound(path))
+        }
+    };
+    if value.is_absolute() {
+        return existing(value.to_owned());
+    }
+    if matches!(value.components().next(), Some(Component::Prefix(_))) && !value.has_root() {
+        return Err(ShellError::DriveRelative(value.to_owned()));
+    }
+    let separated = value
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .any(|&byte| std::path::is_separator(byte.into()));
+    if separated {
+        return match base {
+            Some(base) => existing(base.join(value)),
+            None => Err(ShellError::NotFound(value.to_owned())),
+        };
+    }
+    let extensions = lookup.var("PATHEXT").filter(|_| cfg!(windows));
+    search_path(
+        value.as_os_str(),
+        lookup.var("PATH").as_deref(),
+        extensions.as_deref(),
+        |path| lookup.is_file(path),
+    )
+    .ok_or_else(|| ShellError::NotOnPath(value.to_owned()))
+}
+
+fn search_path(
+    name: &OsStr,
+    path: Option<&OsStr>,
+    extensions: Option<&OsStr>,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let extensions = extensions.map(OsStr::to_string_lossy).unwrap_or_default();
+    let names: Vec<OsString> = std::iter::once(name.to_owned())
+        .chain(
+            extensions
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| {
+                    let mut candidate = name.to_owned();
+                    candidate.push(extension);
+                    candidate
+                }),
+        )
+        .collect();
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| is_file(candidate))
+}
+
+#[derive(Debug)]
+pub enum ShellError {
+    NotFound(PathBuf),
+    NotOnPath(PathBuf),
+    DriveRelative(PathBuf),
+}
+
+impl fmt::Display for ShellError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(path) => write!(f, "shell {} not found", path.display()),
+            Self::NotOnPath(name) => write!(
+                f,
+                "shell {} was not found in the directories of PATH",
+                name.display()
+            ),
+            Self::DriveRelative(path) => write!(
+                f,
+                "shell {} names a drive without a root directory; use an absolute path or a \
+                 path without a drive",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ShellError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     fn pairs(entries: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         entries
@@ -336,5 +447,191 @@ mod tests {
             "environment variable \"NAME\" is not valid Unicode"
         );
         assert!(environment_block(&[(invalid, OsString::new())]).is_err());
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        vars: Vec<(&'static str, OsString)>,
+        files: Vec<PathBuf>,
+    }
+
+    impl Fake {
+        fn path(mut self, dirs: &[&Path]) -> Self {
+            self.vars
+                .push(("PATH", std::env::join_paths(dirs).unwrap()));
+            self
+        }
+
+        fn env(mut self, name: &'static str, value: &str) -> Self {
+            self.vars.push((name, value.into()));
+            self
+        }
+
+        fn file(mut self, path: impl Into<PathBuf>) -> Self {
+            self.files.push(path.into());
+            self
+        }
+    }
+
+    impl Lookup for Fake {
+        fn var(&self, name: &str) -> Option<OsString> {
+            self.vars
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.iter().any(|file| file == path)
+        }
+    }
+
+    fn root(name: &str) -> PathBuf {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        Path::new(root).join(name)
+    }
+
+    #[test]
+    fn an_absolute_shell_is_used_as_is_and_must_exist() {
+        let shell = root("tools").join("sh");
+        let lookup = Fake::default().file(&shell);
+        assert_eq!(resolve_shell(&shell, None, &lookup).unwrap(), shell);
+        let missing = root("missing").join("sh");
+        assert_eq!(
+            resolve_shell(&missing, Some(&root("cfg")), &lookup)
+                .unwrap_err()
+                .to_string(),
+            format!("shell {} not found", missing.display())
+        );
+    }
+
+    #[test]
+    fn a_relative_shell_with_a_separator_is_resolved_against_the_base_only() {
+        let base = root("cfg");
+        let lookup = Fake::default()
+            .file(base.join("tools/sh"))
+            .file("other/sh")
+            .path(&[&root("bin")])
+            .file(root("bin").join("other/sh"));
+        assert_eq!(
+            resolve_shell(Path::new("tools/sh"), Some(&base), &lookup).unwrap(),
+            base.join("tools/sh")
+        );
+        for base in [Some(base.as_path()), None] {
+            let error = resolve_shell(Path::new("other/sh"), base, &lookup).unwrap_err();
+            assert!(error.to_string().contains("not found"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_bare_shell_is_searched_on_path_and_never_in_the_base_or_current_directory() {
+        let (first, second) = (root("first"), root("second"));
+        let base = root("cfg");
+        let lookup = Fake::default()
+            .path(&[
+                Path::new(""),
+                Path::new("."),
+                Path::new("rel"),
+                &first,
+                &second,
+            ])
+            .file("sh")
+            .file("./sh")
+            .file("rel/sh")
+            .file(base.join("sh"))
+            .file(second.join("sh"))
+            .file(second.join("zsh"))
+            .file(first.join("zsh"));
+        assert_eq!(
+            resolve_shell(Path::new("sh"), Some(&base), &lookup).unwrap(),
+            second.join("sh")
+        );
+        assert_eq!(
+            resolve_shell(Path::new("zsh"), Some(&base), &lookup).unwrap(),
+            first.join("zsh")
+        );
+        assert_eq!(
+            resolve_shell(Path::new("fish"), Some(&base), &lookup)
+                .unwrap_err()
+                .to_string(),
+            "shell fish was not found in the directories of PATH"
+        );
+        let error = resolve_shell(Path::new("sh"), Some(&base), &Fake::default()).unwrap_err();
+        assert!(error.to_string().contains("PATH"), "{error}");
+    }
+
+    #[test]
+    fn a_path_search_tries_the_name_as_given_then_each_extension_per_directory() {
+        let (first, second) = (root("first"), root("second"));
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        let extensions = OsString::from(".COM;;.EXE");
+        let search = |files: &[PathBuf]| {
+            search_path(
+                OsStr::new("pwsh"),
+                Some(&path),
+                Some(&extensions),
+                |candidate| files.iter().any(|file| file == candidate),
+            )
+        };
+        assert_eq!(
+            search(&[first.join("pwsh.EXE"), first.join("pwsh")]),
+            Some(first.join("pwsh"))
+        );
+        assert_eq!(
+            search(&[first.join("pwsh.EXE"), first.join("pwsh.COM")]),
+            Some(first.join("pwsh.COM"))
+        );
+        assert_eq!(
+            search(&[second.join("pwsh"), first.join("pwsh.EXE")]),
+            Some(first.join("pwsh.EXE"))
+        );
+        assert_eq!(search(&[first.join("pwsh.")]), None);
+        assert_eq!(
+            search_path(OsStr::new("pwsh"), None, Some(&extensions), |_| true),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shells_use_pathext_backslashes_and_refuse_drive_relative_paths() {
+        let base = root("cfg");
+        let bin = root("bin");
+        let lookup = Fake::default()
+            .path(&[&bin])
+            .env("PATHEXT", ".COM;.EXE")
+            .file(bin.join("pwsh.EXE"))
+            .file(base.join(r"tools\sh.exe"))
+            .file(r"C:tools\sh.exe");
+        assert_eq!(
+            resolve_shell(Path::new("pwsh"), Some(&base), &lookup).unwrap(),
+            bin.join("pwsh.EXE")
+        );
+        assert_eq!(
+            resolve_shell(Path::new(r"tools\sh.exe"), Some(&base), &lookup).unwrap(),
+            base.join(r"tools\sh.exe")
+        );
+        for value in [r"C:tools\sh.exe", "C:sh.exe", "c:"] {
+            let error = resolve_shell(Path::new(value), Some(&base), &lookup).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "shell {value} names a drive without a root directory; use an absolute path \
+                     or a path without a drive"
+                )
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shells_ignore_pathext() {
+        let bin = root("bin");
+        let lookup = Fake::default()
+            .path(&[&bin])
+            .env("PATHEXT", ".EXE")
+            .file(bin.join("sh.EXE"));
+        let error = resolve_shell(Path::new("sh"), None, &lookup).unwrap_err();
+        assert!(error.to_string().contains("PATH"), "{error}");
     }
 }
