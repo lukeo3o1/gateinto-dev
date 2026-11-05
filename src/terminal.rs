@@ -364,6 +364,31 @@ pub fn configured_shell(file: &ConfigFile, lookup: &impl Lookup) -> Result<Shell
     })
 }
 
+pub fn terminal_shell(
+    requested: Option<&Path>,
+    args: Vec<OsString>,
+    current_dir: impl FnOnce() -> io::Result<PathBuf>,
+    file: &ConfigFile,
+    lookup: &impl Lookup,
+) -> Result<Shell, ShellError> {
+    let Some(value) = requested else {
+        return configured_shell(file, lookup);
+    };
+    let base = current_dir();
+    let executable =
+        resolve_shell(value, base.as_deref().ok(), lookup).map_err(|error| {
+            match (error, base) {
+                (ShellError::NotFound(path), Err(error))
+                    if path == value && value.is_relative() =>
+                {
+                    ShellError::CurrentDirectory(path, error)
+                }
+                (error, _) => error,
+            }
+        })?;
+    Ok(Shell { executable, args })
+}
+
 pub fn default_shell(lookup: &impl Lookup) -> Result<PathBuf, ShellError> {
     if cfg!(windows) {
         windows_default_shell(lookup)
@@ -463,6 +488,7 @@ pub enum ShellError {
     NotOnPath(PathBuf),
     DriveRelative(PathBuf),
     RootRelative(PathBuf),
+    CurrentDirectory(PathBuf, io::Error),
     NoDefault,
 }
 
@@ -485,6 +511,11 @@ impl fmt::Display for ShellError {
                 f,
                 "shell {} names a root directory without a drive; use an absolute path or a \
                  path without a root directory",
+                path.display()
+            ),
+            Self::CurrentDirectory(path, error) => write!(
+                f,
+                "shell {} is relative, but the current directory cannot be read: {error}",
                 path.display()
             ),
             Self::NoDefault => f.write_str(
@@ -1101,6 +1132,65 @@ mod tests {
             error,
             format!("shell {} not found", dir.join("missing/sh").display())
         );
+    }
+
+    #[test]
+    fn a_requested_shell_takes_the_given_arguments_and_never_the_configured_ones() {
+        let scratch = Scratch::new("requested");
+        let dir = &scratch.0;
+        let cwd = root("work");
+        let lookup = Fake::default()
+            .file(cwd.join("tools").join("sh"))
+            .file(dir.join("cfg-sh"));
+        let file = config(dir, "[terminal]\nshell = \"./cfg-sh\"\nargs = [\"-l\"]\n");
+        let args = ["-c", "x"].map(OsString::from).to_vec();
+        assert_eq!(
+            terminal_shell(
+                Some(Path::new("tools/sh")),
+                args.clone(),
+                || Ok(cwd.clone()),
+                &file,
+                &lookup
+            )
+            .unwrap(),
+            Shell {
+                executable: cwd.join("tools").join("sh"),
+                args,
+            }
+        );
+        assert_eq!(
+            terminal_shell(None, Vec::new(), || unreachable!(), &file, &lookup)
+                .unwrap()
+                .args,
+            ["-l"]
+        );
+    }
+
+    #[test]
+    fn a_relative_shell_without_a_current_directory_says_so() {
+        let lookup = Fake::default();
+        let error = terminal_shell(
+            Some(Path::new("tools/sh")),
+            Vec::new(),
+            || Err(io::Error::other("gone")),
+            &ConfigFile::default(),
+            &lookup,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "shell tools/sh is relative, but the current directory cannot be read: gone"
+        );
+        let absolute = root("missing").join("sh");
+        let error = terminal_shell(
+            Some(&absolute),
+            Vec::new(),
+            || Err(io::Error::other("gone")),
+            &ConfigFile::default(),
+            &lookup,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ShellError::NotFound(_)), "{error}");
     }
 
     #[test]
