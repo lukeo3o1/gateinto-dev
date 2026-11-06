@@ -493,7 +493,8 @@ impl Agent {
         }
         let limit = self.inner.options.limits.max_terminal_sessions;
         // Held until the terminal is registered, so that a close or stop arriving while the
-        // shell starts waits for it instead of missing it.
+        // shell starts waits for it instead of missing it. Lock order: launching, terminals,
+        // sessions.
         let mut terminals = self.inner.terminals.lock().await;
         if terminals.len() >= limit {
             return Err(format!(
@@ -503,6 +504,13 @@ impl Agent {
         let known = self.inner.profiles.known()?;
         let plan = self.inner.profiles.terminal_session(&gateway)?;
         let route = terminal::terminal_route(request.route, plan.route);
+        let inherited = launcher.environment();
+        let Some(current_dir) = home_dir(&inherited) else {
+            return Err(
+                "the agent has no absolute USERPROFILE to start the shell in; nothing was started"
+                    .to_owned(),
+            );
+        };
         let job =
             terminal::terminal_job(launcher.terminal_job()).map_err(|error| error.to_string())?;
         let mut proxy = terminal::terminal_proxy(plan.proxy, route, job.clone());
@@ -524,8 +532,6 @@ impl Agent {
             (id, listen)
         };
         let span = info_span!("session", %id, kind = %SessionKind::Terminal, gateway = %gateway);
-        let inherited = launcher.environment();
-        let current_dir = home_dir(&inherited);
         let (environment, _) =
             terminal::terminal_environment(terminal::without_hidden_entries(inherited), listen);
         let Shell { executable, args } = plan.shell;
@@ -533,7 +539,7 @@ impl Agent {
             executable: executable.clone(),
             args,
             environment,
-            current_dir,
+            current_dir: Some(current_dir),
             title: format!("Gateinto: {gateway}"),
             new_console: true,
         };
@@ -1275,6 +1281,7 @@ mod tests {
             spawn: Spawn,
             spawned: std::sync::Mutex<Vec<TerminalSpawn>>,
             gate: std::sync::Mutex<Option<Gate>>,
+            profile: Option<&'static str>,
         }
 
         struct Gate {
@@ -1321,6 +1328,7 @@ mod tests {
                     spawn: Spawn::Runs,
                     spawned: std::sync::Mutex::new(Vec::new()),
                     gate: std::sync::Mutex::new(None),
+                    profile: Some("/home/ana"),
                 }
             }
         }
@@ -1359,12 +1367,16 @@ mod tests {
             }
 
             fn environment(&self) -> Variables {
-                pairs(&[
-                    ("=C:", r"C:\work"),
-                    ("USERPROFILE", "/home/ana"),
-                    ("https_proxy", "http://old.example:8080"),
-                    ("Path", r"C:\Windows"),
-                ])
+                let profile = self.profile.map(|profile| ("USERPROFILE", profile));
+                let entries: Vec<_> = [("=C:", r"C:\work")]
+                    .into_iter()
+                    .chain(profile)
+                    .chain([
+                        ("https_proxy", "http://old.example:8080"),
+                        ("Path", r"C:\Windows"),
+                    ])
+                    .collect();
+                pairs(&entries)
             }
 
             fn spawn_terminal(
@@ -1600,6 +1612,26 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_missing_or_relative_userprofile_starts_nothing() {
+            for profile in [None, Some(r"Users\ana")] {
+                let launcher = Terminals {
+                    profile,
+                    ..Terminals::default()
+                };
+                let (agent, launcher, _) = agent(launcher);
+                let error = answer(&agent, request("office", None)).await.unwrap_err();
+                assert_eq!(
+                    error,
+                    "the agent has no absolute USERPROFILE to start the shell in; nothing was \
+                     started"
+                );
+                assert!(session_ids(&agent).await.is_empty());
+                assert!(agent.inner.terminals.lock().await.is_empty());
+                assert!(launcher.spawned.lock().unwrap().is_empty());
+            }
+        }
+
+        #[tokio::test]
         async fn an_unknown_gateway_is_refused_without_a_confirmation() {
             let (agent, launcher, _) = agent(Terminals::default());
             let error = answer(&agent, request("newco", None)).await.unwrap_err();
@@ -1676,7 +1708,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn other_sessions_stay_reachable_while_a_shell_starts() {
+        async fn the_sessions_lock_is_free_while_a_shell_starts() {
             let (launcher, opener) = gated();
             let (agent, _, _) = agent(launcher);
             let starting = tokio::spawn({
