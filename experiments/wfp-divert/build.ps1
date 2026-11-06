@@ -23,10 +23,8 @@ Copy-Item (Join-Path $sdk 'x64\WinDivert.dll'), $driver -Destination $OutDir -Fo
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) { throw 'MSVC x64 tools not found' }
-$devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
-& cmd /s /c "`"`"$devcmd`" -arch=x64 -host_arch=x64 >nul && set`"" | ForEach-Object {
-  if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') }
-}
+Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
 
 $sources = $PSScriptRoot
 Push-Location $OutDir

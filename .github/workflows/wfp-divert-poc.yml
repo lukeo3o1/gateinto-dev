@@ -41,7 +41,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: wfp-divert-windows
+          shared-key: windows-release
           save-if: false
       - name: Build controlled gateway, Gateinto and echo fixture
         run: cargo build --release --locked --example wfp_lab
