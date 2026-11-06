@@ -208,18 +208,12 @@ pub fn unshown_verification_text(gateway: &GatewayName) -> String {
     )
 }
 
-pub fn show_verification(gateway: &GatewayName, verification: &Verification) -> bool {
+pub fn show_verification(gateway: &GatewayName, verification: &Verification) -> io::Result<bool> {
     use std::io::IsTerminal;
 
     let text = verification_text(gateway, verification);
-    #[cfg(feature = "test-hooks")]
-    if let Some(path) = std::env::var_os("GATEINTO_TEST_VERIFICATION_FILE") {
-        return std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut output| writeln!(output, "{}", *text))
-            .is_ok();
+    if let Some(shown) = show_in_test_file(&text) {
+        return shown.map(|()| true);
     }
     let mut stderr = io::stderr();
     let terminal = stderr.is_terminal();
@@ -227,13 +221,51 @@ pub fn show_verification(gateway: &GatewayName, verification: &Verification) -> 
 }
 
 pub fn announce_verification(gateway: &GatewayName, verification: &Verification) {
-    if !show_verification(gateway, verification) {
-        let _ = writeln!(io::stderr(), "{}", unshown_verification_text(gateway));
+    use std::io::IsTerminal;
+
+    let mut stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    announce_on(gateway, verification, terminal, &mut stderr);
+}
+
+fn announce_on(
+    gateway: &GatewayName,
+    verification: &Verification,
+    terminal: bool,
+    output: &mut impl Write,
+) {
+    let text = verification_text(gateway, verification);
+    let shown = match show_in_test_file(&text) {
+        Some(shown) => shown.is_ok(),
+        None => matches!(show_on_terminal(&text, terminal, output), Ok(true)),
+    };
+    if !shown {
+        let _ = writeln!(output, "{}", unshown_verification_text(gateway));
     }
 }
 
-fn show_on_terminal(text: &str, terminal: bool, output: &mut impl Write) -> bool {
-    terminal && writeln!(output, "{text}").is_ok()
+#[cfg(feature = "test-hooks")]
+fn show_in_test_file(text: &str) -> Option<io::Result<()>> {
+    let path = std::env::var_os("GATEINTO_TEST_VERIFICATION_FILE")?;
+    Some(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut output| writeln!(output, "{text}")),
+    )
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn show_in_test_file(_text: &str) -> Option<io::Result<()>> {
+    None
+}
+
+fn show_on_terminal(text: &str, terminal: bool, output: &mut impl Write) -> io::Result<bool> {
+    if terminal {
+        writeln!(output, "{text}")?;
+    }
+    Ok(terminal)
 }
 
 fn show_on(
@@ -649,11 +681,28 @@ mod tests {
     }
 
     #[test]
+    fn an_announcement_off_a_terminal_is_only_the_fixed_line() {
+        let pending = verification(&["example.com:443"], 0);
+        let mut output = Vec::new();
+        announce_on(&office(), &pending, false, &mut output);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("{}\n", unshown_verification_text(&office()))
+        );
+        let mut output = Vec::new();
+        announce_on(&office(), &pending, true, &mut output);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("{}\n", *verification_text(&office(), &pending))
+        );
+    }
+
+    #[test]
     fn a_verification_reaches_only_a_terminal() {
         let mut output = Vec::new();
-        assert!(!show_on_terminal("secret", false, &mut output));
+        assert!(!show_on_terminal("secret", false, &mut output).unwrap());
         assert!(output.is_empty());
-        assert!(show_on_terminal("secret", true, &mut output));
+        assert!(show_on_terminal("secret", true, &mut output).unwrap());
         assert_eq!(output, b"secret\n");
     }
 

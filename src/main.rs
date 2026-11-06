@@ -1348,13 +1348,15 @@ async fn session_verification(id: SessionId) -> Result {
     )?);
     let (gateway, verification) = ipc::verification_from_lines(&lines)
         .ok_or("the agent did not return the session verification")?;
-    if prompt::show_verification(&gateway, &verification) {
-        Ok(())
-    } else {
-        Err(format!(
+    match prompt::show_verification(&gateway, &verification) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
             "the verification for session {id} was not shown: standard error is not a terminal"
         )
-        .into())
+        .into()),
+        Err(error) => {
+            Err(format!("the verification for session {id} was not shown: {error}").into())
+        }
     }
 }
 

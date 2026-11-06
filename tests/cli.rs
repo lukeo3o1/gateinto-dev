@@ -839,6 +839,7 @@ mod fake_agent {
             Self { dir, instance }
         }
 
+        #[cfg(feature = "test-hooks")]
         pub fn file(&self, name: &str) -> PathBuf {
             self.dir.join(name)
         }
@@ -911,6 +912,7 @@ mod fake_agent {
         assert!(!text.contains(CODE), "{text}");
     }
 
+    #[cfg(feature = "test-hooks")]
     pub fn verification_block() -> String {
         format!(
             "verification required for gateway office\n  target: example.com:443\n  verify at: \
@@ -934,11 +936,34 @@ fn a_verification_is_not_shown_on_a_redirected_standard_error() {
     assert_eq!(request.as_deref(), Some("verification 7"));
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    fake_agent::assert_no_secret(&output.stderr);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(
         stderr,
         "error: the verification for session 7 was not shown: standard error is not a terminal\n"
     );
+}
+
+#[cfg(all(unix, feature = "test-hooks"))]
+#[test]
+fn a_verification_file_that_cannot_be_written_is_reported_as_such() {
+    let agent = fake_agent::FakeAgent::new();
+    let mut command = gateinto_command();
+    command.env("GATEINTO_TEST_VERIFICATION_FILE", agent.file(""));
+    let (output, _) = agent.run(
+        &["session", "verification", "7"],
+        fake_agent::pending_verification(),
+        command,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    fake_agent::assert_no_secret(&output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("error: the verification for session 7 was not shown: "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("not a terminal"), "{stderr}");
 }
 
 #[cfg(all(unix, feature = "test-hooks"))]
