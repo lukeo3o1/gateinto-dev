@@ -151,6 +151,18 @@ class AttributionTests(unittest.TestCase):
         self.assertTrue(lab.valid_client_result(result, connect_only=False))
         self.assertFalse(lab.valid_client_result(result, connect_only=True))
 
+    def test_wfp_pass_without_native_events_is_inconclusive(self):
+        status, error = lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", dict(wfp_count=0, wfp_raw_count=3))
+        self.assertEqual("INCONCLUSIVE_NO_NATIVE_EVENTS", status)
+        self.assertIn("wfp_count", error)
+        self.assertEqual(("PASS_RESTRICTED_CASE", None),
+                         lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", dict(wfp_count=2)))
+        self.assertEqual(("PASS_RESTRICTED_CASE", None),
+                         lab.native_evidence_status("PASS_RESTRICTED_CASE", "security5156", dict(wfp_count=0)))
+        self.assertEqual(("FAIL", None), lab.native_evidence_status("FAIL", "wfp", dict(wfp_count=0)))
+        self.assertEqual("INCONCLUSIVE_NO_NATIVE_EVENTS",
+                         lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", None)[0])
+
 
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):

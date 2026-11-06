@@ -95,8 +95,10 @@ try {
     if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
     $nativeLog = Join-Path $caseDir 'native.jsonl'
     if (Test-Path $nativeLog) {
-      Get-Content $nativeLog | Where-Object { $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"ready"|"kind":"summary"' } |
+      Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum"' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"ready"|"kind":"summary"' } |
         Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
+      Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum"' } |
+        Select-Object -First 30 | ForEach-Object { Write-Host "WFPENUM $($case.name) $_" }
     }
     $packetLog = Join-Path $caseDir 'packets.jsonl'
     if (Test-Path $packetLog) {

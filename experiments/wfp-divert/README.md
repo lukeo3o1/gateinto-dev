@@ -68,6 +68,12 @@ requires client echo success, native evidence for each expected confirmed flow,
 accepted packet decisions, no B proxy packets, correct bridge count and gateway
 CONNECT destination/count, successful collector exit, and no collector error or
 overflow. Issuing a proxy command or accepting a local socket alone cannot pass.
+A `--source wfp` case whose native summary reports `wfp_count` 0 ends as
+INCONCLUSIVE_NO_NATIVE_EVENTS instead of passing, because its negative controls
+never exercised WFP attribution. The summary also reports every subscription
+callback by type (`wfp_raw_count`, `wfp_type_counts`) and the stored net events
+enumerated for the collector window (`wfp_enum_total`, `wfp_enum_type_counts`,
+up to 200 `wfp_enum` CLASSIFY_ALLOW lines).
 
 Evidence includes raw native/packet JSONL, decision/control logs, translation and
 bridge logs, gateway requests, target payload hex and client nonces/tuples. Driver

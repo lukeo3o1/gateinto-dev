@@ -87,6 +87,13 @@ def timing_summary(clients, packets, events, decisions, frequency):
                 decision_minus_capture_ms=distribution(r["decision_minus_capture_ms"] for r in rows), rows=rows)
 
 
+def native_evidence_status(status, source, native_summary):
+    if status != "PASS_RESTRICTED_CASE" or source != "wfp" or (native_summary or {}).get("wfp_count"):
+        return status, None
+    return ("INCONCLUSIVE_NO_NATIVE_EVENTS",
+            "native summary reported wfp_count 0; WFP produced no CLASSIFY_ALLOW events, so this result does not exercise WFP attribution")
+
+
 def security_fields(value):
     if "raw_xml" not in value:
         return value
@@ -569,6 +576,9 @@ def main():
                 summary["native_summary"] = native_summary[-1]
             except Exception as error:
                 summary.update(status="FAIL", error=str(error))
+        status, error = native_evidence_status(summary["status"], args.source, summary.get("native_summary"))
+        if error:
+            summary.update(status=status, error=error)
         if bridge:
             bridge.close()
         for process in reversed(processes):

@@ -9,11 +9,13 @@
 #define NOMINMAX
 #endif
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
 
 std::string json(const std::string&);
 std::string xml_value(const std::string&, const std::string&);
+std::string counts_json(const std::map<unsigned, unsigned long long>&);
 
 int self_test() {
     if (json("a\n\"\\\t") != "\"a\\n\\\"\\\\\\t\"") throw std::runtime_error("JSON escaping");
@@ -22,6 +24,8 @@ int self_test() {
     if (xml_value(xml, "Application") != "C:\\a&b<c>.exe") throw std::runtime_error("XML entities");
     if (xml_value(xml, "ProcessID") != "123") throw std::runtime_error("XML quote style");
     if (!xml_value(xml, "Missing").empty()) throw std::runtime_error("XML missing field");
+    if (counts_json({}) != "{}") throw std::runtime_error("Empty type counts");
+    if (counts_json({{3, 2}, {0, 1}}) != "{\"0\":1,\"3\":2}") throw std::runtime_error("Type counts");
     std::cout << "native-events helper self-tests passed\n";
     return 0;
 }
@@ -49,6 +53,15 @@ std::string json(const std::string& value) {
         }
     }
     return result + '"';
+}
+
+std::string counts_json(const std::map<unsigned, unsigned long long>& counts) {
+    std::string result = "{";
+    for (const auto& entry : counts) {
+        if (result.size() > 1) result += ',';
+        result += "\"" + std::to_string(entry.first) + "\":" + std::to_string(entry.second);
+    }
+    return result + '}';
 }
 
 std::string xml_value(const std::string& xml, const std::string& name) {
@@ -174,6 +187,11 @@ struct Output {
     std::atomic<unsigned long long> dropped{0};
     std::atomic<unsigned long long> errors{0};
     std::atomic<unsigned long long> wfp_count{0};
+    std::atomic<unsigned long long> wfp_raw_count{0};
+    std::mutex type_mutex;
+    std::map<unsigned, unsigned long long> wfp_type_counts;
+    unsigned long long enum_total = 0, enum_emitted = 0;
+    std::map<unsigned, unsigned long long> enum_type_counts;
     std::atomic<unsigned long long> security_count{0};
     bool stop = false;
     std::thread writer;
@@ -210,6 +228,16 @@ struct Output {
              ",\"code\":" + std::to_string(code) + ",\"recv_qpc\":" + std::to_string(qpc()) + "}");
     }
 
+    void count_type(unsigned type) {
+        std::lock_guard<std::mutex> lock(type_mutex);
+        ++wfp_type_counts[type];
+    }
+
+    std::string type_counts() {
+        std::lock_guard<std::mutex> lock(type_mutex);
+        return counts_json(wfp_type_counts);
+    }
+
     void finish() {
         if (!writer.joinable()) return;
         {
@@ -223,46 +251,54 @@ struct Output {
     ~Output() { finish(); }
 };
 
+static std::string wfp_line(const char* kind, const FWPM_NET_EVENT3* event,
+                            unsigned long long received, unsigned long long receipt_utc) {
+    const auto& h = event->header;
+    const auto flags = h.flags;
+    const UINT32 required = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
+        FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET |
+        FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET | FWPM_NET_EVENT_FLAG_APP_ID_SET |
+        FWPM_NET_EVENT_FLAG_IP_VERSION_SET;
+    const auto* allow = event->classifyAllow;
+    const bool app_set = (flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && h.appId.data && h.appId.size;
+    const auto path = app_set ? blob_path(h.appId) : std::string{};
+    const auto local = (flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) ? address(h, true) : std::string{};
+    const auto remote = (flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) ? address(h, false) : std::string{};
+    const bool direction_known = allow && (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND || allow->msFwpDirection == FWP_DIRECTION_INBOUND);
+    const bool complete = (flags & required) == required && direction_known && !path.empty() && !local.empty() && !remote.empty();
+    std::ostringstream s;
+    s << "{\"kind\":" << json(kind) << ",\"recv_qpc\":" << received << ",\"receipt_filetime\":" << receipt_utc
+      << ",\"event_filetime\":" << filetime(h.timeStamp) << ",\"flags\":" << flags
+      << ",\"event_type\":" << event->type << ",\"pid\":null,\"app_path\":" << json(path)
+      << ",\"app_id_hex\":" << json(app_set ? blob_hex(h.appId) : std::string{})
+      << ",\"app_id_bytes\":" << (app_set ? h.appId.size : 0)
+      << ",\"ip_version\":" << static_cast<int>(h.ipVersion)
+      << ",\"protocol\":" << ((flags & FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET) ? std::to_string(h.ipProtocol) : "null")
+      << ",\"local_ip\":" << json(local) << ",\"remote_ip\":" << json(remote)
+      << ",\"local_port\":" << ((flags & FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET) ? std::to_string(h.localPort) : "null")
+      << ",\"remote_port\":" << ((flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET) ? std::to_string(h.remotePort) : "null")
+      << ",\"scope_id\":" << ((flags & FWPM_NET_EVENT_FLAG_SCOPE_ID_SET) ? std::to_string(h.scopeId) : "null")
+      << ",\"user_sid\":" << json((flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) ? sid_text(h.userId) : std::string{})
+      << ",\"direction\":" << json(!direction_known ? "unknown" : (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND ? "outbound" : "inbound"))
+      << ",\"complete\":" << (complete ? "true" : "false")
+      << ",\"layer_id\":" << (allow ? std::to_string(allow->layerId) : "null")
+      << ",\"filter_id\":" << (allow ? std::to_string(allow->filterId) : "null")
+      << ",\"reauth_reason\":" << (allow ? std::to_string(allow->reauthReason) : "null")
+      << ",\"is_loopback\":" << (allow && allow->isLoopback ? "true" : "false") << "}";
+    return s.str();
+}
+
 static void CALLBACK net_event(void* context, const FWPM_NET_EVENT3* event) noexcept {
     const auto received = qpc();
     const auto receipt_utc = utc_now();
     auto& out = *static_cast<Output*>(context);
     try {
+        ++out.wfp_raw_count;
+        if (!event) return;
+        out.count_type(static_cast<unsigned>(event->type));
         if (event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) return;
         ++out.wfp_count;
-        const auto& h = event->header;
-        const auto flags = h.flags;
-        const UINT32 required = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
-            FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET |
-            FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET | FWPM_NET_EVENT_FLAG_APP_ID_SET |
-            FWPM_NET_EVENT_FLAG_IP_VERSION_SET;
-        const auto* allow = event->classifyAllow;
-        const bool app_set = (flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && h.appId.data && h.appId.size;
-        const auto path = app_set ? blob_path(h.appId) : std::string{};
-        const auto local = (flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) ? address(h, true) : std::string{};
-        const auto remote = (flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) ? address(h, false) : std::string{};
-        const bool direction_known = allow && (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND || allow->msFwpDirection == FWP_DIRECTION_INBOUND);
-        const bool complete = (flags & required) == required && direction_known && !path.empty() && !local.empty() && !remote.empty();
-        std::ostringstream s;
-        s << "{\"kind\":\"wfp\",\"recv_qpc\":" << received << ",\"receipt_filetime\":" << receipt_utc
-          << ",\"event_filetime\":" << filetime(h.timeStamp) << ",\"flags\":" << flags
-          << ",\"event_type\":" << event->type << ",\"pid\":null,\"app_path\":" << json(path)
-          << ",\"app_id_hex\":" << json(app_set ? blob_hex(h.appId) : std::string{})
-          << ",\"app_id_bytes\":" << (app_set ? h.appId.size : 0)
-          << ",\"ip_version\":" << static_cast<int>(h.ipVersion)
-          << ",\"protocol\":" << ((flags & FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET) ? std::to_string(h.ipProtocol) : "null")
-          << ",\"local_ip\":" << json(local) << ",\"remote_ip\":" << json(remote)
-          << ",\"local_port\":" << ((flags & FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET) ? std::to_string(h.localPort) : "null")
-          << ",\"remote_port\":" << ((flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET) ? std::to_string(h.remotePort) : "null")
-          << ",\"scope_id\":" << ((flags & FWPM_NET_EVENT_FLAG_SCOPE_ID_SET) ? std::to_string(h.scopeId) : "null")
-          << ",\"user_sid\":" << json((flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) ? sid_text(h.userId) : std::string{})
-          << ",\"direction\":" << json(!direction_known ? "unknown" : (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND ? "outbound" : "inbound"))
-          << ",\"complete\":" << (complete ? "true" : "false")
-          << ",\"layer_id\":" << (allow ? std::to_string(allow->layerId) : "null")
-          << ",\"filter_id\":" << (allow ? std::to_string(allow->filterId) : "null")
-          << ",\"reauth_reason\":" << (allow ? std::to_string(allow->reauthReason) : "null")
-          << ",\"is_loopback\":" << (allow && allow->isLoopback ? "true" : "false") << "}";
-        out.push(s.str());
+        out.push(wfp_line("wfp", event, received, receipt_utc));
     } catch (...) { out.error("net_event_callback", ERROR_INVALID_DATA); }
 }
 
@@ -349,7 +385,8 @@ struct Engine {
     HANDLE subscription = nullptr;
     EVT_HANDLE security = nullptr;
     UINT32 old_collect = 0, old_keywords = 0;
-    bool collect_changed = false, keywords_changed = false;
+    bool collect_changed = false, keywords_changed = false, enumerate_on_close = false;
+    FILETIME start_time{};
     Output& out;
 
     explicit Engine(Output& output) : out(output) {}
@@ -371,6 +408,7 @@ struct Engine {
         return FwpmEngineSetOption0(engine, option, &value);
     }
     void start(const std::string& state_path) {
+        GetSystemTimePreciseAsFileTime(&start_time);
         check(FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &engine), "FwpmEngineOpen0");
         old_collect = get(FWPM_ENGINE_COLLECT_NET_EVENTS);
         old_keywords = get(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS);
@@ -387,6 +425,9 @@ struct Engine {
             check(set(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS, old_keywords | FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW), "Set CLASSIFY_ALLOW keyword");
             keywords_changed = true;
         }
+        const auto collect_after = get(FWPM_ENGINE_COLLECT_NET_EVENTS);
+        const auto keywords_after = get(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS);
+        enumerate_on_close = true;
         FWPM_NET_EVENT_SUBSCRIPTION0 request{};
         check(FwpmNetEventSubscribe2(engine, &request, net_event, &out, &subscription), "FwpmNetEventSubscribe2");
         security = EvtSubscribe(nullptr, nullptr, L"Security", L"*[System[EventID=5156]]", nullptr, &out,
@@ -395,7 +436,8 @@ struct Engine {
         LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
         out.push("{\"kind\":\"ready\",\"recv_qpc\":" + std::to_string(qpc()) +
             ",\"receipt_filetime\":" + std::to_string(utc_now()) + ",\"qpc_frequency\":" + std::to_string(frequency.QuadPart) +
-            ",\"old_collect\":" + std::to_string(old_collect) + ",\"old_keywords\":" + std::to_string(old_keywords) + "}");
+            ",\"old_collect\":" + std::to_string(old_collect) + ",\"old_keywords\":" + std::to_string(old_keywords) +
+            ",\"collect_after\":" + std::to_string(collect_after) + ",\"keywords_after\":" + std::to_string(keywords_after) + "}");
     }
     void restore_from(const std::string& path) {
         std::ifstream input(path, std::ios::binary);
@@ -432,8 +474,43 @@ struct Engine {
             if (result) out.error(operation, result);
         } catch (...) { out.error(operation, ERROR_INVALID_DATA); }
     }
+    void enumerate() noexcept {
+        HANDLE handle = nullptr;
+        try {
+            FWPM_NET_EVENT_ENUM_TEMPLATE0 window{};
+            window.startTime = start_time;
+            GetSystemTimePreciseAsFileTime(&window.endTime);
+            const auto created = FwpmNetEventCreateEnumHandle0(engine, &window, &handle);
+            if (created) { out.error("FwpmNetEventCreateEnumHandle0", created); return; }
+            const UINT32 batch = 256;
+            for (;;) {
+                FWPM_NET_EVENT3** entries = nullptr;
+                UINT32 count = 0;
+                const auto result = FwpmNetEventEnum3(engine, handle, batch, &entries, &count);
+                if (result) { out.error("FwpmNetEventEnum3", result); break; }
+                try {
+                    for (UINT32 i = 0; i < count; ++i) {
+                        ++out.enum_total;
+                        if (!entries[i]) continue;
+                        ++out.enum_type_counts[static_cast<unsigned>(entries[i]->type)];
+                        if (entries[i]->type == FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW && out.enum_emitted < 200) {
+                            ++out.enum_emitted;
+                            out.push(wfp_line("wfp_enum", entries[i], qpc(), utc_now()));
+                        }
+                    }
+                } catch (...) { out.error("FwpmNetEventEnum3_entry", ERROR_INVALID_DATA); }
+                if (entries) FwpmFreeMemory0(reinterpret_cast<void**>(&entries));
+                if (count < batch) break;
+            }
+        } catch (...) { out.error("net_event_enum", ERROR_INVALID_DATA); }
+        if (handle) {
+            const auto destroyed = FwpmNetEventDestroyEnumHandle0(engine, handle);
+            if (destroyed) out.error("FwpmNetEventDestroyEnumHandle0", destroyed);
+        }
+    }
     ~Engine() {
         if (security) EvtClose(security);
+        if (engine && enumerate_on_close) enumerate();
         if (subscription) {
             const auto result = FwpmNetEventUnsubscribe0(engine, subscription);
             if (result) out.error("FwpmNetEventUnsubscribe0", result);
@@ -511,6 +588,11 @@ int main(int argc, char** argv) {
         SetConsoleCtrlHandler(console_control, FALSE);
         out.push("{\"kind\":\"summary\",\"recv_qpc\":" + std::to_string(qpc()) +
             ",\"wfp_count\":" + std::to_string(out.wfp_count.load()) +
+            ",\"wfp_raw_count\":" + std::to_string(out.wfp_raw_count.load()) +
+            ",\"wfp_type_counts\":" + out.type_counts() +
+            ",\"wfp_enum_total\":" + std::to_string(out.enum_total) +
+            ",\"wfp_enum_type_counts\":" + counts_json(out.enum_type_counts) +
+            ",\"wfp_enum_emitted\":" + std::to_string(out.enum_emitted) +
             ",\"security5156_count\":" + std::to_string(out.security_count.load()) +
             ",\"queue_dropped\":" + std::to_string(out.dropped.load()) +
             ",\"errors\":" + std::to_string(out.errors.load()) + "}");
