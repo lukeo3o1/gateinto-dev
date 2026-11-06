@@ -56,9 +56,10 @@ struct Sample {
     age: u64,
     tunnels: u64,
     browser: Option<BrowserKind>,
+    shell: Option<&'static str>,
 }
 
-const SESSIONS: [Sample; 3] = [
+const SESSIONS: [Sample; 4] = [
     Sample {
         id: 3,
         kind: SessionKind::Browser,
@@ -70,6 +71,7 @@ const SESSIONS: [Sample; 3] = [
         age: 7_380,
         tunnels: 4,
         browser: Some(BrowserKind::Chromium),
+        shell: None,
     },
     Sample {
         id: 5,
@@ -82,6 +84,7 @@ const SESSIONS: [Sample; 3] = [
         age: 1_500,
         tunnels: 2,
         browser: Some(BrowserKind::Edge),
+        shell: None,
     },
     Sample {
         id: 6,
@@ -94,6 +97,20 @@ const SESSIONS: [Sample; 3] = [
         age: 30,
         tunnels: 0,
         browser: Some(BrowserKind::Chrome),
+        shell: None,
+    },
+    Sample {
+        id: 7,
+        kind: SessionKind::Terminal,
+        gateway: "office",
+        upstream: "proxy.example.com:8443",
+        port: 49_760,
+        route: SessionRoute::All,
+        auth: SessionAuth::OsUser,
+        age: 600,
+        tunnels: 1,
+        browser: None,
+        shell: Some("pwsh.exe"),
     },
 ];
 
@@ -162,7 +179,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             started: now - s.age,
             tunnels: s.tunnels,
             browser: s.browser,
-            shell: None,
+            shell: s.shell.map(str::to_owned),
         })
         .collect()
 }
@@ -350,9 +367,19 @@ mod tests {
     }
 
     #[test]
-    fn the_sample_sessions_cover_each_browser_and_some_relay_traffic() {
+    fn the_sample_sessions_cover_each_browser_a_terminal_and_some_relay_traffic() {
         let sessions = listed();
-        assert!(sessions.iter().all(|s| s.kind == SessionKind::Browser));
+        let browsers = sessions.iter().filter(|s| s.kind == SessionKind::Browser);
+        assert!(browsers.clone().all(|s| s.shell.is_none()));
+        assert_eq!(browsers.count(), sessions.len() - 1);
+        let terminal = sessions
+            .iter()
+            .find(|s| s.kind == SessionKind::Terminal)
+            .unwrap();
+        assert_eq!(
+            (terminal.auth, terminal.browser, terminal.shell.as_deref()),
+            (SessionAuth::OsUser, None, Some("pwsh.exe"))
+        );
         for browser in [
             BrowserKind::Chrome,
             BrowserKind::Edge,

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use gateinto::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionKind, SessionRoute};
 use gateinto::link::Known;
 
@@ -26,6 +28,7 @@ pub enum Launch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Browser,
+    Terminal,
     Other,
 }
 
@@ -33,7 +36,7 @@ pub enum Kind {
 pub struct Row {
     pub id: u64,
     pub kind: Kind,
-    pub title: &'static str,
+    pub title: Cow<'static, str>,
     pub number: String,
     pub auth: &'static str,
     pub gateway: String,
@@ -165,8 +168,15 @@ pub fn browser_title(kind: Option<BrowserKind>) -> &'static str {
 
 pub fn row(session: &SessionInfo, now: u64, names: &Names) -> Row {
     let (kind, title) = match session.kind {
-        SessionKind::Browser => (Kind::Browser, browser_title(session.browser)),
-        SessionKind::Terminal | SessionKind::Unknown => (Kind::Other, tr(Text::Session)),
+        SessionKind::Browser => (Kind::Browser, browser_title(session.browser).into()),
+        SessionKind::Terminal => (
+            Kind::Terminal,
+            match session.shell.as_deref() {
+                Some(shell) if !shell.is_empty() => shell.to_owned().into(),
+                _ => tr(Text::TerminalTitle).into(),
+            },
+        ),
+        SessionKind::Unknown => (Kind::Other, tr(Text::Session).into()),
     };
     Row {
         id: session.id,
@@ -299,7 +309,7 @@ mod tests {
         );
         let row = &page.rows.unwrap()[0];
         assert_eq!(
-            (row.title, row.auth, row.route, row.uptime.as_str()),
+            (row.title.as_ref(), row.auth, row.route, row.uptime.as_str()),
             ("Edge", "作業系統使用者", "全部", "2 小時")
         );
         assert_eq!(page_title(&AgentState::Stopped), "已停止");
@@ -525,7 +535,7 @@ mod tests {
             Row {
                 id: 7,
                 kind: Kind::Browser,
-                title: "Edge",
+                title: "Edge".into(),
                 number: " #7".to_owned(),
                 auth: "OS user",
                 gateway: "office".to_owned(),
@@ -573,19 +583,42 @@ mod tests {
         use SessionKind as S;
         assert_eq!(
             titled(S::Browser, Some(B::Chrome)),
-            ("Chrome", Kind::Browser)
+            ("Chrome".into(), Kind::Browser)
         );
-        assert_eq!(titled(S::Browser, Some(B::Edge)), ("Edge", Kind::Browser));
+        assert_eq!(
+            titled(S::Browser, Some(B::Edge)),
+            ("Edge".into(), Kind::Browser)
+        );
         assert_eq!(
             titled(S::Browser, Some(B::Chromium)),
-            ("Chromium", Kind::Browser)
+            ("Chromium".into(), Kind::Browser)
         );
         assert_eq!(
             titled(S::Browser, Some(B::Unknown)),
-            ("Browser", Kind::Browser)
+            ("Browser".into(), Kind::Browser)
         );
-        assert_eq!(titled(S::Browser, None), ("Browser", Kind::Browser));
-        assert_eq!(titled(S::Unknown, None), ("Session", Kind::Other));
+        assert_eq!(titled(S::Browser, None), ("Browser".into(), Kind::Browser));
+        assert_eq!(titled(S::Unknown, None), ("Session".into(), Kind::Other));
+    }
+
+    #[test]
+    fn a_terminal_is_titled_by_its_shell() {
+        let titled = |shell: Option<&str>| {
+            let mut s = session(1, 0);
+            s.kind = SessionKind::Terminal;
+            s.auth = SessionAuth::OsUser;
+            s.shell = shell.map(str::to_owned);
+            let r = row(&s, 0, &NO_NAMES);
+            (r.title, r.kind)
+        };
+        assert_eq!(
+            titled(Some("pwsh.exe")),
+            ("pwsh.exe".into(), Kind::Terminal)
+        );
+        assert_eq!(titled(None), ("Terminal".into(), Kind::Terminal));
+        assert_eq!(titled(Some("")), ("Terminal".into(), Kind::Terminal));
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(titled(None), ("終端機".into(), Kind::Terminal));
     }
 
     #[test]

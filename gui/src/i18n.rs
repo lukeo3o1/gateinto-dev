@@ -341,6 +341,7 @@ table! {
     AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
     AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
     Confirmation => "the agent asked to confirm this gateway; open the gateway's link again to confirm it", "代理程式要求確認此閘道；請重新開啟該閘道的連結以確認";
+    TerminalTitle => "Terminal", "終端機";
     TerminalTooOld => "the agent is too old for terminal sessions; restart it", "代理程式版本過舊，不支援終端機工作階段；請重新啟動它";
     ClosedTerminal => "Closed 1 terminal session", "已關閉 1 個終端機工作階段";
     ClosedTerminals => "Closed {0} terminal sessions", "已關閉 {0} 個終端機工作階段";

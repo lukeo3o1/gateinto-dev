@@ -468,6 +468,7 @@ impl<'a, M: Measure> Painter<'a, M> {
         self.push(Op::Round(tile, s.pxf(10.0), t.tile));
         let icon = match row.kind {
             Kind::Browser => icons::GLOBE,
+            Kind::Terminal => icons::TERMINAL,
             Kind::Other => icons::DEVICE,
         };
         self.icon(icon, tile, 20.0, t.text);
@@ -476,8 +477,13 @@ impl<'a, M: Measure> Painter<'a, M> {
         let line2 = |col: Rect| Rect::new(col.x, r.y + s.px(31.0), col.w, s.px(18.0));
 
         let first = line1(c.session);
-        let w = self.m.width(Font::BodyStrong, row.title).min(first.w);
-        self.text(Font::BodyStrong, row.title, Rect { w, ..first }, t.text);
+        let w = self.m.width(Font::BodyStrong, &row.title).min(first.w);
+        self.text(
+            Font::BodyStrong,
+            row.title.clone(),
+            Rect { w, ..first },
+            t.text,
+        );
         let number = Rect::new(first.x + w, first.y, first.w - w, first.h);
         self.text(Font::Small, row.number.clone(), number, t.muted);
         self.text(Font::Small, row.auth, line2(c.session), t.muted);
@@ -752,7 +758,7 @@ mod tests {
         Row {
             id,
             kind: Kind::Browser,
-            title: "Chrome",
+            title: "Chrome".into(),
             number: format!(" #{id}"),
             auth: "OS user",
             gateway: "edge.example".to_owned(),
