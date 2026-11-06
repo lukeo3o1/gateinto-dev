@@ -306,12 +306,15 @@ style and answer handling and by integration tests of the agent's side.
 
 Every browser session accepts the user name and password generated for it
 when it starts; no setting removes them, and there is no shared session for
-background programs. On Windows browser sessions in a job object also offer `os_user`
-([below](#local-proxy-authentication-os_user)), and passing either method is
-enough. Terminal sessions (`gateinto session terminal`, Windows only) are the
-one exception: they accept only `os_user` with the terminal's job and have
-no session credentials at all, so there is nothing to show, store or leak. This is local proxy access
-control, not authorization by the upstream, and it does not identify a user.
+background programs. On Windows browser sessions in a job object also offer
+`os_user` ([below](#local-proxy-authentication-os_user)), and passing either
+method is enough. Terminal sessions (`gateinto session terminal`, with or
+without `--agent`, Windows only) are the one exception: they accept only
+`os_user` with the terminal's job and have no session credentials at all, so
+there is nothing to show, store or leak; an agent's answer to a terminal
+request has no credential lines, and `session credentials <id>` answers that
+the session has none. This is local proxy access control, not authorization
+by the upstream, and it does not identify a user.
 The trust-on-first-use mode `basic_tofu` it replaces is refused in the
 configuration file, in links and in IPC requests with an error naming
 `session_credentials`, so an old configuration fails closed instead of
@@ -416,8 +419,9 @@ Non-guarantees:
 ### Local proxy authentication (`os_user`)
 
 `os_user` is available on Windows only. It is offered by browser sessions on
-Windows, next to `session_credentials`, and by terminal sessions, alone. The client sends nothing for
-it: Gateinto identifies the process at the other end of the connection.
+Windows, next to `session_credentials`, and by terminal sessions, alone. The
+client sends nothing for it: Gateinto identifies the process at the other end
+of the connection.
 
 Guarantees:
 
@@ -448,13 +452,18 @@ Guarantees:
   place the connecting process in that job. Other programs of the same user,
   which run outside the job, are denied.
 - **Terminal sessions: only the terminal's job, never without one.**
-  `gateinto session terminal` creates the job before it binds the session
-  and starts the shell in it the same way, with the same fallback to a
-  suspended start and `AssignProcessToJobObject`. If the job cannot be
-  created or the shell cannot be put in it, the command fails and nothing is
-  started; unlike browser launches there is no fallback to a session
+  `gateinto session terminal`, and the agent for `gateinto session terminal
+  --agent`, create the job before they bind the session and start the shell
+  in it the same way, with the same fallback to a suspended start and
+  `AssignProcessToJobObject`. If the job cannot be created or the shell
+  cannot be put in it, the command or the agent's request fails and nothing
+  is started; unlike browser launches there is no fallback to a session
   without a job. The shell and the processes it starts are accepted; every
-  other program is denied. The job is terminated when the shell exits.
+  other program is denied. The job is terminated when the shell exits, and
+  for an agent-hosted terminal also when its session is closed or the agent
+  stops. The agent starts terminals only for gateways of its configuration
+  file, never for gateways approved from links, and a link can never ask for
+  a terminal.
 - **No job, no `os_user`.** If no job can be created or the browser cannot
   be put in one (for example on a Windows version that does not allow the
   process into another job), the agent logs one warning for that launch and
@@ -485,8 +494,9 @@ Guarantees:
   a request without credentials (`407` with the `Basic` challenge), and the
   session credentials keep working. Terminal sessions have no fallback: a
   denied connection gets `403 Forbidden` (or `408` when the owner lookup
-  does not finish in time) and is closed, never a `407` challenge. Denials do not count toward the `session_credentials` failure
-  limit, because they involve no guess; that limit is unchanged.
+  does not finish in time) and is closed, never a `407` challenge. Denials
+  do not count toward the `session_credentials` failure limit, because they
+  involve no guess; that limit is unchanged.
 - **Nothing secret in logs.** No credentials are involved. The first denial
   of a session logs a warning with its reason (no owner found, another user,
   outside the session's job, a lookup past the deadline, or the Windows
@@ -515,7 +525,9 @@ Non-guarantees:
   challenge in a browser session and `403` in a terminal session. See
   [verification.md](verification.md#local-proxy-authentication-os_user).
 - **Not verified:** terminal sessions on real Windows (the shell in the
-  job, its console, console control events and the exit code),
+  job, its console, console control events and the exit code; for
+  agent-hosted terminals the new console window, its closing with the job
+  and Ctrl-C in it),
   domain-joined machines, Chrome inside the job,
   browsers launched by Gateinto itself rather than by a test probe, a run on
   Windows CI, and the suspended-and-assign fallback and the launch without a
