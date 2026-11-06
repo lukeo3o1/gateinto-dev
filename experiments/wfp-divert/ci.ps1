@@ -97,7 +97,7 @@ try {
     if (Test-Path $nativeLog) {
       Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum"' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"ready"|"kind":"summary"' } |
         Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
-      Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum"' } |
+      Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum(_error)?"' } |
         Select-Object -First 30 | ForEach-Object { Write-Host "WFPENUM $($case.name) $_" }
     }
     $packetLog = Join-Path $caseDir 'packets.jsonl'

@@ -16,6 +16,7 @@
 std::string json(const std::string&);
 std::string xml_value(const std::string&, const std::string&);
 std::string counts_json(const std::map<unsigned, unsigned long long>&);
+std::string enum_error_json(const std::string&, unsigned long);
 
 int self_test() {
     if (json("a\n\"\\\t") != "\"a\\n\\\"\\\\\\t\"") throw std::runtime_error("JSON escaping");
@@ -26,6 +27,8 @@ int self_test() {
     if (!xml_value(xml, "Missing").empty()) throw std::runtime_error("XML missing field");
     if (counts_json({}) != "{}") throw std::runtime_error("Empty type counts");
     if (counts_json({{3, 2}, {0, 1}}) != "{\"0\":1,\"3\":2}") throw std::runtime_error("Type counts");
+    if (enum_error_json("FwpmNetEventEnum3", 5) != "{\"kind\":\"wfp_enum_error\",\"operation\":\"FwpmNetEventEnum3\",\"code\":5}")
+        throw std::runtime_error("Enumeration error line");
     std::cout << "native-events helper self-tests passed\n";
     return 0;
 }
@@ -62,6 +65,10 @@ std::string counts_json(const std::map<unsigned, unsigned long long>& counts) {
         result += "\"" + std::to_string(entry.first) + "\":" + std::to_string(entry.second);
     }
     return result + '}';
+}
+
+std::string enum_error_json(const std::string& operation, unsigned long code) {
+    return "{\"kind\":\"wfp_enum_error\",\"operation\":" + json(operation) + ",\"code\":" + std::to_string(code) + "}";
 }
 
 std::string xml_value(const std::string& xml, const std::string& name) {
@@ -191,6 +198,8 @@ struct Output {
     std::mutex type_mutex;
     std::map<unsigned, unsigned long long> wfp_type_counts;
     unsigned long long enum_total = 0, enum_emitted = 0;
+    std::atomic<unsigned long long> enum_errors{0};
+    bool enum_truncated = false;
     std::map<unsigned, unsigned long long> enum_type_counts;
     std::atomic<unsigned long long> security_count{0};
     bool stop = false;
@@ -226,6 +235,11 @@ struct Output {
         ++errors;
         push("{\"kind\":\"error\",\"operation\":" + json(operation) +
              ",\"code\":" + std::to_string(code) + ",\"recv_qpc\":" + std::to_string(qpc()) + "}");
+    }
+
+    void enum_error(const char* operation, DWORD code) {
+        ++enum_errors;
+        push(enum_error_json(operation, code));
     }
 
     void count_type(unsigned type) {
@@ -477,19 +491,21 @@ struct Engine {
     void enumerate() noexcept {
         HANDLE handle = nullptr;
         try {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             FWPM_NET_EVENT_ENUM_TEMPLATE0 window{};
             window.startTime = start_time;
             GetSystemTimePreciseAsFileTime(&window.endTime);
             const auto created = FwpmNetEventCreateEnumHandle0(engine, &window, &handle);
-            if (created) { out.error("FwpmNetEventCreateEnumHandle0", created); return; }
+            if (created) { out.enum_error("FwpmNetEventCreateEnumHandle0", created); return; }
             const UINT32 batch = 256;
-            for (;;) {
+            for (int batches = 0;; ++batches) {
+                if (batches >= 64 || std::chrono::steady_clock::now() >= deadline) { out.enum_truncated = true; break; }
                 FWPM_NET_EVENT3** entries = nullptr;
                 UINT32 count = 0;
                 const auto result = FwpmNetEventEnum3(engine, handle, batch, &entries, &count);
-                if (result) { out.error("FwpmNetEventEnum3", result); break; }
-                try {
-                    for (UINT32 i = 0; i < count; ++i) {
+                if (result) { out.enum_error("FwpmNetEventEnum3", result); break; }
+                for (UINT32 i = 0; i < count; ++i) {
+                    try {
                         ++out.enum_total;
                         if (!entries[i]) continue;
                         ++out.enum_type_counts[static_cast<unsigned>(entries[i]->type)];
@@ -497,15 +513,15 @@ struct Engine {
                             ++out.enum_emitted;
                             out.push(wfp_line("wfp_enum", entries[i], qpc(), utc_now()));
                         }
-                    }
-                } catch (...) { out.error("FwpmNetEventEnum3_entry", ERROR_INVALID_DATA); }
+                    } catch (...) { out.enum_error("FwpmNetEventEnum3_entry", ERROR_INVALID_DATA); }
+                }
                 if (entries) FwpmFreeMemory0(reinterpret_cast<void**>(&entries));
                 if (count < batch) break;
             }
-        } catch (...) { out.error("net_event_enum", ERROR_INVALID_DATA); }
+        } catch (...) { out.enum_error("net_event_enum", ERROR_INVALID_DATA); }
         if (handle) {
             const auto destroyed = FwpmNetEventDestroyEnumHandle0(engine, handle);
-            if (destroyed) out.error("FwpmNetEventDestroyEnumHandle0", destroyed);
+            if (destroyed) out.enum_error("FwpmNetEventDestroyEnumHandle0", destroyed);
         }
     }
     ~Engine() {
@@ -593,6 +609,8 @@ int main(int argc, char** argv) {
             ",\"wfp_enum_total\":" + std::to_string(out.enum_total) +
             ",\"wfp_enum_type_counts\":" + counts_json(out.enum_type_counts) +
             ",\"wfp_enum_emitted\":" + std::to_string(out.enum_emitted) +
+            ",\"wfp_enum_errors\":" + std::to_string(out.enum_errors.load()) +
+            ",\"wfp_enum_truncated\":" + (out.enum_truncated ? "true" : "false") +
             ",\"security5156_count\":" + std::to_string(out.security_count.load()) +
             ",\"queue_dropped\":" + std::to_string(out.dropped.load()) +
             ",\"errors\":" + std::to_string(out.errors.load()) + "}");

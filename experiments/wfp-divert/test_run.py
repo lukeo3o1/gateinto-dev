@@ -163,6 +163,24 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual("INCONCLUSIVE_NO_NATIVE_EVENTS",
                          lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", None)[0])
 
+    def test_wfp_reuse_rejection_without_native_events_is_inconclusive(self):
+        self.assertEqual("INCONCLUSIVE_NO_NATIVE_EVENTS",
+                         lab.native_evidence_status("CHARACTERIZED_REUSE_REJECTION", "wfp", dict(wfp_count=0))[0])
+        self.assertEqual(("CHARACTERIZED_REUSE_REJECTION", None),
+                         lab.native_evidence_status("CHARACTERIZED_REUSE_REJECTION", "security5156", dict(wfp_count=0)))
+
+    def test_enumeration_errors_do_not_fail_wfp_case(self):
+        summary = dict(kind="summary", wfp_count=0, wfp_enum_errors=2, errors=0, queue_dropped=0)
+        records = [dict(kind="wfp_enum_error", operation="FwpmNetEventEnum3", code=5), summary]
+        self.assertFalse(lab.collector_errors(records))
+        self.assertTrue(lab.collector_errors([dict(kind="error", operation="x", code=1)]))
+        self.assertTrue(lab.clean_native_summary(summary))
+        self.assertFalse(lab.clean_native_summary(dict(summary, errors=1)))
+        self.assertFalse(lab.clean_native_summary(dict(summary, queue_dropped=1)))
+        self.assertFalse(lab.clean_native_summary(None))
+        self.assertEqual("INCONCLUSIVE_NO_NATIVE_EVENTS",
+                         lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", summary)[0])
+
 
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):

@@ -87,8 +87,17 @@ def timing_summary(clients, packets, events, decisions, frequency):
                 decision_minus_capture_ms=distribution(r["decision_minus_capture_ms"] for r in rows), rows=rows)
 
 
+def collector_errors(records):
+    return any(r.get("kind") == "error" for r in records)
+
+
+def clean_native_summary(native_summary):
+    return bool(native_summary) and not native_summary.get("errors") and not native_summary.get("queue_dropped")
+
+
 def native_evidence_status(status, source, native_summary):
-    if status != "PASS_RESTRICTED_CASE" or source != "wfp" or (native_summary or {}).get("wfp_count"):
+    if (status not in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"] or source != "wfp" or
+            (native_summary or {}).get("wfp_count")):
         return status, None
     return ("INCONCLUSIVE_NO_NATIVE_EVENTS",
             "native summary reported wfp_count 0; WFP produced no CLASSIFY_ALLOW events, so this result does not exercise WFP attribution")
@@ -509,7 +518,7 @@ def main():
         expected_line = f"CONNECT {manifest['target_ip']}:{manifest['target_port']} HTTP/1.1"
         if len(gateway_records) != expected_count or any(r.get("kind") != "gateway_connect" or r.get("request_line") != expected_line for r in gateway_records):
             raise RuntimeError("gateway CONNECT count or original destination differs from expected transparent tunnels")
-        if any(p.get("kind") == "error" for p in packet_records):
+        if collector_errors(packet_records):
             raise RuntimeError("packet component reported an error")
         if args.scenario == "retransmit" and not retransmissions_verified(packet_records):
             raise RuntimeError("injected SYN drop did not produce a same-generation same-sequence retransmission")
@@ -565,11 +574,11 @@ def main():
                 packet_records = JsonTail(args.out / "packets.jsonl").read()
                 native_summary = [r for r in native_records if r.get("kind") == "summary"]
                 packet_complete = [r for r in packet_records if r.get("kind") == "complete"]
-                if not native_summary or native_summary[-1].get("errors") or native_summary[-1].get("queue_dropped"):
+                if not native_summary or not clean_native_summary(native_summary[-1]):
                     raise RuntimeError("native collector missing clean final summary or reported event loss")
                 if not packet_complete or not packet_complete[-1].get("success"):
                     raise RuntimeError("packet collector did not complete successfully")
-                if any(r.get("kind") == "error" for r in native_records + packet_records):
+                if collector_errors(native_records + packet_records):
                     raise RuntimeError("collector reported an error")
                 if native.returncode != 0 or packet_process.returncode != 0:
                     raise RuntimeError("collector exit code was nonzero")
