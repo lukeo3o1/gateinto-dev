@@ -187,13 +187,14 @@ struct Flow {
     bool saw_syn = false;
     bool saw_close = false;
     bool native_confirmed = false;
+    bool original_loopback = false;
     SynDrop syn_drop;
     SOCKET reservation = INVALID_SOCKET;
     uint16_t alias = 0;
     std::deque<Packet> held;
 
-    Flow(int64_t generation, int64_t deadline, uint8_t protocol)
-        : decision(generation, deadline, protocol) {}
+    Flow(int64_t generation, int64_t deadline, uint8_t protocol, bool loopback)
+        : decision(generation, deadline, protocol), original_loopback(loopback) {}
     ~Flow() { if (reservation != INVALID_SOCKET) closesocket(reservation); }
 };
 
@@ -267,11 +268,32 @@ class Capture {
 
     void send(Packet& packet) {
         UINT sent = 0;
-        if (!WinDivertSend(handle, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
-                           &sent, &packet.address) || sent != packet.bytes.size()) {
+        bool success = WinDivertSend(handle, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
+                                    &sent, &packet.address) != 0;
+        DWORD error = success ? ERROR_SUCCESS : GetLastError();
+        success = success && sent == packet.bytes.size();
+        Parsed parsed(packet);
+        std::ostringstream line;
+        line << "{\"kind\":\"injection\",\"capture_qpc\":" << packet.address.Timestamp
+             << ",\"qpc\":" << qpc() << ",\"outbound\":" << unsigned(packet.address.Outbound)
+             << ",\"loopback\":" << unsigned(packet.address.Loopback)
+             << ",\"impostor\":" << unsigned(packet.address.Impostor)
+             << ",\"if_idx\":" << packet.address.Network.IfIdx
+             << ",\"sub_if_idx\":" << packet.address.Network.SubIfIdx
+             << ",\"length\":" << packet.bytes.size() << ",\"sent_length\":" << sent
+             << ",\"success\":" << (success ? "true" : "false") << ",\"error\":" << error;
+        if (parsed.valid)
+            line << ",\"src_ip\":\"" << ip(parsed.tuple.local)
+                 << "\",\"src_port\":" << parsed.tuple.local_port
+                 << ",\"dst_ip\":\"" << ip(parsed.tuple.remote)
+                 << "\",\"dst_port\":" << parsed.tuple.remote_port
+                 << ",\"protocol\":" << unsigned(parsed.tuple.protocol);
+        line << "}";
+        log.write(line.str());
+        if (!success) {
             fatal_send = true;
             log.write("{\"kind\":\"error\",\"operation\":\"send\",\"code\":" +
-                      std::to_string(GetLastError()) + "}");
+                      std::to_string(error) + "}");
         }
     }
 
@@ -283,6 +305,9 @@ class Capture {
              << ",\"generation\":" << (flow ? flow->decision.generation : packet.address.Timestamp)
              << ",\"capture_qpc\":" << packet.address.Timestamp
              << ",\"recv_qpc\":" << packet.received << ",\"decision_qpc\":" << qpc()
+             << ",\"outbound\":" << unsigned(packet.address.Outbound)
+             << ",\"loopback\":" << unsigned(packet.address.Loopback)
+             << ",\"impostor\":" << unsigned(packet.address.Impostor)
              << ",\"length\":" << packet.bytes.size() << ",\"action\":\"" << action
              << "\",\"reason\":\"" << reason << "\",\"syn\":" << (parsed.tcp ? unsigned(parsed.tcp->Syn) : 0)
              << ",\"ack\":" << (parsed.tcp ? unsigned(parsed.tcp->Ack) : 0)
@@ -345,7 +370,7 @@ class Capture {
             parsed.ip_header->DstAddr = tuple.local;
             parsed.tcp->SrcPort = htons(flow.alias);
             parsed.tcp->DstPort = htons(config.listener_port);
-            packet.address.Outbound = 0;
+            packet.address.Outbound = 1;
             packet.address.Loopback = 1;
             WinDivertHelperCalcChecksums(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                         &packet.address, 0);
@@ -394,8 +419,8 @@ class Capture {
         parsed.ip_header->DstAddr = original.local;
         parsed.tcp->SrcPort = htons(original.remote_port);
         parsed.tcp->DstPort = htons(original.local_port);
-        packet.address.Outbound = 0;
-        packet.address.Loopback = 0;
+        packet.address.Outbound = flow.original_loopback ? 1 : 0;
+        packet.address.Loopback = flow.original_loopback ? 1 : 0;
         WinDivertHelperCalcChecksums(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                     &packet.address, 0);
         send(packet);
@@ -425,7 +450,8 @@ class Capture {
                 return;
             }
             auto flow = std::make_unique<Flow>(packet.address.Timestamp,
-                packet.received + frequency * config.hold_ms / 1000, tuple.protocol);
+                packet.received + frequency * config.hold_ms / 1000, tuple.protocol,
+                packet.address.Loopback != 0);
             if (parsed.tcp && parsed.tcp->Syn && !parsed.tcp->Ack) {
                 flow->saw_syn = true;
                 flow->syn_sequence = parsed.tcp->SeqNum;

@@ -45,6 +45,8 @@ int main(int argc, char** argv) {
         const auto ip = args.at("--target");
         const auto nonce = args.at("--nonce");
         const bool udp = args.at("--protocol") == "udp";
+        const bool connect_only = args.count("--connect-only") && args.at("--connect-only") == "1";
+        if (connect_only && udp) throw std::runtime_error("connect-only requires TCP");
         const auto close_mode = args.count("--close-mode") ? args.at("--close-mode") : "fin";
         if (close_mode != "fin" && close_mode != "reset") throw std::runtime_error("invalid close mode");
         if (!udp && args.at("--protocol") != "tcp") throw std::runtime_error("invalid protocol");
@@ -87,6 +89,20 @@ int main(int argc, char** argv) {
             }
             if (!udp && connect(socket.value, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != 0)
                 throw std::runtime_error("connect failed");
+            if (connect_only) {
+                sockaddr_in bound{};
+                int length = sizeof(bound);
+                char local_ip[INET_ADDRSTRLEN]{};
+                if (getsockname(socket.value, reinterpret_cast<sockaddr*>(&bound), &length) ||
+                    !InetNtopA(AF_INET, &bound.sin_addr, local_ip, sizeof(local_ip)))
+                    throw std::runtime_error("connected endpoint query failed");
+                std::cout << "{\"kind\":\"client\",\"pid\":" << GetCurrentProcessId()
+                    << ",\"start_qpc\":" << started << ",\"done_qpc\":" << qpc()
+                    << ",\"local_ip\":\"" << local_ip << "\",\"local_port\":" << ntohs(bound.sin_port)
+                    << ",\"remote_ip\":\"" << ip << "\",\"remote_port\":" << port
+                    << ",\"protocol\":6,\"nonce\":\"" << nonce << "\",\"status\":\"connected\"}" << std::endl;
+                continue;
+            }
             if (udp) {
                 if (sendto(socket.value, nonce.data(), static_cast<int>(nonce.size()), 0,
                            reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != static_cast<int>(nonce.size()))

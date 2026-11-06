@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import datetime
+import ipaddress
 import json
 import math
 import os
@@ -10,6 +11,10 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+
+
+class NoOwnershipConfirmation(RuntimeError):
+    pass
 
 
 def normalized_path(value):
@@ -25,6 +30,11 @@ def tuple_key(value):
         return key
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def valid_client_result(value, connect_only=False):
+    return (value.get("kind") == "client" and tuple_key(value) is not None and
+            value.get("status") == ("connected" if connect_only else "echo_ok"))
 
 
 def retransmissions_verified(records):
@@ -227,6 +237,8 @@ def main():
     parser.add_argument("--delay-ms", type=int, default=0)
     parser.add_argument("--skip-all", action="store_true")
     parser.add_argument("--bind-ip", default="127.0.0.1")
+    parser.add_argument("--external-target")
+    parser.add_argument("--external-port", type=int, default=443)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--seconds", type=int, default=35)
     args = parser.parse_args()
@@ -238,6 +250,15 @@ def main():
         parser.error("retransmit and reuse scenarios require TCP")
     if args.scenario == "reuse" and (args.mode != "redirect" or args.iterations != 1 or args.skip_all or args.delay_ms >= args.hold_ms):
         parser.error("reuse requires redirect mode, one iteration and normal native attribution")
+    if args.external_target:
+        try:
+            external = ipaddress.IPv4Address(args.external_target)
+        except ipaddress.AddressValueError:
+            parser.error("--external-target must be an IPv4 literal")
+        if external.is_loopback or external.is_unspecified or not 1 <= args.external_port <= 65535:
+            parser.error("external target must not be loopback/unspecified and port must be 1..65535")
+        if args.mode != "hold" or args.protocol != "tcp" or args.scenario != "baseline":
+            parser.error("external target is valid only for baseline TCP hold mode")
     if args.out.exists() and any(args.out.iterdir()):
         parser.error("--out must be empty to avoid stale evidence")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -248,6 +269,10 @@ def main():
     summary = dict(status="NOT_COMPLETED", source=args.source, mode=args.mode,
                    protocol=args.protocol, scenario=args.scenario, topology="single-host-local", decisions=0,
                    selected_confirmed=0, redirected=0, clients=[])
+    if args.external_target:
+        summary.update(topology="external-connect-only", controlled_echo=False,
+                       qualification="Outbound TCP connection and native attribution only; no controlled payload/echo or proxy validation",
+                       external_target=args.external_target, external_port=args.external_port)
 
     def start(command, name):
         output = (args.out / (name + ".stdout.txt")).open("w", encoding="utf-8")
@@ -277,6 +302,8 @@ def main():
                 raise TimeoutError("fixture manifest missing")
             time.sleep(.02)
         manifest_path.chmod(0o600)
+        if args.external_target:
+            manifest.update(target_ip=args.external_target, target_port=args.external_port)
         frequency, anchor_filetime, anchor_qpc, uncertainty = windows_clock()
         summary.update(qpc_frequency=frequency, anchor_filetime=anchor_filetime,
                        anchor_qpc=anchor_qpc, anchor_uncertainty_ticks=uncertainty,
@@ -358,6 +385,8 @@ def main():
                        "--nonce", f"{args.source}-{args.mode}-{app}-{iteration}"]
             if args.protocol == "udp":
                 command += ["--second-port", manifest["udp_ports"][1]]
+            if args.external_target:
+                command += ["--connect-only", "1"]
             command += list(extra)
             label = f"client-{app}-{iteration}"
             entry = (app, label, start(command, label))
@@ -397,6 +426,7 @@ def main():
             reuse_started = qpc()
             attempt_file = args.out / "client-b-attempt.jsonl"
             second = launch("b", 0, ["--source-port", reuse_key[1], "--close-mode", "reset",
+                                      "--local-ip", reuse_key[0],
                                       "--attempt-out", attempt_file.resolve()])
 
             def verified_reuse():
@@ -430,9 +460,15 @@ def main():
             if args.scenario == "reuse" and app == "b":
                 continue
             client_records = JsonTail(args.out / (label + ".stdout.txt")).read()
-            if not client_records or any(c.get("status") != "echo_ok" for c in client_records):
-                raise RuntimeError(f"{label} has no valid echo result")
+            if not client_records or any(not valid_client_result(c, connect_only=bool(args.external_target)) for c in client_records):
+                raise RuntimeError(f"{label} has no valid {'connection' if args.external_target else 'echo'} result")
             records.extend((app, c) for c in client_records)
+        summary["timing"] = timing_summary(records, packet_records,
+                                             ownership_observations, decision_records, frequency)
+        summary["timing"]["anchor_uncertainty_ms"] = uncertainty * 1000 / frequency
+        summary["timing"]["occurrence_semantics"] = "WFP occurrence or audit TimeCreated; not exact classifyFn execution time"
+        client_keys = {tuple_key(client) for _, client in records}
+        summary["source_target_complete_outbound_events"] = sum(tuple_key(event) in client_keys for event in ownership_observations)
         controls = [p for p in packet_records if p.get("kind") == "control" and p.get("accepted")]
         effective = [p for p in packet_records if p.get("kind") == "packet" and p.get("action") == "proxy"]
         negative = args.skip_all or args.delay_ms >= args.hold_ms
@@ -449,7 +485,7 @@ def main():
             elif proxied or any(c.get("action") == "proxy" for c in matching):
                 raise RuntimeError(f"unexpected proxying of {client['nonce']}")
             if not negative and not matching:
-                raise RuntimeError(f"client {client['nonce']} lacked accepted native ownership control")
+                raise NoOwnershipConfirmation(f"client {client['nonce']} lacked accepted native ownership control")
         expected_count = sum(app == "a" for app, _ in records) if args.mode == "redirect" and not negative and args.protocol == "tcp" else 0
         if bridge and bridge.successful_tunnels != expected_count:
             raise RuntimeError("transparent bridge tunnel count differs from selected client count")
@@ -477,14 +513,13 @@ def main():
             summary.update(reuse_tuple=list(reuse_key), reused_syn_rejected=True,
                            nonselected_client_disrupted=True,
                            rejection_semantics="Characterized conservative rejection; not normal application connectivity")
-        summary["timing"] = timing_summary(records, packet_records,
-                                             ownership_observations, decision_records, frequency)
-        summary["timing"]["anchor_uncertainty_ms"] = uncertainty * 1000 / frequency
-        summary["timing"]["occurrence_semantics"] = "WFP occurrence or audit TimeCreated; not exact classifyFn execution time"
         summary.update(client_tuple_count=len(records), accepted_controls=len(controls), effective_proxy_packets=len(effective),
                        bridge_tunnels=bridge.successful_tunnels if bridge else 0)
         summary["gateway_connect_count"] = len(gateway_records)
         summary["status"] = "CHARACTERIZED_REUSE_REJECTION" if args.scenario == "reuse" else "PASS_RESTRICTED_CASE"
+    except NoOwnershipConfirmation as error:
+        missing_ownership = args.external_target and "lacked accepted native ownership control" in str(error)
+        summary.update(status="NO_OWNERSHIP_CONFIRMATION" if missing_ownership else "FAIL", error=str(error))
     except Exception as error:
         summary.update(status="FAIL", error=str(error))
     finally:
@@ -511,6 +546,12 @@ def main():
                     summary["fallback_restore_exit_code"] = restore.returncode
                 except Exception as error:
                     summary["fallback_restore_error"] = str(error)
+        try:
+            summaries = [r for r in JsonTail(args.out / "native.jsonl").read() if r.get("kind") == "summary"]
+            if summaries:
+                summary["native_summary"] = summaries[-1]
+        except Exception as error:
+            summary["native_summary_read_error"] = str(error)
         if summary["status"] in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"]:
             try:
                 native_records = JsonTail(args.out / "native.jsonl").read()

@@ -143,6 +143,14 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(60, result["decision_minus_capture_ms"]["p95"])
         self.assertEqual(995, result["rows"][0]["occurrence_qpc"])
 
+    def test_connect_only_result_does_not_count_as_echo(self):
+        result = dict(self.packet(), kind="client", status="connected")
+        self.assertTrue(lab.valid_client_result(result, connect_only=True))
+        self.assertFalse(lab.valid_client_result(result, connect_only=False))
+        result["status"] = "echo_ok"
+        self.assertTrue(lab.valid_client_result(result, connect_only=False))
+        self.assertFalse(lab.valid_client_result(result, connect_only=True))
+
 
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):

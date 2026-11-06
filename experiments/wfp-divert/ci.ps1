@@ -48,11 +48,17 @@ try {
     @{ name='hold-wfp-too-late'; source='wfp'; mode='hold'; protocol='tcp'; delay=1000; hold=250; skip=$false },
     @{ name='hold-wfp-udp'; source='wfp'; mode='hold'; protocol='udp'; delay=0; hold=1000; skip=$false },
     @{ name='hold-security-udp'; source='security5156'; mode='hold'; protocol='udp'; delay=0; hold=1000; skip=$false },
+    @{ name='hold-security-udp-2000'; source='security5156'; mode='hold'; protocol='udp'; delay=0; hold=2000; skip=$false },
+    @{ name='hold-security-delayed'; source='security5156'; mode='hold'; protocol='tcp'; delay=100; hold=2000; skip=$false },
+    @{ name='hold-security-too-late'; source='security5156'; mode='hold'; protocol='tcp'; delay=1000; hold=250; skip=$false },
+    @{ name='redirect-security-missing'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=250; skip=$true },
     @{ name='redirect-wfp-missing'; source='wfp'; mode='redirect'; protocol='tcp'; delay=0; hold=250; skip=$true },
     @{ name='redirect-wfp'; source='wfp'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false },
     @{ name='redirect-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false },
     @{ name='retransmit-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='retransmit' },
-    @{ name='reuse-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='reuse' }
+    @{ name='reuse-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='reuse' },
+    @{ name='external-wfp-tcp'; source='wfp'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true },
+    @{ name='external-security-tcp'; source='security5156'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true }
   )
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
@@ -65,6 +71,18 @@ try {
     if ($case.ContainsKey('scenario')) {
       $arguments += @('--scenario', $case.scenario)
       if ($case.scenario -eq 'reuse') { $arguments += @('--iterations', 1) }
+    }
+    if ($case.ContainsKey('external')) {
+      try {
+        $external = [System.Net.Dns]::GetHostAddresses('api.github.com') |
+          Where-Object AddressFamily -eq InterNetwork | Select-Object -First 1
+        if (-not $external) { throw 'No external IPv4 address resolved' }
+        $arguments += @('--external-target', $external.IPAddressToString, '--external-port', 443, '--iterations', 1)
+      } catch {
+        $failures.Add($case.name + '-dns')
+        Write-Host "External connect-only probe unavailable: $_"
+        continue
+      }
     }
     python @arguments
     if ($LASTEXITCODE) { $failures.Add($case.name) }
