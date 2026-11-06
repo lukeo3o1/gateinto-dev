@@ -191,22 +191,34 @@ impl<'a> Cursor<'a> {
             return None;
         }
         self.pos += 1;
-        let capacity = (self.bytes.len() - self.pos).min(MAX_AUTH_URI_LEN);
-        let mut value = Zeroizing::new(Vec::with_capacity(capacity));
+        let start = self.pos;
+        let len = self.quoted_body(|_| {})?;
+        let end = self.pos;
+        self.pos = start;
+        let mut value = Zeroizing::new(Vec::with_capacity(len));
+        self.quoted_body(|byte| value.push(byte))?;
+        debug_assert_eq!((self.pos, value.len()), (end, len));
+        Some(value)
+    }
+
+    fn quoted_body(&mut self, mut push: impl FnMut(u8)) -> Option<usize> {
+        let mut len = 0;
         loop {
             let byte = self.peek()?;
             self.pos += 1;
-            match byte {
-                b'"' => return Some(value),
+            let decoded = match byte {
+                b'"' => return Some(len),
                 b'\\' => {
                     let escaped = self.peek().filter(|&b| b == b'\t' || is_text(b))?;
                     self.pos += 1;
-                    value.push(escaped);
+                    escaped
                 }
-                b'\t' => value.push(byte),
-                _ if is_text(byte) => value.push(byte),
+                b'\t' => byte,
+                _ if is_text(byte) => byte,
                 _ => return None,
-            }
+            };
+            push(decoded);
+            len += 1;
         }
     }
 
@@ -598,6 +610,25 @@ mod tests {
             assert!(!debug.contains(secret), "{debug}");
         }
         assert!(debug.contains("300"), "{debug}");
+    }
+
+    #[test]
+    fn parameter_values_reserve_no_more_than_their_own_length() {
+        let mut header = b"Foo a=\"\"".to_vec();
+        while header.len() < 16 * 1024 {
+            header.extend_from_slice(b",a=\"\",b=\"x\\\"y\"");
+        }
+        let parsed = challenges(&header).unwrap();
+        let params: Vec<_> = parsed.iter().flat_map(|c| &c.params).collect();
+        assert!(params.len() > 1000, "{}", params.len());
+        let reserved: usize = params.iter().map(|(_, value)| value.capacity()).sum();
+        assert!(reserved <= header.len(), "{reserved} > {}", header.len());
+        assert!(
+            params
+                .iter()
+                .all(|(name, value)| value.capacity() == value.len()
+                    && (*name != b"b" || value.as_slice() == b"x\"y"))
+        );
     }
 
     #[test]
