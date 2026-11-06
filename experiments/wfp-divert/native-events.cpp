@@ -18,6 +18,13 @@ std::string xml_value(const std::string&, const std::string&);
 std::string counts_json(const std::map<unsigned, unsigned long long>&);
 std::string enum_error_json(const std::string&, unsigned long);
 
+struct CappedCounter {
+    unsigned long long count = 0;
+    unsigned long long cap;
+    explicit CappedCounter(unsigned long long limit) : cap(limit) {}
+    bool record();
+};
+
 int self_test() {
     if (json("a\n\"\\\t") != "\"a\\n\\\"\\\\\\t\"") throw std::runtime_error("JSON escaping");
     if (json(std::string(1, '\x01')) != "\"\\u0001\"") throw std::runtime_error("JSON control character");
@@ -29,6 +36,9 @@ int self_test() {
     if (counts_json({{3, 2}, {0, 1}}) != "{\"0\":1,\"3\":2}") throw std::runtime_error("Type counts");
     if (enum_error_json("FwpmNetEventEnum3", 5) != "{\"kind\":\"wfp_enum_error\",\"operation\":\"FwpmNetEventEnum3\",\"code\":5}")
         throw std::runtime_error("Enumeration error line");
+    CappedCounter capped(2);
+    if (!capped.record() || !capped.record() || capped.record() || capped.record() || capped.count != 4)
+        throw std::runtime_error("Capped counter");
     std::cout << "native-events helper self-tests passed\n";
     return 0;
 }
@@ -70,6 +80,8 @@ std::string counts_json(const std::map<unsigned, unsigned long long>& counts) {
 std::string enum_error_json(const std::string& operation, unsigned long code) {
     return "{\"kind\":\"wfp_enum_error\",\"operation\":" + json(operation) + ",\"code\":" + std::to_string(code) + "}";
 }
+
+bool CappedCounter::record() { return ++count <= cap; }
 
 std::string xml_value(const std::string& xml, const std::string& name) {
     auto pos = xml.find("Name='" + name + "'");
@@ -198,7 +210,7 @@ struct Output {
     std::mutex type_mutex;
     std::map<unsigned, unsigned long long> wfp_type_counts;
     unsigned long long enum_total = 0, enum_emitted = 0;
-    std::atomic<unsigned long long> enum_errors{0};
+    CappedCounter enum_errors{5};
     bool enum_truncated = false;
     std::map<unsigned, unsigned long long> enum_type_counts;
     std::atomic<unsigned long long> security_count{0};
@@ -238,8 +250,7 @@ struct Output {
     }
 
     void enum_error(const char* operation, DWORD code) {
-        ++enum_errors;
-        push(enum_error_json(operation, code));
+        if (enum_errors.record()) push(enum_error_json(operation, code));
     }
 
     void count_type(unsigned type) {
@@ -499,7 +510,15 @@ struct Engine {
             if (created) { out.enum_error("FwpmNetEventCreateEnumHandle0", created); return; }
             const UINT32 batch = 256;
             for (int batches = 0;; ++batches) {
-                if (batches >= 64 || std::chrono::steady_clock::now() >= deadline) { out.enum_truncated = true; break; }
+                if (batches >= 64 || std::chrono::steady_clock::now() >= deadline) {
+                    FWPM_NET_EVENT3** rest = nullptr;
+                    UINT32 remaining = 0;
+                    const auto probe = FwpmNetEventEnum3(engine, handle, 1, &rest, &remaining);
+                    if (probe) out.enum_error("FwpmNetEventEnum3_probe", probe);
+                    if (rest) FwpmFreeMemory0(reinterpret_cast<void**>(&rest));
+                    out.enum_truncated = probe || remaining > 0;
+                    break;
+                }
                 FWPM_NET_EVENT3** entries = nullptr;
                 UINT32 count = 0;
                 const auto result = FwpmNetEventEnum3(engine, handle, batch, &entries, &count);
@@ -609,7 +628,7 @@ int main(int argc, char** argv) {
             ",\"wfp_enum_total\":" + std::to_string(out.enum_total) +
             ",\"wfp_enum_type_counts\":" + counts_json(out.enum_type_counts) +
             ",\"wfp_enum_emitted\":" + std::to_string(out.enum_emitted) +
-            ",\"wfp_enum_errors\":" + std::to_string(out.enum_errors.load()) +
+            ",\"wfp_enum_errors\":" + std::to_string(out.enum_errors.count) +
             ",\"wfp_enum_truncated\":" + (out.enum_truncated ? "true" : "false") +
             ",\"security5156_count\":" + std::to_string(out.security_count.load()) +
             ",\"queue_dropped\":" + std::to_string(out.dropped.load()) +

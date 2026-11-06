@@ -77,7 +77,10 @@ up to 200 `wfp_enum` CLASSIFY_ALLOW lines).
 On `wfp_enum` lines `recv_qpc` and `receipt_filetime` are the enumeration time;
 `event_filetime` is the event's own timestamp. Enumeration failures appear as
 `wfp_enum_error` lines and `wfp_enum_errors`, never as collector errors, and
-enumeration stops after about 2 s or 64 batches (`wfp_enum_truncated`).
+enumeration stops after about 2 s or 64 batches. Only the first 5 `wfp_enum_error`
+lines are written; `wfp_enum_errors` counts all of them. `wfp_enum_truncated` is
+true only when a limit stopped enumeration and a one-entry probe then found an
+unread event or failed.
 
 Evidence includes raw native/packet JSONL, decision/control logs, translation and
 bridge logs, gateway requests, target payload hex and client nonces/tuples. Driver
