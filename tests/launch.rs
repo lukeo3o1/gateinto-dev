@@ -740,6 +740,52 @@ async fn invalid_uris_are_rejected_before_any_agent_is_contacted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agent_terminal_never_starts_an_agent() {
+    let launcher = Launcher::new("").await;
+
+    let output = launcher
+        .run(&["session", "terminal", "--agent", "--gateway", "main"])
+        .await;
+
+    assert!(
+        output.failure().stderr.contains("no agent is running"),
+        "{}",
+        output.stderr
+    );
+    let output = launcher.run(&["session", "list"]).await;
+    assert!(output.failure().stderr.contains("no agent is running"));
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_terminal_is_refused_by_an_agent_outside_windows() {
+    let launcher = Launcher::new("").await;
+    launcher.opened("main").await;
+
+    let output = launcher
+        .run(&[
+            "session",
+            "terminal",
+            "--agent",
+            "--gateway",
+            "main",
+            "--route",
+            "mixed",
+        ])
+        .await;
+
+    assert!(
+        output
+            .failure()
+            .stderr
+            .contains("terminal sessions from the agent are not supported on this platform"),
+        "{}",
+        output.stderr
+    );
+    launcher.run(&["stop"]).await.success();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_agent_rejects_a_profile_missing_from_its_configuration() {
     let launcher = Launcher::new("").await;
 

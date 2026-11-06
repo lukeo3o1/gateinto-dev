@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::future::Future;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,12 +14,15 @@ use tracing::{Instrument, info, info_span, warn};
 use crate::browser::{self, BrowserProcess, ProfileDir};
 use crate::clock::unix_now;
 use crate::config::GatewayName;
-use crate::ipc::{self, BrowserKind, ConfirmToken, Connection, Request, Response, Server};
+use crate::ipc::{
+    self, BrowserKind, ConfirmToken, Connection, Request, Response, Server, TerminalRequest,
+};
 use crate::job::{Job, SpawnError};
 use crate::link::{self, Ask, Confirm, Decision, Known, Launch, LinkedGateway, Resolution};
 use crate::logbook::Logbook;
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
+use crate::terminal::{self, Shell, Variables};
 use crate::uri::LaunchRequest;
 
 const MAX_CONNECTIONS: usize = 8;
@@ -66,6 +70,7 @@ pub struct AgentLimits {
     pub launches: usize,
     pub launch_window: Duration,
     pub max_browser_sessions: usize,
+    pub max_terminal_sessions: usize,
     pub confirm_timeout: Duration,
 }
 
@@ -75,6 +80,7 @@ impl Default for AgentLimits {
             launches: 5,
             launch_window: Duration::from_secs(60),
             max_browser_sessions: 4,
+            max_terminal_sessions: 4,
             confirm_timeout: Duration::from_secs(120),
         }
     }
@@ -85,10 +91,18 @@ pub struct BrowserSessionPlan {
     pub proxy: proxy::Config,
 }
 
+#[derive(Debug, Clone)]
+pub struct TerminalSessionPlan {
+    pub proxy: proxy::Config,
+    pub route: proxy::Route,
+    pub shell: Shell,
+}
+
 pub trait Profiles: Send + Sync + 'static {
     fn known(&self) -> Result<Known, String>;
     fn link(&self, gateway: &LinkedGateway) -> Result<(), String>;
     fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String>;
+    fn terminal_session(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String>;
 }
 
 struct Pending {
@@ -161,6 +175,23 @@ struct Browser {
     task: JoinHandle<()>,
 }
 
+struct Terminal {
+    shell: String,
+    close: oneshot::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug)]
+struct TerminalSpawn {
+    executable: PathBuf,
+    args: Vec<OsString>,
+    environment: Variables,
+    current_dir: Option<PathBuf>,
+    title: String,
+    new_console: bool,
+}
+
 trait Launcher: Send + Sync + 'static {
     fn job(&self) -> Option<Arc<Job>>;
     fn spawn(
@@ -168,6 +199,14 @@ trait Launcher: Send + Sync + 'static {
         executable: &Path,
         args: Vec<OsString>,
         job: Option<&Arc<Job>>,
+    ) -> Result<BrowserProcess, SpawnError>;
+    fn terminals(&self) -> bool;
+    fn terminal_job(&self) -> io::Result<Job>;
+    fn environment(&self) -> Variables;
+    fn spawn_terminal(
+        &self,
+        spawn: TerminalSpawn,
+        job: &Arc<Job>,
     ) -> Result<BrowserProcess, SpawnError>;
 }
 
@@ -186,6 +225,45 @@ impl Launcher for System {
     ) -> Result<BrowserProcess, SpawnError> {
         browser::spawn(executable, args, job)
     }
+
+    fn terminals(&self) -> bool {
+        cfg!(windows)
+    }
+
+    fn terminal_job(&self) -> io::Result<Job> {
+        Job::new()
+    }
+
+    fn environment(&self) -> Variables {
+        std::env::vars_os().collect()
+    }
+
+    #[cfg(windows)]
+    fn spawn_terminal(
+        &self,
+        spawn: TerminalSpawn,
+        job: &Arc<Job>,
+    ) -> Result<BrowserProcess, SpawnError> {
+        let block = terminal::environment_block(&spawn.environment).map_err(|error| {
+            SpawnError::Process(io::Error::new(io::ErrorKind::InvalidInput, error))
+        })?;
+        let options = crate::job::SpawnOptions {
+            environment: Some(&block),
+            new_console: spawn.new_console,
+            current_dir: spawn.current_dir.as_deref(),
+            title: Some(&spawn.title),
+        };
+        job.spawn_with(&spawn.executable, &spawn.args, options)
+            .map(BrowserProcess::Job)
+    }
+
+    #[cfg(not(windows))]
+    fn spawn_terminal(&self, _: TerminalSpawn, _: &Arc<Job>) -> Result<BrowserProcess, SpawnError> {
+        Err(SpawnError::Process(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "terminal sessions from the agent are only available on Windows",
+        )))
+    }
 }
 
 struct Inner {
@@ -194,6 +272,7 @@ struct Inner {
     options: AgentOptions,
     sessions: Mutex<SessionManager>,
     browsers: Mutex<BTreeMap<SessionId, Browser>>,
+    terminals: Mutex<BTreeMap<SessionId, Terminal>>,
     launches: std::sync::Mutex<LaunchLimiter>,
     launching: Mutex<Option<Pending>>,
     stop: Notify,
@@ -222,6 +301,7 @@ impl Agent {
                 options,
                 sessions: Mutex::new(SessionManager::new()),
                 browsers: Mutex::new(BTreeMap::new()),
+                terminals: Mutex::new(BTreeMap::new()),
                 launches: std::sync::Mutex::new(limiter),
                 launching: Mutex::new(None),
                 stop: Notify::new(),
@@ -303,9 +383,7 @@ impl Agent {
     pub async fn handle(&self, request: Request) -> Response {
         let result = match request {
             Request::Launch(request) => self.launch(request).await,
-            Request::Terminal(_) => {
-                Err("terminal sessions from the agent are not supported yet".to_owned())
-            }
+            Request::Terminal(request) => self.terminal(request).await,
             Request::Approve(token) => self.approve(token).await,
             Request::Deny(token) => self.deny(token).await.map(|()| Vec::new()),
             Request::List => Ok(self.list().await),
@@ -313,8 +391,11 @@ impl Agent {
             Request::Credentials(id) => self.credentials(id).await,
             Request::Stop => {
                 self.inner.stop.notify_one();
-                self.close_all().await;
-                Ok(vec![ipc::agent_pid_line()])
+                let terminals = self.close_all().await;
+                Ok(vec![
+                    ipc::agent_pid_line(),
+                    ipc::closed_terminals_line(terminals),
+                ])
             }
             Request::Log { after } => return self.inner.options.logbook.response(after),
             Request::Config => ipc::config_line(&self.inner.options.config)
@@ -330,19 +411,9 @@ impl Agent {
     async fn launch(&self, request: LaunchRequest) -> Result<Vec<String>, String> {
         let mut pending = self.inner.launching.lock().await;
         let limits = &self.inner.options.limits;
-        let allowed = self
-            .inner
-            .launches
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .allow(Instant::now());
-        if !allowed {
+        if let Err(error) = self.allow_launch() {
             warn!(gateway = ?request.profile, "refused a browser launch: rate limit reached");
-            return Err(format!(
-                "too many launch requests; at most {} are accepted every {} seconds",
-                limits.launches,
-                limits.launch_window.as_secs()
-            ));
+            return Err(error);
         }
         self.check_capacity().await?;
         let known = self.inner.profiles.known()?;
@@ -387,6 +458,117 @@ impl Agent {
             expires: now + limits.confirm_timeout,
         });
         Ok(warned(lines, &known))
+    }
+
+    fn allow_launch(&self) -> Result<(), String> {
+        let allowed = self
+            .inner
+            .launches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .allow(Instant::now());
+        if allowed {
+            return Ok(());
+        }
+        let limits = &self.inner.options.limits;
+        Err(format!(
+            "too many launch requests; at most {} are accepted every {} seconds",
+            limits.launches,
+            limits.launch_window.as_secs()
+        ))
+    }
+
+    async fn terminal(&self, request: TerminalRequest) -> Result<Vec<String>, String> {
+        let _launching = self.inner.launching.lock().await;
+        let gateway = request.gateway;
+        if let Err(error) = self.allow_launch() {
+            warn!(%gateway, "refused a terminal: rate limit reached");
+            return Err(error);
+        }
+        let launcher = self.inner.launcher.clone();
+        if !launcher.terminals() {
+            return Err(
+                "terminal sessions from the agent are not supported on this platform".to_owned(),
+            );
+        }
+        let limit = self.inner.options.limits.max_terminal_sessions;
+        if self.inner.terminals.lock().await.len() >= limit {
+            return Err(format!(
+                "{limit} terminal sessions are already open; close one first"
+            ));
+        }
+        let known = self.inner.profiles.known()?;
+        let plan = self.inner.profiles.terminal_session(&gateway)?;
+        let route = terminal::terminal_route(request.route, plan.route);
+        let job =
+            terminal::terminal_job(launcher.terminal_job()).map_err(|error| error.to_string())?;
+        let mut proxy = terminal::terminal_proxy(plan.proxy, route, job.clone());
+        proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let mut sessions = self.inner.sessions.lock().await;
+        let id = sessions
+            .start(SessionConfig {
+                kind: SessionKind::Terminal,
+                gateway: gateway.clone(),
+                proxy,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let listen = sessions
+            .session(id)
+            .expect("the session just started")
+            .local_addr();
+        let span = info_span!("session", %id, kind = %SessionKind::Terminal, gateway = %gateway);
+        let inherited = launcher.environment();
+        let current_dir = home_dir(&inherited);
+        let (environment, _) =
+            terminal::terminal_environment(terminal::without_hidden_entries(inherited), listen);
+        let Shell { executable, args } = plan.shell;
+        let spawn = TerminalSpawn {
+            executable: executable.clone(),
+            args,
+            environment,
+            current_dir,
+            title: format!("Gateinto: {gateway}"),
+            new_console: true,
+        };
+        let spawned = tokio::task::spawn_blocking({
+            let job = job.clone();
+            move || launcher.spawn_terminal(spawn, &job)
+        })
+        .await
+        .map_err(|error| SpawnError::Process(io::Error::other(error)))
+        .and_then(|spawned| spawned);
+        let child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                sessions.close(id).await;
+                let message = format!("starting {} failed: {error}", executable.display());
+                span.in_scope(|| warn!("{message}"));
+                return Err(message);
+            }
+        };
+        drop(sessions);
+        span.in_scope(|| info!(shell = %executable.display(), "started a shell for the session"));
+        let shell = executable
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut lines = vec![
+            format!("session: {id}"),
+            format!("gateway: {gateway}"),
+            format!("listen: {listen}"),
+            format!("route: {route}"),
+            "auth: os_user".to_owned(),
+            format!("shell: {shell}"),
+        ];
+        lines = warned(lines, &known);
+        lines.extend(terminal::route_warning(route).map(str::to_owned));
+        let (close, closed) = oneshot::channel();
+        let mut terminals = self.inner.terminals.lock().await;
+        let task =
+            tokio::spawn(watch_terminal(self.inner.clone(), id, child, closed).instrument(span));
+        terminals.insert(id, Terminal { shell, close, task });
+        Ok(lines)
     }
 
     fn answered(pending: &mut Option<Pending>, token: ConfirmToken) -> Result<Pending, String> {
@@ -585,12 +767,24 @@ impl Agent {
             .iter()
             .filter_map(|(&id, browser)| Some((id, browser.name?)))
             .collect();
+        let shells: BTreeMap<SessionId, String> = self
+            .inner
+            .terminals
+            .lock()
+            .await
+            .iter()
+            .map(|(&id, terminal)| (id, terminal.shell.clone()))
+            .collect();
         self.inner
             .sessions
             .lock()
             .await
             .sessions()
-            .map(|session| session.info(names.get(&session.id()).copied()).to_line())
+            .map(|session| {
+                let mut info = session.info(names.get(&session.id()).copied());
+                info.shell = shells.get(&session.id()).cloned();
+                info.to_line()
+            })
             .collect()
     }
 
@@ -614,6 +808,12 @@ impl Agent {
             let _ = browser.task.await;
             return Ok(());
         }
+        let terminal = self.inner.terminals.lock().await.remove(&id);
+        if let Some(terminal) = terminal {
+            let _ = terminal.close.send(());
+            let _ = terminal.task.await;
+            return Ok(());
+        }
         if self.inner.sessions.lock().await.close(id).await {
             Ok(())
         } else {
@@ -621,13 +821,20 @@ impl Agent {
         }
     }
 
-    pub async fn close_all(&self) {
+    pub async fn close_all(&self) -> usize {
         let browsers = std::mem::take(&mut *self.inner.browsers.lock().await);
         for (_, browser) in browsers {
             let _ = browser.close.send(());
             let _ = browser.task.await;
         }
+        let terminals = std::mem::take(&mut *self.inner.terminals.lock().await);
+        let count = terminals.len();
+        for (_, terminal) in terminals {
+            let _ = terminal.close.send(());
+            let _ = terminal.task.await;
+        }
         self.inner.sessions.lock().await.close_all().await;
+        count
     }
 }
 
@@ -672,6 +879,44 @@ async fn watch(
     inner.sessions.lock().await.close(id).await;
     remove_profile(&profile).await;
     inner.browsers.lock().await.remove(&id);
+}
+
+async fn watch_terminal(
+    inner: Arc<Inner>,
+    id: SessionId,
+    mut child: BrowserProcess,
+    closed: oneshot::Receiver<()>,
+) {
+    tokio::select! {
+        status = child.wait() => {
+            match status {
+                Ok(status) => info!(
+                    "the shell exited with code {}; closing the session",
+                    terminal::exit_code(status)
+                ),
+                Err(error) => warn!("waiting for the shell failed: {error}; closing the session"),
+            }
+            if let Err(error) = child.release().await {
+                warn!("stopping the processes the shell left failed: {error}");
+            }
+        }
+        _ = closed => {
+            if let Err(error) = child.kill().await {
+                warn!("stopping the shell failed: {error}");
+            }
+            info!("stopped the shell; closing the session");
+        }
+    }
+    drop(child);
+    inner.sessions.lock().await.close(id).await;
+    inner.terminals.lock().await.remove(&id);
+}
+
+fn home_dir(environment: &Variables) -> Option<PathBuf> {
+    environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("USERPROFILE"))
+        .map(|(_, value)| PathBuf::from(value))
 }
 
 async fn remove_profile(profile: &ProfileDir) {
@@ -843,6 +1088,10 @@ mod tests {
                     proxy: self.0.clone(),
                 })
             }
+
+            fn terminal_session(&self, _: &GatewayName) -> Result<TerminalSessionPlan, String> {
+                Err("not used".to_owned())
+            }
         }
 
         #[derive(Default)]
@@ -868,9 +1117,29 @@ mod tests {
                 }
                 browser::spawn(executable, vec!["30".into()], None)
             }
+
+            fn terminals(&self) -> bool {
+                false
+            }
+
+            fn terminal_job(&self) -> io::Result<Job> {
+                Err(io::Error::other("not used"))
+            }
+
+            fn environment(&self) -> Variables {
+                Variables::new()
+            }
+
+            fn spawn_terminal(
+                &self,
+                _: TerminalSpawn,
+                _: &Arc<Job>,
+            ) -> Result<BrowserProcess, SpawnError> {
+                Err(SpawnError::Process(io::Error::other("not used")))
+            }
         }
 
-        fn proxy_config() -> proxy::Config {
+        pub(super) fn proxy_config() -> proxy::Config {
             proxy::Config {
                 listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                 local_auth: LocalAuth::SESSION_CREDENTIALS,
@@ -934,6 +1203,477 @@ mod tests {
             }
             agent.close_all().await;
             let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    mod terminal_sessions {
+        use std::io;
+
+        use super::*;
+        use crate::ipc::SessionInfo;
+        use crate::sessions::Session;
+        use crate::terminal::{Shell, Variables};
+
+        #[derive(Default)]
+        struct Gateways {
+            calls: std::sync::Mutex<usize>,
+        }
+
+        impl Profiles for Gateways {
+            fn known(&self) -> Result<Known, String> {
+                *self.calls.lock().unwrap() += 1;
+                Ok(Known::default())
+            }
+
+            fn link(&self, _: &LinkedGateway) -> Result<(), String> {
+                Err("not used".to_owned())
+            }
+
+            fn browser_session(&self, _: &GatewayName) -> Result<BrowserSessionPlan, String> {
+                *self.calls.lock().unwrap() += 1;
+                Ok(BrowserSessionPlan {
+                    proxy: super::no_job_retry::proxy_config(),
+                })
+            }
+
+            fn terminal_session(
+                &self,
+                gateway: &GatewayName,
+            ) -> Result<TerminalSessionPlan, String> {
+                *self.calls.lock().unwrap() += 1;
+                if gateway.as_str() != "office" {
+                    return Err(format!("unknown gateway \"{gateway}\""));
+                }
+                Ok(TerminalSessionPlan {
+                    proxy: super::no_job_retry::proxy_config(),
+                    route: proxy::Route::Gateway,
+                    shell: Shell {
+                        executable: PathBuf::from("/opt/shells/pwsh"),
+                        args: vec!["-NoLogo".into()],
+                    },
+                })
+            }
+        }
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Spawn {
+            Runs,
+            Exits,
+            JobRefused,
+            Fails,
+        }
+
+        struct Terminals {
+            supported: bool,
+            job: bool,
+            spawn: Spawn,
+            spawned: std::sync::Mutex<Vec<TerminalSpawn>>,
+        }
+
+        impl Default for Terminals {
+            fn default() -> Self {
+                Self {
+                    supported: true,
+                    job: true,
+                    spawn: Spawn::Runs,
+                    spawned: std::sync::Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        fn pairs(entries: &[(&str, &str)]) -> Variables {
+            entries
+                .iter()
+                .map(|(name, value)| ((*name).into(), (*value).into()))
+                .collect()
+        }
+
+        impl Launcher for Terminals {
+            fn job(&self) -> Option<Arc<Job>> {
+                None
+            }
+
+            fn spawn(
+                &self,
+                _: &Path,
+                _: Vec<OsString>,
+                _: Option<&Arc<Job>>,
+            ) -> Result<BrowserProcess, SpawnError> {
+                browser::spawn(Path::new("/bin/sleep"), vec!["30".into()], None)
+            }
+
+            fn terminals(&self) -> bool {
+                self.supported
+            }
+
+            fn terminal_job(&self) -> io::Result<Job> {
+                if self.job {
+                    Ok(Job::fake())
+                } else {
+                    Err(io::Error::other("refused"))
+                }
+            }
+
+            fn environment(&self) -> Variables {
+                pairs(&[
+                    ("=C:", r"C:\work"),
+                    ("USERPROFILE", r"C:\Users\ana"),
+                    ("https_proxy", "http://old.example:8080"),
+                    ("Path", r"C:\Windows"),
+                ])
+            }
+
+            fn spawn_terminal(
+                &self,
+                spawn: TerminalSpawn,
+                _: &Arc<Job>,
+            ) -> Result<BrowserProcess, SpawnError> {
+                self.spawned.lock().unwrap().push(spawn);
+                match self.spawn {
+                    Spawn::Runs => browser::spawn(Path::new("/bin/sleep"), vec!["30".into()], None),
+                    Spawn::Exits => browser::spawn(Path::new("/bin/true"), Vec::new(), None),
+                    Spawn::JobRefused => {
+                        Err(SpawnError::Job(io::Error::other("assigning refused")))
+                    }
+                    Spawn::Fails => Err(SpawnError::Process(io::Error::other("not found"))),
+                }
+            }
+        }
+
+        fn agent_with(
+            launcher: Terminals,
+            limits: AgentLimits,
+        ) -> (Agent, Arc<Terminals>, Arc<Gateways>) {
+            let launcher = Arc::new(launcher);
+            let gateways = Arc::new(Gateways::default());
+            let agent = Agent::with_launcher(
+                AgentOptions {
+                    browser: Some(PathBuf::from("/bin/sleep")),
+                    profiles_root: std::env::temp_dir()
+                        .join(format!("gateinto-terminal-agent-{}", std::process::id())),
+                    limits,
+                    logbook: Default::default(),
+                    config: ipc::ConfigSource::Defaults,
+                },
+                SharedGateways(gateways.clone()),
+                launcher.clone(),
+            );
+            (agent, launcher, gateways)
+        }
+
+        struct SharedGateways(Arc<Gateways>);
+
+        impl Profiles for SharedGateways {
+            fn known(&self) -> Result<Known, String> {
+                self.0.known()
+            }
+
+            fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
+                self.0.link(gateway)
+            }
+
+            fn browser_session(&self, gateway: &GatewayName) -> Result<BrowserSessionPlan, String> {
+                self.0.browser_session(gateway)
+            }
+
+            fn terminal_session(
+                &self,
+                gateway: &GatewayName,
+            ) -> Result<TerminalSessionPlan, String> {
+                self.0.terminal_session(gateway)
+            }
+        }
+
+        fn agent(launcher: Terminals) -> (Agent, Arc<Terminals>, Arc<Gateways>) {
+            agent_with(launcher, AgentLimits::default())
+        }
+
+        fn request(gateway: &str, route: Option<proxy::Route>) -> Request {
+            Request::Terminal(TerminalRequest {
+                gateway: gateway.parse().unwrap(),
+                route,
+            })
+        }
+
+        async fn answer(agent: &Agent, request: Request) -> Result<Vec<String>, String> {
+            match agent.handle(request).await {
+                Response::Ok(lines) => Ok(lines),
+                Response::Error(error) => Err(error),
+            }
+        }
+
+        async fn session_ids(agent: &Agent) -> Vec<SessionId> {
+            agent
+                .inner
+                .sessions
+                .lock()
+                .await
+                .sessions()
+                .map(Session::id)
+                .collect()
+        }
+
+        #[test]
+        fn the_system_launcher_offers_terminals_only_on_windows() {
+            assert_eq!(System.terminals(), cfg!(windows));
+        }
+
+        #[tokio::test]
+        async fn an_unsupported_platform_is_refused_after_the_rate_limit_and_before_any_gateway() {
+            let limits = AgentLimits {
+                launches: 1,
+                ..AgentLimits::default()
+            };
+            let launcher = Terminals {
+                supported: false,
+                ..Terminals::default()
+            };
+            let (agent, launcher, gateways) = agent_with(launcher, limits);
+
+            let error = answer(&agent, request("office", None)).await.unwrap_err();
+            assert_eq!(
+                error,
+                "terminal sessions from the agent are not supported on this platform"
+            );
+            assert_eq!(*gateways.calls.lock().unwrap(), 0);
+            assert!(launcher.spawned.lock().unwrap().is_empty());
+            let error = answer(&agent, request("office", None)).await.unwrap_err();
+            assert!(error.starts_with("too many launch requests"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn a_terminal_request_starts_an_os_user_session_and_a_shell_in_a_new_console() {
+            let (agent, launcher, _) = agent(Terminals::default());
+
+            let lines = answer(&agent, request("office", None)).await.unwrap();
+
+            let ids = session_ids(&agent).await;
+            assert_eq!(ids.len(), 1);
+            let (listen, auth, kind, credentials) = {
+                let sessions = agent.inner.sessions.lock().await;
+                let session = sessions.session(ids[0]).unwrap();
+                (
+                    session.local_addr(),
+                    session.local_auth(),
+                    session.kind(),
+                    session.credentials().is_some(),
+                )
+            };
+            assert_eq!(kind, SessionKind::Terminal);
+            assert_eq!(auth, LocalAuth::OS_USER);
+            assert!(!credentials);
+            assert_eq!(
+                lines,
+                [
+                    format!("session: {}", ids[0]),
+                    "gateway: office".to_owned(),
+                    format!("listen: {listen}"),
+                    "route: gateway".to_owned(),
+                    "auth: os_user".to_owned(),
+                    "shell: pwsh".to_owned(),
+                ]
+            );
+            let spawned = std::mem::take(&mut *launcher.spawned.lock().unwrap());
+            assert_eq!(spawned.len(), 1);
+            let spawn = &spawned[0];
+            assert_eq!(spawn.executable, Path::new("/opt/shells/pwsh"));
+            assert_eq!(spawn.args, [OsString::from("-NoLogo")]);
+            assert!(spawn.new_console);
+            assert_eq!(
+                spawn.current_dir.as_deref(),
+                Some(Path::new(r"C:\Users\ana"))
+            );
+            assert_eq!(spawn.title, "Gateinto: office");
+            let url = format!("http://{listen}");
+            assert_eq!(
+                spawn.environment,
+                pairs(&[
+                    ("USERPROFILE", r"C:\Users\ana"),
+                    ("Path", r"C:\Windows"),
+                    ("HTTPS_PROXY", &url),
+                    ("https_proxy", &url),
+                    ("HTTP_PROXY", &url),
+                    ("http_proxy", &url),
+                    ("ALL_PROXY", &url),
+                    ("all_proxy", &url),
+                    ("NO_PROXY", crate::terminal::NO_PROXY_HOSTS),
+                    ("no_proxy", crate::terminal::NO_PROXY_HOSTS),
+                ])
+            );
+            agent.close_all().await;
+        }
+
+        #[tokio::test]
+        async fn a_requested_mixed_route_is_answered_with_its_warning() {
+            let (agent, _, _) = agent(Terminals::default());
+            let lines = answer(&agent, request("office", Some(proxy::Route::Mixed)))
+                .await
+                .unwrap();
+            assert_eq!(lines[3], "route: mixed");
+            assert_eq!(lines.last().unwrap(), crate::link::MIXED_WARNING);
+            agent.close_all().await;
+        }
+
+        #[tokio::test]
+        async fn a_job_that_cannot_be_created_starts_nothing() {
+            let launcher = Terminals {
+                job: false,
+                ..Terminals::default()
+            };
+            let (agent, launcher, _) = agent(launcher);
+            let error = answer(&agent, request("office", None)).await.unwrap_err();
+            assert_eq!(
+                error,
+                "creating the job object for the terminal failed: refused; nothing was started"
+            );
+            assert!(session_ids(&agent).await.is_empty());
+            assert!(launcher.spawned.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_shell_that_cannot_join_the_job_or_start_closes_its_session() {
+            for (spawn, reason) in [
+                (Spawn::JobRefused, "putting the process in the job failed"),
+                (Spawn::Fails, "not found"),
+            ] {
+                let launcher = Terminals {
+                    spawn,
+                    ..Terminals::default()
+                };
+                let (agent, launcher, _) = agent(launcher);
+                let error = answer(&agent, request("office", None)).await.unwrap_err();
+                assert!(
+                    error.starts_with("starting /opt/shells/pwsh failed: "),
+                    "{error}"
+                );
+                assert!(error.contains(reason), "{error}");
+                assert_eq!(launcher.spawned.lock().unwrap().len(), 1);
+                assert!(session_ids(&agent).await.is_empty());
+                assert!(agent.inner.terminals.lock().await.is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn an_unknown_gateway_is_refused_without_a_confirmation() {
+            let (agent, launcher, _) = agent(Terminals::default());
+            let error = answer(&agent, request("newco", None)).await.unwrap_err();
+            assert_eq!(error, "unknown gateway \"newco\"");
+            assert!(agent.inner.launching.lock().await.is_none());
+            assert!(launcher.spawned.lock().unwrap().is_empty());
+            assert!(session_ids(&agent).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn terminals_share_the_launch_rate_limit() {
+            let limits = AgentLimits {
+                launches: 2,
+                ..AgentLimits::default()
+            };
+            let (agent, _, _) = agent_with(Terminals::default(), limits);
+            answer(&agent, request("office", None)).await.unwrap();
+            answer(&agent, request("office", None)).await.unwrap();
+            let launch = LaunchRequest::new("office", "session_credentials").unwrap();
+            let error = answer(&agent, Request::Launch(launch)).await.unwrap_err();
+            assert!(error.starts_with("too many launch requests"), "{error}");
+            agent.close_all().await;
+        }
+
+        #[tokio::test]
+        async fn terminal_capacity_is_counted_apart_from_browsers() {
+            let limits = AgentLimits {
+                max_terminal_sessions: 1,
+                max_browser_sessions: 1,
+                ..AgentLimits::default()
+            };
+            let (agent, _, _) = agent_with(Terminals::default(), limits);
+            answer(&agent, request("office", None)).await.unwrap();
+            let error = answer(&agent, request("office", None)).await.unwrap_err();
+            assert_eq!(
+                error,
+                "1 terminal sessions are already open; close one first"
+            );
+            assert_eq!(agent.check_capacity().await, Ok(()));
+            agent.close_all().await;
+        }
+
+        #[tokio::test]
+        async fn a_terminal_is_listed_with_its_shell_and_has_no_credentials() {
+            let (agent, _, _) = agent(Terminals::default());
+            answer(&agent, request("office", None)).await.unwrap();
+            let id = session_ids(&agent).await[0];
+
+            let listed = SessionInfo::parse_list(&agent.list().await).unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].kind, SessionKind::Terminal);
+            assert_eq!(listed[0].shell.as_deref(), Some("pwsh"));
+            assert_eq!(listed[0].browser, None);
+            assert_eq!(
+                answer(&agent, Request::Credentials(id)).await,
+                Err(format!("session {id} has no credentials"))
+            );
+            agent.close_all().await;
+        }
+
+        #[tokio::test]
+        async fn closing_a_terminal_stops_its_shell_and_closes_its_session() {
+            let (agent, _, _) = agent(Terminals::default());
+            answer(&agent, request("office", None)).await.unwrap();
+            let id = session_ids(&agent).await[0];
+
+            assert_eq!(answer(&agent, Request::Close(id)).await, Ok(Vec::new()));
+            assert!(session_ids(&agent).await.is_empty());
+            assert!(agent.inner.terminals.lock().await.is_empty());
+            assert_eq!(
+                answer(&agent, Request::Close(id)).await,
+                Err(format!("no session {id}"))
+            );
+        }
+
+        #[tokio::test]
+        async fn a_shell_that_exits_closes_its_session() {
+            let launcher = Terminals {
+                spawn: Spawn::Exits,
+                ..Terminals::default()
+            };
+            let (agent, _, _) = agent(launcher);
+            answer(&agent, request("office", None)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !session_ids(&agent).await.is_empty()
+                    || !agent.inner.terminals.lock().await.is_empty()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn stop_closes_browsers_and_terminals_and_counts_the_terminals() {
+            let (agent, _, _) = agent(Terminals::default());
+            answer(&agent, request("office", None)).await.unwrap();
+            answer(&agent, request("office", None)).await.unwrap();
+            agent
+                .start(Launch {
+                    route: proxy::Route::Gateway,
+                    profile: "office".parse().unwrap(),
+                    start_page: None,
+                    add: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(session_ids(&agent).await.len(), 3);
+
+            let lines = answer(&agent, Request::Stop).await.unwrap();
+            assert_eq!(
+                lines,
+                [ipc::agent_pid_line(), ipc::closed_terminals_line(2)]
+            );
+            assert_eq!(ipc::closed_terminals(&lines), Some(2));
+            assert!(session_ids(&agent).await.is_empty());
+            assert!(agent.inner.terminals.lock().await.is_empty());
+            assert!(agent.inner.browsers.lock().await.is_empty());
         }
     }
 }

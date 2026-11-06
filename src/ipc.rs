@@ -345,6 +345,7 @@ pub fn config_source(lines: &[String]) -> Option<ConfigSource> {
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
+pub const CLOSED_TERMINALS: &str = "terminals-closed: ";
 
 pub fn agent_pid_line() -> String {
     format!("{AGENT_PID}{}", std::process::id())
@@ -354,6 +355,16 @@ pub fn agent_pid(lines: &[String]) -> Option<u32> {
     lines
         .iter()
         .find_map(|line| line.strip_prefix(AGENT_PID)?.parse().ok())
+}
+
+pub fn closed_terminals_line(count: usize) -> String {
+    format!("{CLOSED_TERMINALS}{count}")
+}
+
+pub fn closed_terminals(lines: &[String]) -> Option<usize> {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(CLOSED_TERMINALS)?.parse().ok())
 }
 
 pub fn instance_from(env: impl Fn(&str) -> Option<OsString>) -> io::Result<Option<String>> {
@@ -1062,6 +1073,23 @@ mod tests {
 
     fn launch(profile: &str) -> Request {
         Request::Launch(LaunchRequest::new(profile, "session_credentials").unwrap())
+    }
+
+    #[test]
+    fn the_closed_terminal_count_is_read_from_its_line() {
+        assert_eq!(closed_terminals_line(3), "terminals-closed: 3");
+        assert_eq!(
+            closed_terminals(&[agent_pid_line(), closed_terminals_line(2)]),
+            Some(2)
+        );
+        for line in [
+            "terminals-closed: x",
+            "terminals-closed:2",
+            "terminals-closed: -1",
+        ] {
+            assert_eq!(closed_terminals(&[line.to_owned()]), None, "{line}");
+        }
+        assert_eq!(closed_terminals(&[agent_pid_line()]), None);
     }
 
     #[test]

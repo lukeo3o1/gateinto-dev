@@ -129,7 +129,12 @@ pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn system(_: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
+pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
+    #[cfg(test)]
+    if job.is_some() {
+        return Ok(tests::fake(Err(Denial::NotInJob)));
+    }
+    let _ = job;
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "os_user authentication is only available on Windows",
@@ -353,5 +358,13 @@ pub(crate) mod tests {
         let error = system(None).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("only available on Windows"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_test_job_stands_in_for_the_system_lookup_and_admits_nobody() {
+        let owners = system(Some(Arc::new(Job::fake()))).unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        assert!(matches!(owners.check(addr, addr), Err(Denial::NotInJob)));
     }
 }
