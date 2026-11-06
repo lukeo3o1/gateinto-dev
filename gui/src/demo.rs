@@ -216,9 +216,13 @@ pub fn answer(request: Request, now: u64) -> Response {
                 .map(|session| format!("listen: {}:{}", Ipv4Addr::LOCALHOST, session.port))
                 .collect(),
         ),
+        Request::Verification(id) => {
+            Response::Error(format!("session {id} has no pending verification"))
+        }
         Request::Launch(_)
         | Request::Terminal(_)
         | Request::Close(_)
+        | Request::Dismiss(..)
         | Request::Stop
         | Request::Config
         | Request::Approve(_)
