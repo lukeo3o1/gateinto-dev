@@ -19,6 +19,7 @@ pub enum Font {
     Pill,
     Mono,
     Lead,
+    Origin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub struct Spec {
 }
 
 impl Font {
-    pub const ALL: [Font; 13] = [
+    pub const ALL: [Font; 14] = [
         Font::Brand,
         Font::Item,
         Font::ItemSelected,
@@ -42,6 +43,7 @@ impl Font {
         Font::Pill,
         Font::Mono,
         Font::Lead,
+        Font::Origin,
     ];
 
     pub fn spec(self) -> Spec {
@@ -58,14 +60,14 @@ impl Font {
             Font::SmallStrong => (12, 600),
             Font::Pill => (11, 400),
             Font::Mono => (12, 400),
-            Font::Lead => (17, 600),
+            Font::Lead | Font::Origin => (17, 600),
         };
         Spec { size, weight }
     }
 
     pub fn families(self) -> &'static [&'static str] {
         match self {
-            Font::Mono => MONO_FAMILIES,
+            Font::Mono | Font::Origin => MONO_FAMILIES,
             _ => UI_FAMILIES,
         }
     }
@@ -158,12 +160,13 @@ mod tests {
         assert_eq!(Font::Pill.spec(), s(11, 400));
         assert_eq!(Font::Mono.spec(), s(12, 400));
         assert_eq!(Font::Lead.spec(), s(17, 600));
+        assert_eq!(Font::Origin.spec(), s(17, 600));
     }
 
     #[test]
-    fn only_mono_uses_the_monospaced_families() {
+    fn only_mono_and_origin_use_the_monospaced_families() {
         for font in Font::ALL {
-            let want = if font == Font::Mono {
+            let want = if matches!(font, Font::Mono | Font::Origin) {
                 MONO_FAMILIES
             } else {
                 UI_FAMILIES
