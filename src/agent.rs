@@ -921,6 +921,7 @@ fn home_dir(environment: &Variables) -> Option<PathBuf> {
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("USERPROFILE"))
         .map(|(_, value)| PathBuf::from(value))
+        .filter(|path| path.is_absolute())
 }
 
 async fn remove_profile(profile: &ProfileDir) {
@@ -1360,7 +1361,7 @@ mod tests {
             fn environment(&self) -> Variables {
                 pairs(&[
                     ("=C:", r"C:\work"),
-                    ("USERPROFILE", r"C:\Users\ana"),
+                    ("USERPROFILE", "/home/ana"),
                     ("https_proxy", "http://old.example:8080"),
                     ("Path", r"C:\Windows"),
                 ])
@@ -1527,16 +1528,13 @@ mod tests {
             assert_eq!(spawn.executable, Path::new("/opt/shells/pwsh"));
             assert_eq!(spawn.args, [OsString::from("-NoLogo")]);
             assert!(spawn.new_console);
-            assert_eq!(
-                spawn.current_dir.as_deref(),
-                Some(Path::new(r"C:\Users\ana"))
-            );
+            assert_eq!(spawn.current_dir.as_deref(), Some(Path::new("/home/ana")));
             assert_eq!(spawn.title, "Gateinto: office");
             let url = format!("http://{listen}");
             assert_eq!(
                 spawn.environment,
                 pairs(&[
-                    ("USERPROFILE", r"C:\Users\ana"),
+                    ("USERPROFILE", "/home/ana"),
                     ("Path", r"C:\Windows"),
                     ("HTTPS_PROXY", &url),
                     ("https_proxy", &url),
@@ -1739,6 +1737,22 @@ mod tests {
             assert_eq!(stopping.await.unwrap(), 1);
             assert!(session_ids(&agent).await.is_empty());
             assert!(agent.inner.terminals.lock().await.is_empty());
+        }
+
+        #[test]
+        fn the_home_directory_is_userprofile_in_any_case_when_absolute() {
+            let absolute = "/home/ana";
+            assert_eq!(
+                home_dir(&pairs(&[("Path", "x"), ("UserProfile", absolute)])),
+                Some(PathBuf::from(absolute))
+            );
+            assert_eq!(
+                home_dir(&pairs(&[("userprofile", absolute)])),
+                Some(PathBuf::from(absolute))
+            );
+            assert_eq!(home_dir(&pairs(&[("USERPROFILE", r"Users\ana")])), None);
+            assert_eq!(home_dir(&pairs(&[("USERPROFILE", "")])), None);
+            assert_eq!(home_dir(&pairs(&[("HOME", absolute)])), None);
         }
 
         #[tokio::test]
