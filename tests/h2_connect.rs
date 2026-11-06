@@ -138,6 +138,43 @@ async fn check_upstream_uses_http2_and_reports_alpn_and_status_without_body() {
 }
 
 #[tokio::test]
+async fn agent_and_check_upstream_send_the_user_agent_and_auth_version_over_http2() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    let upstream = config.upstream.clone();
+    let proxy = Proxy::bind(config).await.unwrap();
+    let agent = proxy.local_addr();
+    let running = tokio::spawn(proxy.run());
+    let (_, response) = send(
+        agent,
+        b"CONNECT echo.test:443 HTTP/1.1\r\nHost: echo.test:443\r\nUser-Agent: client\r\nX-Local: 1\r\n\r\n",
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    running.abort();
+    gateinto::check::check_upstream(gateinto::check::CheckOptions {
+        upstream,
+        tls_mode: gateinto::tls::TlsMode::default(),
+        client_certificate: None,
+        target: Some("echo.test:443".parse().unwrap()),
+        timeout: Duration::from_secs(2),
+        max_header_bytes: 16384,
+    })
+    .await
+    .unwrap();
+
+    let expected = vec![
+        (
+            "user-agent".to_owned(),
+            format!("Gateinto/{}", gateinto::VERSION),
+        ),
+        ("gateinto-auth-version".to_owned(), "1".to_owned()),
+    ];
+    assert_eq!(*server.fields.lock().unwrap(), [expected.clone(), expected]);
+}
+
+#[tokio::test]
 async fn statuses_resets_and_opening_timeouts_do_not_break_other_streams() {
     let ca = TestCa::new();
     let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;

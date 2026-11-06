@@ -212,11 +212,38 @@ fn parse_field(line: &[u8]) -> Result<Field<'_>, ParseError> {
     })
 }
 
-pub(crate) fn is_token(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
-        && bytes
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+pub(crate) const fn is_token(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if !matches!(
+            bytes[i],
+            b'0'..=b'9'
+                | b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'!'
+                | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        ) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 fn is_field_byte(byte: u8) -> bool {

@@ -201,12 +201,7 @@ pub(crate) fn request(
     liveness: &Liveness,
     target: &Authority,
 ) -> Result<Pending, UpstreamError> {
-    let request = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .version(http::Version::HTTP_2)
-        .uri(target.to_string())
-        .body(())
-        .expect("a validated CONNECT authority is a valid URI");
+    let request = connect_request(target);
     let tracked = Tracked::new(&liveness.0);
     let (response, send) = sender
         .send_request(request, false)
@@ -216,6 +211,17 @@ pub(crate) fn request(
         send: Some(send),
         tracked,
     })
+}
+
+fn connect_request(target: &Authority) -> http::Request<()> {
+    http::Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(target.to_string())
+        .header(http::header::USER_AGENT, super::user_agent())
+        .header("gateinto-auth-version", super::AUTH_VERSION)
+        .body(())
+        .expect("a validated CONNECT authority and token header values form a valid request")
 }
 
 impl Pending {
@@ -341,6 +347,32 @@ pub(crate) async fn ready(sender: &mut h2::client::SendRequest<Bytes>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_request_has_the_authority_and_lowercase_gateinto_fields_only() {
+        let target: Authority = "[::1]:443".parse().unwrap();
+
+        let request = connect_request(&target);
+
+        assert_eq!(request.method(), http::Method::CONNECT);
+        assert_eq!(request.version(), http::Version::HTTP_2);
+        assert_eq!(request.uri(), "[::1]:443");
+        let fields: Vec<_> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (
+                    "user-agent",
+                    format!("Gateinto/{}", crate::VERSION).as_str()
+                ),
+                ("gateinto-auth-version", "1"),
+            ]
+        );
+    }
 
     #[test]
     fn connection_window_covers_every_stream_window_up_to_the_protocol_maximum() {

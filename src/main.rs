@@ -45,13 +45,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
-const VERSION: &str = match option_env!("GATEINTO_BUILD_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
-
 #[derive(Parser)]
-#[command(version = VERSION, about)]
+#[command(version = gateinto::VERSION, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

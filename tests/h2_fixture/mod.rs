@@ -18,12 +18,15 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, Sleep};
 use tokio_rustls::TlsAcceptor;
 
+pub type Fields = Vec<(String, String)>;
+
 pub struct Server {
     pub addr: SocketAddr,
     pub accepted: Arc<AtomicUsize>,
     pub active: Arc<AtomicUsize>,
     pub sent_bytes: Arc<AtomicUsize>,
     pub requests: Arc<Mutex<Vec<(usize, String)>>>,
+    pub fields: Arc<Mutex<Vec<Fields>>>,
     pub certificates: Arc<Mutex<Vec<Vec<rustls::pki_types::CertificateDer<'static>>>>>,
     pub blackhole_first_connection: Arc<AtomicBool>,
     pub pings: Arc<AtomicUsize>,
@@ -209,6 +212,7 @@ impl Server {
         let active = Arc::new(AtomicUsize::new(0));
         let sent_bytes = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let fields = Arc::new(Mutex::new(Vec::new()));
         let certificates = Arc::new(Mutex::new(Vec::new()));
         let blackhole_first_connection = Arc::new(AtomicBool::new(false));
         let pings = Arc::new(AtomicUsize::new(0));
@@ -218,6 +222,7 @@ impl Server {
             let accepted = accepted.clone();
             let active = active.clone();
             let requests = requests.clone();
+            let fields = fields.clone();
             let certificates = certificates.clone();
             let sent_bytes = sent_bytes.clone();
             let pings = pings.clone();
@@ -245,6 +250,7 @@ impl Server {
                         acceptor.clone()
                     };
                     let requests = requests.clone();
+                    let fields = fields.clone();
                     let certificates = certificates.clone();
                     let sent_bytes = sent_bytes.clone();
                     let frames = Frames::new(pings.clone(), ping_delay.clone());
@@ -302,6 +308,15 @@ impl Server {
                             assert!(request.uri().path_and_query().is_none());
                             let target = request.uri().authority().unwrap().to_string();
                             requests.lock().unwrap().push((id, target.clone()));
+                            fields.lock().unwrap().push(
+                                request
+                                    .headers()
+                                    .iter()
+                                    .map(|(name, value)| {
+                                        (name.to_string(), value.to_str().unwrap().to_owned())
+                                    })
+                                    .collect(),
+                            );
                             if target.starts_with("drop.") {
                                 break;
                             }
@@ -326,6 +341,7 @@ impl Server {
             active,
             sent_bytes,
             requests,
+            fields,
             certificates,
             blackhole_first_connection,
             pings,

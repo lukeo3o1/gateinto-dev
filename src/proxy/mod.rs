@@ -228,14 +228,27 @@ pub(crate) async fn request_tunnel<T>(
     max_header_bytes: usize,
     parse: fn(&[u8], usize) -> ParseResult<T>,
 ) -> Result<(T, Vec<u8>), UpstreamError> {
-    let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
-    tls.write_all(request.as_bytes())
+    tls.write_all(connect_request(target).as_bytes())
         .await
         .map_err(UpstreamError::Request)?;
     tls.flush().await.map_err(UpstreamError::Request)?;
     read_head(tls, max_header_bytes, parse)
         .await
         .map_err(UpstreamError::Head)
+}
+
+fn connect_request(target: &Authority) -> String {
+    format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: {}\r\n\
+         Gateinto-Auth-Version: {AUTH_VERSION}\r\n\r\n",
+        user_agent()
+    )
+}
+
+const AUTH_VERSION: &str = "1";
+
+fn user_agent() -> String {
+    format!("Gateinto/{}", crate::VERSION)
 }
 
 struct Shared {
@@ -679,6 +692,20 @@ mod tests {
     use super::os_user::tests::{Fake, fake, slow};
     use super::os_user::{Denial, Owners};
     use super::*;
+
+    #[test]
+    fn connect_request_sends_the_user_agent_and_auth_version_after_the_host() {
+        let target: Authority = "example.com:443".parse().unwrap();
+
+        assert_eq!(
+            connect_request(&target),
+            format!(
+                "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                 User-Agent: Gateinto/{}\r\nGateinto-Auth-Version: 1\r\n\r\n",
+                crate::VERSION
+            )
+        );
+    }
 
     async fn closed_port() -> SocketAddr {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
