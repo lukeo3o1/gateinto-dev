@@ -235,6 +235,7 @@ mod tests {
             started: 0,
             tunnels: 0,
             browser: None,
+            shell: None,
         }
     }
 

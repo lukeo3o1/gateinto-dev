@@ -84,6 +84,7 @@ mod tests {
             started: 1_000,
             tunnels: 0,
             browser: None,
+            shell: None,
         }
     }
 

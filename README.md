@@ -96,12 +96,12 @@ be uninstalled before a release MSI is installed.
 | --- | --- |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
 | `gateinto session browser` | Run one browser session with `session_credentials` local proxy authentication on an ephemeral loopback port and show its credentials. |
-| `gateinto session terminal` | Windows only, pre-release: start a shell in this console whose proxy variables point to a new session that accepts only the shell and the processes it starts (`os_user` with a job object, no credentials), and close the session when the shell exits. |
-| `gateinto agent` | Run the per-user agent: the endpoint that starts browser sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
+| `gateinto session terminal` | Windows only, pre-release: start a shell in this console whose proxy variables point to a new session that accepts only the shell and the processes it starts (`os_user` with a job object, no credentials), and close the session when the shell exits. With `--agent` and a gateway of the config file, the running agent opens the shell in a new console window instead, lists the session in `session list` and closes it with `session close` or `stop`. |
+| `gateinto agent` | Run the per-user agent: the endpoint that starts browser sessions and, on Windows, terminal sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
-| `gateinto session list`, `gateinto session close <id>` | List the agent's sessions, or close one (its browser is stopped, its profile deleted and its credentials revoked). |
+| `gateinto session list`, `gateinto session close <id>` | List the agent's sessions with their browser or shell, or close one (its browser is stopped, its profile deleted and its credentials revoked; a terminal's job is killed with its shell). |
 | `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
-| `gateinto stop` | Close all of the agent's sessions and stop it. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
+| `gateinto stop` | Close all of the agent's sessions and stop it, saying how many terminal sessions it closed. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their default route and their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
@@ -355,6 +355,20 @@ share only the device key.
   exits with the shell's exit code. Like `session browser`, the session is
   not shown by `gateinto session list`. On other platforms the command
   fails.
+- `gateinto session terminal --agent --gateway <name>` (Windows only,
+  pre-release, not yet verified on real Windows) asks the running agent for
+  the same kind of session; it never starts an agent. The gateway must be in
+  the agent's configuration file, not one approved from a link, and only
+  `--route` may be given with it; the shell is `[terminal] shell` and `args`
+  of that file, else `%ComSpec%`. The agent opens the shell in a new console
+  window titled `Gateinto: <gateway>`, in `%USERPROFILE%` (the request is
+  refused if the agent has no absolute `USERPROFILE`), with its own
+  start-time environment and the proxy variables replaced, and prints
+  `session`, `gateway`, `listen`, `route`, `auth` and `shell`. The session
+  is listed by `gateinto session list`; it ends when the shell exits, and
+  `gateinto session close <id>` and `gateinto stop` kill its job, ending the
+  shell and everything started from it. At most 4 terminal sessions are
+  open at a time, and terminal requests share the launch rate limit.
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or

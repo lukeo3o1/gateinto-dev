@@ -1,6 +1,7 @@
 # Design: terminal sessions
 
-Status: design decided, not implemented; the decisions are listed in
+Status: design decided; the in-process and agent-hosted variants are
+implemented, the GUI entry is not. The decisions are listed in
 [Decisions](#decisions). None of the behaviour it expects from shells,
 terminals or tools has been tried on a real Windows or Linux system; what
 must be checked first is under [Needs verification](#needs-verification).
@@ -21,7 +22,7 @@ The first version has two entry points on Windows:
 
 - **In-process:** `gateinto session terminal` runs the session in the CLI
   process and the shell in the console it was run from.
-- **Agent-hosted:** `gateinto session terminal --agent` *(proposed flag)* or
+- **Agent-hosted:** `gateinto session terminal --agent` or
   the GUI's "Open terminal" button asks the running agent over IPC; the agent
   opens the shell in a new console window, lists the session in
   `gateinto session list`, and closes it on `gateinto session close` or
@@ -150,7 +151,7 @@ is CLI-only (in-process), without an agent-hosted variant. See
 
 | | In-process | Agent-hosted |
 | --- | --- | --- |
-| Started by | `gateinto session terminal` | `gateinto session terminal --agent` *(proposed)*, GUI button |
+| Started by | `gateinto session terminal` | `gateinto session terminal --agent`, GUI button |
 | Session lives in | the CLI process | the agent |
 | Console | the CLI's | a new one (`CREATE_NEW_CONSOLE`) |
 | Shell | `--shell` > `[terminal] shell` > default | `[terminal] shell` > default |
@@ -159,11 +160,11 @@ is CLI-only (in-process), without an agent-hosted variant. See
 | Ends when | the shell exits or the CLI ends | the shell exits, the session is closed, or the agent ends |
 
 Both use the same job settings, local authentication, environment, routes and
-plain-HTTP behaviour. Shared code lives in a `terminal` module *(proposed)*
+plain-HTTP behaviour. Shared code lives in a `terminal` module
 with pure helpers (`terminal_environment`, `resolve_shell`, `terminal_route`)
 and one spawn function used by both variants.
 
-`SessionKind::Terminal => "terminal"` *(proposed)* is added to `ipc-types`;
+`SessionKind::Terminal => "terminal"` is added to `ipc-types`;
 older clients already read it as `Unknown`.
 
 ### In-process variant
@@ -234,7 +235,7 @@ gateinto session terminal --agent --gateway NAME [--route saved|gateway|mixed]
   found empty or the 5-second wait has ended) and the session has been closed.
   With `--agent` the exit code is Gateinto's own, as for other agent requests.
 
-New code *(proposed)*: `SessionCommand::Terminal(TerminalSessionArgs)` in
+New code: `SessionCommand::Terminal(TerminalSessionArgs)` in
 `src/main.rs`.
 
 ### Shell selection
@@ -248,7 +249,7 @@ shell = "pwsh.exe"
 args = ["-NoLogo"]
 ```
 
-*(proposed)* `TerminalSection { shell: Option<PathBuf>, args: Vec<String> }`
+`TerminalSection { shell: Option<PathBuf>, args: Vec<String> }`
 in `src/config.rs`, `deny_unknown_fields` like the other sections. `args` are
 passed like `ARGS` and are used only together with `shell`; both keys ship
 in the first version. The platform default is `%ComSpec%` on Windows; for the
@@ -311,8 +312,8 @@ argument or environment field.**
 terminal <gateway> route=<saved|gateway|mixed>
 ```
 
-*(proposed `Request::Terminal(TerminalRequest { gateway: GatewayName, route:
-Option<Route> })`, `None` meaning `saved`)*
+(`Request::Terminal(TerminalRequest { gateway: GatewayName, route:
+Option<Route> })`, `None` meaning `saved`)
 
 - `<gateway>` is required and must parse as a `GatewayName`; it names a gateway
   in the agent's configuration file. Gateways approved from links are refused
@@ -330,10 +331,10 @@ Option<Route> })`, `None` meaning `saved`)*
   `warned` lines (`Known::error_lines`) as for `launch`, and the mixed-route
   warning when the route is `mixed`. No credential lines.
 - An older agent answers `invalid request`; the CLI and GUI show "the agent is
-  too old for terminal sessions; restart it" *(proposed text)*.
+  too old for terminal sessions; restart it".
 - On platforms without terminal sessions the agent answers an error saying so,
   after the rate limit and before resolving the gateway.
-- `SessionInfo` gains `shell: Option<String>` *(proposed)*, the shell's file
+- `SessionInfo` gains `shell: Option<String>`, the shell's file
   name (for example `pwsh.exe`), serialized only when present. `session list`
   and `session_table` (`src/session_table.rs`) show `kind: terminal`;
   `session credentials <id>` answers "session <id> has no credentials", the
@@ -341,15 +342,15 @@ Option<Route> })`, `None` meaning `saved`)*
 
 ### Agent-hosted variant
 
-`Agent::handle` maps `Request::Terminal` to `Agent::terminal` *(proposed)*:
+`Agent::handle` maps `Request::Terminal` to `Agent::terminal`:
 
 1. Take a slot from the shared `LaunchLimiter` (browser and terminal
    requests share one budget, so a local process cannot open windows faster
    than browsers). Then ask the launcher whether terminals are supported
-   *(proposed `Launcher::terminals() -> bool`; `System` answers
-   `cfg!(windows)`, test launchers answer what the test needs)* and answer
+   (`Launcher::terminals() -> bool`; `System` answers `cfg!(windows)`, test
+   launchers answer what the test needs) and answer
    the unsupported error if not. Then check a separate capacity,
-   `AgentLimits::max_terminal_sessions` *(proposed, default 4)*, against the
+   `AgentLimits::max_terminal_sessions` (default 4), against the
    number of terminals.
 2. Resolve the gateway, the route ([Routes](#routes)) and the shell
    ([Shell selection](#shell-selection)). Only configuration-file gateways
@@ -367,7 +368,9 @@ Option<Route> })`, `None` meaning `saved`)*
    ([Environment](#environment)) and spawn the shell in the job through
    `spawn_blocking`, with `CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT`,
    current directory `%USERPROFILE%` (the agent's own current directory is
-   wherever it was started from), and a window title `Gateinto: <gateway>`
+   wherever it was started from; if the agent's environment has no absolute
+   `USERPROFILE`, the request is refused before the job and the session are
+   created, never started in the agent's directory), and a window title `Gateinto: <gateway>`
    in `STARTUPINFOW::lpTitle` (the shell may change it). Not
    `CREATE_NEW_PROCESS_GROUP`. Ctrl-C in the new console needs more; see
    [Ctrl-C in the agent-hosted console](#ctrl-c-in-the-agent-hosted-console).
@@ -375,11 +378,10 @@ Option<Route> })`, `None` meaning `saved`)*
    answer an error.
 6. Register the terminal and spawn its watch task, then answer.
 
-Bookkeeping *(proposed)*: `Inner::browsers` becomes a map of children with a
-kind (`Browser { name, profile }` or `Terminal { shell }`), or a second map
-`Inner::terminals` with the same close sender and task. `check_capacity`
-counts each kind separately; `list` joins the browser name or the shell name;
-`close` and `close_all` handle both kinds the same way.
+Bookkeeping: a second map, `Inner::terminals`, holds each terminal's shell
+name, close sender and task next to `Inner::browsers`. Each kind has its
+own capacity check; `list` joins the browser name or the shell name; `close`
+and `close_all` handle both kinds the same way.
 
 Watch task: like `watch`, without a profile directory. It selects on the
 shell's exit and the close signal. On exit it terminates the job (ending
@@ -398,7 +400,10 @@ Lifetime:
   including unsaved work in editors.
 - **`gateinto stop`**: `Request::Stop` runs `close_all`, which closes
   terminals like browsers. `gateinto stop` and the GUI's Stop button say how
-  many terminal sessions are closed *(proposed)*. The GUI asks for
+  many terminal sessions are closed: the agent's stop answer has a
+  `terminals-closed: <n>` line, which `gateinto stop` prints as "closed <n>
+  terminal sessions" when it is not 0; the GUI's count is not implemented
+  yet. The GUI asks for
   confirmation first while terminals are open ([GUI](#gui)); `gateinto stop`
   and `gateinto session close` do not ask.
 - **Agent ends** (killed, crash, logoff): the job handles close with the
@@ -568,8 +573,8 @@ The URI parser already refuses unknown fields; tests pin that `kind`,
 ### Environment
 
 The shell's environment is the starting process's environment (the CLI's or
-the agent's) with these changes *(proposed `terminal_environment(inherited,
-listen) -> (vars, replaced)`)*:
+the agent's) with these changes (`terminal_environment(inherited,
+listen) -> (vars, replaced)`):
 
 | Name | Value |
 | --- | --- |
@@ -618,10 +623,10 @@ listen) -> (vars, replaced)`)*:
   to the new process.
 
 On Windows `Job::spawn` needs an environment, console flags and a current
-directory *(proposed `Job::spawn_with(executable, args, SpawnOptions {
-environment, new_console, current_dir, title })`)*, passing
+directory (`Job::spawn_with(executable, args, SpawnOptions {
+environment, new_console, current_dir, title })`), passing
 `CREATE_UNICODE_ENVIRONMENT` and a block built by a pure, cross-platform
-`environment_block` *(proposed)*:
+`environment_block`:
 
 - `NAME=value\0` each, terminated by an extra NUL.
 - Sorted by name with an ordinal, case-insensitive comparison that folds to
@@ -670,8 +675,9 @@ On Linux the list is passed to `execve` as is; no sorting or hidden entries.
   `ctrl_logoff` and `ctrl_shutdown` remain shutdown events and end the
   session. The implementation creates all five listeners before it creates
   the job and starts the session, so Ctrl-C and Ctrl-Break are ignored by
-  Gateinto from then until the shell has exited and the command exits. Gateinto must not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose
-  ignore flag the shell would inherit, and must not start the shell with
+  Gateinto from then until the shell has exited and the command exits.
+  Gateinto must not call `SetConsoleCtrlHandler(NULL, TRUE)`, whose ignore
+  flag the shell would inherit, and must not start the shell with
   `CREATE_NEW_PROCESS_GROUP`, which disables Ctrl-C in the new process.
 - **Shell exits.** Gateinto terminates the job, which also ends background
   processes the shell left (build daemons, `start /b` jobs), waits up to 5
@@ -1025,18 +1031,22 @@ TDD order: each item starts as a failing test.
   row.
 - `Denial::NotInJob` text no longer mentions a browser.
 
-**Agent tests (all platforms, fake `Launcher` as in the existing
-`JobFailsOnce` test in `src/agent.rs`).** They run everywhere because the
-platform check goes through the proposed `Launcher::terminals()` seam, not
-`cfg!`; the fake answers `true` unless a test says otherwise:
+**Agent tests (Unix only, in the `#[cfg(unix)]` `terminal_sessions` module of
+`src/agent.rs`, fake `Launcher` as in the existing `JobFailsOnce` test).** The
+Windows build compiles the agent code but does not run these tests. They do not
+depend on the host platform's support for terminals because the platform check
+goes through the `Launcher::terminals()` seam, not `cfg!`; the fake answers
+`true` unless a test says otherwise:
 
 - a launcher answering `false` makes the agent answer the unsupported error
   after the rate limit and before any gateway lookup (the fake `Profiles`
   records no call);
-- `System::terminals()` is `cfg!(windows)` (one assertion per platform);
+- `System::terminals()` is `cfg!(windows)`, asserted on Unix only, where it is
+  `false`;
 - a `terminal` request starts a session of kind `terminal` with
   `LocalAuth::OS_USER` and the job, and the launcher sees the resolved shell,
-  `new_console`, `%USERPROFILE%` and the environment;
+  `new_console`, `%USERPROFILE%` and the environment; a missing or relative
+  `USERPROFILE` refuses the request and starts nothing;
 - a job that cannot be created, or `SpawnError::Job`, closes the session,
   answers an error and leaves no session, with no retry;
 - the launch rate limit is shared with `launch`, and `max_terminal_sessions`
@@ -1175,7 +1185,8 @@ marked as such.
 9. **Agent-hosted environment** is the agent's start-time environment;
    `CreateEnvironmentBlock` is not used.
 10. **Agent-hosted current directory** is `%USERPROFILE%`; there is no
-    `[terminal] directory` key.
+    `[terminal] directory` key, and without an absolute `USERPROFILE` the
+    request is refused.
 11. **Limits:** `max_terminal_sessions` = 4, counted separately from
     browsers, and the launch rate limit is shared by `launch` and
     `terminal`.

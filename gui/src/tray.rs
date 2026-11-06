@@ -404,6 +404,7 @@ mod tests {
             started: 0,
             tunnels,
             browser: None,
+            shell: None,
         }
     }
 

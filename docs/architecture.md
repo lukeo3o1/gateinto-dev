@@ -133,8 +133,10 @@ The session's TLS configuration, resolver and self-signed certificates are
 dropped with it; no other session holds them, so no later `CONNECT` can use
 that certificate. Other sessions are not affected.
 
-Kind: `SessionKind::Browser` is a session for one browser; it is the only
-kind. There is no shared session for background programs. `gateinto session
+Kind: `SessionKind::Browser` is a session for one browser and
+`SessionKind::Terminal` one for a shell and the processes it starts (see
+[Terminal sessions in the agent](#terminal-sessions-in-the-agent)). There is
+no shared session for background programs. `gateinto session
 browser` starts one on `127.0.0.1:0` with `SessionCredentials`, prints its
 port and realm, shows the credentials (see below) and runs until Ctrl+C (or
 SIGTERM on Unix), then closes it with `SessionManager::close_all` and exits.
@@ -309,6 +311,11 @@ The full protocol, limits and guarantees are in
   `127.0.0.1:0` and `SessionCredentials` whatever the profile says, and
   answers a launch with the session's credentials, which `gateinto open`
   shows.
+- The agent also answers `terminal <gateway> route=<saved|gateway|mixed>`;
+  see [Terminal sessions in the agent](#terminal-sessions-in-the-agent).
+  `stop` answers the agent's process ID and a `terminals-closed: <n>` line,
+  which `gateinto stop` prints as "closed <n> terminal sessions" when it is
+  not 0.
 - A browser's watch task waits for the browser process to exit or for a
   close request (`close <id>`, `stop`, Ctrl+C), kills the browser in the
   second case, closes the session, deletes the profile directory (retrying
@@ -459,11 +466,57 @@ The full protocol, limits and guarantees are in
   name, falling back to the identifier. This is unit-tested but not yet
   verified on Windows.
 
+### Terminal sessions in the agent
+
+```text
+ gateinto session terminal --agent --gateway <name> [--route ..]
+        |  "terminal <name> route=<saved|gateway|mixed>\n"
+        |  (no agent: fail, never start one)
+        v
+ gateinto agent ---- agent::Agent::terminal
+        |  rate limit (shared with launch), Launcher::terminals(),
+        |  at most AgentLimits::max_terminal_sessions (4) terminals
+        |  Profiles::terminal_session: config-file gateways only, route, shell
+        |  absolute %USERPROFILE% in the agent environment (else refuse)
+        |-- Job::new (no job: answer an error, start nothing)
+        |-- SessionManager::start(Terminal, 127.0.0.1:0, os_user with the job)
+        |-- Job::spawn_with(shell, CREATE_NEW_CONSOLE, %USERPROFILE%,
+        |                   "Gateinto: <name>", agent environment + proxy vars)
+        '-- watch task: shell exit (terminate the job) or close request (kill)
+               -> SessionManager::close
+```
+
+- The request has only a gateway name and a route; a link cannot produce
+  it. The answer has `session`, `gateway`, `listen`, `route`,
+  `auth: os_user` and `shell` (the shell's file name) lines, the gateway
+  warnings and, for `mixed`, the mixed-route warning, never credentials.
+  An agent that does not know the request answers `invalid request`, which
+  the CLI shows as "the agent is too old for terminal sessions; restart it".
+- `ConfigProfiles::terminal_session` (`main.rs`) refuses a gateway that is
+  not in the configuration file, even one the agent knows from a link, and
+  takes the shell from `[terminal] shell` and `args`, else `%ComSpec%`.
+- The environment is the agent's own start-time environment without the
+  hidden `=<drive>:` entries, with the proxy variables replaced by
+  `terminal::terminal_environment`. The spawn runs on the blocking thread
+  pool; if it fails, the session is closed and the request answers an
+  error.
+- `session list` shows the shell in the `PROGRAM` column (`SessionInfo`
+  `shell`); `session close` and `stop` kill the job. While a shell is
+  starting, `session list`, `stop` and `session close` of any session that
+  is not a browser wait until it is registered, so they see it. The `Launcher` trait
+  is the test seam: `System` answers `terminals()` with `cfg!(windows)` and
+  creates real jobs, the tests use fake jobs and record the spawns.
+- On Windows the agent calls `SetConsoleCtrlHandler(NULL, FALSE)` once at
+  start, so that its children do not inherit an "ignore Ctrl-C" attribute
+  from the detached agent's new process group; a failure is logged as a
+  warning. Whether this restores Ctrl-C in the terminal windows has not been
+  verified.
+
 ## Modules
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process, the agent's `Profiles` from the configuration file, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`), the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
@@ -471,7 +524,7 @@ The full protocol, limits and guarantees are in
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/logbook.rs` | The agent's in-memory logbook: a `tracing` layer that keeps the last 500 events at `info` and above, each message cut to 1000 characters and scoped to its session or module, and the page of events after a sequence number for the IPC `log` request. Never written to disk. |
-| `src/agent.rs` | The agent: launch validation, rate limit and session cap, browser sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
+| `src/agent.rs` | The agent: launch validation, rate limit and session caps, browser and terminal sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
 | `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |

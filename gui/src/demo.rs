@@ -162,6 +162,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             started: now - s.age,
             tunnels: s.tunnels,
             browser: s.browser,
+            shell: None,
         })
         .collect()
 }
@@ -198,6 +199,7 @@ pub fn answer(request: Request, now: u64) -> Response {
                 .collect(),
         ),
         Request::Launch(_)
+        | Request::Terminal(_)
         | Request::Close(_)
         | Request::Stop
         | Request::Config
@@ -371,6 +373,10 @@ mod tests {
         let token = || "0123456789abcdef0123456789abcdef".parse().unwrap();
         for request in [
             Request::Launch(launch),
+            Request::Terminal(gateinto::ipc::TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: None,
+            }),
             Request::Close(SessionId::from(3)),
             Request::Stop,
             Request::Approve(token()),

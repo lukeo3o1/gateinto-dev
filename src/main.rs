@@ -6,7 +6,9 @@ use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
+use gateinto::agent::{
+    Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles, TerminalSessionPlan,
+};
 use gateinto::browser;
 use gateinto::check::{self, CheckOptions};
 use gateinto::config::{self, ConfigFile, DeviceKeySettings, GatewayName, Overrides, Settings};
@@ -20,6 +22,7 @@ use gateinto::identity::device_key::{
 };
 use gateinto::ipc::{
     self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
+    TerminalRequest,
 };
 use gateinto::lifecycle::{self, Purge};
 use gateinto::link::store::{self, ForgetError, Forgotten, LinkedStore, Loaded, StoreError};
@@ -152,10 +155,11 @@ enum SessionCommand {
     Browser(BrowserSessionArgs),
     /// Start a shell in this console whose proxy variables point to a new session on an
     /// ephemeral loopback port, accepting only the shell and its child processes, and close the
-    /// session when the shell exits; Windows only
+    /// session when the shell exits; with --agent the running agent starts it in a new console
+    /// window instead; Windows only
     Terminal(TerminalSessionArgs),
     /// List the sessions of the running agent as a table: id, kind, gateway, listen address,
-    /// route, local auth, open tunnels, uptime and browser; never credentials
+    /// route, local auth, open tunnels, uptime, and browser or shell; never credentials
     List {
         /// Print one JSON object per session and line instead, with the gateway's upstream
         /// address and the start time in Unix seconds
@@ -168,7 +172,8 @@ enum SessionCommand {
         /// Session id as shown by `gateinto session list`
         id: SessionId,
     },
-    /// Close a session of the running agent, stopping its browser and deleting its profile
+    /// Close a session of the running agent, stopping its browser and deleting its profile, or
+    /// ending its shell and every process started from it
     Close {
         /// Session id as shown by `gateinto session list`
         id: SessionId,
@@ -223,6 +228,19 @@ struct BrowserSessionArgs {
 struct TerminalSessionArgs {
     #[command(flatten)]
     upstream: UpstreamArgs,
+
+    /// Ask the running agent to start the shell in a new console window and return; takes only
+    /// --gateway and --route, and never starts an agent
+    #[arg(
+        long,
+        requires = "gateway",
+        conflicts_with_all = [
+            "shell", "args", "config", "upstream_host", "upstream_port", "upstream_server_name",
+            "ca_file", "tls_mode", "client_certificate", "client_cert_file",
+            "self_signed_client_cert", "key_name",
+        ],
+    )]
+    agent: bool,
 
     /// Gateway from --config to relay through [default: the only gateway]
     #[arg(long)]
@@ -752,13 +770,46 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
     result
 }
 
+fn terminal_request(args: &TerminalSessionArgs) -> Option<Request> {
+    let gateway = args.gateway.clone().filter(|_| args.agent)?;
+    Some(Request::Terminal(TerminalRequest {
+        gateway,
+        route: args.route.requested(),
+    }))
+}
+
+fn agent_terminal_answer(response: Response) -> Result<Vec<String>, String> {
+    match response {
+        Response::Ok(lines) => Ok(lines),
+        Response::Error(error) if error == ipc::INVALID_REQUEST => {
+            Err("the agent is too old for terminal sessions; restart it".to_owned())
+        }
+        Response::Error(error) => Err(error),
+    }
+}
+
+async fn agent_terminal(request: Request) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    for line in agent_terminal_answer(ipc::send(&endpoint, &request).await?)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+async fn terminal_session(args: TerminalSessionArgs) -> Result {
+    match terminal_request(&args) {
+        Some(request) => agent_terminal(request).await,
+        None => console_terminal(args).await,
+    }
+}
+
 #[cfg(not(windows))]
-async fn terminal_session(_args: TerminalSessionArgs) -> Result {
+async fn console_terminal(_args: TerminalSessionArgs) -> Result {
     Err("terminal sessions are not supported on this platform".into())
 }
 
 #[cfg(windows)]
-async fn terminal_session(args: TerminalSessionArgs) -> Result {
+async fn console_terminal(args: TerminalSessionArgs) -> Result {
     use gateinto::job::Job;
     use gateinto::terminal::{self, System};
 
@@ -828,6 +879,7 @@ async fn run_terminal(
         &shell.args,
         SpawnOptions {
             environment: Some(&environment),
+            ..SpawnOptions::default()
         },
     )?;
     let supervised = terminal::supervise(events, process.wait()).await;
@@ -953,6 +1005,30 @@ impl Profiles for ConfigProfiles {
             proxy: proxy_config(&settings).map_err(|error| error.to_string())?,
         })
     }
+
+    fn terminal_session(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String> {
+        if !self.file.gateways.iter().any(|(name, _)| name == gateway) {
+            return Err(format!(
+                "the gateway \"{gateway}\" is not in the config file; terminal sessions use only \
+                 gateways of the config file, not gateways added from links"
+            ));
+        }
+        let overrides = Overrides {
+            gateway: Some(gateway.clone()),
+            ..Overrides::default()
+        };
+        let settings = self
+            .file
+            .settings(&overrides)
+            .map_err(|error| error.to_string())?;
+        let shell = gateinto::terminal::configured_shell(&self.file, &gateinto::terminal::System)
+            .map_err(|error| error.to_string())?;
+        Ok(TerminalSessionPlan {
+            proxy: proxy_config(&settings).map_err(|error| error.to_string())?,
+            route: settings.gateway.route,
+            shell,
+        })
+    }
 }
 
 fn agent_config(path: Option<PathBuf>) -> std::io::Result<ConfigSource> {
@@ -972,6 +1048,8 @@ async fn agent(args: ConfigArg) -> Result {
     let logbook = Logbook::default();
     init_logging_into("info", Some(&logbook));
     args.log_default();
+    #[cfg(windows)]
+    restore_ctrl_c_for_children();
     let endpoint = Endpoint::for_current_user()?;
     let server = Server::bind(&endpoint)?;
     let profiles_root = browser::profiles_root()
@@ -1092,6 +1170,21 @@ fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
         stop_inheriting_standard_handles();
     }
     Ok(command.spawn()?)
+}
+
+#[cfg(windows)]
+fn restore_ctrl_c_for_children() {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    // SAFETY: a null handler routine is allowed; FALSE clears the inherited attribute that
+    // makes this process and its children ignore Ctrl-C.
+    if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
+        tracing::warn!(
+            "restoring Ctrl-C handling for terminal windows failed: {}; Ctrl-C may not work in \
+             shells the agent starts",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -1261,6 +1354,14 @@ async fn agent_request(request: Request) -> Result {
 
 const AGENT_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 
+fn closed_terminals_message(lines: &[String]) -> Option<String> {
+    match ipc::closed_terminals(lines)? {
+        0 => None,
+        1 => Some("closed 1 terminal session".to_owned()),
+        count => Some(format!("closed {count} terminal sessions")),
+    }
+}
+
 async fn stop_and_wait() -> Result<Result<u32, RequestError>, String> {
     let endpoint = Endpoint::for_current_user().map_err(|error| error.to_string())?;
     let lines = match ipc::send(&endpoint, &Request::Stop).await {
@@ -1270,6 +1371,9 @@ async fn stop_and_wait() -> Result<Result<u32, RequestError>, String> {
         Err(error) => return Err(error.to_string()),
     };
     let pid = ipc::agent_pid(&lines).ok_or("the agent did not report its process id")?;
+    if let Some(message) = closed_terminals_message(&lines) {
+        println!("{message}");
+    }
     let exited = tokio::task::spawn_blocking(move || {
         gateinto::process::wait_for_exit(pid, AGENT_EXIT_TIMEOUT)
     })
@@ -1737,6 +1841,136 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "terminal sessions are not supported on this platform"
+        );
+    }
+
+    fn terminal_profiles(text: &str) -> (ConfigProfiles, PathBuf) {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "gateinto-terminal-profiles-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let linked = LinkedStore::new(root.join("linked"));
+        linked
+            .add(&LinkedGateway {
+                name: "newco".parse().unwrap(),
+                display_name: None,
+                address: "newco.example.test:443".parse().unwrap(),
+                portal_url: None,
+                approved_at: Some(1_760_000_000),
+                route: gateinto::proxy::Route::Gateway,
+            })
+            .unwrap();
+        let profiles = ConfigProfiles {
+            file: ConfigFile::parse(text).unwrap(),
+            linked: Some(linked),
+        };
+        (profiles, root)
+    }
+
+    const TERMINAL_CONFIG: &str = r#"
+[gateways.office]
+host = "proxy.example.test"
+port = 8443
+route = "mixed"
+
+[terminal]
+shell = "/bin/sh"
+args = ["-l"]
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_terminal_uses_a_config_file_gateway_with_its_route_and_shell() {
+        let (profiles, root) = terminal_profiles(TERMINAL_CONFIG);
+        let plan = profiles
+            .terminal_session(&"office".parse().unwrap())
+            .unwrap();
+        assert_eq!(plan.route, gateinto::proxy::Route::Mixed);
+        assert_eq!(plan.proxy.upstream.address(), "proxy.example.test:8443");
+        assert_eq!(plan.shell.executable, Path::new("/bin/sh"));
+        assert_eq!(plan.shell.args, [std::ffi::OsString::from("-l")]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_agent_terminal_refuses_a_gateway_approved_from_a_link() {
+        let (profiles, root) = terminal_profiles(TERMINAL_CONFIG);
+        assert!(profiles.known().unwrap().error_lines().is_empty());
+        let error = profiles
+            .terminal_session(&"newco".parse().unwrap())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "the gateway \"newco\" is not in the config file; terminal sessions use only gateways \
+             of the config file, not gateways added from links"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_agent_terminal_takes_a_gateway_and_a_route_only() {
+        let args = terminal_args(&["--agent", "--gateway", "office", "--route", "mixed"]).unwrap();
+        assert!(args.agent);
+        assert_eq!(
+            terminal_request(&args),
+            Some(Request::Terminal(TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: Some(gateinto::proxy::Route::Mixed),
+            }))
+        );
+        assert_eq!(terminal_request(&terminal_args(&[]).unwrap()), None);
+        assert!(terminal_args(&["--agent"]).is_err());
+        for flags in [
+            &["--shell", "sh"][..],
+            &["--shell", "sh", "--", "-l"],
+            &["--config", "gateinto.toml"],
+            &["--upstream-host", "proxy.example.test"],
+            &["--upstream-port", "443"],
+        ] {
+            let flags: Vec<&str> = ["--agent", "--gateway", "office"]
+                .into_iter()
+                .chain(flags.iter().copied())
+                .collect();
+            assert!(terminal_args(&flags).is_err(), "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_too_old_for_terminals_is_named() {
+        assert_eq!(
+            agent_terminal_answer(Response::Error("invalid request".to_owned())),
+            Err("the agent is too old for terminal sessions; restart it".to_owned())
+        );
+        assert_eq!(
+            agent_terminal_answer(Response::Error(
+                "1 terminal sessions are already open".to_owned()
+            )),
+            Err("1 terminal sessions are already open".to_owned())
+        );
+        let lines = vec!["session: 1".to_owned()];
+        assert_eq!(
+            agent_terminal_answer(Response::Ok(lines.clone())),
+            Ok(lines)
+        );
+    }
+
+    #[test]
+    fn stop_names_the_terminals_it_closed() {
+        assert_eq!(closed_terminals_message(&[ipc::agent_pid_line()]), None);
+        assert_eq!(
+            closed_terminals_message(&[ipc::closed_terminals_line(0)]),
+            None
+        );
+        assert_eq!(
+            closed_terminals_message(&[ipc::closed_terminals_line(2)]).as_deref(),
+            Some("closed 2 terminal sessions")
+        );
+        assert_eq!(
+            closed_terminals_message(&[ipc::closed_terminals_line(1)]).as_deref(),
+            Some("closed 1 terminal session")
         );
     }
 

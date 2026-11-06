@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::config::GatewayName;
 use crate::proxy::{Route, SessionCredentials};
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
@@ -27,6 +28,7 @@ const BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Launch(LaunchRequest),
+    Terminal(TerminalRequest),
     Approve(ConfirmToken),
     Deny(ConfirmToken),
     List,
@@ -35,6 +37,12 @@ pub enum Request {
     Stop,
     Log { after: u64 },
     Config,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalRequest {
+    pub gateway: GatewayName,
+    pub route: Option<Route>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,6 +141,10 @@ impl fmt::Display for Request {
                 }
                 Ok(())
             }
+            Self::Terminal(request) => match request.route {
+                None => write!(f, "terminal {} route=saved", request.gateway),
+                Some(route) => write!(f, "terminal {} route={route}", request.gateway),
+            },
             Self::Approve(token) => write!(f, "approve {token}"),
             Self::Deny(token) => write!(f, "deny {token}"),
             Self::List => f.write_str("list"),
@@ -167,6 +179,9 @@ impl FromStr for Request {
             ["launch", "basic_tofu", ..] | ["launch", _, "basic_tofu", ..] => Err(ProtocolError(
                 "the basic_tofu local proxy authentication was removed; use session_credentials",
             )),
+            ["terminal", ..] => terminal(&words)
+                .filter(|request| request.to_string() == line)
+                .ok_or(ProtocolError("invalid terminal request")),
             ["approve", token] => token.parse().map(Self::Approve),
             ["deny", token] => token.parse().map(Self::Deny),
             ["list"] => Ok(Self::List),
@@ -208,6 +223,20 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
         }),
     }
     .map(Request::Launch)
+}
+
+fn terminal(words: &[&str]) -> Option<Request> {
+    let ["terminal", gateway, route] = words else {
+        return None;
+    };
+    let route = match route.strip_prefix("route=")? {
+        "saved" => None,
+        route => Some(route.parse().ok()?),
+    };
+    Some(Request::Terminal(TerminalRequest {
+        gateway: gateway.parse().ok()?,
+        route,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +345,7 @@ pub fn config_source(lines: &[String]) -> Option<ConfigSource> {
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
+pub const CLOSED_TERMINALS: &str = "terminals-closed: ";
 
 pub fn agent_pid_line() -> String {
     format!("{AGENT_PID}{}", std::process::id())
@@ -325,6 +355,16 @@ pub fn agent_pid(lines: &[String]) -> Option<u32> {
     lines
         .iter()
         .find_map(|line| line.strip_prefix(AGENT_PID)?.parse().ok())
+}
+
+pub fn closed_terminals_line(count: usize) -> String {
+    format!("{CLOSED_TERMINALS}{count}")
+}
+
+pub fn closed_terminals(lines: &[String]) -> Option<usize> {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(CLOSED_TERMINALS)?.parse().ok())
 }
 
 pub fn instance_from(env: impl Fn(&str) -> Option<OsString>) -> io::Result<Option<String>> {
@@ -1036,6 +1076,23 @@ mod tests {
     }
 
     #[test]
+    fn the_closed_terminal_count_is_read_from_its_line() {
+        assert_eq!(closed_terminals_line(3), "terminals-closed: 3");
+        assert_eq!(
+            closed_terminals(&[agent_pid_line(), closed_terminals_line(2)]),
+            Some(2)
+        );
+        for line in [
+            "terminals-closed: x",
+            "terminals-closed:2",
+            "terminals-closed: -1",
+        ] {
+            assert_eq!(closed_terminals(&[line.to_owned()]), None, "{line}");
+        }
+        assert_eq!(closed_terminals(&[agent_pid_line()]), None);
+    }
+
+    #[test]
     fn the_agent_pid_is_read_from_its_line() {
         assert_eq!(agent_pid(&["agent-pid: 42".to_owned()]), Some(42));
         assert_eq!(
@@ -1201,6 +1258,66 @@ mod tests {
             assert_eq!(request.to_string(), line);
             assert_eq!(line.parse::<Request>(), Ok(request));
         }
+    }
+
+    fn terminal(route: Option<Route>) -> Request {
+        Request::Terminal(TerminalRequest {
+            gateway: "office".parse().unwrap(),
+            route,
+        })
+    }
+
+    #[test]
+    fn terminal_requests_round_trip_for_every_route() {
+        for (request, line) in [
+            (terminal(None), "terminal office route=saved"),
+            (
+                terminal(Some(Route::Gateway)),
+                "terminal office route=gateway",
+            ),
+            (terminal(Some(Route::Mixed)), "terminal office route=mixed"),
+        ] {
+            assert_eq!(request.to_string(), line);
+            assert_eq!(line.parse::<Request>(), Ok(request));
+        }
+    }
+
+    #[test]
+    fn terminal_requests_carry_nothing_but_a_gateway_and_a_route() {
+        let long = format!("terminal {} route=saved", "a".repeat(MAX_REQUEST_BYTES));
+        for line in [
+            "terminal",
+            "terminal office",
+            "terminal office route=",
+            "terminal office route=direct",
+            "terminal office route=Saved",
+            "terminal office route=saved shell=cmd.exe",
+            "terminal office route=saved command=whoami",
+            "terminal office route=saved args=/c",
+            "terminal office route=saved env=PATH=x",
+            "terminal office shell=cmd.exe route=saved",
+            "terminal route=saved office",
+            "terminal route=saved",
+            "terminal  office route=saved",
+            "terminal office  route=saved",
+            "terminal office route=saved ",
+            "terminal ../office route=saved",
+            "terminal off.ice route=saved",
+            "terminal caf\u{e9} route=saved",
+            "terminal office gateway=proxy.example:443 route=saved",
+            "terminal office route=saved route=saved",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                line.parse::<Request>(),
+                Err(ProtocolError("invalid terminal request")),
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            "TERMINAL office route=saved".parse::<Request>(),
+            Err(ProtocolError(INVALID_REQUEST))
+        );
     }
 
     fn linked_launch() -> Request {

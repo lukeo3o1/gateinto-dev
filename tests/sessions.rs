@@ -395,6 +395,7 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
             started: info.started,
             tunnels: 0,
             browser: Some(BrowserKind::Edge),
+            shell: None,
         }
     );
     let mut stream = open_tunnel(session.local_addr(), target).await;

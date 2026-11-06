@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fixture::*;
-use gateinto::agent::{Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles};
+use gateinto::agent::{
+    Agent, AgentLimits, AgentOptions, BrowserSessionPlan, Profiles, TerminalSessionPlan,
+};
 use gateinto::browser::ProfileDir;
 use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
@@ -84,6 +86,10 @@ impl Profiles for TestProfiles {
         proxy.upstream.host = linked.address.host();
         proxy.upstream.port = linked.address.port();
         Ok(BrowserSessionPlan { proxy })
+    }
+
+    fn terminal_session(&self, _: &GatewayName) -> Result<TerminalSessionPlan, String> {
+        Err("terminal sessions are not planned in these tests".to_owned())
     }
 }
 
@@ -283,7 +289,10 @@ impl TestAgent {
         let response = self.send(Request::Stop).await;
         assert_eq!(
             response,
-            Response::Ok(vec![format!("agent-pid: {}", std::process::id())])
+            Response::Ok(vec![
+                format!("agent-pid: {}", std::process::id()),
+                "terminals-closed: 0".to_owned(),
+            ])
         );
         let Response::Ok(lines) = response else {
             unreachable!()
@@ -301,6 +310,7 @@ fn limits() -> AgentLimits {
         launches: 10,
         launch_window: Duration::from_secs(60),
         max_browser_sessions: 4,
+        max_terminal_sessions: 4,
         confirm_timeout: Duration::from_secs(60),
     }
 }
@@ -520,6 +530,7 @@ async fn the_session_list_is_one_json_object_per_session_without_secrets() {
         started: listed.started,
         tunnels: 0,
         browser: None,
+        shell: None,
     };
     assert_eq!(listed, expected);
     let list = agent.list().await;
@@ -954,6 +965,21 @@ async fn a_request_the_agent_does_not_know_is_answered_as_invalid() {
         Response::decode(&response),
         Ok(Response::Error(ipc::INVALID_REQUEST.to_owned()))
     );
+    agent.stop().await;
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_request_is_refused_outside_windows() {
+    let agent = TestAgent::start(limits()).await;
+
+    let response = agent.raw(b"terminal main route=saved\n").await;
+
+    assert_eq!(
+        response,
+        "error: terminal sessions from the agent are not supported on this platform\n"
+    );
+    assert!(agent.list().await.is_empty());
     agent.stop().await;
 }
 

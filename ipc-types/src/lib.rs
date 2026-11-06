@@ -64,6 +64,8 @@ pub struct SessionInfo {
     pub tunnels: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<BrowserKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 impl SessionInfo {
@@ -199,6 +201,7 @@ mod tests {
             started: 1_700_000_000,
             tunnels: 2,
             browser,
+            shell: None,
         }
     }
 
@@ -264,6 +267,23 @@ mod tests {
             SessionKind::Terminal
         );
         assert_eq!(SessionKind::Terminal.to_string(), "terminal");
+    }
+
+    #[test]
+    fn a_terminal_session_names_its_shell_and_a_browser_session_omits_it() {
+        let terminal = SessionInfo {
+            kind: SessionKind::Terminal,
+            shell: Some("pwsh.exe".to_owned()),
+            ..info(None)
+        };
+        let line = terminal.to_line();
+        assert!(
+            line.ends_with(r#""tunnels":2,"shell":"pwsh.exe"}"#),
+            "{line}"
+        );
+        assert_eq!(SessionInfo::parse_list(&[line]).unwrap(), [terminal]);
+        let line = info(Some(BrowserKind::Chrome)).to_line();
+        assert!(!line.contains("shell"), "{line}");
     }
 
     #[test]
