@@ -57,6 +57,7 @@ use self::icon::Owned;
 use crate::add::{self, Form, Keyed, Units};
 use crate::agent::Config;
 use crate::board::{self, Board, board, tips};
+use crate::confirm::{self, Ending};
 use crate::credentials::{self, Dialog, Field};
 use crate::demo;
 use crate::focus::{self, Focus, Stop};
@@ -170,6 +171,7 @@ struct App {
     details: Option<GatewayName>,
     adding: Option<Form>,
     removing: Option<Removal>,
+    ending: Option<Ending>,
     units: Units,
     tickets: u64,
     secret: Option<u32>,
@@ -229,6 +231,7 @@ impl App {
             details: None,
             adding: None,
             removing: None,
+            ending: None,
             units: Units::default(),
             tickets: 0,
             secret: None,
@@ -319,6 +322,9 @@ impl App {
         if let Some(form) = &self.adding {
             let sheet = add::sheet(form, &update.gateways);
             board::dialog::add(&mut board, l, s, t, v, &sheet, m);
+        }
+        if let Some(prompt) = self.end_prompt() {
+            board::dialog::ending(&mut board, l, s, t, v, &prompt, m);
         }
         board
     }
@@ -439,11 +445,23 @@ impl App {
         remove::prompt(&self.update.as_ref()?.gateways, self.removing.as_ref()?)
     }
 
+    fn end_prompt(&self) -> Option<confirm::Prompt> {
+        let update = self.update.as_ref()?;
+        let names = sessions::Names::new(&update.gateways);
+        confirm::prompt(self.ending?, &update.state, &names, self.unlisted())
+    }
+
+    fn unlisted(&self) -> u64 {
+        self.update.as_ref().map_or(0, |update| update.unlisted)
+            + u64::from(self.launches.opening())
+    }
+
     fn modal(&self) -> bool {
         self.dialog.is_some()
             || self.details.is_some()
             || self.adding.is_some()
             || self.removing.is_some()
+            || self.ending.is_some()
     }
 
     fn portal(&self, id: u64) -> Option<String> {
@@ -467,6 +485,7 @@ impl App {
             self.details = None;
             self.adding = None;
             self.removing = None;
+            self.ending = None;
             self.relog();
             if self.copied {
                 self.uncopy();
@@ -518,6 +537,7 @@ impl App {
         self.details = None;
         self.adding = None;
         self.removing = None;
+        self.ending = None;
         self.dialog = Some(dialog);
         self.link.send(Command::Credentials(id, ticket));
         self.retarget();
@@ -555,6 +575,7 @@ impl App {
 
     fn close_dialog(&mut self) -> bool {
         if self.removing.take().is_some()
+            || self.ending.take().is_some()
             || self.details.take().is_some()
             || self.adding.take().is_some()
         {
@@ -676,7 +697,32 @@ impl App {
         self.invalidate();
     }
 
-    fn order(&mut self, command: Command) {
+    fn order(&mut self, command: Command) -> bool {
+        let unlisted = self.unlisted();
+        let asked = self
+            .update
+            .as_ref()
+            .and_then(|update| confirm::asks(&command, &update.state, unlisted));
+        let Some(ending) = asked else {
+            self.send(command);
+            return false;
+        };
+        self.close_dialog();
+        self.ending = Some(ending);
+        self.retarget();
+        self.invalidate();
+        true
+    }
+
+    fn confirm_end(&mut self) {
+        if let Some(ending) = self.ending.take() {
+            self.send(ending.command());
+            self.retarget();
+            self.invalidate();
+        }
+    }
+
+    fn send(&mut self, command: Command) {
         if self
             .dialog
             .as_ref()
@@ -722,11 +768,24 @@ impl App {
     }
 
     fn launch(&mut self, row: usize) -> bool {
+        self.pend(row, Launches::start, Command::Launch)
+    }
+
+    fn open_terminal(&mut self, row: usize) -> bool {
+        self.pend(row, Launches::terminal, Command::Terminal)
+    }
+
+    fn pend(
+        &mut self,
+        row: usize,
+        start: fn(&mut Launches, &[GatewayName], usize) -> Option<GatewayName>,
+        command: fn(GatewayName) -> Command,
+    ) -> bool {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
-        let Some(name) = self.launches.start(&names.unwrap_or_default(), row) else {
+        let Some(name) = start(&mut self.launches, &names.unwrap_or_default(), row) else {
             return false;
         };
-        self.link.send(Command::Launch(name));
+        self.link.send(command(name));
         self.retarget();
         self.invalidate();
         true
@@ -976,8 +1035,10 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::StopAgent
         | Zone::StartAgent
         | Zone::Revoke(_)
+        | Zone::CloseTerminal(_)
         | Zone::More(_)
         | Zone::StartBrowser(_)
+        | Zone::OpenTerminal(_)
         | Zone::GatewayCard(_)
         | Zone::Picker
         | Zone::Entry(_)
@@ -1001,6 +1062,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::ConfirmAdd
         | Zone::RemoveGateway
         | Zone::ConfirmRemove
+        | Zone::ConfirmEnd
         | Zone::OpenMain
         | Zone::DenyLink
         | Zone::AllowLink
@@ -1026,6 +1088,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::StopAgent) => {
             with_app(hwnd, |app| app.order(Command::Stop));
+            rehover(hwnd);
             return;
         }
         Some(Action::StartAgent) => {
@@ -1034,10 +1097,15 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::Revoke(id)) => {
             with_app(hwnd, |app| app.order(Command::Close(id)));
+            rehover(hwnd);
             return;
         }
         Some(Action::StartBrowser(row)) => {
             with_app(hwnd, |app| app.launch(row));
+            return;
+        }
+        Some(Action::OpenTerminal(row)) => {
+            with_app(hwnd, |app| app.open_terminal(row));
             return;
         }
         Some(Action::GatewayDetails(row)) => {
@@ -1187,6 +1255,11 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             rehover(hwnd);
             return;
         }
+        Some(Action::ConfirmEnd) => {
+            with_app(hwnd, App::confirm_end);
+            rehover(hwnd);
+            return;
+        }
         Some(Action::OpenMain) => {
             show_main(hwnd);
             return;
@@ -1333,6 +1406,9 @@ fn on_agent(hwnd: HWND) {
         }
         if app.removing.is_some() && app.removal().is_none() {
             app.removing = None;
+        }
+        if app.ending.is_some() && app.end_prompt().is_none() {
+            app.ending = None;
         }
         app.relog();
         if pinned {

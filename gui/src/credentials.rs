@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use gateinto::ipc::{self, RequestError, Response, SessionAuth, SessionInfo};
+use gateinto::ipc::{self, RequestError, Response, SessionAuth, SessionInfo, SessionKind};
 use gateinto::proxy::SessionCredentials;
 use zeroize::Zeroize;
 
@@ -114,8 +114,12 @@ fn find(state: &AgentState, id: u64) -> Option<&SessionInfo> {
     }
 }
 
+fn reveals(session: &SessionInfo) -> bool {
+    session.auth == SessionAuth::Password && session.kind != SessionKind::Terminal
+}
+
 pub fn offers(state: &AgentState, id: u64) -> bool {
-    find(state, id).is_some_and(|session| session.auth == SessionAuth::Password)
+    find(state, id).is_some_and(reveals)
 }
 
 pub fn clears_clipboard(copied: Option<u32>, sequence: u32) -> bool {
@@ -140,7 +144,7 @@ pub fn deliver(dialog: Option<&mut Dialog>, reveal: Reveal) -> bool {
 
 impl Dialog {
     pub fn open(state: &AgentState, id: u64, ticket: u64) -> Option<Self> {
-        let session = find(state, id).filter(|session| session.auth == SessionAuth::Password)?;
+        let session = find(state, id).filter(|session| reveals(session))?;
         Some(Self {
             id,
             ticket,
@@ -335,6 +339,15 @@ mod tests {
         assert!(Dialog::open(&running(), 2, 1).is_none());
         assert!(Dialog::open(&AgentState::Stopped, 3, 1).is_none());
         assert_eq!(Dialog::open(&running(), 3, 1).unwrap().id(), 3);
+    }
+
+    #[test]
+    fn a_terminal_never_offers_credentials_even_if_listed_with_a_password() {
+        let mut terminal = session(4, SessionAuth::Password);
+        terminal.kind = SessionKind::Terminal;
+        let state = AgentState::Running(vec![terminal]);
+        assert!(!offers(&state, 4));
+        assert!(Dialog::open(&state, 4, 1).is_none());
     }
 
     #[test]

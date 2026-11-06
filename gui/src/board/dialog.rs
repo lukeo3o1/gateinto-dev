@@ -4,6 +4,7 @@ use gateinto::proxy::Route;
 
 use super::{Board, Painter};
 use crate::add::{self, Sheet, Tone};
+use crate::confirm;
 use crate::credentials::{Field, HINT, Page, SUBTITLE};
 use crate::fonts::{Font, Measure};
 use crate::gateways::Details;
@@ -387,6 +388,42 @@ pub fn remove(
     });
 }
 
+pub fn ending(
+    board: &mut Board,
+    l: &Layout,
+    s: Scale,
+    t: &Theme,
+    v: &View,
+    prompt: &confirm::Prompt,
+    m: &impl Measure,
+) {
+    let w = width(l, s);
+    let line = s.px(18.0);
+    let question = wrap(m, Font::Body, &prompt.question, w);
+    let body = s.px(42.0) + question.len() as i32 * line;
+    let mut modal = Modal::open(l, s, t, v, m, body);
+    let inner = modal.inner;
+    let p = &mut modal.p;
+    let x = inner.x;
+    p.text(
+        Font::Title,
+        prompt.title,
+        Rect::new(x, inner.y, w, s.px(28.0)),
+        t.text,
+    );
+    let mut y = inner.y + s.px(42.0);
+    for text in question {
+        p.text(Font::Body, text, Rect::new(x, y, w, line), t.text);
+        y += line;
+    }
+    modal.close(board, |p, footer| {
+        let confirm = p.footer_rect(footer, footer.right() - s.px(24.0), prompt.confirm);
+        let cancel = p.footer_rect(footer, confirm.x - s.px(8.0), tr(CANCEL));
+        p.primary(cancel, tr(CANCEL), Zone::CloseDialog);
+        p.plain(confirm, prompt.confirm, Zone::ConfirmEnd);
+    });
+}
+
 const LABEL_W: f32 = 130.0;
 const NOTE: f32 = 16.0;
 
@@ -654,6 +691,7 @@ mod tests {
     use gateinto::proxy::Route;
 
     use crate::add::{ADDRESS_HINT, Entry, Input, NAME_HINT, PORTAL_HINT, Tone, disclosure};
+    use crate::confirm;
     use crate::credentials::{Field, MASK, Page, UNAVAILABLE, WAITING};
     use crate::gateways::Details;
     use crate::hit::Zone;
@@ -952,6 +990,84 @@ mod tests {
         Prompt {
             question: "Remove \"lab\" from the gateways added on this device?".to_owned(),
             failure,
+        }
+    }
+
+    fn draw_ending(l: &crate::layout::Layout, prompt: &confirm::Prompt) -> Board {
+        let mut board = Board {
+            targets: vec![(Rect::new(900, 300, 32, 32), Zone::Revoke(3))],
+            ..Board::default()
+        };
+        ending(&mut board, l, S, &T, &View::default(), prompt, &Chars);
+        board
+    }
+
+    fn close_terminal() -> confirm::Prompt {
+        confirm::Prompt {
+            title: "Close terminal",
+            question: Text::CloseTerminalAsk
+                .english()
+                .replace("{0}{1}", "pwsh.exe #7")
+                .replace("{2}", "office"),
+            confirm: "Close terminal",
+        }
+    }
+
+    #[test]
+    fn an_ending_prompt_asks_its_question_and_puts_cancel_first() {
+        let board = draw_ending(&layout(), &close_terminal());
+        assert_eq!(
+            zones(&board),
+            [Zone::CloseDialog, Zone::ConfirmEnd, Zone::Dialog]
+        );
+        let cancel = board.targets[0].0;
+        let confirm = board.targets[1].0;
+        assert!(cancel.right() < confirm.x, "{cancel:?} {confirm:?}");
+        assert!(board.ops.contains(&Op::Round(cancel, S.pxf(6.0), T.button)));
+        assert!(
+            !board
+                .ops
+                .contains(&Op::Round(confirm, S.pxf(6.0), T.button))
+        );
+        let all = texts(&board).join(" ");
+        for part in [
+            "Close terminal",
+            "Close pwsh.exe #7 on office?",
+            "unsaved work",
+            "Cancel",
+        ] {
+            assert!(all.contains(part), "{part}: {all}");
+        }
+    }
+
+    #[test]
+    fn an_ending_prompt_fits_a_window_of_the_minimum_size() {
+        let (w, h) = crate::layout::Layout::min_size(S);
+        let l = crate::layout::Layout::new(w, h, S, true);
+        let stop = confirm::Prompt {
+            title: "Stop agent",
+            question: Text::StopTerminalsAsk.english().replace("{0}", "12"),
+            confirm: "Stop agent",
+        };
+        for prompt in [close_terminal(), stop] {
+            let board = draw_ending(&l, &prompt);
+            let panel = board.targets.last().unwrap().0;
+            assert!(
+                panel.y >= l.caption_row.bottom() && panel.bottom() <= h,
+                "{panel:?}"
+            );
+            let words = board
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Text(_, _, r, _) => Some(*r),
+                    _ => None,
+                })
+                .filter(|r| r.y < board.targets[0].0.y - 20)
+                .map(|r| r.bottom())
+                .max()
+                .unwrap();
+            assert!(words <= board.targets[0].0.y, "{words}");
         }
     }
 

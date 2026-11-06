@@ -463,7 +463,10 @@ Guarantees:
   for an agent-hosted terminal also when its session is closed or the agent
   stops. The agent starts terminals only for gateways of its configuration
   file, never for gateways approved from links, and a link can never ask for
-  a terminal.
+  a terminal. The GUI's Open terminal button sends the same request with
+  only a configuration-file gateway name and `route=saved`, never a shell,
+  command, argument or variable, and only while the agent already runs; the
+  GUI offers no credentials dialog for a terminal session.
 - **No job, no `os_user`.** If no job can be created or the browser cannot
   be put in one (for example on a Windows version that does not allow the
   process into another job), the agent logs one warning for that launch and
@@ -527,7 +530,7 @@ Non-guarantees:
 - **Not verified:** terminal sessions on real Windows (the shell in the
   job, its console, console control events and the exit code; for
   agent-hosted terminals the new console window, its closing with the job
-  and Ctrl-C in it),
+  and Ctrl-C in it; the GUI's Open terminal button and its confirmations),
   domain-joined machines, Chrome inside the job,
   browsers launched by Gateinto itself rather than by a test probe, a run on
   Windows CI, and the suspended-and-assign fallback and the launch without a

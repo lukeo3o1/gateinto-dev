@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use gateinto::config::GatewayName;
+use gateinto::ipc::SessionKind;
 use gateinto::link::{Known, KnownGateway};
 
 use crate::agent::AgentState;
@@ -87,6 +88,12 @@ pub fn portal<'a>(
     state: &AgentState,
     id: u64,
 ) -> Option<&'a str> {
+    let AgentState::Running(sessions) = state else {
+        return None;
+    };
+    sessions
+        .iter()
+        .find(|session| session.id == id && session.kind != SessionKind::Terminal)?;
     listed(listing, state, id)?
         .portal_url
         .as_ref()
@@ -163,7 +170,7 @@ pub fn wheel(open: bool, zone: Zone, in_content: bool) -> Option<Wheel> {
 
 #[cfg(test)]
 mod tests {
-    use gateinto::ipc::{SessionAuth, SessionInfo, SessionKind, SessionRoute};
+    use gateinto::ipc::{SessionAuth, SessionInfo, SessionRoute};
     use gateinto::link::{KnownGateway, Source};
 
     use super::*;
@@ -273,6 +280,23 @@ mod tests {
         assert_eq!(
             super::portal(&listing, &running(), 3),
             Some("https://portal.example.com/start")
+        );
+    }
+
+    #[test]
+    fn a_terminal_session_menu_has_no_portal() {
+        let listing = known(vec![with_portal(
+            "office",
+            "https://portal.example.com/start",
+        )]);
+        let mut terminal = session_info(5, "office");
+        terminal.kind = SessionKind::Terminal;
+        let state = AgentState::Running(vec![terminal]);
+        assert_eq!(session(&listing, &state, 5), [details(5)]);
+        assert_eq!(super::portal(&listing, &state, 5), None);
+        assert_eq!(
+            super::gateway(&listing, &state, 5),
+            Some("office".parse().unwrap())
         );
     }
 

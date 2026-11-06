@@ -16,6 +16,7 @@ pub const SUBTITLE: Text = Text::GatewaysSubtitle;
 pub const EMPTY: Text = Text::NoGatewaysHint;
 pub const FOOTNOTE: Text = Text::ConfigReadOnly;
 pub const START: Text = Text::StartBrowser;
+pub const OPEN_TERMINAL: Text = Text::OpenTerminal;
 pub const ADD: Text = Text::AddGateway;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub struct Page {
     pub empty: bool,
     pub footnote: bool,
     pub launch: bool,
+    pub terminal: bool,
 }
 
 pub fn read(config: Option<PathBuf>) -> Result<ConfigFile, String> {
@@ -53,6 +55,7 @@ pub fn catalog(file: &ConfigFile, store: Option<PathBuf>) -> Known {
 pub struct Launches {
     sent: u64,
     done: u64,
+    terminal: bool,
 }
 
 impl Launches {
@@ -60,12 +63,25 @@ impl Launches {
         self.sent > self.done
     }
 
+    pub fn opening(&self) -> bool {
+        self.busy() && self.terminal
+    }
+
     pub fn start(&mut self, names: &[GatewayName], row: usize) -> Option<GatewayName> {
+        self.begin(names, row, false)
+    }
+
+    pub fn terminal(&mut self, names: &[GatewayName], row: usize) -> Option<GatewayName> {
+        self.begin(names, row, true)
+    }
+
+    fn begin(&mut self, names: &[GatewayName], row: usize, terminal: bool) -> Option<GatewayName> {
         if self.busy() {
             return None;
         }
         let name = names.get(row)?.clone();
         self.sent += 1;
+        self.terminal = terminal;
         Some(name)
     }
 
@@ -103,6 +119,7 @@ pub fn page(
         empty: listing.is_ok() && rows.is_empty(),
         footnote: rows.iter().any(|row: &Row| row.config),
         launch: matches!(state, AgentState::Running(_)) && !busy,
+        terminal: matches!(state, AgentState::Running(_)),
         rows,
     }
 }
@@ -356,6 +373,7 @@ mod tests {
                 empty: false,
                 footnote: true,
                 launch: true,
+                terminal: true,
             }
         );
     }
@@ -593,6 +611,21 @@ mod tests {
     }
 
     #[test]
+    fn only_a_running_agent_offers_a_terminal_even_while_a_launch_is_pending() {
+        let listing = known(vec![office()]);
+        let running = AgentState::Running(Vec::new());
+        assert!(page(&listing, &running, None, false).terminal);
+        let busy = page(&listing, &running, None, true);
+        assert!(busy.terminal && !busy.launch);
+        assert!(!page(&listing, &AgentState::Stopped, None, false).terminal);
+        let unreachable = AgentState::Unreachable(crate::i18n::Note::Agent("busy".to_owned()));
+        assert!(!page(&listing, &unreachable, None, false).terminal);
+        assert_eq!(OPEN_TERMINAL.english(), "Open terminal");
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(tr(OPEN_TERMINAL), "開啟終端機");
+    }
+
+    #[test]
     fn no_gateways_says_where_they_come_from() {
         let page = page(&known(Vec::new()), &AgentState::Stopped, None, false);
         assert!(page.empty);
@@ -684,6 +717,22 @@ mod tests {
         assert!(!launches.busy());
         assert_eq!(launches.start(&names, 0), Some(name("office")));
         assert!(launches.busy());
+    }
+
+    #[test]
+    fn a_terminal_is_opening_only_while_it_is_the_pending_launch() {
+        let names = [name("office")];
+        let mut launches = Launches::default();
+        assert!(!launches.opening());
+        assert_eq!(launches.terminal(&names, 0), Some(name("office")));
+        assert!(launches.opening());
+        assert_eq!(launches.start(&names, 0), None);
+        assert!(launches.opening());
+        launches.settle(1);
+        assert!(!launches.opening());
+        assert_eq!(launches.start(&names, 0), Some(name("office")));
+        assert!(launches.busy());
+        assert!(!launches.opening());
     }
 
     #[test]

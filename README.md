@@ -968,6 +968,21 @@ closed. The list shows the change at the next refresh, within 2 seconds. The
 demo never removes anything. This is unit-tested but has not been tried on a
 real Windows desktop.
 
+## Terminal sessions in the GUI
+
+While the agent runs, each gateway of the config file has an **Open
+terminal** button next to Start browser. It does what `gateinto session
+terminal --agent --gateway <name>` does with the gateway's saved route: the
+agent opens its shell from `[terminal]` in a new console window. The button
+never starts the agent, gateways added from a link have none, and the GUI
+has no shell setting. A terminal row on the sessions page is titled by its
+shell and has no credentials. Closing it asks first, because that ends the
+shell and everything started from it; Stop asks first while terminal
+sessions are open or one is being opened, and then says how many it
+closed. Closing a browser
+session does not ask. In the demo nothing is started. This is unit-tested
+but has not been tried on a real Windows desktop.
+
 ## Verification status
 
 [docs/verification.md](docs/verification.md) lists each capability (relay,

@@ -308,6 +308,20 @@ pub const DEVICE: Icon = Icon {
     ],
 };
 
+pub const TERMINAL: Icon = Icon {
+    view: RAIL,
+    stroke: RAIL_STROKE,
+    shapes: &[
+        rect(3.0, 4.5, 18.0, 15.0, 2.0),
+        Shape::Path(&[
+            Cmd::Move(7.0, 9.5),
+            Cmd::Line(10.0, 12.0),
+            Cmd::Line(7.0, 14.5),
+        ]),
+        Shape::Path(&line(12.0, 15.0, 16.5, 15.0)),
+    ],
+};
+
 pub const LOG: Icon = Icon {
     view: RAIL,
     stroke: RAIL_STROKE,
