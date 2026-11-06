@@ -26,7 +26,9 @@ impl Stop {
 }
 
 pub fn stops(rail: &[Stop], order: &[Stop]) -> (Vec<Stop>, bool) {
-    let actionable = |s: &&Stop| pointer::action(s.zone).is_some() && (s.scrolls || s.seen());
+    let actionable = |s: &&Stop| {
+        pointer::action(s.zone).is_some() && !pointer::mouse_only(s.zone) && (s.scrolls || s.seen())
+    };
     match order
         .iter()
         .position(|s| matches!(s.zone, Zone::Menu | Zone::Dialog))
@@ -417,6 +419,20 @@ mod tests {
             ring(Rect::new(100, 50, 40, 30), s, &t),
             Op::Ring(Rect::new(96, 46, 48, 38), 9.0, 3.0, t.focus)
         );
+    }
+
+    #[test]
+    fn the_verification_buttons_are_left_to_the_mouse() {
+        let order = vec![
+            stop(Zone::OpenVerification),
+            stop(Zone::CopyLink),
+            stop(Zone::DismissVerification),
+            stop(Zone::CloseDialog),
+            stop(Zone::Dialog),
+        ];
+        let (found, trapped) = stops(&rail(), &order);
+        assert!(trapped);
+        assert_eq!(zones(&found), [Zone::CloseDialog]);
     }
 
     #[test]

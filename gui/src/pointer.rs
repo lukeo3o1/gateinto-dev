@@ -33,6 +33,9 @@ pub enum Action {
     TogglePassword,
     RevokeCredentials,
     CloseDialog,
+    OpenVerification,
+    CopyLink,
+    DismissVerification,
     AddGateway,
     Focus(Input),
     Route(Route),
@@ -62,6 +65,13 @@ pub fn outside_click_closes(adding: bool) -> bool {
     !adding
 }
 
+pub fn mouse_only(zone: Zone) -> bool {
+    matches!(
+        zone,
+        Zone::OpenVerification | Zone::CopyLink | Zone::DismissVerification
+    )
+}
+
 pub fn action(zone: Zone) -> Option<Action> {
     match zone {
         Zone::Nav(page) => Some(Action::Select(page)),
@@ -88,6 +98,9 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::TogglePassword(_) => Some(Action::TogglePassword),
         Zone::RevokeCredentials => Some(Action::RevokeCredentials),
         Zone::CloseDialog => Some(Action::CloseDialog),
+        Zone::OpenVerification => Some(Action::OpenVerification),
+        Zone::CopyLink => Some(Action::CopyLink),
+        Zone::DismissVerification => Some(Action::DismissVerification),
         Zone::AddGateway => Some(Action::AddGateway),
         Zone::AddField(input) => Some(Action::Focus(input)),
         Zone::AddRoute(route) => Some(Action::Route(route)),
@@ -420,6 +433,29 @@ mod tests {
             assert_eq!(p.up(zone), Some(action));
         }
         assert!(!p.down(Zone::Dialog));
+    }
+
+    #[test]
+    fn the_verification_dialog_opens_copies_dismisses_and_closes() {
+        let mut p = Pointer::default();
+        for (zone, action) in [
+            (Zone::OpenVerification, Action::OpenVerification),
+            (Zone::CopyLink, Action::CopyLink),
+            (Zone::DismissVerification, Action::DismissVerification),
+            (Zone::CloseDialog, Action::CloseDialog),
+        ] {
+            assert!(p.down(zone));
+            assert_eq!(p.up(zone), Some(action));
+        }
+    }
+
+    #[test]
+    fn only_the_verification_buttons_are_mouse_only() {
+        assert!(mouse_only(Zone::OpenVerification));
+        assert!(mouse_only(Zone::CopyLink));
+        assert!(mouse_only(Zone::DismissVerification));
+        assert!(!mouse_only(Zone::CloseDialog));
+        assert!(!mouse_only(Zone::RevokeCredentials));
     }
 
     #[test]
