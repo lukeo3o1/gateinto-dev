@@ -147,6 +147,13 @@ pub struct TunnelResponse {
 }
 
 impl TunnelResponse {
+    pub(crate) fn new(status: u16, proxy_authenticate: Vec<Zeroizing<Vec<u8>>>) -> Self {
+        Self {
+            status,
+            proxy_authenticate,
+        }
+    }
+
     pub fn proxy_authenticate(&self) -> impl Iterator<Item = &[u8]> {
         self.proxy_authenticate.iter().map(|value| value.as_slice())
     }

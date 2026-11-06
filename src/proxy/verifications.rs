@@ -24,12 +24,19 @@ impl PendingVerifications {
     }
 
     fn reserve(&self) -> Option<AgentSlot> {
-        self.0
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_PENDING).then_some(count + 1)
-            })
-            .ok()
-            .map(|_| AgentSlot(self.0.clone()))
+        let mut count = self.0.load(Ordering::Acquire);
+        while count < MAX_PENDING {
+            match self.0.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(AgentSlot(self.0.clone())),
+                Err(actual) => count = actual,
+            }
+        }
+        None
     }
 }
 

@@ -215,11 +215,12 @@ async fn check(options: CheckOptions) -> Result<Report, CheckError> {
             crate::proxy::h2::ready(&mut sender)
                 .await
                 .map_err(|error| upstream_error(UpstreamError::Http2(error)))?;
-            let (status, _stream) = crate::proxy::h2::request(&mut sender, &liveness, target)
+            let (response, _stream) = crate::proxy::h2::request(&mut sender, &liveness, target)
                 .map_err(upstream_error)?
                 .response()
                 .await
                 .map_err(upstream_error)?;
+            let status = response.status;
             report.connect_status = Some((status, format!("HTTP/2 {status}")));
         } else {
             let (status, _) = request_tunnel(

@@ -12,9 +12,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio_rustls::client::TlsStream;
+use zeroize::Zeroizing;
 
 use super::UpstreamError;
-use crate::http::Authority;
+use crate::http::{Authority, TunnelResponse};
 
 pub(crate) struct Driver(JoinHandle<()>);
 
@@ -225,12 +226,22 @@ fn connect_request(target: &Authority) -> http::Request<()> {
 }
 
 impl Pending {
-    pub(crate) async fn response(mut self) -> Result<(u16, Stream), UpstreamError> {
+    pub(crate) async fn response(mut self) -> Result<(TunnelResponse, Stream), UpstreamError> {
         let response = (&mut self.response).await.map_err(UpstreamError::Http2)?;
         self.tracked.0.answered();
         let status = response.status().as_u16();
+        let proxy_authenticate = if status == 407 {
+            response
+                .headers()
+                .get_all(http::header::PROXY_AUTHENTICATE)
+                .iter()
+                .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok((
-            status,
+            TunnelResponse::new(status, proxy_authenticate),
             Stream {
                 send: self
                     .send
