@@ -104,12 +104,7 @@ async fn failed_direct_tcp_falls_back_once_and_preserves_gateway_refusals() {
         drop(listener);
         let (_, response) = send(agent, &connect_request(&unavailable.to_string())).await;
         assert_eq!(response.status, local);
-        assert_eq!(
-            gateway.requests(),
-            vec![format!(
-                "CONNECT {unavailable} HTTP/1.1\r\nHost: {unavailable}\r\n\r\n"
-            )]
-        );
+        assert_eq!(gateway.requests(), vec![gateway_connect(unavailable)]);
     }
 }
 

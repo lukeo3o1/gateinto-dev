@@ -639,6 +639,14 @@ pub fn connect_request(target: &str) -> Vec<u8> {
     format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").into_bytes()
 }
 
+pub fn gateway_connect(target: impl std::fmt::Display) -> String {
+    format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: Gateinto/{}\r\n\
+         Gateinto-Auth-Version: 1\r\n\r\n",
+        gateinto::VERSION
+    )
+}
+
 pub async fn open_tunnel(agent: SocketAddr, target: SocketAddr) -> TcpStream {
     let (stream, response) = send(agent, &connect_request(&target.to_string())).await;
     assert_eq!(response.status, 200, "{}", response.head);
