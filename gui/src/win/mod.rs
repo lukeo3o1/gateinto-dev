@@ -75,7 +75,7 @@ use crate::nav::{self, Page as NavPage};
 use crate::pointer::{self, Action};
 use crate::remove::{self, Removal};
 use crate::scale::Scale;
-use crate::scene::{Op, View, scene};
+use crate::scene::{self, Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
 use crate::settings::{self, AgentStart};
@@ -352,7 +352,7 @@ impl App {
 
     fn retarget(&mut self) {
         let board = self.board();
-        self.adopt(board);
+        scene::wipe(&mut self.adopt(board));
     }
 
     fn adopt(&mut self, board: Board) -> Vec<Op> {
@@ -1456,7 +1456,9 @@ fn on_paint(hwnd: HWND) {
         let board = app.board();
         ops.extend(app.adopt(board));
         ops.extend(app.ring());
-        if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
+        let drawn = app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts);
+        scene::wipe(&mut ops);
+        if !drawn {
             app.invalidate();
         }
         let active = unsafe { GetActiveWindow() } == hwnd;

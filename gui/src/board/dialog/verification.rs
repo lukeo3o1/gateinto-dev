@@ -370,4 +370,16 @@ mod tests {
         let qr = Encoder::default().encode(&long).unwrap();
         assert!(module(S, &qr) >= 1);
     }
+
+    #[test]
+    fn a_wiped_frame_keeps_no_link_code_or_modules() {
+        let qr = Encoder::default().encode(URL).unwrap();
+        let mut b = draw(&page(Some(&qr)));
+        crate::scene::wipe(&mut b.ops);
+        assert!(b.ops.iter().all(|op| match op {
+            Op::Text(_, text, ..) => !text.contains("BCDF") && !text.contains("verify.example"),
+            Op::Fill(r, _) => *r == Rect::default(),
+            _ => true,
+        }));
+    }
 }
