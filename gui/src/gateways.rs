@@ -55,6 +55,7 @@ pub fn catalog(file: &ConfigFile, store: Option<PathBuf>) -> Known {
 pub struct Launches {
     sent: u64,
     done: u64,
+    terminal: bool,
 }
 
 impl Launches {
@@ -62,12 +63,25 @@ impl Launches {
         self.sent > self.done
     }
 
+    pub fn opening(&self) -> bool {
+        self.busy() && self.terminal
+    }
+
     pub fn start(&mut self, names: &[GatewayName], row: usize) -> Option<GatewayName> {
+        self.begin(names, row, false)
+    }
+
+    pub fn terminal(&mut self, names: &[GatewayName], row: usize) -> Option<GatewayName> {
+        self.begin(names, row, true)
+    }
+
+    fn begin(&mut self, names: &[GatewayName], row: usize, terminal: bool) -> Option<GatewayName> {
         if self.busy() {
             return None;
         }
         let name = names.get(row)?.clone();
         self.sent += 1;
+        self.terminal = terminal;
         Some(name)
     }
 
@@ -703,6 +717,22 @@ mod tests {
         assert!(!launches.busy());
         assert_eq!(launches.start(&names, 0), Some(name("office")));
         assert!(launches.busy());
+    }
+
+    #[test]
+    fn a_terminal_is_opening_only_while_it_is_the_pending_launch() {
+        let names = [name("office")];
+        let mut launches = Launches::default();
+        assert!(!launches.opening());
+        assert_eq!(launches.terminal(&names, 0), Some(name("office")));
+        assert!(launches.opening());
+        assert_eq!(launches.start(&names, 0), None);
+        assert!(launches.opening());
+        launches.settle(1);
+        assert!(!launches.opening());
+        assert_eq!(launches.start(&names, 0), Some(name("office")));
+        assert!(launches.busy());
+        assert!(!launches.opening());
     }
 
     #[test]

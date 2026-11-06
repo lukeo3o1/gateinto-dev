@@ -448,7 +448,12 @@ impl App {
     fn end_prompt(&self) -> Option<confirm::Prompt> {
         let update = self.update.as_ref()?;
         let names = sessions::Names::new(&update.gateways);
-        confirm::prompt(self.ending?, &update.state, &names)
+        confirm::prompt(self.ending?, &update.state, &names, self.unlisted())
+    }
+
+    fn unlisted(&self) -> u64 {
+        self.update.as_ref().map_or(0, |update| update.unlisted)
+            + u64::from(self.launches.opening())
     }
 
     fn modal(&self) -> bool {
@@ -693,10 +698,11 @@ impl App {
     }
 
     fn order(&mut self, command: Command) -> bool {
+        let unlisted = self.unlisted();
         let asked = self
             .update
             .as_ref()
-            .and_then(|update| confirm::asks(&command, &update.state));
+            .and_then(|update| confirm::asks(&command, &update.state, unlisted));
         let Some(ending) = asked else {
             self.send(command);
             return false;
@@ -762,16 +768,21 @@ impl App {
     }
 
     fn launch(&mut self, row: usize) -> bool {
-        self.pend(row, Command::Launch)
+        self.pend(row, Launches::start, Command::Launch)
     }
 
     fn open_terminal(&mut self, row: usize) -> bool {
-        self.pend(row, Command::Terminal)
+        self.pend(row, Launches::terminal, Command::Terminal)
     }
 
-    fn pend(&mut self, row: usize, command: fn(GatewayName) -> Command) -> bool {
+    fn pend(
+        &mut self,
+        row: usize,
+        start: fn(&mut Launches, &[GatewayName], usize) -> Option<GatewayName>,
+        command: fn(GatewayName) -> Command,
+    ) -> bool {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
-        let Some(name) = self.launches.start(&names.unwrap_or_default(), row) else {
+        let Some(name) = start(&mut self.launches, &names.unwrap_or_default(), row) else {
             return false;
         };
         self.link.send(command(name));

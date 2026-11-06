@@ -89,6 +89,7 @@ pub struct Update {
     pub agent: Result<Agent, String>,
     pub failure: Option<Note>,
     pub launched: u64,
+    pub unlisted: u64,
     pub device: Option<Probe>,
     pub log: Journal,
     pub starting: Starting,
@@ -158,6 +159,7 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
         agent: loaded.agent,
         failure: None,
         launched: 0,
+        unlisted: 0,
         device: Some(Probe {
             key: KeyState::Failed(error),
             system: System::default(),
@@ -198,14 +200,14 @@ pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Optio
     }
 }
 
-async fn run<F, R>(command: Command, send: &F) -> Option<Note>
+async fn run<F, R>(command: Command, send: &F) -> (Option<Note>, bool)
 where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
     let request = match command.request() {
         Ok(request) => request,
-        Err(error) => return Some(Note::Agent(error)),
+        Err(error) => return (Some(Note::Agent(error)), false),
     };
     let reply = send(request).await;
     if let Ok(Response::Ok(lines)) = &reply
@@ -213,9 +215,10 @@ where
     {
         drop(wiped(reply));
         let _ = send(Request::Deny(token)).await;
-        return Some(CONFIRMATION.into());
+        return (Some(CONFIRMATION.into()), false);
     }
-    failure(command, reply)
+    let ok = matches!(reply, Ok(Response::Ok(_)));
+    (failure(command, reply), ok)
 }
 
 type Answers = RefCell<Desk<oneshot::Sender<Answer>>>;
@@ -363,6 +366,7 @@ pub async fn serve_with<F, R, S>(
 {
     let mut failure = None;
     let mut launched = 0;
+    let mut unlisted = 0;
     let mut device = None;
     let mut watching = false;
     let mut journal = Journal::default();
@@ -375,6 +379,7 @@ pub async fn serve_with<F, R, S>(
     loop {
         if tokio::time::Instant::now() >= next_poll {
             polled = poll(&send, &mut load, watching, &mut journal).await;
+            unlisted = 0;
             next_poll = tokio::time::Instant::now() + POLL;
         }
         let (state, config, loaded) = polled.clone();
@@ -394,6 +399,7 @@ pub async fn serve_with<F, R, S>(
             agent,
             failure: failure.take(),
             launched,
+            unlisted,
             device: device.clone(),
             log: journal.clone(),
             starting: match (&starting, &unstarted) {
@@ -462,8 +468,11 @@ pub async fn serve_with<F, R, S>(
                     }
                     Command::Close(_) | Command::Stop | Command::Launch(_) | Command::Terminal(_) => {}
                 }
-                failure = run(command, &send).await;
+                let terminal = matches!(command, Command::Terminal(_));
+                let (note, ok) = run(command, &send).await;
+                failure = note;
                 launched += u64::from(launch);
+                unlisted += u64::from(terminal && ok);
             }
             note = finish(&mut linking) => {
                 linking = None;
@@ -519,6 +528,7 @@ mod tests {
             agent: Ok(Agent::default()),
             failure,
             launched: 0,
+            unlisted: 0,
             device: None,
             log: Journal::default(),
             starting: Starting::Idle,
@@ -953,10 +963,71 @@ mod tests {
             unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), launched(polled(None))]);
+        assert_eq!(updates, [polled(None), unlisted(launched(polled(None)))]);
         assert_eq!(
             *log.borrow(),
             [Request::List, Request::Config, terminal("office")]
+        );
+    }
+
+    fn unlisted(update: Update) -> Update {
+        Update {
+            unlisted: 1,
+            ..update
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_opened_terminal_is_unlisted_until_the_next_list() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Terminal("office".parse().unwrap()))
+            .unwrap();
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            launcher(&log, Vec::new()),
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        assert_eq!(
+            updates,
+            [
+                polled(None),
+                unlisted(launched(polled(None))),
+                launched(polled(None))
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_the_agent_refused_is_not_unlisted() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Terminal("office".parse().unwrap()))
+            .unwrap();
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            |request| {
+                std::future::ready(Ok(match request {
+                    Request::Terminal(_) => Response::Error("no such gateway".to_owned()),
+                    _ => Response::Ok(Vec::new()),
+                }))
+            },
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        assert_eq!(
+            updates,
+            [polled(None), launched(polled(said("no such gateway")))]
         );
     }
 
