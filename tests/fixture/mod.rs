@@ -351,6 +351,7 @@ pub enum Behavior {
     TunnelWithBanner(&'static [u8]),
     Status(u16),
     Challenge(&'static str),
+    ChallengeNamingFirst(&'static str),
     Hang,
     Close,
 }
@@ -433,13 +434,11 @@ impl UpstreamProxy {
                                 .and_then(|chain| chain.first())
                                 .map(|leaf| leaf.to_vec())
                                 .unwrap_or_default();
-                            let response = format!(
-                                "HTTP/1.1 407 Fixture\r\nProxy-Authenticate: Basic realm=\"{SECRET}\"\r\nProxy-Authenticate: {}\r\nContent-Length: {}\r\n\r\n{SECRET}",
-                                challenge_value(&leaf, code),
-                                SECRET.len()
-                            );
-                            let _ = tls.write_all(response.as_bytes()).await;
-                            let _ = tls.shutdown().await;
+                            challenge(tls, &leaf, code).await
+                        }
+                        Behavior::ChallengeNamingFirst(code) => {
+                            let first = presented.lock().unwrap()[0][0].to_vec();
+                            challenge(tls, &first, code).await
                         }
                         Behavior::Hang => {
                             tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -490,6 +489,19 @@ impl UpstreamProxy {
     pub fn client_certificates(&self) -> Vec<Vec<CertificateDer<'static>>> {
         self.client_certificates.lock().unwrap().clone()
     }
+}
+
+async fn challenge<S>(mut upstream: S, leaf: &[u8], code: &str)
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let response = format!(
+        "HTTP/1.1 407 Fixture\r\nProxy-Authenticate: Basic realm=\"{SECRET}\"\r\nProxy-Authenticate: {}\r\nContent-Length: {}\r\n\r\n{SECRET}",
+        challenge_value(leaf, code),
+        SECRET.len()
+    );
+    let _ = upstream.write_all(response.as_bytes()).await;
+    let _ = upstream.shutdown().await;
 }
 
 async fn tunnel<S>(mut upstream: S, head: &str, rest: &[u8], banner: &[u8])

@@ -153,11 +153,15 @@ impl TestAgent {
     }
 
     async fn challenging(code: &'static str) -> Self {
+        Self::challenged(Behavior::Challenge(code)).await
+    }
+
+    async fn challenged(behavior: Behavior) -> Self {
         let key = KeyPair::generate().unwrap();
         let ca = TestCa::new();
         let upstream = UpstreamProxy::start(
             ca.server_config_trusting_client_spki(PROXY_NAME, key.subject_public_key_info()),
-            Behavior::Challenge(code),
+            behavior,
         )
         .await;
         let mut proxy = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
@@ -664,6 +668,46 @@ async fn a_refused_tunnel_is_shown_on_request_until_it_is_dismissed() {
             Response::Error("no session 999".to_owned())
         );
     }
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_challenge_naming_another_sessions_certificate_is_not_offered() {
+    let agent = TestAgent::challenged(Behavior::ChallengeNamingFirst(CHALLENGE_CODES[0])).await;
+    let (owner, owner_browser) = agent.launched("main").await;
+    let (other, other_browser) = agent.launched("main").await;
+    let refused = async |browser: &FakeBrowser, lines: &[String]| {
+        let (_, response) = send(
+            browser.proxy(),
+            &connect_with("example.test:443", Some(&session_auth(lines))),
+        )
+        .await;
+        assert_eq!(response.status, 502, "{}", response.head);
+    };
+
+    refused(&owner_browser, &owner).await;
+    refused(&other_browser, &other).await;
+    let presented = agent._upstream.client_certificates();
+    assert_eq!(presented.len(), 2);
+    assert_ne!(presented[0][0], presented[1][0]);
+
+    assert!(agent.listed(&owner).await.verification);
+    assert!(!agent.listed(&other).await.verification);
+    let other_id: SessionId = field(&other, "session").parse().unwrap();
+    assert_eq!(
+        agent.send(Request::Verification(other_id)).await,
+        Response::Error(format!("session {other_id} has no pending verification"))
+    );
+    let owner_id: SessionId = field(&owner, "session").parse().unwrap();
+    let Response::Ok(shown) = agent.send(Request::Verification(owner_id)).await else {
+        panic!("the verification was not shown");
+    };
+    assert_eq!(
+        field(&shown, "auth_uri"),
+        format!("{CHALLENGE_URI}{}", sha256_fingerprint(&presented[0][0]))
+    );
+    assert_eq!(field(&shown, "target"), "example.test:443");
+    assert_eq!(field(&shown, "suppressed"), "0");
     agent.stop().await;
 }
 
