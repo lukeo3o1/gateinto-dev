@@ -492,7 +492,10 @@ impl Agent {
             );
         }
         let limit = self.inner.options.limits.max_terminal_sessions;
-        if self.inner.terminals.lock().await.len() >= limit {
+        // Held until the terminal is registered, so that a close or stop arriving while the
+        // shell starts waits for it instead of missing it.
+        let mut terminals = self.inner.terminals.lock().await;
+        if terminals.len() >= limit {
             return Err(format!(
                 "{limit} terminal sessions are already open; close one first"
             ));
@@ -504,19 +507,22 @@ impl Agent {
             terminal::terminal_job(launcher.terminal_job()).map_err(|error| error.to_string())?;
         let mut proxy = terminal::terminal_proxy(plan.proxy, route, job.clone());
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        let mut sessions = self.inner.sessions.lock().await;
-        let id = sessions
-            .start(SessionConfig {
-                kind: SessionKind::Terminal,
-                gateway: gateway.clone(),
-                proxy,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let listen = sessions
-            .session(id)
-            .expect("the session just started")
-            .local_addr();
+        let (id, listen) = {
+            let mut sessions = self.inner.sessions.lock().await;
+            let id = sessions
+                .start(SessionConfig {
+                    kind: SessionKind::Terminal,
+                    gateway: gateway.clone(),
+                    proxy,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let listen = sessions
+                .session(id)
+                .expect("the session just started")
+                .local_addr();
+            (id, listen)
+        };
         let span = info_span!("session", %id, kind = %SessionKind::Terminal, gateway = %gateway);
         let inherited = launcher.environment();
         let current_dir = home_dir(&inherited);
@@ -541,13 +547,12 @@ impl Agent {
         let child = match spawned {
             Ok(child) => child,
             Err(error) => {
-                sessions.close(id).await;
+                self.inner.sessions.lock().await.close(id).await;
                 let message = format!("starting {} failed: {error}", executable.display());
                 span.in_scope(|| warn!("{message}"));
                 return Err(message);
             }
         };
-        drop(sessions);
         span.in_scope(|| info!(shell = %executable.display(), "started a shell for the session"));
         let shell = executable
             .file_name()
@@ -564,7 +569,6 @@ impl Agent {
         lines = warned(lines, &known);
         lines.extend(terminal::route_warning(route).map(str::to_owned));
         let (close, closed) = oneshot::channel();
-        let mut terminals = self.inner.terminals.lock().await;
         let task =
             tokio::spawn(watch_terminal(self.inner.clone(), id, child, closed).instrument(span));
         terminals.insert(id, Terminal { shell, close, task });
@@ -1269,6 +1273,43 @@ mod tests {
             job: bool,
             spawn: Spawn,
             spawned: std::sync::Mutex<Vec<TerminalSpawn>>,
+            gate: std::sync::Mutex<Option<Gate>>,
+        }
+
+        struct Gate {
+            started: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        struct Opener {
+            started: std::sync::mpsc::Receiver<()>,
+            release: std::sync::mpsc::Sender<()>,
+        }
+
+        impl Opener {
+            async fn wait_started(self) -> std::sync::mpsc::Sender<()> {
+                let Opener { started, release } = self;
+                tokio::task::spawn_blocking(move || started.recv().unwrap())
+                    .await
+                    .unwrap();
+                release
+            }
+        }
+
+        fn gated() -> (Terminals, Opener) {
+            let (started, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release) = std::sync::mpsc::channel();
+            let launcher = Terminals {
+                gate: std::sync::Mutex::new(Some(Gate { started, release })),
+                ..Terminals::default()
+            };
+            (
+                launcher,
+                Opener {
+                    started: started_rx,
+                    release: release_tx,
+                },
+            )
         }
 
         impl Default for Terminals {
@@ -1278,6 +1319,7 @@ mod tests {
                     job: true,
                     spawn: Spawn::Runs,
                     spawned: std::sync::Mutex::new(Vec::new()),
+                    gate: std::sync::Mutex::new(None),
                 }
             }
         }
@@ -1330,6 +1372,11 @@ mod tests {
                 _: &Arc<Job>,
             ) -> Result<BrowserProcess, SpawnError> {
                 self.spawned.lock().unwrap().push(spawn);
+                let gate = self.gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    gate.started.send(()).unwrap();
+                    gate.release.recv().unwrap();
+                }
                 match self.spawn {
                     Spawn::Runs => browser::spawn(Path::new("/bin/sleep"), vec!["30".into()], None),
                     Spawn::Exits => browser::spawn(Path::new("/bin/true"), Vec::new(), None),
@@ -1628,6 +1675,70 @@ mod tests {
                 answer(&agent, Request::Close(id)).await,
                 Err(format!("no session {id}"))
             );
+        }
+
+        #[tokio::test]
+        async fn other_sessions_stay_reachable_while_a_shell_starts() {
+            let (launcher, opener) = gated();
+            let (agent, _, _) = agent(launcher);
+            let starting = tokio::spawn({
+                let agent = agent.clone();
+                async move { answer(&agent, request("office", None)).await }
+            });
+            let release = opener.wait_started().await;
+
+            let reachable = agent.inner.sessions.try_lock().is_ok();
+            release.send(()).unwrap();
+            starting.await.unwrap().unwrap();
+            assert!(reachable);
+            agent.close_all().await;
+        }
+
+        #[tokio::test]
+        async fn a_close_while_a_shell_starts_stops_that_shell() {
+            let (launcher, opener) = gated();
+            let (agent, _, _) = agent(launcher);
+            let starting = tokio::spawn({
+                let agent = agent.clone();
+                async move { answer(&agent, request("office", None)).await }
+            });
+            let release = opener.wait_started().await;
+            let id = tokio::time::timeout(Duration::from_secs(5), session_ids(&agent))
+                .await
+                .expect("the sessions are reachable while the shell starts")[0];
+            let closing = tokio::spawn({
+                let agent = agent.clone();
+                async move { answer(&agent, Request::Close(id)).await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            release.send(()).unwrap();
+            starting.await.unwrap().unwrap();
+            assert_eq!(closing.await.unwrap(), Ok(Vec::new()));
+            assert!(session_ids(&agent).await.is_empty());
+            assert!(agent.inner.terminals.lock().await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn stop_counts_a_terminal_whose_shell_is_still_starting() {
+            let (launcher, opener) = gated();
+            let (agent, _, _) = agent(launcher);
+            let starting = tokio::spawn({
+                let agent = agent.clone();
+                async move { answer(&agent, request("office", None)).await }
+            });
+            let release = opener.wait_started().await;
+            let stopping = tokio::spawn({
+                let agent = agent.clone();
+                async move { agent.close_all().await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            release.send(()).unwrap();
+            starting.await.unwrap().unwrap();
+            assert_eq!(stopping.await.unwrap(), 1);
+            assert!(session_ids(&agent).await.is_empty());
+            assert!(agent.inner.terminals.lock().await.is_empty());
         }
 
         #[tokio::test]
