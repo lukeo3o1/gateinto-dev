@@ -361,7 +361,8 @@ share only the device key.
   the agent's configuration file, not one approved from a link, and only
   `--route` may be given with it; the shell is `[terminal] shell` and `args`
   of that file, else `%ComSpec%`. The agent opens the shell in a new console
-  window titled `Gateinto: <gateway>`, in `%USERPROFILE%`, with its own
+  window titled `Gateinto: <gateway>`, in `%USERPROFILE%` (the request is
+  refused if the agent has no absolute `USERPROFILE`), with its own
   start-time environment and the proxy variables replaced, and prints
   `session`, `gateway`, `listen`, `route`, `auth` and `shell`. The session
   is listed by `gateinto session list`; it ends when the shell exits, and

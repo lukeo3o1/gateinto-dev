@@ -477,6 +477,7 @@ The full protocol, limits and guarantees are in
         |  rate limit (shared with launch), Launcher::terminals(),
         |  at most AgentLimits::max_terminal_sessions (4) terminals
         |  Profiles::terminal_session: config-file gateways only, route, shell
+        |  absolute %USERPROFILE% in the agent environment (else refuse)
         |-- Job::new (no job: answer an error, start nothing)
         |-- SessionManager::start(Terminal, 127.0.0.1:0, os_user with the job)
         |-- Job::spawn_with(shell, CREATE_NEW_CONSOLE, %USERPROFILE%,
@@ -500,7 +501,9 @@ The full protocol, limits and guarantees are in
   pool; if it fails, the session is closed and the request answers an
   error.
 - `session list` shows the shell in the `PROGRAM` column (`SessionInfo`
-  `shell`); `session close` and `stop` kill the job. The `Launcher` trait
+  `shell`); `session close` and `stop` kill the job. While a shell is
+  starting, `session list`, `stop` and `session close` of any session that
+  is not a browser wait until it is registered, so they see it. The `Launcher` trait
   is the test seam: `System` answers `terminals()` with `cfg!(windows)` and
   creates real jobs, the tests use fake jobs and record the spawns.
 - On Windows the agent calls `SetConsoleCtrlHandler(NULL, FALSE)` once at

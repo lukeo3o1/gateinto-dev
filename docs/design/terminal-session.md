@@ -368,7 +368,9 @@ Option<Route> })`, `None` meaning `saved`)
    ([Environment](#environment)) and spawn the shell in the job through
    `spawn_blocking`, with `CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT`,
    current directory `%USERPROFILE%` (the agent's own current directory is
-   wherever it was started from), and a window title `Gateinto: <gateway>`
+   wherever it was started from; if the agent's environment has no absolute
+   `USERPROFILE`, the request is refused before the job and the session are
+   created, never started in the agent's directory), and a window title `Gateinto: <gateway>`
    in `STARTUPINFOW::lpTitle` (the shell may change it). Not
    `CREATE_NEW_PROCESS_GROUP`. Ctrl-C in the new console needs more; see
    [Ctrl-C in the agent-hosted console](#ctrl-c-in-the-agent-hosted-console).
@@ -1043,7 +1045,8 @@ goes through the `Launcher::terminals()` seam, not `cfg!`; the fake answers
   `false`;
 - a `terminal` request starts a session of kind `terminal` with
   `LocalAuth::OS_USER` and the job, and the launcher sees the resolved shell,
-  `new_console`, `%USERPROFILE%` and the environment;
+  `new_console`, `%USERPROFILE%` and the environment; a missing or relative
+  `USERPROFILE` refuses the request and starts nothing;
 - a job that cannot be created, or `SpawnError::Job`, closes the session,
   answers an error and leaves no session, with no retry;
 - the launch rate limit is shared with `launch`, and `max_terminal_sessions`
@@ -1182,7 +1185,8 @@ marked as such.
 9. **Agent-hosted environment** is the agent's start-time environment;
    `CreateEnvironmentBlock` is not used.
 10. **Agent-hosted current directory** is `%USERPROFILE%`; there is no
-    `[terminal] directory` key.
+    `[terminal] directory` key, and without an absolute `USERPROFILE` the
+    request is refused.
 11. **Limits:** `max_terminal_sessions` = 4, counted separately from
     browsers, and the launch rate limit is shared by `launch` and
     `terminal`.
