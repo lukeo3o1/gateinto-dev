@@ -80,7 +80,7 @@ impl Link {
             }
         };
         let reveal = move |reveal| {
-            if open(&secrets).put_reveal(reveal) {
+            if open(&secrets).put_secret(reveal) {
                 unsafe { PostMessageW(window as HWND, WM_AGENT, 0, 0) };
             }
         };

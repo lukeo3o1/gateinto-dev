@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 gateinto = { path = ".." }
 tokio = { version = "1.54.1", features = ["rt", "net", "sync", "time", "macros", "process"] }
+qrcodegen-no-heap = "=1.8.1"
 zeroize = "1.9.1"
 
 [dev-dependencies]
