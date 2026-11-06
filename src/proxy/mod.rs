@@ -38,10 +38,12 @@ mod pool;
 mod relay;
 mod routing;
 mod session_credentials;
+mod verifications;
 
 pub use challenge::VerificationOrigin;
 pub use local_auth::LocalAuth;
 pub use routing::Route;
+pub use verifications::{PendingVerifications, Verification, Verifications};
 
 use local_auth::Authenticator;
 pub use session_credentials::{FailureLimit, SessionCredentials};
