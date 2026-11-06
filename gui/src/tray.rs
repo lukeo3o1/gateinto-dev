@@ -29,6 +29,7 @@ pub struct Status {
     pub logo: State,
     pub stop: bool,
     pub start: bool,
+    pub verification: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +76,7 @@ pub fn status(state: &AgentState) -> Status {
                 },
                 stop: true,
                 start: false,
+                verification: sessions.iter().any(|s| s.verification),
             }
         }
         AgentState::Stopped => Status {
@@ -83,6 +85,7 @@ pub fn status(state: &AgentState) -> Status {
             logo: State::Stopped,
             stop: false,
             start: true,
+            verification: false,
         },
         AgentState::Unreachable(error) => Status {
             title: tr(Text::AgentUnreachable),
@@ -90,6 +93,7 @@ pub fn status(state: &AgentState) -> Status {
             logo: State::Attention,
             stop: false,
             start: false,
+            verification: false,
         },
     }
 }
@@ -101,6 +105,7 @@ pub fn pending() -> Status {
         logo: State::Idle,
         stop: false,
         start: false,
+        verification: false,
     }
 }
 
@@ -138,10 +143,11 @@ pub fn flyout_title(demo: bool) -> &'static str {
 }
 
 pub fn tooltip(status: &Status, demo: bool) -> String {
-    let tip = if demo {
-        Text::DemoTrayTip
-    } else {
-        Text::TrayTip
+    let tip = match (demo, status.verification) {
+        (true, true) => Text::DemoVerificationTrayTip,
+        (true, false) => Text::DemoTrayTip,
+        (false, true) => Text::VerificationTrayTip,
+        (false, false) => Text::TrayTip,
     };
     let full = fill(tip, &[&status.title, &status.subtitle]);
     let mut units = 0;
@@ -196,6 +202,7 @@ pub fn flyout(
         logo,
         stop,
         start,
+        ..
     } = status(state);
     let (subtitle, start) = match (start, starting) {
         (false, _) => (subtitle, Launch::Hidden),
@@ -424,6 +431,7 @@ mod tests {
                 logo: State::Relaying,
                 stop: true,
                 start: false,
+                verification: false,
             }
         );
     }
@@ -454,6 +462,7 @@ mod tests {
                 logo: State::Stopped,
                 stop: false,
                 start: true,
+                verification: false,
             }
         );
         let lost = status(&AgentState::Unreachable(crate::i18n::Note::Agent(
@@ -490,6 +499,31 @@ mod tests {
         );
         assert_eq!(flyout_title(true), "Gateinto 示範狀態");
         assert_eq!(flyout_title(false), "Gateinto 狀態");
+    }
+
+    #[test]
+    fn the_tooltip_says_that_a_session_needs_verification() {
+        let mut flagged = session(2, "office", 0);
+        flagged.verification = true;
+        let state = running(vec![session(1, "office", 1), flagged]);
+        assert!(status(&state).verification);
+        assert!(!status(&running(vec![session(1, "office", 1)])).verification);
+        assert!(!status(&AgentState::Stopped).verification);
+        assert_eq!(
+            tooltip(&status(&state), false),
+            "Gateinto: Relaying\nA session needs verification\n2 sessions · 1 with traffic"
+        );
+        assert_eq!(
+            tooltip(&status(&state), true),
+            "Gateinto Demo: Relaying\nA session needs verification\n2 sessions · 1 with traffic"
+        );
+        let long = Status {
+            subtitle: "é".repeat(300),
+            ..status(&state)
+        };
+        let tip = tooltip(&long, false);
+        assert!(tip.encode_utf16().count() <= TIP_UNITS);
+        assert!(tip.starts_with("Gateinto: Relaying\nA session needs verification\né"));
     }
 
     #[test]
