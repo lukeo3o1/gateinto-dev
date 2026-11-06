@@ -1,7 +1,7 @@
 use crate::ipc::SessionInfo;
 
 const HEADER: [&str; 9] = [
-    "ID", "KIND", "GATEWAY", "LISTEN", "ROUTE", "AUTH", "TUNNELS", "UPTIME", "BROWSER",
+    "ID", "KIND", "GATEWAY", "LISTEN", "ROUTE", "AUTH", "TUNNELS", "UPTIME", "PROGRAM",
 ];
 
 pub fn session_table(sessions: &[SessionInfo], now: u64) -> Vec<String> {
@@ -16,9 +16,11 @@ pub fn session_table(sessions: &[SessionInfo], now: u64) -> Vec<String> {
                 session.auth.to_string(),
                 session.tunnels.to_string(),
                 uptime(now.saturating_sub(session.started)),
-                session
-                    .browser
-                    .map_or_else(|| "-".to_owned(), |browser| browser.to_string()),
+                match (&session.shell, session.browser) {
+                    (Some(shell), _) => shell.clone(),
+                    (None, Some(browser)) => browser.to_string(),
+                    (None, None) => "-".to_owned(),
+                },
             ]
         }))
         .collect();
@@ -65,6 +67,7 @@ mod tests {
             started: 1_000,
             tunnels: 3,
             browser,
+            shell: None,
         }
     }
 
@@ -72,7 +75,7 @@ mod tests {
     fn an_empty_list_is_only_the_header() {
         assert_eq!(
             session_table(&[], 0),
-            ["ID  KIND  GATEWAY  LISTEN  ROUTE  AUTH  TUNNELS  UPTIME  BROWSER"]
+            ["ID  KIND  GATEWAY  LISTEN  ROUTE  AUTH  TUNNELS  UPTIME  PROGRAM"]
         );
     }
 
@@ -94,10 +97,24 @@ mod tests {
         assert_eq!(
             table,
             [
-                "ID  KIND     GATEWAY    LISTEN           ROUTE  AUTH      TUNNELS  UPTIME  BROWSER",
+                "ID  KIND     GATEWAY    LISTEN           ROUTE  AUTH      TUNNELS  UPTIME  PROGRAM",
                 "1   browser  corporate  127.0.0.1:49152  all    password  3        51m05s  chrome",
                 "10  unknown  office     [::1]:8080       mixed  os_user   12       1m05s   -",
             ]
+        );
+    }
+
+    #[test]
+    fn a_terminal_row_shows_its_shell_as_the_program() {
+        let terminal = SessionInfo {
+            kind: SessionKind::Terminal,
+            auth: SessionAuth::OsUser,
+            shell: Some("pwsh.exe".to_owned()),
+            ..session(2, "office", None)
+        };
+        assert_eq!(
+            session_table(&[terminal], 1_005)[1],
+            "2   terminal  office   127.0.0.1:49152  all    os_user  3        5s      pwsh.exe"
         );
     }
 

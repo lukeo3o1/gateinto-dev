@@ -44,6 +44,8 @@ pub fn default_path_from(env: impl Fn(&str) -> Option<OsString>) -> Option<PathB
 pub struct ConfigFile {
     #[serde(skip)]
     path: Option<PathBuf>,
+    #[serde(skip)]
+    dir: Option<PathBuf>,
     #[serde(
         default,
         rename = "device_session",
@@ -58,6 +60,8 @@ pub struct ConfigFile {
     pub limits: LimitsSection,
     #[serde(default)]
     pub browser: BrowserSection,
+    #[serde(default)]
+    pub terminal: TerminalSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
@@ -399,6 +403,38 @@ pub struct BrowserSection {
     pub executable: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawTerminalSection")]
+pub struct TerminalSection {
+    pub shell: Option<PathBuf>,
+    pub args: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTerminalSection {
+    shell: Option<PathBuf>,
+    args: Option<Vec<String>>,
+}
+
+impl TryFrom<RawTerminalSection> for TerminalSection {
+    type Error = &'static str;
+
+    fn try_from(raw: RawTerminalSection) -> Result<Self, Self::Error> {
+        match (raw.shell, raw.args) {
+            (Some(shell), _) if shell.as_os_str().is_empty() => {
+                Err("[terminal] shell is empty; name a shell or remove the key")
+            }
+            (None, Some(_)) => Err("[terminal] args is used only together with shell; set \
+                                    shell or remove args"),
+            (shell, args) => Ok(Self {
+                shell,
+                args: args.unwrap_or_default(),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
     pub gateway: Option<GatewayName>,
@@ -422,6 +458,7 @@ pub struct GatewayProfile {
     pub client_cert_file: Option<PathBuf>,
     pub self_signed_client_cert: bool,
     pub portal_url: Option<PortalUrl>,
+    pub route: Route,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,8 +530,20 @@ impl ConfigFile {
         if let Some(executable) = &mut file.browser.executable {
             *executable = base.join(&*executable);
         }
-        file.path = Some(path.to_owned());
+        file.locate(path).map_err(in_file)?;
         Ok(file)
+    }
+
+    fn locate(&mut self, path: &Path) -> Result<(), ConfigError> {
+        let absolute = std::path::absolute(path)
+            .map_err(|error| ConfigError::new(ErrorKind::Directory(error)))?;
+        self.dir = absolute.parent().map(Path::to_owned);
+        self.path = Some(path.to_owned());
+        Ok(())
+    }
+
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
     pub fn with_linked(&self, linked: &[LinkedGateway]) -> Self {
@@ -593,6 +642,7 @@ impl ConfigFile {
                 kind,
             })
         };
+        let route = section.route();
         let (Some(host), Some(port)) = (section.host, section.port) else {
             return Err(invalid(GatewayErrorKind::NoUpstream));
         };
@@ -620,6 +670,7 @@ impl ConfigFile {
             client_cert_file: section.client_cert_file,
             self_signed_client_cert,
             portal_url: section.portal_url,
+            route,
         })
     }
 
@@ -640,6 +691,7 @@ pub struct ConfigError {
 #[derive(Debug)]
 enum ErrorKind {
     Read(io::Error),
+    Directory(io::Error),
     Parse(toml::de::Error),
     UnknownGateway {
         name: GatewayName,
@@ -677,6 +729,10 @@ impl fmt::Display for ConfigError {
         }
         match &self.kind {
             ErrorKind::Read(error) => write!(f, "{error}"),
+            ErrorKind::Directory(error) => write!(
+                f,
+                "cannot find the absolute directory of the config file: {error}"
+            ),
             ErrorKind::TunnelLimit(limit) => write!(
                 f,
                 "max_concurrent_tunnels is {limit}; the maximum is {}",
@@ -863,6 +919,7 @@ port = 443
                             .parse()
                             .unwrap()
                     ),
+                    route: Route::Mixed,
                 },
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
@@ -1070,6 +1127,8 @@ port = 443
             ("[gateways.main]\nlisten = \"127.0.0.1:1\"\n", "listen"),
             ("[device_key]\nbackend = \"tpm\"\n", "backend"),
             ("[limits]\nmax_tunnels = 1\n", "max_tunnels"),
+            ("[terminal]\ncommand = \"sh\"\n", "command"),
+            ("[terminal]\nshell = \"sh\"\nenv = {}\n", "env"),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains(key), "{text}: {error}");
@@ -1233,6 +1292,57 @@ port = 443
     }
 
     #[test]
+    fn the_terminal_section_names_a_shell_and_its_arguments() {
+        let file =
+            ConfigFile::parse("[terminal]\nshell = \"pwsh.exe\"\nargs = [\"-NoLogo\"]\n").unwrap();
+        assert_eq!(
+            file.terminal,
+            TerminalSection {
+                shell: Some(PathBuf::from("pwsh.exe")),
+                args: vec!["-NoLogo".to_owned()],
+            }
+        );
+        let file = ConfigFile::parse("[terminal]\nshell = \"sh\"\n").unwrap();
+        assert!(file.terminal.args.is_empty());
+        assert_eq!(
+            ConfigFile::parse("").unwrap().terminal,
+            TerminalSection::default()
+        );
+        assert_eq!(
+            ConfigFile::parse("[terminal]\n").unwrap().terminal,
+            TerminalSection::default()
+        );
+    }
+
+    #[test]
+    fn an_empty_terminal_shell_is_refused() {
+        for text in [
+            "[terminal]\nshell = \"\"\n",
+            "[terminal]\nshell = \"\"\nargs = [\"-l\"]\n",
+        ] {
+            let error = ConfigFile::parse(text).unwrap_err().to_string();
+            assert!(
+                error.contains("[terminal] shell is empty; name a shell or remove the key"),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_args_need_a_shell() {
+        for text in [
+            "[terminal]\nargs = [\"-NoLogo\"]\n",
+            "[terminal]\nargs = []\n",
+        ] {
+            let error = ConfigFile::parse(text).unwrap_err().to_string();
+            assert!(
+                error.contains("[terminal] args is used only together with shell"),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn self_signed_client_cert_is_off_unless_enabled() {
         assert!(!settings(MINIMAL).unwrap().gateway.self_signed_client_cert);
         assert!(
@@ -1385,7 +1495,8 @@ port = 443
                 "{MINIMAL}ca_file = \"certs/ca.pem\"\nclient_cert_file = '{}'\n\
                  [gateways.other]\nhost = \"other.test\"\nport = 1\nca_file = \"other.pem\"\n\
                  client_cert_file = \"keys/client.pem\"\n\
-                 [browser]\nexecutable = \"bin/chrome\"\n",
+                 [browser]\nexecutable = \"bin/chrome\"\n\
+                 [terminal]\nshell = \"tools/sh\"\n",
                 absolute.display()
             ),
         )
@@ -1400,6 +1511,34 @@ port = 443
         assert_eq!(other.upstream.ca_file, Some(dir.join("other.pem")));
         assert_eq!(other.client_cert_file, Some(dir.join("keys/client.pem")));
         assert_eq!(file.browser.executable, Some(dir.join("bin/chrome")));
+        assert_eq!(file.terminal.shell, Some(PathBuf::from("tools/sh")));
+        assert_eq!(file.dir(), Some(dir.as_path()));
+        assert_eq!(ConfigFile::parse("").unwrap().dir(), None);
+    }
+
+    #[test]
+    fn the_directory_of_a_relative_file_is_made_absolute_when_it_is_located() {
+        let cwd = std::env::current_dir().unwrap();
+        for (path, expected) in [
+            ("gateinto.toml", cwd.clone()),
+            ("conf/gateinto.toml", cwd.join("conf")),
+        ] {
+            let mut file = ConfigFile::default();
+            file.locate(Path::new(path)).unwrap();
+            assert_eq!(file.dir(), Some(expected.as_path()), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_file_whose_directory_cannot_be_made_absolute_is_refused() {
+        let error = ConfigFile::default()
+            .locate(Path::new(""))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot find the absolute directory of the config file"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1467,6 +1606,25 @@ port = 443
             assert!(component.contains(wanted), "{wanted}");
         }
         assert!(!component.contains("Transitive"), "{component}");
+    }
+
+    #[test]
+    fn the_selected_gateway_carries_its_saved_route() {
+        let file = ConfigFile::parse(&format!(
+            "{MINIMAL}[gateways.forced]\nhost = \"f.example.test\"\nport = 1\nroute = \"gateway\"\n"
+        ))
+        .unwrap();
+        let route = |gateway: &str| {
+            file.settings(&Overrides {
+                gateway: Some(name(gateway)),
+                ..Overrides::default()
+            })
+            .unwrap()
+            .gateway
+            .route
+        };
+        assert_eq!(route("forced"), Route::Gateway);
+        assert_eq!(route("main"), Route::Mixed);
     }
 
     #[test]

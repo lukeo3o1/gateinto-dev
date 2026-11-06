@@ -20,9 +20,7 @@ impl fmt::Display for Denial {
         match self {
             Self::NotFound => f.write_str("no process owns the connection"),
             Self::OtherUser => f.write_str("the connection comes from another OS user"),
-            Self::NotInJob => {
-                f.write_str("the connection comes from outside the session's browser")
-            }
+            Self::NotInJob => f.write_str("the connection comes from outside the session's job"),
             Self::Lookup(error) => write!(f, "looking up the connection owner failed: {error}"),
             Self::TimedOut => {
                 f.write_str("the owner lookup did not finish within the handshake timeout")
@@ -131,7 +129,12 @@ pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn system(_: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
+pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
+    #[cfg(test)]
+    if job.is_some() {
+        return Ok(tests::fake(Err(Denial::NotInJob)));
+    }
+    let _ = job;
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "os_user authentication is only available on Windows",
@@ -335,7 +338,7 @@ pub(crate) mod tests {
         for (denial, reason) in [
             (Denial::NotFound, "no process owns"),
             (Denial::OtherUser, "another OS user"),
-            (Denial::NotInJob, "outside the session's browser"),
+            (Denial::NotInJob, "outside the session's job"),
             (
                 Denial::Lookup("access denied".to_owned()),
                 "failed: access denied",
@@ -355,5 +358,13 @@ pub(crate) mod tests {
         let error = system(None).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("only available on Windows"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_test_job_stands_in_for_the_system_lookup_and_admits_nobody() {
+        let owners = system(Some(Arc::new(Job::fake()))).unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        assert!(matches!(owners.check(addr, addr), Err(Denial::NotInJob)));
     }
 }

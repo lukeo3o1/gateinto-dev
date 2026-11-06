@@ -56,9 +56,10 @@ struct Sample {
     age: u64,
     tunnels: u64,
     browser: Option<BrowserKind>,
+    shell: Option<&'static str>,
 }
 
-const SESSIONS: [Sample; 3] = [
+const SESSIONS: [Sample; 4] = [
     Sample {
         id: 3,
         kind: SessionKind::Browser,
@@ -70,6 +71,7 @@ const SESSIONS: [Sample; 3] = [
         age: 7_380,
         tunnels: 4,
         browser: Some(BrowserKind::Chromium),
+        shell: None,
     },
     Sample {
         id: 5,
@@ -82,6 +84,7 @@ const SESSIONS: [Sample; 3] = [
         age: 1_500,
         tunnels: 2,
         browser: Some(BrowserKind::Edge),
+        shell: None,
     },
     Sample {
         id: 6,
@@ -94,6 +97,20 @@ const SESSIONS: [Sample; 3] = [
         age: 30,
         tunnels: 0,
         browser: Some(BrowserKind::Chrome),
+        shell: None,
+    },
+    Sample {
+        id: 7,
+        kind: SessionKind::Terminal,
+        gateway: "office",
+        upstream: "proxy.example.com:8443",
+        port: 49_760,
+        route: SessionRoute::All,
+        auth: SessionAuth::OsUser,
+        age: 600,
+        tunnels: 1,
+        browser: None,
+        shell: Some("pwsh.exe"),
     },
 ];
 
@@ -162,6 +179,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             started: now - s.age,
             tunnels: s.tunnels,
             browser: s.browser,
+            shell: s.shell.map(str::to_owned),
         })
         .collect()
 }
@@ -198,6 +216,7 @@ pub fn answer(request: Request, now: u64) -> Response {
                 .collect(),
         ),
         Request::Launch(_)
+        | Request::Terminal(_)
         | Request::Close(_)
         | Request::Stop
         | Request::Config
@@ -208,7 +227,7 @@ pub fn answer(request: Request, now: u64) -> Response {
 
 pub fn refusal(command: &Command) -> Option<Text> {
     match command {
-        Command::Launch(_) | Command::Link(_) => Some(NOT_STARTED),
+        Command::Launch(_) | Command::Terminal(_) | Command::Link(_) => Some(NOT_STARTED),
         Command::Close(_) => Some(NOT_REVOKED),
         Command::Stop => Some(NOT_STOPPED),
         Command::Start => Some(AGENT_NOT_STARTED),
@@ -348,9 +367,19 @@ mod tests {
     }
 
     #[test]
-    fn the_sample_sessions_cover_each_browser_and_some_relay_traffic() {
+    fn the_sample_sessions_cover_each_browser_a_terminal_and_some_relay_traffic() {
         let sessions = listed();
-        assert!(sessions.iter().all(|s| s.kind == SessionKind::Browser));
+        let browsers = sessions.iter().filter(|s| s.kind == SessionKind::Browser);
+        assert!(browsers.clone().all(|s| s.shell.is_none()));
+        assert_eq!(browsers.count(), sessions.len() - 1);
+        let terminal = sessions
+            .iter()
+            .find(|s| s.kind == SessionKind::Terminal)
+            .unwrap();
+        assert_eq!(
+            (terminal.auth, terminal.browser, terminal.shell.as_deref()),
+            (SessionAuth::OsUser, None, Some("pwsh.exe"))
+        );
         for browser in [
             BrowserKind::Chrome,
             BrowserKind::Edge,
@@ -371,6 +400,10 @@ mod tests {
         let token = || "0123456789abcdef0123456789abcdef".parse().unwrap();
         for request in [
             Request::Launch(launch),
+            Request::Terminal(gateinto::ipc::TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: None,
+            }),
             Request::Close(SessionId::from(3)),
             Request::Stop,
             Request::Approve(token()),
@@ -385,6 +418,8 @@ mod tests {
     fn the_window_refuses_every_action_before_it_reaches_the_sample_agent() {
         let launch = Command::Launch("office".parse().unwrap());
         assert_eq!(refusal(&launch), Some(NOT_STARTED));
+        let terminal = Command::Terminal("office".parse().unwrap());
+        assert_eq!(refusal(&terminal), Some(NOT_STARTED));
         assert_eq!(refusal(&Command::Close(3)), Some(NOT_REVOKED));
         assert_eq!(refusal(&Command::Stop), Some(NOT_STOPPED));
         assert_eq!(refusal(&Command::Start), Some(AGENT_NOT_STARTED));

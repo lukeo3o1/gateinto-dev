@@ -149,6 +149,7 @@ impl Session {
             started: unix_seconds(self.started),
             tunnels: self.open_tunnels.count() as u64,
             browser,
+            shell: None,
         }
     }
 

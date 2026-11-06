@@ -489,7 +489,9 @@ fn act(main: HWND, action: Option<Action>) {
             });
         }
         Some(Action::StopAgent) => {
-            with_app(main, |app| app.order(Command::Stop));
+            if with_app(main, |app| app.order(Command::Stop)) == Some(true) {
+                open_main(main);
+            }
         }
         Some(Action::StartAgent) => {
             with_app(main, |app| app.link.send(Command::Start));

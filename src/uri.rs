@@ -548,6 +548,20 @@ mod tests {
     }
 
     #[test]
+    fn a_link_cannot_ask_for_a_terminal_or_a_command() {
+        for uri in [
+            "gateinto://terminal?profile=a",
+            "gateinto://connect?profile=a&kind=terminal",
+            "gateinto://connect?profile=a&shell=cmd.exe",
+            "gateinto://connect?profile=a&command=calc",
+            "gateinto://connect?profile=a&args=%2Fc",
+            "gateinto://connect?profile=a&env=PATH%3D.",
+        ] {
+            assert!(parse(uri).is_err(), "{uri:?}");
+        }
+    }
+
+    #[test]
     fn injection_attempts_are_rejected() {
         let long = "a".repeat(65);
         for profile in [

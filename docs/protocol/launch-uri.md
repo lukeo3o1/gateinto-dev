@@ -578,7 +578,8 @@ they never contain spaces or line breaks.
 | `list` | `session: <id> <device or browser> <gateway> <listen address>` per session, with ` route=mixed` appended for mixed sessions |
 | `close <id>` | none |
 | `credentials <id>` | `listen: 127.0.0.1:<port>`, `username: <user name>`, `password: <password>`; `error: no session <id>` once the session is closed |
-| `stop` | none; the agent closes every session, then exits |
+| `terminal <gateway> route=<saved\|gateway\|mixed>` | Windows only: `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `route: <route>`, `auth: os_user`, `shell: <file name>`, then the gateway's warnings and, for `mixed`, the mixed-route warning; never credentials. The gateway must be in the agent's configuration file. Other platforms answer an error; an agent older than `terminal` answers `error: invalid request` |
+| `stop` | `agent-pid: <pid>`, `terminals-closed: <n>` (the number of terminal sessions closed); the agent closes every session, then exits |
 | `log <after>` | `agent-pid: <pid>`, `last: <n>` (the sequence number of the newest event logged since the agent started, `0` when none), then, oldest first, one JSON object per kept event with a sequence number above `<after>`: `{"seq":<n>,"time":<Unix milliseconds>,"level":"error"\|"warn"\|"info","scope":"session <id>" or a module name,"message":<text>}`. The agent keeps only the last 500 events at `info` and above in memory, each message cut to 1000 characters, and stops adding events before the answer would exceed 64 KiB. `<after>` is a decimal number without sign or leading zeros. |
 | `config` | `config: <absolute path>` of the config file the agent loaded, or `config: none` when it runs without one; an agent whose path is not UTF-8 or contains a line break answers an error instead |
 

@@ -294,10 +294,17 @@ pointed at it (see [Launching a browser session from a
 link](../README.md#launching-a-browser-session-from-a-link)). Only `CONNECT`
 is supported: plain `http://` URLs sent to a session get `405`.
 
+On Windows, `gateinto session terminal --config C:\gateinto\gateinto.toml`
+instead starts a shell in the same console with its proxy variables pointing
+at a new session that accepts only that shell and the processes it starts;
+the session ends when the shell exits. It is pre-release and has not been
+verified on real Windows yet.
+
 Security caveat: the credentials keep out local programs that do not know
 them, but not malware running as your user. Every session listens on
-loopback only and always requires its credentials; there is no setting that
-removes them. Do not run Gateinto on shared machines you do not trust. See
+loopback only. A browser session always requires its credentials; there is
+no setting that removes them. A terminal session has none and accepts only
+processes in its job object. Do not run Gateinto on shared machines you do not trust. See
 the [security model](security-model.md).
 
 ## 7. Optional: mutual TLS with the device key
