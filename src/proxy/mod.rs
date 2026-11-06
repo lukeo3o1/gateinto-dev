@@ -26,6 +26,8 @@ use crate::identity::client_cert::ClientCertificate;
 use crate::job::Job;
 use crate::tls::{self, NegotiationError, TlsMode};
 
+#[cfg_attr(not(any(test, fuzzing)), expect(dead_code))]
+mod challenge;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -37,6 +39,7 @@ mod relay;
 mod routing;
 mod session_credentials;
 
+pub use challenge::VerificationOrigin;
 pub use local_auth::LocalAuth;
 pub use routing::Route;
 

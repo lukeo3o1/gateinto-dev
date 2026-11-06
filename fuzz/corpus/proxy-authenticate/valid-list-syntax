@@ -1,0 +1,1 @@
+, , Negotiate abc==, Gateinto AUTH_URI = "https://verify.example.test/device?x=1&cert_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" , , User_Code	=	WDJB-MJHT,expires_in= 600, foo=bar, Digest realm="x", nonce="y"
