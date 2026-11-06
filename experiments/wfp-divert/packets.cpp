@@ -25,6 +25,24 @@ struct Decision {
     }
 };
 
+struct SynDrop {
+    bool dropped = false;
+
+    bool should_drop(bool enabled, uint8_t protocol, bool syn, bool ack,
+                     const std::string& action) {
+        if (!enabled || dropped || protocol != 6 || !syn || ack ||
+            (action != "direct" && action != "proxy")) return false;
+        dropped = true;
+        return true;
+    }
+};
+
+static bool controlled_port(uint8_t protocol, uint16_t destination,
+                            uint16_t primary, uint16_t secondary) {
+    return (protocol == 6 || protocol == 17) &&
+        (destination == primary || (protocol == 17 && secondary && destination == secondary));
+}
+
 #ifdef WFP_PACKET_STATE_TEST
 #include <cassert>
 int main() {
@@ -42,6 +60,20 @@ int main() {
     Decision udp(100, 200, 17);
     assert(!udp.resolve(100, 110, "proxy"));
     assert(udp.resolve(100, 110, "direct"));
+    SynDrop retransmit;
+    assert(!retransmit.should_drop(true, 6, true, false, "pending"));
+    assert(!retransmit.should_drop(true, 17, false, false, "direct"));
+    assert(!retransmit.should_drop(true, 6, false, true, "proxy"));
+    assert(retransmit.should_drop(true, 6, true, false, "proxy"));
+    assert(!retransmit.should_drop(true, 6, true, false, "proxy"));
+    SynDrop disabled;
+    assert(!disabled.should_drop(false, 6, true, false, "direct"));
+    assert(controlled_port(6, 8000, 8000, 8001));
+    assert(!controlled_port(6, 8001, 8000, 8001));
+    assert(controlled_port(17, 8000, 8000, 8001));
+    assert(controlled_port(17, 8001, 8000, 8001));
+    assert(!controlled_port(17, 8002, 8000, 8001));
+    assert(!controlled_port(17, 8001, 8000, 0));
 }
 #endif
 
@@ -154,6 +186,8 @@ struct Flow {
     uint32_t syn_sequence = 0;
     bool saw_syn = false;
     bool saw_close = false;
+    bool native_confirmed = false;
+    SynDrop syn_drop;
     SOCKET reservation = INVALID_SOCKET;
     uint16_t alias = 0;
     std::deque<Packet> held;
@@ -169,6 +203,8 @@ struct Options {
     std::string control;
     std::string stop_file;
     uint16_t port = 0;
+    uint16_t second_port = 0;
+    bool drop_first_syn = false;
     uint16_t listener_port = 0;
     int seconds = 15;
     int hold_ms = 250;
@@ -189,6 +225,8 @@ static Options options(int argc, char** argv) {
         std::string key = argv[i], value = argv[i + 1];
         if (key == "--target") { parse_ip(value); result.target = value; }
         else if (key == "--port") result.port = static_cast<uint16_t>(number(value, 1, 65535));
+        else if (key == "--second-port") result.second_port = static_cast<uint16_t>(number(value, 1, 65535));
+        else if (key == "--drop-first-syn") result.drop_first_syn = number(value, 0, 1) != 0;
         else if (key == "--listener-port") result.listener_port = static_cast<uint16_t>(number(value, 1, 65535));
         else if (key == "--seconds") result.seconds = number(value, 1, 600);
         else if (key == "--hold-ms") result.hold_ms = number(value, 1, 10000);
@@ -201,6 +239,8 @@ static Options options(int argc, char** argv) {
         throw std::runtime_error("required: --target IPv4 --port N --out PATH --control PATH");
     if (result.listener_port == result.port)
         throw std::runtime_error("listener and controlled target ports must differ");
+    if (result.second_port == result.port)
+        throw std::runtime_error("second UDP destination must differ from the primary port");
     return result;
 }
 
@@ -289,9 +329,15 @@ class Capture {
     }
 
     void forward(Packet& packet, const Tuple& tuple, Flow& flow, const std::string& reason) {
+        Parsed parsed(packet);
+        if (flow.syn_drop.should_drop(config.drop_first_syn && flow.native_confirmed, tuple.protocol,
+                parsed.tcp && parsed.tcp->Syn, parsed.tcp && parsed.tcp->Ack,
+                flow.decision.action)) {
+            packet_log(packet, tuple, &flow, "drop", "injected_first_syn_drop");
+            return;
+        }
         packet_log(packet, tuple, &flow, flow.decision.action, reason);
         if (flow.decision.action == "proxy") {
-            Parsed parsed(packet);
             if (!parsed.tcp || !flow.alias) {
                 fatal_send = true;
                 return;
@@ -365,7 +411,9 @@ class Capture {
         }
         if (config.listener_port && reverse(packet, parsed)) return;
         const Tuple tuple = parsed.tuple;
-        if (tuple.remote != target || tuple.remote_port != config.port || !packet.address.Outbound) {
+        if (tuple.remote != target ||
+            !controlled_port(tuple.protocol, tuple.remote_port, config.port, config.second_port) ||
+            !packet.address.Outbound) {
             send(packet);
             return;
         }
@@ -448,6 +496,7 @@ class Capture {
                     continue;
                 }
                 accepted = flow.decision.resolve(generation, qpc(), action);
+                if (accepted) flow.native_confirmed = true;
                 if (accepted && action == "proxy" && !reserve(tuple, flow)) {
                     flow.decision.action = "direct";
                     log.write("{\"kind\":\"error\",\"operation\":\"reserve_alias_direct\"}");
@@ -477,9 +526,11 @@ public:
     }
 
     int run() {
+        std::string udp_ports = "udp.DstPort == " + std::to_string(config.port);
+        if (config.second_port) udp_ports += " or udp.DstPort == " + std::to_string(config.second_port);
         std::string filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
             " and ((tcp and tcp.DstPort == " + std::to_string(config.port) +
-            ") or (udp and udp.DstPort == " + std::to_string(config.port) + ")))";
+            ") or (udp and (" + udp_ports + "))))";
         if (config.listener_port)
             filter += " or (outbound and tcp and tcp.SrcPort == " + std::to_string(config.listener_port) + ")";
         filter += ")";
@@ -495,6 +546,8 @@ public:
         log.write("{\"kind\":\"ready\",\"qpc\":" + std::to_string(qpc()) +
                   ",\"qpc_frequency\":" + std::to_string(frequency) +
                   ",\"hold_ms\":" + std::to_string(config.hold_ms) +
+                  ",\"second_port\":" + std::to_string(config.second_port) +
+                  ",\"drop_first_syn\":" + (config.drop_first_syn ? "true" : "false") +
                   ",\"queue_length\":4096,\"queue_size\":8388608,\"queue_time_ms\":2048}");
         receiver = std::thread([this] { receive(); });
         int64_t end = qpc() + frequency * config.seconds;

@@ -50,7 +50,9 @@ try {
     @{ name='hold-security-udp'; source='security5156'; mode='hold'; protocol='udp'; delay=0; hold=1000; skip=$false },
     @{ name='redirect-wfp-missing'; source='wfp'; mode='redirect'; protocol='tcp'; delay=0; hold=250; skip=$true },
     @{ name='redirect-wfp'; source='wfp'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false },
-    @{ name='redirect-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false }
+    @{ name='redirect-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+    @{ name='retransmit-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='retransmit' },
+    @{ name='reuse-security'; source='security5156'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='reuse' }
   )
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
@@ -60,15 +62,35 @@ try {
       '--mode', $case.mode, '--protocol', $case.protocol,
       '--hold-ms', $case.hold, '--delay-ms', $case.delay, '--iterations', 3, '--seconds', 35)
     if ($case.skip) { $arguments += '--skip-all' }
+    if ($case.ContainsKey('scenario')) {
+      $arguments += @('--scenario', $case.scenario)
+      if ($case.scenario -eq 'reuse') { $arguments += @('--iterations', 1) }
+    }
     python @arguments
     if ($LASTEXITCODE) { $failures.Add($case.name) }
+    $caseDir = Join-Path $OutDir $case.name
+    foreach ($file in @('native.stdout.txt', 'packet.stdout.txt', 'restore.stdout.txt')) {
+      $logPath = Join-Path $caseDir $file
+      if (Test-Path $logPath) { Get-Content $logPath -Tail 12 }
+    }
+    $bridgeLog = Join-Path $caseDir 'bridge.jsonl'
+    if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
+    $nativeLog = Join-Path $caseDir 'native.jsonl'
+    if (Test-Path $nativeLog) {
+      Get-Content $nativeLog | Where-Object { $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"ready"|"kind":"summary"' } |
+        Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
+    }
+    $packetLog = Join-Path $caseDir 'packets.jsonl'
+    if (Test-Path $packetLog) {
+      Get-Content $packetLog | Select-Object -First 30 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
+    }
   }
 } finally {
   & auditpol /restore "/file:$audit"
   if ($LASTEXITCODE) { $failures.Add('audit-policy-restore') }
   Get-ChildItem $OutDir -Recurse -Filter 'private-manifest.json' | Remove-Item -Force
   @{ failed_cases = @($failures); windows_desktop = 'NOT RUN'; remote_topology = 'NOT RUN';
-     udp_forwarding = 'NOT IMPLEMENTED'; retransmit_reuse_stress = 'NOT RUN' } |
+     udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN' } |
     ConvertTo-Json | Set-Content (Join-Path $OutDir 'ci-summary.json')
 }
 if ($failures.Count) { throw "PoC cases failed: $($failures -join ', ')" }

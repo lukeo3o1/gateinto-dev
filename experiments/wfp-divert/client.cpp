@@ -4,6 +4,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -44,6 +45,8 @@ int main(int argc, char** argv) {
         const auto ip = args.at("--target");
         const auto nonce = args.at("--nonce");
         const bool udp = args.at("--protocol") == "udp";
+        const auto close_mode = args.count("--close-mode") ? args.at("--close-mode") : "fin";
+        if (close_mode != "fin" && close_mode != "reset") throw std::runtime_error("invalid close mode");
         if (!udp && args.at("--protocol") != "tcp") throw std::runtime_error("invalid protocol");
         if (nonce.empty() || nonce.size() > 32768 ||
             nonce.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != std::string::npos)
@@ -66,6 +69,22 @@ int main(int argc, char** argv) {
         for (const int port : ports) {
             const auto remote = address(ip, port);
             const auto started = qpc();
+            if (args.count("--attempt-out")) {
+                sockaddr_in attempt{};
+                int size = sizeof(attempt);
+                char attempt_ip[INET_ADDRSTRLEN]{};
+                if (getsockname(socket.value, reinterpret_cast<sockaddr*>(&attempt), &size) ||
+                    !InetNtopA(AF_INET, &attempt.sin_addr, attempt_ip, sizeof(attempt_ip)))
+                    throw std::runtime_error("attempt endpoint query failed");
+                std::ofstream out(args.at("--attempt-out"), std::ios::app);
+                out << "{\"kind\":\"client_attempt\",\"pid\":" << GetCurrentProcessId()
+                    << ",\"attempt_qpc\":" << started << ",\"local_ip\":\"" << attempt_ip
+                    << "\",\"local_port\":" << ntohs(attempt.sin_port)
+                    << ",\"remote_ip\":\"" << ip << "\",\"remote_port\":" << port
+                    << ",\"protocol\":" << (udp ? 17 : 6) << ",\"nonce\":\"" << nonce << "\"}\n";
+                out.flush();
+                if (!out) throw std::runtime_error("attempt log failed");
+            }
             if (!udp && connect(socket.value, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != 0)
                 throw std::runtime_error("connect failed");
             if (udp) {
@@ -79,7 +98,7 @@ int main(int argc, char** argv) {
                     if (n <= 0) throw std::runtime_error("send failed");
                     sent += n;
                 }
-                shutdown(socket.value, SD_SEND);
+                if (close_mode == "fin") shutdown(socket.value, SD_SEND);
             }
             std::string reply;
             do {
@@ -95,6 +114,11 @@ int main(int argc, char** argv) {
                 reply.append(buffer, n);
             } while (!udp && reply.size() < nonce.size());
             if (reply != nonce) throw std::runtime_error("echo differs");
+            if (!udp && close_mode == "reset") {
+                linger reset{1, 0};
+                if (setsockopt(socket.value, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&reset), sizeof(reset)))
+                    throw std::runtime_error("reset close setup failed");
+            }
             sockaddr_in bound{};
             int length = sizeof(bound);
             if (getsockname(socket.value, reinterpret_cast<sockaddr*>(&bound), &length))

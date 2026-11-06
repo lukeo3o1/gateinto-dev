@@ -111,6 +111,38 @@ class AttributionTests(unittest.TestCase):
         self.assertTrue(event["complete"])
         self.assertEqual("outbound", event["direction"])
 
+    def test_retransmission_requires_distinct_capture_with_same_sequence(self):
+        packet = dict(self.packet(), syn=1, sequence=123, kind="packet")
+        dropped = dict(packet, action="drop", reason="injected_first_syn_drop")
+        self.assertFalse(lab.retransmissions_verified([dropped, dict(packet, action="proxy")]))
+        repeated = dict(packet, capture_qpc=1100, action="proxy")
+        self.assertTrue(lab.retransmissions_verified([dropped, repeated]))
+        self.assertFalse(lab.retransmissions_verified([dropped, dict(repeated, sequence=999)]))
+
+    def test_reuse_requires_post_launch_same_tuple_syn_rejection(self):
+        packet = dict(self.packet(), action="drop", reason="ambiguous_reuse_of_proxy_tuple", syn=1,
+                      capture_qpc=1090, recv_qpc=1100, sequence=456)
+        key = lab.tuple_key(packet)
+        self.assertTrue(lab.reuse_rejection_verified([packet], key, 1050, 123))
+        self.assertFalse(lab.reuse_rejection_verified([packet], key, 1150, 123))
+        self.assertFalse(lab.reuse_rejection_verified([dict(packet, syn=0)], key, 1050, 123))
+        self.assertFalse(lab.reuse_rejection_verified([dict(packet, local_port=5555)], key, 1050, 123))
+        self.assertFalse(lab.reuse_rejection_verified([dict(packet, capture_qpc=1040)], key, 1050, 123))
+        self.assertFalse(lab.reuse_rejection_verified([dict(packet, sequence=123)], key, 1050, 123))
+
+    def test_timing_separates_notification_from_delayed_decision(self):
+        packet = self.packet()
+        packet["recv_qpc"] = 1015
+        event = self.event(recv_qpc=1010, occurrence_qpc=995)
+        decision = dict(packet, decision_qpc=1060)
+        client = dict(packet, nonce="timing")
+        result = lab.timing_summary([("a", client)], [packet], [event], [decision], 1000)
+        self.assertEqual(1, result["native_after_packet_capture"])
+        self.assertEqual(0, result["native_after_packet_receive"])
+        self.assertEqual(10, result["notification_minus_capture_ms"]["p95"])
+        self.assertEqual(60, result["decision_minus_capture_ms"]["p95"])
+        self.assertEqual(995, result["rows"][0]["occurrence_qpc"])
+
 
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):

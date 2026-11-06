@@ -2,6 +2,7 @@ import argparse
 import ctypes
 import datetime
 import json
+import math
 import os
 import pathlib
 import subprocess
@@ -24,6 +25,56 @@ def tuple_key(value):
         return key
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def retransmissions_verified(records):
+    dropped = [p for p in records if p.get("kind") == "packet" and p.get("syn") and
+               p.get("reason") == "injected_first_syn_drop"]
+    return bool(dropped) and all(any(
+        p.get("kind") == "packet" and p.get("syn") and p.get("action") in ["direct", "proxy"]
+        and tuple_key(p) == tuple_key(first) and p.get("generation") == first.get("generation")
+        and p.get("sequence") == first.get("sequence") and p.get("capture_qpc", 0) > first.get("capture_qpc", 0)
+        for p in records) for first in dropped)
+
+
+def reuse_rejection_verified(records, key, launched_qpc, original_sequence):
+    return any(p.get("kind") == "packet" and tuple_key(p) == key and p.get("syn") and
+               p.get("capture_qpc", 0) >= launched_qpc and p.get("sequence") is not None and
+               p["sequence"] != original_sequence and p.get("action") == "drop" and
+               p.get("reason") == "ambiguous_reuse_of_proxy_tuple" for p in records)
+
+
+def timing_summary(clients, packets, events, decisions, frequency):
+    rows = []
+    for app, client in clients:
+        key = tuple_key(client)
+        matching = [p for p in packets if p.get("kind") == "packet" and tuple_key(p) == key]
+        evidence = [e for e in events if tuple_key(e) == key]
+        if not matching or not evidence:
+            continue
+        first = min(matching, key=lambda p: p["capture_qpc"])
+        event = min(evidence, key=lambda e: e["recv_qpc"])
+        decision = next((d for d in decisions if tuple_key(d) == key), None)
+        rows.append(dict(app=app, nonce=client["nonce"], tuple=list(key),
+                         packet_capture_qpc=first["capture_qpc"], packet_receive_qpc=first["recv_qpc"],
+                         event_filetime=event.get("event_filetime"), occurrence_qpc=event.get("occurrence_qpc"),
+                         native_receive_qpc=event["recv_qpc"], decision_ready_qpc=decision.get("decision_qpc") if decision else None,
+                         notification_minus_capture_ms=(event["recv_qpc"] - first["capture_qpc"]) * 1000 / frequency,
+                         decision_minus_capture_ms=(decision["decision_qpc"] - first["capture_qpc"]) * 1000 / frequency if decision else None))
+
+    def distribution(values):
+        values = sorted(v for v in values if v is not None)
+        if not values:
+            return None
+        return dict(count=len(values), min=min(values), max=max(values),
+                    p50=values[max(0, math.ceil(len(values) * .5) - 1)],
+                    p95=values[max(0, math.ceil(len(values) * .95) - 1)])
+
+    return dict(matched_client_tuples=len(rows), unmatched_client_tuples=len(clients) - len(rows),
+                native_after_packet_capture=sum(r["native_receive_qpc"] > r["packet_capture_qpc"] for r in rows),
+                native_after_packet_receive=sum(r["native_receive_qpc"] > r["packet_receive_qpc"] for r in rows),
+                notification_minus_capture_ms=distribution(r["notification_minus_capture_ms"] for r in rows),
+                decision_minus_capture_ms=distribution(r["decision_minus_capture_ms"] for r in rows), rows=rows)
 
 
 def security_fields(value):
@@ -171,6 +222,7 @@ def main():
     parser.add_argument("--source", choices=["wfp", "security5156"], default="wfp")
     parser.add_argument("--mode", choices=["hold", "redirect"], default="hold")
     parser.add_argument("--protocol", choices=["tcp", "udp"], default="tcp")
+    parser.add_argument("--scenario", choices=["baseline", "retransmit", "reuse"], default="baseline")
     parser.add_argument("--hold-ms", type=int, default=1000)
     parser.add_argument("--delay-ms", type=int, default=0)
     parser.add_argument("--skip-all", action="store_true")
@@ -182,6 +234,10 @@ def main():
         parser.error("Windows is required; pure attribution tests run on other hosts")
     if args.seconds < 15 or args.iterations < 1 or args.hold_ms < 1 or args.delay_ms < 0:
         parser.error("require --seconds >= 15, --iterations >= 1, --hold-ms >= 1 and --delay-ms >= 0")
+    if args.scenario != "baseline" and args.protocol != "tcp":
+        parser.error("retransmit and reuse scenarios require TCP")
+    if args.scenario == "reuse" and (args.mode != "redirect" or args.iterations != 1 or args.skip_all or args.delay_ms >= args.hold_ms):
+        parser.error("reuse requires redirect mode, one iteration and normal native attribution")
     if args.out.exists() and any(args.out.iterdir()):
         parser.error("--out must be empty to avoid stale evidence")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -190,7 +246,7 @@ def main():
     private = tempfile.TemporaryDirectory(prefix="gateinto-wfp-private-", dir=args.private_dir)
     bridge = None
     summary = dict(status="NOT_COMPLETED", source=args.source, mode=args.mode,
-                   protocol=args.protocol, topology="single-host-local", decisions=0,
+                   protocol=args.protocol, scenario=args.scenario, topology="single-host-local", decisions=0,
                    selected_confirmed=0, redirected=0, clients=[])
 
     def start(command, name):
@@ -254,8 +310,12 @@ def main():
             bridge = Bridge(manifest, packet_file, args.out / "bridge.jsonl")
             bridge.start()
             packet_args += ["--listener-port", bridge.port]
+        if args.protocol == "udp":
+            packet_args += ["--second-port", manifest["udp_ports"][1]]
+        if args.scenario == "retransmit":
+            packet_args += ["--drop-first-syn", "1"]
         packet_process = start(packet_args, "packet")
-        pending_clients, packet_ready, packet_records = [], False, []
+        pending_clients, packet_ready, packet_records, decision_records, ownership_observations = [], False, [], [], []
         decision_log = (args.out / "decisions.jsonl").open("w", encoding="utf-8")
         logs.append(decision_log)
         control_stream = control.open("a", encoding="ascii", buffering=1)
@@ -268,6 +328,8 @@ def main():
                 event = security_fields(event)
                 if "event_filetime" in event:
                     event["occurrence_qpc"] = anchor_qpc + (event["event_filetime"] - anchor_filetime) * frequency / 10_000_000
+                if event.get("kind") == args.source and event.get("direction") == "outbound" and event.get("complete"):
+                    ownership_observations.append(event)
                 engine.event(event)
             for packet in packet_tail.read():
                 packet_records.append(packet)
@@ -275,6 +337,7 @@ def main():
                     packet_ready = True
                 engine.packet(packet)
             for decision in engine.decisions(qpc()):
+                decision_records.append(decision)
                 key = tuple_key(decision)
                 control_stream.write("decision " + " ".join(str(x) for x in (*key, decision["generation"], decision["action"])) + "\n")
                 decision_log.write(json.dumps(decision) + "\n")
@@ -289,29 +352,83 @@ def main():
             if time.monotonic() > deadline:
                 raise TimeoutError("NETWORK handle readiness missing")
             time.sleep(.01)
-        for iteration in range(args.iterations):
-            for app in ["a", "b"]:
-                command = [args.bin / f"app-{app}.exe", "--target", manifest["target_ip"],
-                           "--port", port, "--protocol", args.protocol,
-                           "--nonce", f"{args.source}-{args.mode}-{app}-{iteration}"]
-                label = f"client-{app}-{iteration}"
-                pending_clients.append((app, label, start(command, label)))
-        deadline = time.monotonic() + min(args.seconds - 5, 20)
-        while any(p.poll() is None for _, _, p in pending_clients):
-            alive(packet_process, "packet collector")
-            alive(native, "native collector")
+        def launch(app, iteration, extra=()):
+            command = [args.bin / f"app-{app}.exe", "--target", manifest["target_ip"],
+                       "--port", port, "--protocol", args.protocol,
+                       "--nonce", f"{args.source}-{args.mode}-{app}-{iteration}"]
+            if args.protocol == "udp":
+                command += ["--second-port", manifest["udp_ports"][1]]
+            command += list(extra)
+            label = f"client-{app}-{iteration}"
+            entry = (app, label, start(command, label))
+            pending_clients.append(entry)
+            return entry
+
+        def wait_clients(entries, seconds=20, rejection=None):
+            deadline = time.monotonic() + min(args.seconds - 5, seconds)
+            while any(p.poll() is None for _, _, p in entries):
+                alive(packet_process, "packet collector")
+                alive(native, "native collector")
+                pump()
+                if rejection and rejection():
+                    for _, _, process in entries:
+                        if process.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=5)
+                    return
+                if time.monotonic() > deadline:
+                    raise TimeoutError("client timeout")
+                time.sleep(.002)
+
+        reuse_key, reuse_started = None, None
+        if args.scenario == "reuse":
+            first = launch("a", 0, ["--close-mode", "reset"])
+            wait_clients([first])
+            if first[2].returncode:
+                raise RuntimeError("initial selected client failed before tuple reuse")
+            first_records = JsonTail(args.out / (first[1] + ".stdout.txt")).read()
+            if len(first_records) != 1 or first_records[0].get("status") != "echo_ok":
+                raise RuntimeError("initial client did not record a single echo tuple")
+            reuse_key = tuple_key(first_records[0])
+            original_syns = [p for p in packet_records if p.get("kind") == "packet" and tuple_key(p) == reuse_key and p.get("syn")]
+            if not original_syns:
+                raise RuntimeError("initial selected client SYN sequence missing")
+            original_sequence = min(original_syns, key=lambda p: p["capture_qpc"])["sequence"]
+            reuse_started = qpc()
+            attempt_file = args.out / "client-b-attempt.jsonl"
+            second = launch("b", 0, ["--source-port", reuse_key[1], "--close-mode", "reset",
+                                      "--attempt-out", attempt_file.resolve()])
+
+            def verified_reuse():
+                try:
+                    attempts = [json.loads(line) for line in attempt_file.read_text().splitlines() if line.strip()]
+                except (FileNotFoundError, json.JSONDecodeError):
+                    return False
+                valid = [attempt for attempt in attempts if attempt.get("kind") == "client_attempt" and
+                         tuple_key(attempt) == reuse_key and attempt.get("pid") == second[2].pid and
+                         attempt.get("attempt_qpc", 0) >= reuse_started]
+                return bool(valid) and reuse_rejection_verified(packet_records, reuse_key,
+                                                                 valid[-1]["attempt_qpc"], original_sequence)
+
+            wait_clients([second], seconds=8, rejection=verified_reuse)
             pump()
-            if time.monotonic() > deadline:
-                raise TimeoutError("client timeout")
-            time.sleep(.002)
+            if not verified_reuse():
+                raise RuntimeError("same full tuple reuse not observed and rejected; bind failure is not coverage")
+        else:
+            for iteration in range(args.iterations):
+                for app in ["a", "b"]:
+                    launch(app, iteration)
+            wait_clients(pending_clients)
         for _ in range(30):
             pump()
             time.sleep(.01)
         summary["clients"] = [dict(app=app, exit_code=p.returncode) for app, _, p in pending_clients]
-        if any(p.returncode != 0 for _, _, p in pending_clients):
+        if any(p.returncode != 0 for app, _, p in pending_clients if not (args.scenario == "reuse" and app == "b")):
             raise RuntimeError("one or more clients failed; trace retained")
         records = []
         for app, label, _ in pending_clients:
+            if args.scenario == "reuse" and app == "b":
+                continue
             client_records = JsonTail(args.out / (label + ".stdout.txt")).read()
             if not client_records or any(c.get("status") != "echo_ok" for c in client_records):
                 raise RuntimeError(f"{label} has no valid echo result")
@@ -351,10 +468,23 @@ def main():
             raise RuntimeError("gateway CONNECT count or original destination differs from expected transparent tunnels")
         if any(p.get("kind") == "error" for p in packet_records):
             raise RuntimeError("packet component reported an error")
+        if args.scenario == "retransmit" and not retransmissions_verified(packet_records):
+            raise RuntimeError("injected SYN drop did not produce a same-generation same-sequence retransmission")
+        if args.scenario == "reuse":
+            if any(p.get("kind") == "packet" and tuple_key(p) == reuse_key and p.get("syn") and
+                   p.get("recv_qpc", 0) >= reuse_started and p.get("action") == "proxy" for p in packet_records):
+                raise RuntimeError("reused unconfirmed SYN was proxied")
+            summary.update(reuse_tuple=list(reuse_key), reused_syn_rejected=True,
+                           nonselected_client_disrupted=True,
+                           rejection_semantics="Characterized conservative rejection; not normal application connectivity")
+        summary["timing"] = timing_summary(records, packet_records,
+                                             ownership_observations, decision_records, frequency)
+        summary["timing"]["anchor_uncertainty_ms"] = uncertainty * 1000 / frequency
+        summary["timing"]["occurrence_semantics"] = "WFP occurrence or audit TimeCreated; not exact classifyFn execution time"
         summary.update(client_tuple_count=len(records), accepted_controls=len(controls), effective_proxy_packets=len(effective),
                        bridge_tunnels=bridge.successful_tunnels if bridge else 0)
         summary["gateway_connect_count"] = len(gateway_records)
-        summary["status"] = "PASS_RESTRICTED_CASE"
+        summary["status"] = "CHARACTERIZED_REUSE_REJECTION" if args.scenario == "reuse" else "PASS_RESTRICTED_CASE"
     except Exception as error:
         summary.update(status="FAIL", error=str(error))
     finally:
@@ -381,7 +511,7 @@ def main():
                     summary["fallback_restore_exit_code"] = restore.returncode
                 except Exception as error:
                     summary["fallback_restore_error"] = str(error)
-        if summary["status"] == "PASS_RESTRICTED_CASE":
+        if summary["status"] in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"]:
             try:
                 native_records = JsonTail(args.out / "native.jsonl").read()
                 packet_records = JsonTail(args.out / "packets.jsonl").read()
@@ -414,7 +544,7 @@ def main():
         private.cleanup()
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary))
-    return 0 if summary["status"] == "PASS_RESTRICTED_CASE" else 1
+    return 0 if summary["status"] in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"] else 1
 
 
 if __name__ == "__main__":
