@@ -150,6 +150,12 @@ impl Inner {
 #[derive(Clone)]
 pub struct Verifications(Arc<Inner>);
 
+impl fmt::Debug for Verifications {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Verifications(<redacted>)")
+    }
+}
+
 impl Verifications {
     pub(crate) fn new(certificate: Option<ClientCertificate>, agent: PendingVerifications) -> Self {
         Self(Arc::new(Inner {

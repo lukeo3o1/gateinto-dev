@@ -14,7 +14,7 @@ use crate::identity::certificates::IssueError;
 use crate::identity::client_cert::ClientCertificate;
 use crate::identity::encoding::sha256_fingerprint;
 use crate::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionRoute};
-use crate::proxy::{self, LocalAuth, OpenTunnels, Proxy};
+use crate::proxy::{self, LocalAuth, OpenTunnels, PendingVerifications, Proxy, Verifications};
 
 pub use gateinto_ipc_types::SessionKind;
 
@@ -101,6 +101,7 @@ pub struct Session {
     realm: Option<String>,
     local_auth: LocalAuth,
     credentials: Option<proxy::SessionCredentials>,
+    verifications: Verifications,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -134,6 +135,10 @@ impl Session {
         self.credentials.as_ref()
     }
 
+    pub fn verifications(&self) -> &Verifications {
+        &self.verifications
+    }
+
     pub fn info(&self, browser: Option<BrowserKind>) -> SessionInfo {
         SessionInfo {
             id: self.id.into(),
@@ -150,13 +155,14 @@ impl Session {
             tunnels: self.open_tunnels.count() as u64,
             browser,
             shell: None,
-            verification: false,
+            verification: self.verifications.pending(),
         }
     }
 
     async fn close(self) {
         let _ = self.close.send(());
         let _ = self.task.await;
+        self.verifications.clear();
     }
 }
 
@@ -164,6 +170,7 @@ impl Session {
 pub struct SessionManager {
     next_id: u64,
     sessions: BTreeMap<SessionId, Session>,
+    pending: PendingVerifications,
 }
 
 impl SessionManager {
@@ -182,13 +189,14 @@ impl SessionManager {
         let route = proxy_config.route;
         let local_auth = proxy_config.local_auth;
         let upstream = proxy_config.upstream.address();
-        let proxy = Proxy::bind(proxy_config)
+        let proxy = Proxy::bind_sharing(proxy_config, self.pending.clone())
             .await
             .map_err(SessionError::Proxy)?;
         let local_addr = proxy.local_addr();
         let open_tunnels = proxy.open_tunnels();
         let realm = proxy.realm().map(str::to_owned);
         let credentials = proxy.credentials().cloned();
+        let verifications = proxy.verifications();
         if !local_auth.is_none() {
             span.in_scope(|| {
                 info!(
@@ -214,6 +222,7 @@ impl SessionManager {
             realm,
             local_auth,
             credentials,
+            verifications,
             close,
             task,
         };
@@ -227,6 +236,10 @@ impl SessionManager {
 
     pub fn sessions(&self) -> impl Iterator<Item = &Session> {
         self.sessions.values()
+    }
+
+    pub fn pending_verifications(&self) -> usize {
+        self.pending.count()
     }
 
     pub async fn close(&mut self, id: SessionId) -> bool {
