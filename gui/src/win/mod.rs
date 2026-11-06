@@ -1508,9 +1508,16 @@ fn on_agent(hwnd: HWND) {
         }
         if let Some(check) = check
             && let Some(dialog) = &mut app.verifying
-            && !dialog.receive(check, Instant::now())
         {
-            app.end_verification();
+            match dialog.receive(check, Instant::now()) {
+                verification::Received::Lasts => {}
+                verification::Received::Fails => {
+                    app.link.send(Command::Unverify);
+                }
+                verification::Received::Ends => {
+                    app.end_verification();
+                }
+            }
         }
         let Some(update) = update else {
             if revealed {

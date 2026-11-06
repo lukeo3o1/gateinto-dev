@@ -234,6 +234,13 @@ enum State {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    Lasts,
+    Fails,
+    Ends,
+}
+
 #[derive(Debug)]
 pub struct Dialog {
     id: u64,
@@ -336,9 +343,9 @@ impl Dialog {
         self.ticket
     }
 
-    pub fn receive(&mut self, check: Check, now: Instant) -> bool {
+    pub fn receive(&mut self, check: Check, now: Instant) -> Received {
         if check.id != self.id || check.ticket != self.ticket {
-            return true;
+            return Received::Lasts;
         }
         match (&self.state, check.reply) {
             (State::Waiting, Reply::Pending(gateway, mut verification))
@@ -351,17 +358,19 @@ impl Dialog {
                     verification,
                     qr,
                 }));
-                true
+                Received::Lasts
             }
             (State::Waiting, _) => {
                 self.state = State::Failed;
-                true
+                Received::Fails
             }
-            (State::Shown(shown), Reply::Pending(_, verification)) => {
-                shown.verification.serial == verification.serial
+            (State::Shown(shown), Reply::Pending(_, verification))
+                if shown.verification.serial == verification.serial =>
+            {
+                Received::Lasts
             }
-            (State::Shown(_), Reply::Settled) => false,
-            (State::Shown(_), Reply::Unreached) | (State::Failed, _) => true,
+            (State::Shown(_), Reply::Pending(..) | Reply::Settled) => Received::Ends,
+            (State::Shown(_), Reply::Unreached) | (State::Failed, _) => Received::Lasts,
         }
     }
 
@@ -550,7 +559,10 @@ mod tests {
 
     fn shown(now: Instant) -> Dialog {
         let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
-        assert!(dialog.receive(check(3, 1, Ok(lines(7))), now));
+        assert_eq!(
+            dialog.receive(check(3, 1, Ok(lines(7))), now),
+            Received::Lasts
+        );
         dialog
     }
 
@@ -594,15 +606,24 @@ mod tests {
     fn the_dialog_accepts_only_the_reply_for_its_id_and_ticket() {
         let now = Instant::now();
         let mut dialog = Dialog::open(&running(), 3, 2).unwrap();
-        assert!(dialog.receive(check(3, 1, Ok(lines(7))), now));
-        assert!(dialog.receive(check(4, 2, Ok(lines(7))), now));
+        assert_eq!(
+            dialog.receive(check(3, 1, Ok(lines(7))), now),
+            Received::Lasts
+        );
+        assert_eq!(
+            dialog.receive(check(4, 2, Ok(lines(7))), now),
+            Received::Lasts
+        );
         assert_eq!(dialog.url(), None);
-        assert!(dialog.receive(check(3, 2, Ok(lines(7))), now));
+        assert_eq!(
+            dialog.receive(check(3, 2, Ok(lines(7))), now),
+            Received::Lasts
+        );
         assert_eq!((dialog.url(), dialog.serial()), (Some(URL), Some(7)));
     }
 
     #[test]
-    fn a_first_reply_without_a_matching_verification_fails_the_dialog() {
+    fn a_first_reply_without_a_matching_verification_fails_the_dialog_once() {
         let now = Instant::now();
         let other = Response::Ok(ipc::verification_lines(
             &"home".parse().unwrap(),
@@ -621,7 +642,11 @@ mod tests {
             Err(RequestError::NotRunning),
         ] {
             let mut dialog = Dialog::open(&running(), 3, 1).unwrap();
-            assert!(dialog.receive(check(3, 1, reply), now));
+            assert_eq!(dialog.receive(check(3, 1, reply), now), Received::Fails);
+            assert_eq!(
+                dialog.receive(check(3, 1, Ok(lines(7))), now),
+                Received::Lasts
+            );
             assert_eq!(dialog.url(), None);
             let page = dialog.page(&running(), &listing(None), &sessions::Names::default(), now);
             assert_eq!(page.status, Some(tr(UNAVAILABLE)));
@@ -633,19 +658,34 @@ mod tests {
     fn the_re_check_keeps_the_dialog_only_while_the_same_serial_is_pending() {
         let now = Instant::now();
         let mut dialog = shown(now);
-        assert!(dialog.receive(check(3, 1, Ok(lines(7))), now));
-        assert!(dialog.receive(check(3, 1, Err(RequestError::NotRunning)), now));
+        assert_eq!(
+            dialog.receive(check(3, 1, Ok(lines(7))), now),
+            Received::Lasts
+        );
+        assert_eq!(
+            dialog.receive(check(3, 1, Err(RequestError::NotRunning)), now),
+            Received::Lasts
+        );
         assert_eq!(dialog.url(), Some(URL));
-        assert!(!shown(now).receive(check(3, 1, Ok(lines(8))), now));
-        assert!(!shown(now).receive(
-            check(
-                3,
-                1,
-                Ok(Response::Error("no verification is pending".to_owned()))
+        assert_eq!(
+            shown(now).receive(check(3, 1, Ok(lines(8))), now),
+            Received::Ends
+        );
+        assert_eq!(
+            shown(now).receive(
+                check(
+                    3,
+                    1,
+                    Ok(Response::Error("no verification is pending".to_owned()))
+                ),
+                now
             ),
-            now
-        ));
-        assert!(!shown(now).receive(check(3, 1, Ok(Response::Ok(Vec::new()))), now));
+            Received::Ends
+        );
+        assert_eq!(
+            shown(now).receive(check(3, 1, Ok(Response::Ok(Vec::new()))), now),
+            Received::Ends
+        );
     }
 
     #[test]
