@@ -330,7 +330,21 @@ pub struct GatewaySection {
     pub portal_url: Option<PortalUrl>,
     pub route: Option<Route>,
     pub display_name: Option<DisplayName>,
+    #[serde(default, deserialize_with = "verification_origins")]
     pub verification_origins: Option<Vec<VerificationOrigin>>,
+}
+
+fn verification_origins<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<VerificationOrigin>>, D::Error> {
+    let origins = Vec::<VerificationOrigin>::deserialize(deserializer)?;
+    if origins.is_empty() {
+        return Err(de::Error::custom(
+            "verification_origins must list at least one origin; remove the key to accept any \
+             origin",
+        ));
+    }
+    Ok(Some(origins))
 }
 
 impl GatewaySection {
@@ -1325,6 +1339,17 @@ port = 443
         .unwrap_err()
         .to_string();
         assert!(error.contains("gateway \"main\""), "{error}");
+    }
+
+    #[test]
+    fn an_empty_verification_origin_list_is_refused() {
+        let text = format!("{MINIMAL}verification_origins = []\n");
+        let error = ConfigFile::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+        assert!(
+            error.contains("verification_origins must list at least one origin"),
+            "{error}"
+        );
     }
 
     #[test]

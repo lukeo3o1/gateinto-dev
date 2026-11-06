@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
@@ -77,27 +78,23 @@ pub(crate) fn parse(
     if challenge.token68 {
         return Err(Invalid::Token68);
     }
-    let params = &challenge.params;
-    for (index, (name, _)) in params.iter().enumerate() {
-        if params[..index]
+    let mut known: [Option<&[u8]>; PARAMETERS.len()] = [None; PARAMETERS.len()];
+    let mut others = HashSet::new();
+    for (name, value) in &challenge.params {
+        let fresh = match PARAMETERS
             .iter()
-            .any(|(other, _)| other.eq_ignore_ascii_case(name))
+            .position(|wanted| name.eq_ignore_ascii_case(wanted))
         {
+            Some(index) => known[index].replace(value).is_none(),
+            None => others.insert(name.to_ascii_lowercase()),
+        };
+        if !fresh {
             return Err(Invalid::DuplicateParameter);
         }
     }
-    let value = |wanted: &[u8]| {
-        params
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
-            .map(|(_, value)| value.as_slice())
-            .ok_or(Invalid::MissingParameter)
+    let [Some(uri), Some(code), Some(expiry)] = known else {
+        return Err(Invalid::MissingParameter);
     };
-    let (uri, code, expiry) = (
-        value(b"auth_uri")?,
-        value(b"user_code")?,
-        value(b"expires_in")?,
-    );
     let auth_uri = auth_uri(uri).map_err(Invalid::AuthUri)?;
     let user_code = user_code(code).ok_or(Invalid::UserCode)?;
     let expires_in = expires_in(expiry).ok_or(Invalid::ExpiresIn)?;
@@ -117,6 +114,7 @@ pub(crate) fn parse(
 }
 
 const SCHEME: &[u8] = b"Gateinto";
+const PARAMETERS: [&[u8]; 3] = [b"auth_uri", b"user_code", b"expires_in"];
 const HTTPS: &str = "https://";
 const CERT_KEY: &[u8] = b"cert_sha256";
 const CODE_KEY: &[u8] = b"user_code";
@@ -395,14 +393,13 @@ fn origin(authority: &str) -> Result<String, UriError> {
     }
     let (host, port) = if authority.starts_with('[') {
         let close = authority.find(']').ok_or(UriError::Host)?;
-        let (host, after) = authority.split_at(close + 1);
-        if host[1..close].parse::<Ipv6Addr>().is_err() {
-            return Err(UriError::Host);
-        }
-        match after {
-            "" => (host, None),
-            _ => (host, Some(after.strip_prefix(':').ok_or(UriError::Host)?)),
-        }
+        let address: Ipv6Addr = authority[1..close].parse().map_err(|_| UriError::Host)?;
+        let after = &authority[close + 1..];
+        let port = match after {
+            "" => None,
+            _ => Some(after.strip_prefix(':').ok_or(UriError::Host)?),
+        };
+        (format!("[{address}]"), port)
     } else {
         let (host, port) = match authority.split_once(':') {
             Some((host, port)) => (host, Some(port)),
@@ -411,13 +408,12 @@ fn origin(authority: &str) -> Result<String, UriError> {
         if !is_registered_name(host) {
             return Err(UriError::Host);
         }
-        (host, port)
+        (host.to_ascii_lowercase(), port)
     };
     let port = match port {
         Some(port) => parse_port(port).ok_or(UriError::Port)?,
         None => 443,
     };
-    let host = host.to_ascii_lowercase();
     Ok(match port {
         443 => format!("{HTTPS}{host}"),
         _ => format!("{HTTPS}{host}:{port}"),
@@ -472,7 +468,10 @@ fn user_code(value: &[u8]) -> Option<String> {
             4 => *byte == b'-',
             _ => CODE_LETTERS.contains(byte),
         });
-    valid.then(|| String::from_utf8_lossy(value).into_owned())
+    if !valid {
+        return None;
+    }
+    String::from_utf8(value.to_vec()).ok()
 }
 
 fn expires_in(value: &[u8]) -> Option<u64> {
@@ -731,6 +730,21 @@ mod tests {
     }
 
     #[test]
+    fn duplicates_are_found_among_many_parameters() {
+        let unknown: String = (0..2000).map(|i| format!(", p{i}=1")).collect();
+        let value = format!("{}{unknown}", standard());
+        assert!(one(&value).is_ok());
+        assert_eq!(
+            one(&format!("{value}, P1999=2")),
+            Err(Invalid::DuplicateParameter)
+        );
+        assert_eq!(
+            one(&format!("{value}, Expires_In=1")),
+            Err(Invalid::DuplicateParameter)
+        );
+    }
+
+    #[test]
     fn the_auth_uri_limit_applies_after_unescaping() {
         let prefix = url("https://a.test/?");
         let fill = |len: usize| format!("{prefix}&{}", "a".repeat(len - prefix.len() - 1));
@@ -929,6 +943,29 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_hosts_are_canonicalised_in_the_origin() {
+        for (value, origin) in [
+            (
+                url("https://[2001:DB8:0:0:0:0:0:1]/?"),
+                "https://[2001:db8::1]",
+            ),
+            (
+                url("https://[2001:0db8::0001]:8443/?"),
+                "https://[2001:db8::1]:8443",
+            ),
+            (url("https://[0:0::1]/?"), "https://[::1]"),
+            (
+                url("https://[::FFFF:C000:0201]/?"),
+                "https://[::ffff:192.0.2.1]",
+            ),
+        ] {
+            let parsed = uri(&value).unwrap_or_else(|error| panic!("{value}: {error:?}"));
+            assert_eq!(parsed.url, value);
+            assert_eq!(parsed.origin, origin, "{value}");
+        }
+    }
+
+    #[test]
     fn brackets_appear_only_around_an_ipv6_host() {
         for value in [
             url("https://a.test/[x]?"),
@@ -1086,6 +1123,8 @@ mod tests {
             ("https://127.0.0.1", "https://127.0.0.1"),
             ("https://[::1]:8443", "https://[::1]:8443"),
             ("https://[2001:DB8::1]", "https://[2001:db8::1]"),
+            ("https://[2001:db8:0:0::0001]", "https://[2001:db8::1]"),
+            ("https://[0::1]:8443", "https://[::1]:8443"),
         ] {
             let origin: VerificationOrigin = entry.parse().unwrap();
             assert_eq!(origin.as_str(), stored, "{entry}");
@@ -1142,6 +1181,9 @@ mod tests {
             check("https://verify.example.test./?"),
             Err(Invalid::AuthUri(UriError::Host))
         );
+        let ipv6 = origins(&["https://[2001:db8:0::1]"]);
+        let value = header(&url("https://[2001:DB8::0:1]/?"));
+        assert!(parse(&[value.as_bytes()], FP, Some(&ipv6)).is_ok());
         let with_port = origins(&["https://verify.example.test:443"]);
         let value = standard();
         assert!(parse(&[value.as_bytes()], FP, Some(&with_port)).is_ok());

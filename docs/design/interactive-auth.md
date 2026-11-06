@@ -321,8 +321,9 @@ command-line argument (see [GUI](#gui)).
   raw and decoded values agree. A key that equals `cert_sha256` or `user_code`
   only ASCII-case-insensitively, or any key that decodes to `user_code`, is
   rejected.
-- The origin is `https://<host>[:<port>]` with the host lowercased and the
-  port omitted when it is `443`. A Punycode name stays visible as Punycode.
+- The origin is `https://<host>[:<port>]` with the host lowercased, an IPv6
+  address in its canonical RFC 5952 form, and the port omitted when it is
+  `443`. A Punycode name stays visible as Punycode.
   The origin is checked against the gateway's `verification_origins`
   *(proposed)* if that is set (Decision 1).
 
@@ -551,12 +552,14 @@ verification_origins = ["https://verify.example.test", "https://login.example.te
 
 Each entry is `https://` plus a host under the same host grammar as
 `auth_uri` and an optional port, nothing else: no path, no trailing `/`, no
-userinfo, no trailing dot. Entries are stored with the host lowercased and
-`:443` dropped. Matching is exact on lowercase host and effective port; there
-are no prefixes, suffixes, wildcards or paths. When the key is set, a
-challenge whose origin is not listed is invalid. When it is absent, every
-origin that passes validation is accepted. Links cannot set it, and the GUI
-never writes it.
+userinfo, no trailing dot. Entries are stored with the host lowercased, an
+IPv6 address in its canonical form, and `:443` dropped. Matching is exact on
+the stored host and effective port; there are no prefixes, suffixes,
+wildcards or paths. When the key is set, a challenge whose origin is not
+listed is invalid. When it is absent, every origin that passes validation is
+accepted. An empty list is refused when the configuration loads, because it
+would reject every challenge. Links cannot set it, and the GUI never writes
+it.
 
 ## Security
 
@@ -945,6 +948,8 @@ systems before it ships. Results go to `docs/verification.md`.
 - Whether the gateway re-checks device trust on a new stream of an existing
   HTTP/2 connection or only on a new TLS connection.
 - That gateways ignore the two new request fields.
+- Whether real gateways double-encode `auth_uri` query names or values
+  (for example `cert%255Fsha256`); the parser decodes once.
 - That rustls records `sent` only for a certificate that is actually sent in
   TLS 1.3 client authentication, also when the server's request is optional,
   and how a server that ignores the certificate looks from the client.
