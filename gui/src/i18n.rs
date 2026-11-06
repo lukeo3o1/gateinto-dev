@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt;
 
-use gateinto::link::{Ask, Confirmation, Loosening, Origin};
+use gateinto::link::{Ask, Confirmation, Loosening, MIXED_WARNING, Origin};
 use gateinto::proxy::Route;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -341,6 +341,9 @@ table! {
     AgentClosed => "the agent closed the connection without an answer", "代理程式未回應就關閉了連線";
     AgentTimedOut => "the agent did not answer in time", "代理程式未及時回應";
     Confirmation => "the agent asked to confirm this gateway; open the gateway's link again to confirm it", "代理程式要求確認此閘道；請重新開啟該閘道的連結以確認";
+    TerminalTooOld => "the agent is too old for terminal sessions; restart it", "代理程式版本過舊，不支援終端機工作階段；請重新啟動它";
+    ClosedTerminal => "Closed 1 terminal session", "已關閉 1 個終端機工作階段";
+    ClosedTerminals => "Closed {0} terminal sessions", "已關閉 {0} 個終端機工作階段";
 }
 
 impl Text {
@@ -397,6 +400,7 @@ fn fill_with(template: &str, args: &[&dyn fmt::Display]) -> String {
 pub enum Note {
     Gui(Text),
     Agent(String),
+    Worded { english: String, chinese: String },
 }
 
 impl Note {
@@ -404,9 +408,49 @@ impl Note {
         match self {
             Note::Gui(text) => tr(*text),
             Note::Agent(message) => message,
+            Note::Worded { english, chinese } => match current() {
+                Language::English => english,
+                Language::Chinese => chinese,
+            },
         }
     }
+
+    pub fn filled(text: Text, args: &[&dyn fmt::Display]) -> Self {
+        Note::Worded {
+            english: fill_with(text.english(), args),
+            chinese: fill_with(text.chinese(), args),
+        }
+    }
+
+    pub fn warnings(lines: &[String]) -> Option<Self> {
+        let worded = |mixed: &str| {
+            let shown: Vec<&str> = lines
+                .iter()
+                .filter_map(|line| {
+                    if line == MIXED_WARNING {
+                        Some(mixed)
+                    } else if line.starts_with(UNAVAILABLE) || line.starts_with(INVALID) {
+                        Some(line.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            shown.join("\n")
+        };
+        let english = worded(MIXED_WARNING);
+        if english.is_empty() {
+            return None;
+        }
+        Some(Note::Worded {
+            english,
+            chinese: worded(ZH_MIXED_WARNING),
+        })
+    }
 }
+
+const UNAVAILABLE: &str = "linked-gateways: error: ";
+const INVALID: &str = "linked-gateway: error: ";
 
 impl From<Text> for Note {
     fn from(text: Text) -> Self {

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use gateinto::config::{GatewayName, Gateways};
-use gateinto::ipc::{self, Request, RequestError, Response};
+use gateinto::ipc::{self, Request, RequestError, Response, TerminalRequest};
 use gateinto::link::approval::{ApprovalError, settle};
 use gateinto::link::{Ask, Known};
 use gateinto::sessions::SessionId;
@@ -32,6 +32,11 @@ pub enum Command {
     Stop,
     Start,
     Launch(GatewayName),
+    #[cfg_attr(
+        all(windows, not(test)),
+        expect(dead_code, reason = "no Windows control sends it yet")
+    )]
+    Terminal(GatewayName),
     Probe,
     Watch(bool),
     Credentials(u64, u64),
@@ -54,6 +59,10 @@ impl Command {
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
                     .map_err(|error| error.to_string())?,
             ),
+            Command::Terminal(gateway) => Request::Terminal(TerminalRequest {
+                gateway: gateway.clone(),
+                route: None,
+            }),
             Command::Start => return Err("starting the agent is not an agent request".to_owned()),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
             Command::Watch(_) => {
@@ -171,8 +180,22 @@ fn wiped<E>(mut reply: Result<Response, E>) -> Result<Response, E> {
 }
 
 pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Option<Note> {
+    let answered = match (&command, &reply) {
+        (Command::Terminal(_), Ok(Response::Ok(lines))) => Note::warnings(lines),
+        (Command::Stop, Ok(Response::Ok(lines))) => match ipc::closed_terminals(lines) {
+            None | Some(0) => None,
+            Some(1) => Some(Text::ClosedTerminal.into()),
+            Some(count) => Some(Note::filled(Text::ClosedTerminals, &[&count])),
+        },
+        _ => None,
+    };
     match wiped(reply) {
-        Ok(Response::Ok(_)) => None,
+        Ok(Response::Ok(_)) => answered,
+        Ok(Response::Error(message))
+            if matches!(command, Command::Terminal(_)) && message == ipc::INVALID_REQUEST =>
+        {
+            Some(Text::TerminalTooOld.into())
+        }
         Ok(Response::Error(message)) => Some(Note::Agent(message)),
         Err(RequestError::NotRunning) if matches!(command, Command::Stop) => None,
         Err(error) => Some(crate::agent::note(error)),
@@ -394,7 +417,7 @@ pub async fn serve_with<F, R, S>(
                     }
                     return;
                 };
-                let launch = matches!(command, Command::Launch(_));
+                let launch = matches!(command, Command::Launch(_) | Command::Terminal(_));
                 if let Some(text) = refuse(&command) {
                     failure = Some(text.into());
                     launched += u64::from(launch);
@@ -441,7 +464,7 @@ pub async fn serve_with<F, R, S>(
                         }
                         continue;
                     }
-                    Command::Close(_) | Command::Stop | Command::Launch(_) => {}
+                    Command::Close(_) | Command::Stop | Command::Launch(_) | Command::Terminal(_) => {}
                 }
                 failure = run(command, &send).await;
                 launched += u64::from(launch);
@@ -908,6 +931,66 @@ mod tests {
             *log.borrow(),
             [Request::List, Request::Config, launch("office")]
         );
+    }
+
+    fn terminal(name: &str) -> Request {
+        Request::Terminal(gateinto::ipc::TerminalRequest {
+            gateway: name.parse().unwrap(),
+            route: None,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn opening_a_terminal_asks_the_agent_and_counts_as_a_launch() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Terminal("office".parse().unwrap()))
+            .unwrap();
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            launcher(&log, Vec::new()),
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        assert_eq!(updates, [polled(None), launched(polled(None))]);
+        assert_eq!(
+            *log.borrow(),
+            [Request::List, Request::Config, terminal("office")]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_terminal_counts_as_a_launch_and_asks_nothing() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Terminal("office".parse().unwrap()))
+            .unwrap();
+        let mut updates = Vec::new();
+        let run = serve_with(
+            |command| matches!(command, Command::Terminal(_)).then_some(Text::DemoNotStarted),
+            || std::future::ready(None),
+            rx,
+            launcher(&log, Vec::new()),
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        assert_eq!(
+            updates,
+            [
+                polled(None),
+                launched(polled(Some(Text::DemoNotStarted.into())))
+            ]
+        );
+        assert_eq!(*log.borrow(), [Request::List, Request::Config]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1893,6 +1976,95 @@ mod tests {
     #[test]
     fn starting_is_not_an_agent_request() {
         assert!(Command::Start.request().is_err());
+    }
+
+    #[test]
+    fn open_terminal_leaves_the_route_and_the_shell_to_the_saved_gateway() {
+        let request = Command::Terminal("office".parse().unwrap())
+            .request()
+            .unwrap();
+        assert_eq!(request.to_string(), "terminal office route=saved");
+        assert_eq!(request, terminal("office"));
+    }
+
+    fn opened(lines: &[&str]) -> Result<Response, RequestError> {
+        Ok(Response::Ok(
+            lines.iter().map(|&line| line.to_owned()).collect(),
+        ))
+    }
+
+    const OPENED: [&str; 6] = [
+        "session: 4",
+        "gateway: office",
+        "listen: 127.0.0.1:50000",
+        "route: gateway",
+        "auth: os_user",
+        "shell: pwsh.exe",
+    ];
+
+    #[test]
+    fn an_opened_terminal_shows_nothing_of_its_answer_but_the_warnings() {
+        let office = || Command::Terminal("office".parse().unwrap());
+        assert_eq!(failure(office(), opened(&OPENED)), None);
+        let mut lines = OPENED.to_vec();
+        lines.extend([
+            "linked-gateways: error: the linked gateways file is unreadable",
+            "linked-gateway: error: bad entry",
+            gateinto::link::MIXED_WARNING,
+        ]);
+        let note = failure(office(), opened(&lines)).unwrap();
+        let english = "linked-gateways: error: the linked gateways file is unreadable\n\
+                       linked-gateway: error: bad entry\n"
+            .to_owned()
+            + gateinto::link::MIXED_WARNING;
+        assert_eq!(note.shown(), english);
+        for line in OPENED {
+            assert!(!note.shown().contains(line), "{line}");
+        }
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert!(note.shown().starts_with("linked-gateways: error: "));
+        assert!(note.shown().ends_with("並繞過閘道的政策。"));
+    }
+
+    #[test]
+    fn an_agent_without_terminals_is_said_to_be_too_old() {
+        let office = || Command::Terminal("office".parse().unwrap());
+        let invalid = || Ok(Response::Error(ipc::INVALID_REQUEST.to_owned()));
+        assert_eq!(
+            failure(office(), invalid()),
+            Some(Text::TerminalTooOld.into())
+        );
+        assert_eq!(
+            failure(office(), Ok(Response::Error("no gateway".to_owned()))),
+            said("no gateway")
+        );
+        assert_eq!(
+            failure(Command::Close(1), invalid()),
+            said(ipc::INVALID_REQUEST)
+        );
+        assert_eq!(
+            Note::from(Text::TerminalTooOld).shown(),
+            "the agent is too old for terminal sessions; restart it"
+        );
+    }
+
+    #[test]
+    fn a_stop_tells_how_many_terminals_it_closed() {
+        let stopped = |count: &str| {
+            opened(&[
+                "agent-pid: 41",
+                &format!("{}{count}", ipc::CLOSED_TERMINALS),
+            ])
+        };
+        assert_eq!(failure(Command::Stop, stopped("0")), None);
+        assert_eq!(failure(Command::Stop, opened(&["agent-pid: 41"])), None);
+        let one = failure(Command::Stop, stopped("1")).unwrap();
+        assert_eq!(one.shown(), "Closed 1 terminal session");
+        let two = failure(Command::Stop, stopped("2")).unwrap();
+        assert_eq!(two.shown(), "Closed 2 terminal sessions");
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(two.shown(), "已關閉 2 個終端機工作階段");
+        assert_eq!(failure(Command::Close(1), stopped("2")), None);
     }
 
     #[test]

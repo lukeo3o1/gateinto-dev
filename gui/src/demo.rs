@@ -210,7 +210,7 @@ pub fn answer(request: Request, now: u64) -> Response {
 
 pub fn refusal(command: &Command) -> Option<Text> {
     match command {
-        Command::Launch(_) | Command::Link(_) => Some(NOT_STARTED),
+        Command::Launch(_) | Command::Terminal(_) | Command::Link(_) => Some(NOT_STARTED),
         Command::Close(_) => Some(NOT_REVOKED),
         Command::Stop => Some(NOT_STOPPED),
         Command::Start => Some(AGENT_NOT_STARTED),
@@ -391,6 +391,8 @@ mod tests {
     fn the_window_refuses_every_action_before_it_reaches_the_sample_agent() {
         let launch = Command::Launch("office".parse().unwrap());
         assert_eq!(refusal(&launch), Some(NOT_STARTED));
+        let terminal = Command::Terminal("office".parse().unwrap());
+        assert_eq!(refusal(&terminal), Some(NOT_STARTED));
         assert_eq!(refusal(&Command::Close(3)), Some(NOT_REVOKED));
         assert_eq!(refusal(&Command::Stop), Some(NOT_STOPPED));
         assert_eq!(refusal(&Command::Start), Some(AGENT_NOT_STARTED));
