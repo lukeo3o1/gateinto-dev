@@ -1,0 +1,3 @@
+Gateinto auth_uri="https://a.test/cafÃ©ÿþ?cert_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", user_code="WDJB-MJHT", expires_in="300"
+Gateinto auth_uri="https://a.test/?cert_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", user_code="WDÃ‰-MJHT", expires_in="300"
+https://ä¾‹.test
