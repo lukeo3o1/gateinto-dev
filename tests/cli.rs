@@ -803,3 +803,224 @@ fn setup_reports_a_damaged_gateway_file_and_continues() {
         "{stderr}"
     );
 }
+
+#[cfg(unix)]
+mod fake_agent {
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::process::{Command, Output};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use gateinto::ipc::{self, Endpoint, Response, Server};
+
+    const URL: &str = "https://verify.example.test/device?x=1&cert_sha256=ab";
+    const CODE: &str = "WDJB-MJHT";
+    const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub struct FakeAgent {
+        dir: PathBuf,
+        instance: String,
+    }
+
+    impl FakeAgent {
+        pub fn new() -> Self {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let instance = format!(
+                "fake-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let dir = std::env::temp_dir().join(&instance);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self { dir, instance }
+        }
+
+        #[cfg(feature = "test-hooks")]
+        pub fn file(&self, name: &str) -> PathBuf {
+            self.dir.join(name)
+        }
+
+        pub fn run(
+            &self,
+            args: &[&str],
+            answer: Response,
+            mut command: Command,
+        ) -> (Output, Option<String>) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let endpoint = Endpoint::from_env_with(
+                |name| match name {
+                    "XDG_RUNTIME_DIR" => Some(OsString::from(&self.dir)),
+                    "GATEINTO_INSTANCE" => Some(OsString::from(&self.instance)),
+                    _ => None,
+                },
+                "",
+            )
+            .unwrap();
+            let mut server = {
+                let _entered = runtime.enter();
+                Server::bind(&endpoint).unwrap()
+            };
+            let answering = runtime.spawn(async move {
+                let mut connection = server.accept().await.unwrap();
+                let request = ipc::read_request(&mut connection).await.unwrap();
+                ipc::write_response(&mut connection, &answer).await.unwrap();
+                request.to_string()
+            });
+            let output = command
+                .args(args)
+                .env("XDG_RUNTIME_DIR", &self.dir)
+                .env("GATEINTO_INSTANCE", &self.instance)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            let answered =
+                runtime.block_on(async { tokio::time::timeout(ANSWER_TIMEOUT, answering).await });
+            (output, answered.ok().map(|request| request.unwrap()))
+        }
+    }
+
+    impl Drop for FakeAgent {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    pub fn pending_verification() -> Response {
+        Response::Ok(
+            [
+                "challenge: 3".to_owned(),
+                "gateway: office".to_owned(),
+                "origin: https://verify.example.test".to_owned(),
+                format!("auth_uri: {URL}"),
+                format!("user_code: {CODE}"),
+                "expires_in: 300".to_owned(),
+                "target: example.com:443".to_owned(),
+                "more_targets: 0".to_owned(),
+                "suppressed: 0".to_owned(),
+            ]
+            .to_vec(),
+        )
+    }
+
+    pub fn assert_no_secret(text: &[u8]) {
+        let text = String::from_utf8_lossy(text);
+        assert!(!text.contains("verify.example.test"), "{text}");
+        assert!(!text.contains(CODE), "{text}");
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn verification_block() -> String {
+        format!(
+            "verification required for gateway office\n  target: example.com:443\n  verify at: \
+             https://verify.example.test\n  link: {URL}\n  pairing code: {CODE}\n  expires in: \
+             300 s\nComplete verification, then retry the connection.\n"
+        )
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_verification_is_not_shown_on_a_redirected_standard_error() {
+    let agent = fake_agent::FakeAgent::new();
+    let mut command = gateinto_command();
+    command.env_remove("GATEINTO_TEST_VERIFICATION_FILE");
+    let (output, request) = agent.run(
+        &["session", "verification", "7"],
+        fake_agent::pending_verification(),
+        command,
+    );
+    assert_eq!(request.as_deref(), Some("verification 7"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    fake_agent::assert_no_secret(&output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr,
+        "error: the verification for session 7 was not shown: standard error is not a terminal\n"
+    );
+}
+
+#[cfg(all(unix, feature = "test-hooks"))]
+#[test]
+fn a_verification_file_that_cannot_be_written_is_reported_as_such() {
+    let agent = fake_agent::FakeAgent::new();
+    let mut command = gateinto_command();
+    command.env("GATEINTO_TEST_VERIFICATION_FILE", agent.file(""));
+    let (output, _) = agent.run(
+        &["session", "verification", "7"],
+        fake_agent::pending_verification(),
+        command,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    fake_agent::assert_no_secret(&output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("error: the verification for session 7 was not shown: "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("not a terminal"), "{stderr}");
+}
+
+#[cfg(all(unix, feature = "test-hooks"))]
+#[test]
+fn a_shown_verification_carries_the_whole_block_and_nothing_on_standard_output() {
+    let agent = fake_agent::FakeAgent::new();
+    let shown = agent.file("verification.txt");
+    let mut command = gateinto_command();
+    command.env("GATEINTO_TEST_VERIFICATION_FILE", &shown);
+    let (output, _) = agent.run(
+        &["session", "verification", "7"],
+        fake_agent::pending_verification(),
+        command,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    fake_agent::assert_no_secret(&output.stderr);
+    assert_eq!(
+        std::fs::read_to_string(shown).unwrap(),
+        fake_agent::verification_block()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_too_old_for_verification_is_named() {
+    let agent = fake_agent::FakeAgent::new();
+    let (output, _) = agent.run(
+        &["session", "verification", "7"],
+        gateinto::ipc::Response::Error("invalid request".to_owned()),
+        gateinto_command(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: the agent is too old for verification; restart it\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_session_list_notes_a_pending_verification_on_standard_error() {
+    let agent = fake_agent::FakeAgent::new();
+    let session = r#"{"id":4,"kind":"browser","gateway":"office","upstream":"proxy.example:443","listen":"127.0.0.1:8080","route":"all","auth":"password","started":1700000000,"tunnels":0,"verification":true}"#;
+    let (output, request) = agent.run(
+        &["session", "list"],
+        gateinto::ipc::Response::Ok(vec![session.to_owned()]),
+        gateinto_command(),
+    );
+    assert_eq!(request.as_deref(), Some("list"));
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with("ID  KIND"), "{stdout}");
+    assert!(!stdout.contains("verification"), "{stdout}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "session 4 needs verification; run `gateinto session verification 4` to show it\n"
+    );
+}
