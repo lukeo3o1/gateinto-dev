@@ -1,7 +1,7 @@
 # Design: terminal sessions
 
-Status: design decided; the in-process and agent-hosted variants are
-implemented, the GUI entry is not. The decisions are listed in
+Status: design decided; the in-process and agent-hosted variants and the
+GUI entry are implemented. The decisions are listed in
 [Decisions](#decisions). None of the behaviour it expects from shells,
 terminals or tools has been tried on a real Windows or Linux system; what
 must be checked first is under [Needs verification](#needs-verification).
@@ -402,8 +402,8 @@ Lifetime:
   terminals like browsers. `gateinto stop` and the GUI's Stop button say how
   many terminal sessions are closed: the agent's stop answer has a
   `terminals-closed: <n>` line, which `gateinto stop` prints as "closed <n>
-  terminal sessions" when it is not 0; the GUI's count is not implemented
-  yet. The GUI asks for
+  terminal sessions" when it is not 0, and the GUI shows it as the note "Closed
+  <n> terminal sessions". The GUI asks for
   confirmation first while terminals are open ([GUI](#gui)); `gateinto stop`
   and `gateinto session close` do not ask.
 - **Agent ends** (killed, crash, logoff): the job handles close with the
@@ -477,15 +477,23 @@ Ctrl-C needs verification too.
 
 ### GUI
 
-The gateways page shows an "Open terminal" action *(proposed)* next to the
-browser launch, under the same condition as `page(..).launch`: only while the
-last poll found the agent running (`AgentState::Running`). It is hidden while
-the agent is stopped or unreachable, and pressing it never sends
+The gateways page shows an "Open terminal" action next to the browser
+launch, under the same condition as `page(..).launch`: only while the last
+poll found the agent running (`AgentState::Running`). It is hidden while the
+agent is stopped or unreachable, and pressing it never sends
 `Command::Start`; the explicit Start agent button stays the only way to start
-the agent.
+the agent. It is shown only on rows of configuration-file gateways, because
+the agent refuses a terminal for a gateway added from a link
+([Agent-hosted variant](#agent-hosted-variant), step 2). It is an icon
+button with an "Open terminal" tooltip, so that it fits next to Start
+browser in a window of the minimum size; there the sessions column of
+each row shrinks to its activity dots. While any launch is pending, from
+any row, every Open terminal and Start browser button is drawn disabled,
+because the GUI waits for one launch at a time (`Launches::busy`). The
+tray flyout has no terminal action.
 
-- `Command::Terminal(GatewayName)` *(proposed)* in `gui/src/worker.rs` maps
-  to `Request::Terminal` with `route: None` (`route=saved`) in
+- `Command::Terminal(GatewayName)` in `gui/src/worker.rs` maps to
+  `Request::Terminal` with `route: None` (`route=saved`) in
   `Command::request`. In `serve_with` it follows `Command::Launch`: the
   `launch` flag becomes `matches!(command, Command::Launch(_) |
   Command::Terminal(_))`, so a refused or finished terminal request also
@@ -495,22 +503,42 @@ the agent.
   the arm that falls through to `run`, so its error becomes a note. The row
   has one pending action at a time, shared by the browser and terminal
   buttons.
-- New strings in `gui/src/i18n.rs`, in English and Chinese *(proposed
-  `Text` variants)*: the "Open terminal" action, the "Terminal" session
-  title fallback, the "agent too old" note, the demo refusal, and the two
-  confirmations (closing a terminal; stopping the agent with terminals
-  open) with their buttons.
+- Notes after a terminal request: an `invalid request` error, which is what
+  an agent older than terminal sessions answers, becomes "the agent is too
+  old for terminal sessions; restart it"; other errors are shown as the
+  agent wrote them. A successful answer shows only its warning lines (the
+  mixed-route warning and the `linked-gateways: error:` and
+  `linked-gateway: error:` lines), never the session lines. A Stop answer
+  with `terminals-closed: <n>` above 0 becomes "Closed <n> terminal
+  sessions".
+- New strings in `gui/src/i18n.rs`, in English and Chinese: the "Open
+  terminal" action, the "Terminal" session title fallback, the "agent too
+  old" note, the closed-terminals notes, and the two confirmations (closing a
+  terminal; stopping the agent with terminals open) with their buttons. The
+  demo refusal reuses the existing "not started in demo mode" note.
 - `gui/src/sessions.rs` maps `SessionKind::Terminal` to a terminal row whose
-  title is the shell name; its close button sends the existing
-  `Command::Close`. There is no credentials button, because the session has
-  none.
+  title is the shell name; its close button (`Zone::CloseTerminal`, with
+  the tooltip "Close terminal" where a browser row says "Revoke session")
+  sends the existing `Command::Close`. There is no credentials entry,
+  because the session has none, and its More menu has no portal entry,
+  because a portal is for a browser.
 - **Confirmation (decided).** Closing a terminal row always asks first,
   because it kills the shell, everything started from it and unsaved work.
   The Stop button asks first when the last session list contains at least
-  one terminal, naming how many; with none it stops at once, as today.
+  one terminal or a new one is not listed yet (below), naming how many;
+  with none it stops at once, as today.
   Cancelling sends nothing. The dialog follows the existing remove-gateway
-  confirmation in `gui/src/board/dialog.rs` (`Zone::ConfirmRemove`).
-  Closing a browser row does not ask. The CLI's `gateinto stop` and
+  confirmation in `gui/src/board/dialog.rs` (`Zone::ConfirmRemove`): the
+  decision and the wording are in `gui/src/confirm.rs`, the dialog is
+  `dialog::ending` with `Zone::ConfirmEnd`. Stop also asks before the next
+  poll lists a new terminal: while an Open terminal request is pending
+  (`Launches::opening`), and after the agent accepted one since the last
+  list (`Update::unlisted`, reset by each poll); the question counts those
+  terminals with the listed ones. A dialog whose terminal is gone, or a
+  Stop dialog after the last terminal closed or the agent stopped, is
+  dropped at the next poll without sending anything. Stop from the tray
+  flyout opens the main window with the dialog. Closing a browser row does
+  not ask. The CLI's `gateinto stop` and
   `gateinto session close` never ask.
 - The GUI has no shell setting and shows no TOML editor; its own settings
   stay in the registry. `[terminal]` is edited only by the user.

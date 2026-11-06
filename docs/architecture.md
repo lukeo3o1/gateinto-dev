@@ -315,7 +315,7 @@ The full protocol, limits and guarantees are in
   see [Terminal sessions in the agent](#terminal-sessions-in-the-agent).
   `stop` answers the agent's process ID and a `terminals-closed: <n>` line,
   which `gateinto stop` prints as "closed <n> terminal sessions" when it is
-  not 0.
+  not 0 and the GUI shows as a note.
 - A browser's watch task waits for the browser process to exit or for a
   close request (`close <id>`, `stop`, Ctrl+C), kills the browser in the
   second case, closes the session, deletes the profile directory (retrying
@@ -465,6 +465,19 @@ The full protocol, limits and guarantees are in
   (`route=saved`). Everywhere else the GUI names a gateway by its display
   name, falling back to the identifier. This is unit-tested but not yet
   verified on Windows.
+- While the agent runs, each configuration-file gateway row has an Open
+  terminal button that sends `terminal <name> route=saved`
+  (`Command::Terminal`); it never starts the agent, and gateways from links
+  have none, because the agent refuses them. It counts as a launch: while
+  any launch is pending, every Open terminal and Start browser button is
+  disabled. The answer shows only its warnings; an
+  `invalid request` from an older agent becomes "the agent is too old for
+  terminal sessions; restart it". Terminal rows on the sessions page are
+  titled by their shell and offer no credentials and no portal. Closing a
+  terminal row, and Stop while the last list has a terminal or a terminal
+  request is pending or accepted since that list, first ask in a dialog with
+  Cancel first (`gui/src/confirm.rs`); closing a browser row does not. This
+  is unit-tested but not yet verified on Windows.
 
 ### Terminal sessions in the agent
 
@@ -491,7 +504,8 @@ The full protocol, limits and guarantees are in
   `auth: os_user` and `shell` (the shell's file name) lines, the gateway
   warnings and, for `mixed`, the mixed-route warning, never credentials.
   An agent that does not know the request answers `invalid request`, which
-  the CLI shows as "the agent is too old for terminal sessions; restart it".
+  the CLI and the GUI show as "the agent is too old for terminal sessions;
+  restart it".
 - `ConfigProfiles::terminal_session` (`main.rs`) refuses a gateway that is
   not in the configuration file, even one the agent knows from a link, and
   takes the shell from `[terminal] shell` and `args`, else `%ComSpec%`.
