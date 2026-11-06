@@ -70,7 +70,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::Close => Some(Action::Close),
         Zone::StopAgent => Some(Action::StopAgent),
         Zone::StartAgent => Some(Action::StartAgent),
-        Zone::Revoke(id) => Some(Action::Revoke(id)),
+        Zone::Revoke(id) | Zone::CloseTerminal(id) => Some(Action::Revoke(id)),
         Zone::More(id) => Some(Action::More(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
         Zone::OpenTerminal(row) => Some(Action::OpenTerminal(row)),
@@ -138,7 +138,10 @@ impl Pointer {
     }
 
     pub fn sessions_changed(&mut self) -> bool {
-        matches!(self.pressed, Some(Zone::Revoke(_) | Zone::More(_))) && self.cancel()
+        matches!(
+            self.pressed,
+            Some(Zone::Revoke(_) | Zone::CloseTerminal(_) | Zone::More(_))
+        ) && self.cancel()
     }
 
     pub fn gateways_changed(&mut self) -> bool {
@@ -228,6 +231,16 @@ mod tests {
         let mut p = Pointer::default();
         assert!(!p.down(Zone::Caption));
         assert_eq!(p.up(Zone::Caption), None);
+    }
+
+    #[test]
+    fn closing_a_terminal_row_acts_like_revoke_and_is_cancelled_by_a_new_list() {
+        let mut p = Pointer::default();
+        p.down(Zone::CloseTerminal(4));
+        assert_eq!(p.up(Zone::CloseTerminal(4)), Some(Action::Revoke(4)));
+        p.down(Zone::CloseTerminal(4));
+        assert!(p.sessions_changed());
+        assert_eq!(p.up(Zone::CloseTerminal(4)), None);
     }
 
     #[test]

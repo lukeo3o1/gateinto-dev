@@ -20,6 +20,7 @@ pub enum Zone {
     StopAgent,
     StartAgent,
     Revoke(u64),
+    CloseTerminal(u64),
     More(u64),
     StartBrowser(usize),
     OpenTerminal(usize),

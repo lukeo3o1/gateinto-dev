@@ -1035,6 +1035,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::StopAgent
         | Zone::StartAgent
         | Zone::Revoke(_)
+        | Zone::CloseTerminal(_)
         | Zone::More(_)
         | Zone::StartBrowser(_)
         | Zone::OpenTerminal(_)

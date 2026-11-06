@@ -50,6 +50,7 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
         .iter()
         .filter_map(|&(r, zone)| match zone {
             Zone::Revoke(_) => Some((r, tr(REVOKE_TIP))),
+            Zone::CloseTerminal(_) => Some((r, tr(crate::confirm::CLOSE))),
             Zone::More(_) => Some((r, tr(MORE_TIP))),
             Zone::OpenTerminal(_) => Some((r, tr(crate::gateways::OPEN_TERMINAL))),
             Zone::TogglePassword(false) => Some((r, tr(Text::ShowPassword))),
@@ -511,7 +512,11 @@ impl<'a, M: Measure> Painter<'a, M> {
 
         let size = s.px(32.0);
         let y = c.actions.y + (c.actions.h - size) / 2;
-        self.revoke(Rect::new(c.actions.x, y, size, size), row.id);
+        let revoke = match row.kind {
+            Kind::Terminal => Zone::CloseTerminal(row.id),
+            Kind::Browser | Kind::Other => Zone::Revoke(row.id),
+        };
+        self.revoke(Rect::new(c.actions.x, y, size, size), revoke);
         self.more(Rect::new(c.actions.right() - size, y, size, size), row.id);
     }
 
@@ -550,9 +555,8 @@ impl<'a, M: Measure> Painter<'a, M> {
         }
     }
 
-    fn revoke(&mut self, button: Rect, id: u64) {
+    fn revoke(&mut self, button: Rect, zone: Zone) {
         let (s, t) = (self.s, self.t);
-        let zone = Zone::Revoke(id);
         let (fill, ink) = match self.v.pointer.look(zone) {
             Look::Rest => (None, t.muted),
             Look::Hover => (Some(t.revoke_hover), t.revoke_glyph),
@@ -1118,6 +1122,24 @@ mod tests {
                 Op::Icon(icons::MORE, Rect::new(971, y + 21, 18, 18), 1.0, T.muted),
             ]
         );
+    }
+
+    #[test]
+    fn a_terminal_row_offers_close_terminal_where_others_offer_revoke() {
+        let mut terminal = row(3);
+        terminal.kind = Kind::Terminal;
+        let b = draw(&running(vec![row(1), terminal]));
+        let zones: Vec<_> = b.targets.iter().map(|(_, z)| *z).collect();
+        assert!(zones.contains(&Zone::Revoke(1)), "{zones:?}");
+        assert!(zones.contains(&Zone::CloseTerminal(3)), "{zones:?}");
+        assert!(!zones.contains(&Zone::Revoke(3)), "{zones:?}");
+        let r = Rect::new(1, 2, 3, 4);
+        assert_eq!(
+            tips(&[(r, Zone::CloseTerminal(3))]),
+            [(r, "Close terminal")]
+        );
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(tips(&[(r, Zone::CloseTerminal(3))]), [(r, "關閉終端機")]);
     }
 
     #[test]
