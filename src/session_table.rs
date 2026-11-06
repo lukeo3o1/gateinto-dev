@@ -37,6 +37,19 @@ pub fn session_table(sessions: &[SessionInfo], now: u64) -> Vec<String> {
         .collect()
 }
 
+pub fn verification_notes(sessions: &[SessionInfo]) -> Vec<String> {
+    sessions
+        .iter()
+        .filter(|session| session.verification)
+        .map(|session| {
+            let id = session.id;
+            format!(
+                "session {id} needs verification; run `gateinto session verification {id}` to show it"
+            )
+        })
+        .collect()
+}
+
 pub fn uptime(seconds: u64) -> String {
     let (minutes, hours, days) = (seconds / 60, seconds / 3_600, seconds / 86_400);
     if days > 0 {
@@ -139,5 +152,21 @@ mod tests {
     fn a_session_started_after_now_has_no_uptime_yet() {
         let table = session_table(&[session(1, "main", None)], 999);
         assert!(table[1].contains("  0s  "), "{table:?}");
+    }
+
+    #[test]
+    fn each_session_awaiting_verification_is_noted_with_the_command_to_show_it() {
+        let mut waiting = session(2, "office", None);
+        waiting.verification = true;
+        let mut also = session(5, "lab", None);
+        also.verification = true;
+        assert_eq!(
+            verification_notes(&[session(1, "office", None), waiting, also]),
+            [
+                "session 2 needs verification; run `gateinto session verification 2` to show it",
+                "session 5 needs verification; run `gateinto session verification 5` to show it",
+            ]
+        );
+        assert!(verification_notes(&[session(1, "office", None)]).is_empty());
     }
 }

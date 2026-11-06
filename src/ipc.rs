@@ -348,6 +348,41 @@ pub fn verification_lines(gateway: &GatewayName, verification: &Verification) ->
     lines
 }
 
+pub fn verification_from_lines(lines: &[String]) -> Option<(GatewayName, Verification)> {
+    let mut lines = lines.iter().map(String::as_str).peekable();
+    let mut field = |name: &str| next_field(&mut lines, name);
+    let serial = field("challenge")?.parse().ok()?;
+    let gateway = field("gateway")?.parse().ok()?;
+    let origin = Zeroizing::new(field("origin")?.to_owned());
+    let auth_uri = Zeroizing::new(field("auth_uri")?.to_owned());
+    let user_code = Zeroizing::new(field("user_code")?.to_owned());
+    let expires_in = field("expires_in")?.parse().ok()?;
+    let mut targets = Vec::new();
+    while let Some(target) = lines.next_if(|line| line.starts_with("target: ")) {
+        targets.push(target.strip_prefix("target: ").unwrap_or(target).to_owned());
+    }
+    let mut field = |name: &str| next_field(&mut lines, name);
+    let more_targets = field("more_targets")?.parse().ok()?;
+    let suppressed = field("suppressed")?.parse().ok()?;
+    lines.next().is_none().then_some((
+        gateway,
+        Verification {
+            serial,
+            origin,
+            auth_uri,
+            user_code,
+            expires_in,
+            targets,
+            more_targets,
+            suppressed,
+        },
+    ))
+}
+
+fn next_field<'a>(lines: &mut impl Iterator<Item = &'a str>, name: &str) -> Option<&'a str> {
+    lines.next()?.strip_prefix(name)?.strip_prefix(": ")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigSource {
     File(PathBuf),
@@ -1530,6 +1565,68 @@ mod tests {
                 "suppressed: 1",
             ]
         );
+    }
+
+    #[test]
+    fn a_sent_verification_is_read_back() {
+        let verification = Verification {
+            serial: 4,
+            origin: Zeroizing::new("https://verify.example.test".to_owned()),
+            auth_uri: Zeroizing::new("https://verify.example.test/device?x=1".to_owned()),
+            user_code: Zeroizing::new("WDJB-MJHT".to_owned()),
+            expires_in: 299,
+            targets: vec!["example.com:443".to_owned(), "[::1]:8443".to_owned()],
+            more_targets: 2,
+            suppressed: 1,
+        };
+        let gateway: GatewayName = "office".parse().unwrap();
+        let (read_gateway, read) =
+            verification_from_lines(&verification_lines(&gateway, &verification)).unwrap();
+        assert_eq!(read_gateway, gateway);
+        assert_eq!(read.serial, 4);
+        assert_eq!(*read.origin, *verification.origin);
+        assert_eq!(*read.auth_uri, *verification.auth_uri);
+        assert_eq!(*read.user_code, *verification.user_code);
+        assert_eq!(read.expires_in, 299);
+        assert_eq!(read.targets, verification.targets);
+        assert_eq!(read.more_targets, 2);
+        assert_eq!(read.suppressed, 1);
+    }
+
+    #[test]
+    fn a_verification_out_of_order_or_incomplete_is_not_read() {
+        let lines: Vec<String> = [
+            "challenge: 4",
+            "gateway: office",
+            "origin: https://verify.example.test",
+            "auth_uri: https://verify.example.test/device",
+            "user_code: WDJB-MJHT",
+            "expires_in: 299",
+            "target: example.com:443",
+            "more_targets: 0",
+            "suppressed: 0",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert!(verification_from_lines(&lines).is_some());
+        let mut swapped = lines.clone();
+        swapped.swap(2, 3);
+        let mut extra = lines.clone();
+        extra.push("suppressed: 0".to_owned());
+        let mut bad_number = lines.clone();
+        bad_number[5] = "expires_in: soon".to_owned();
+        let mut bad_gateway = lines.clone();
+        bad_gateway[1] = "gateway: ".to_owned();
+        for broken in [
+            swapped,
+            extra,
+            bad_number,
+            bad_gateway,
+            lines[..8].to_vec(),
+            vec![],
+        ] {
+            assert!(verification_from_lines(&broken).is_none(), "{broken:?}");
+        }
     }
 
     #[test]

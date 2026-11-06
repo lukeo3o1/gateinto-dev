@@ -1,8 +1,10 @@
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until};
 use zeroize::Zeroizing;
@@ -121,6 +123,7 @@ struct Inner {
     certificate: Option<ClientCertificate>,
     agent: PendingVerifications,
     state: Mutex<State>,
+    serial: watch::Sender<u64>,
 }
 
 impl Inner {
@@ -162,6 +165,7 @@ impl Verifications {
             certificate,
             agent,
             state: Mutex::default(),
+            serial: watch::channel(0).0,
         }))
     }
 
@@ -213,7 +217,22 @@ impl Verifications {
             timer,
             _slot: slot,
         });
+        self.0.serial.send_replace(serial);
         Offer::Pending
+    }
+
+    pub async fn for_each_new(&self, mut announce: impl FnMut(&Verification)) -> Infallible {
+        let mut serials = self.0.serial.subscribe();
+        let mut shown = 0;
+        loop {
+            if let Some(pending) = self.get().filter(|pending| pending.serial > shown) {
+                shown = pending.serial;
+                announce(&pending);
+            }
+            if serials.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
     }
 
     pub fn pending(&self) -> bool {
@@ -549,5 +568,34 @@ mod tests {
         store.clear();
         assert!(!store.pending());
         assert_eq!(agent.count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_newly_pending_challenge_is_announced_once() {
+        let (store, certificates, _) = store();
+        let fp = fingerprint(&certificates);
+        store.offer(refusal(&fp, "WDJB-MJHT", 300), &target(1));
+        let (announced, mut seen) = tokio::sync::mpsc::unbounded_channel();
+        let watching = store.clone();
+        let task = tokio::spawn(async move {
+            watching
+                .for_each_new(|pending| {
+                    announced
+                        .send((pending.serial, pending.user_code.to_string()))
+                        .unwrap();
+                })
+                .await
+        });
+        assert_eq!(seen.recv().await.unwrap(), (1, "WDJB-MJHT".to_owned()));
+        store.offer(refusal(&fp, "WDJB-MJHT", 300), &target(2));
+        store.offer(refusal(&fp, "BCDF-GHJK", 300), &target(3));
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(seen.try_recv().is_err());
+        assert!(store.dismiss(1));
+        store.offer(refusal(&fp, "BCDF-GHJK", 300), &target(3));
+        assert_eq!(seen.recv().await.unwrap(), (2, "BCDF-GHJK".to_owned()));
+        task.abort();
     }
 }
