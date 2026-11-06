@@ -1029,15 +1029,18 @@ TDD order: each item starts as a failing test.
   row.
 - `Denial::NotInJob` text no longer mentions a browser.
 
-**Agent tests (all platforms, fake `Launcher` as in the existing
-`JobFailsOnce` test in `src/agent.rs`).** They run everywhere because the
-platform check goes through the `Launcher::terminals()` seam, not
-`cfg!`; the fake answers `true` unless a test says otherwise:
+**Agent tests (Unix only, in the `#[cfg(unix)]` `terminal_sessions` module of
+`src/agent.rs`, fake `Launcher` as in the existing `JobFailsOnce` test).** The
+Windows build compiles the agent code but does not run these tests. They do not
+depend on the host platform's support for terminals because the platform check
+goes through the `Launcher::terminals()` seam, not `cfg!`; the fake answers
+`true` unless a test says otherwise:
 
 - a launcher answering `false` makes the agent answer the unsupported error
   after the rate limit and before any gateway lookup (the fake `Profiles`
   records no call);
-- `System::terminals()` is `cfg!(windows)` (one assertion per platform);
+- `System::terminals()` is `cfg!(windows)`, asserted on Unix only, where it is
+  `false`;
 - a `terminal` request starts a session of kind `terminal` with
   `LocalAuth::OS_USER` and the job, and the launcher sees the resolved shell,
   `new_console`, `%USERPROFILE%` and the environment;
