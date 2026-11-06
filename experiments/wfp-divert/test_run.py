@@ -169,6 +169,25 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(("CHARACTERIZED_REUSE_REJECTION", None),
                          lab.native_evidence_status("CHARACTERIZED_REUSE_REJECTION", "security5156", dict(wfp_count=0)))
 
+    def test_native_command_passes_wfp_api(self):
+        command = [str(x) for x in lab.native_command(pathlib.Path("bin"), pathlib.Path("out"), 35, "poll")]
+        self.assertEqual(str(pathlib.Path("bin") / "native-events.exe"), command[0])
+        self.assertEqual("poll", command[command.index("--wfp-api") + 1])
+        self.assertEqual("35", command[command.index("--seconds") + 1])
+        self.assertTrue(command[command.index("--out") + 1].endswith("native.jsonl"))
+        self.assertTrue(command[command.index("--stop-file") + 1].endswith("native.stop"))
+        self.assertTrue(command[command.index("--state-out") + 1].endswith("bfe-state.json"))
+
+    def test_polled_event_timing_uses_poll_observation_time(self):
+        client = dict(self.packet(), kind="client", nonce="n")
+        packet = self.packet(generation=1000)
+        polled = self.event(recv_qpc=1050, event_filetime=1, occurrence_qpc=999)
+        decision = dict(self.packet(), kind="decision", decision_qpc=1060)
+        result = lab.timing_summary([("a", client)], [packet], [polled], [decision], 1000)
+        self.assertEqual(50, result["notification_minus_capture_ms"]["p50"])
+        self.assertEqual(60, result["decision_minus_capture_ms"]["p50"])
+        self.assertEqual(999, result["rows"][0]["occurrence_qpc"])
+
     def test_enumeration_errors_do_not_fail_wfp_case(self):
         summary = dict(kind="summary", wfp_count=0, wfp_enum_errors=2, errors=0, queue_dropped=0)
         records = [dict(kind="wfp_enum_error", operation="FwpmNetEventEnum3", code=5), summary]

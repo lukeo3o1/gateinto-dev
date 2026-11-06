@@ -60,6 +60,17 @@ try {
     @{ name='external-wfp-tcp'; source='wfp'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true },
     @{ name='external-security-tcp'; source='security5156'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true }
   )
+  foreach ($api in @('subscribe4', 'poll')) {
+    $cases += @(
+      @{ name="hold-wfp-$api-tcp"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+      @{ name="hold-wfp-$api-udp"; source='wfp'; api=$api; mode='hold'; protocol='udp'; delay=0; hold=1000; skip=$false },
+      @{ name="hold-wfp-$api-delayed"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=100; hold=1000; skip=$false },
+      @{ name="hold-wfp-$api-too-late"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=1000; hold=250; skip=$false },
+      @{ name="hold-wfp-$api-missing"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=250; skip=$true },
+      @{ name="redirect-wfp-$api"; source='wfp'; api=$api; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+      @{ name="external-wfp-$api-tcp"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true }
+    )
+  }
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
     $arguments = @("$PSScriptRoot\run.py", '--bin', $Bin, '--fixture', $Fixture,
@@ -68,6 +79,7 @@ try {
       '--mode', $case.mode, '--protocol', $case.protocol,
       '--hold-ms', $case.hold, '--delay-ms', $case.delay, '--iterations', 3, '--seconds', 35)
     if ($case.skip) { $arguments += '--skip-all' }
+    if ($case.ContainsKey('api')) { $arguments += @('--wfp-api', $case.api) }
     if ($case.ContainsKey('scenario')) {
       $arguments += @('--scenario', $case.scenario)
       if ($case.scenario -eq 'reuse') { $arguments += @('--iterations', 1) }
@@ -95,7 +107,7 @@ try {
     if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
     $nativeLog = Join-Path $caseDir 'native.jsonl'
     if (Test-Path $nativeLog) {
-      Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum"' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"ready"|"kind":"summary"' } |
+      Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum"' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"wfp_poll_error"|"kind":"ready"|"kind":"summary"' } |
         Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
       Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum(_error)?"' } |
         Select-Object -First 30 | ForEach-Object { Write-Host "WFPENUM $($case.name) $_" }

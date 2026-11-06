@@ -87,6 +87,12 @@ def timing_summary(clients, packets, events, decisions, frequency):
                 decision_minus_capture_ms=distribution(r["decision_minus_capture_ms"] for r in rows), rows=rows)
 
 
+def native_command(bin_dir, out_dir, seconds, wfp_api):
+    return [bin_dir / "native-events.exe", "--seconds", seconds, "--out", (out_dir / "native.jsonl").resolve(),
+            "--stop-file", (out_dir / "native.stop").resolve(), "--state-out", (out_dir / "bfe-state.json").resolve(),
+            "--wfp-api", wfp_api]
+
+
 def collector_errors(records):
     return any(r.get("kind") == "error" for r in records)
 
@@ -246,6 +252,7 @@ def main():
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--private-dir", type=pathlib.Path)
     parser.add_argument("--source", choices=["wfp", "security5156"], default="wfp")
+    parser.add_argument("--wfp-api", choices=["subscribe2", "subscribe4", "poll"], default="subscribe2")
     parser.add_argument("--mode", choices=["hold", "redirect"], default="hold")
     parser.add_argument("--protocol", choices=["tcp", "udp"], default="tcp")
     parser.add_argument("--scenario", choices=["baseline", "retransmit", "reuse"], default="baseline")
@@ -282,7 +289,7 @@ def main():
     processes, logs = [], []
     private = tempfile.TemporaryDirectory(prefix="gateinto-wfp-private-", dir=args.private_dir)
     bridge = None
-    summary = dict(status="NOT_COMPLETED", source=args.source, mode=args.mode,
+    summary = dict(status="NOT_COMPLETED", source=args.source, wfp_api=args.wfp_api, mode=args.mode,
                    protocol=args.protocol, scenario=args.scenario, topology="single-host-local", decisions=0,
                    selected_confirmed=0, redirected=0, clients=[])
     if args.external_target:
@@ -330,9 +337,7 @@ def main():
         native_tail, packet_tail = JsonTail(native_file), JsonTail(packet_file)
         control = args.out / "control.txt"
         control.touch()
-        native = start([args.bin / "native-events.exe", "--seconds", args.seconds,
-                        "--out", native_file.resolve(), "--stop-file", (args.out / "native.stop").resolve(),
-                        "--state-out", (args.out / "bfe-state.json").resolve()], "native")
+        native = start(native_command(args.bin, args.out, args.seconds, args.wfp_api), "native")
         native_ready = False
         deadline = time.monotonic() + 10
         while not native_ready:

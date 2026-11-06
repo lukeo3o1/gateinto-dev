@@ -15,7 +15,7 @@ SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
 
 | File | Purpose |
 | --- | --- |
-| `native-events.cpp` | Native Subscribe2 and Security 5156; raw App ID/path, validity flags, tuples, event FILETIME, callback QPC, and raw Security XML. Native PID is null. |
+| `native-events.cpp` | Native WFP net events (`--wfp-api subscribe2`, `subscribe4` or `poll`) and Security 5156; raw App ID/path, validity flags, tuples, event FILETIME, callback QPC, and raw Security XML. Native PID is null. |
 | `packets.cpp` | NETWORK capture with bounded queues, first-packet buffering, generation-qualified control, pinned timeout-direct policy, and candidate TCP forward/reverse translation. |
 | `run.py`, `test_run.py` | Correlate the selected native source, full device path and tuple; inject delayed/missing attribution; verify per-client evidence and final collector status. |
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
@@ -81,6 +81,17 @@ enumeration stops after about 2 s or 64 batches. Only the first 5 `wfp_enum_erro
 lines are written; `wfp_enum_errors` counts all of them. `wfp_enum_truncated` is
 true only when a limit stopped enumeration and a one-entry probe then found an
 unread event or failed.
+
+`--wfp-api` selects how the collector obtains WFP CLASSIFY_ALLOW events, all
+reported as `kind:"wfp"` and validated identically. `subscribe2` uses
+FwpmNetEventSubscribe2/FWPM_NET_EVENT3, `subscribe4` uses
+FwpmNetEventSubscribe4/FWPM_NET_EVENT5 (Windows 10 1809+), and `poll`
+enumerates the stored net events every `--poll-interval-ms` (default 5) over a
+window that starts `--poll-overlap-ms` (default 1000) before the previous poll
+end, deduplicated on timestamp, tuple and app ID. A polled event's `recv_qpc` is
+when the poll observed it, so `notification_minus_capture_ms` includes polling
+latency. The summary reports `wfp_api`, `wfp_polls`, `wfp_poll_errors` (capped
+`wfp_poll_error` lines, not collector errors) and `wfp_poll_max_ms`.
 
 Evidence includes raw native/packet JSONL, decision/control logs, translation and
 bridge logs, gateway requests, target payload hex and client nonces/tuples. Driver
