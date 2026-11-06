@@ -18,6 +18,7 @@ pub enum Action {
     Revoke(u64),
     More(u64),
     StartBrowser(usize),
+    OpenTerminal(usize),
     GatewayDetails(usize),
     OpenPicker,
     Choose(usize),
@@ -71,6 +72,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::Revoke(id) => Some(Action::Revoke(id)),
         Zone::More(id) => Some(Action::More(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
+        Zone::OpenTerminal(row) => Some(Action::OpenTerminal(row)),
         Zone::GatewayCard(row) => Some(Action::GatewayDetails(row)),
         Zone::Picker => Some(Action::OpenPicker),
         Zone::Entry(i) => Some(Action::Choose(i)),
@@ -140,7 +142,7 @@ impl Pointer {
     pub fn gateways_changed(&mut self) -> bool {
         matches!(
             self.pressed,
-            Some(Zone::StartBrowser(_) | Zone::GatewayCard(_))
+            Some(Zone::StartBrowser(_) | Zone::OpenTerminal(_) | Zone::GatewayCard(_))
         ) && self.cancel()
     }
 
@@ -271,6 +273,19 @@ mod tests {
         assert_eq!(p.up(Zone::StartBrowser(2)), Some(Action::StartBrowser(2)));
         p.down(Zone::StartBrowser(1));
         assert_eq!(p.up(Zone::StartBrowser(0)), None);
+    }
+
+    #[test]
+    fn an_open_terminal_button_opens_its_gateway_until_the_list_changes() {
+        let mut p = Pointer::default();
+        p.down(Zone::OpenTerminal(2));
+        assert_eq!(p.up(Zone::OpenTerminal(2)), Some(Action::OpenTerminal(2)));
+        p.down(Zone::OpenTerminal(1));
+        assert_eq!(p.up(Zone::OpenTerminal(0)), None);
+        p.down(Zone::OpenTerminal(1));
+        assert!(!p.sessions_changed());
+        assert!(p.gateways_changed());
+        assert_eq!(p.up(Zone::OpenTerminal(1)), None);
     }
 
     #[test]

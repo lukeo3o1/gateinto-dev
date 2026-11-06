@@ -6,9 +6,12 @@ use crate::i18n::tr;
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
+use crate::pointer::Look;
 use crate::scale::Scale;
 use crate::scene::{Op, View};
 use crate::theme::Theme;
+
+const MIN_NAME: f32 = 80.0;
 
 pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Measure) -> Board {
     if v.nav.selected() != NavPage::Gateways {
@@ -48,10 +51,10 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
         for (i, row) in page.rows.iter().enumerate() {
             let card = Rect::new(content.x, top - offset + i as i32 * (h + gap), content.w, h);
             if card.bottom() <= view.y || card.y >= view.bottom() {
-                p.unseen(|p| p.gateway(card, row, (i, page.launch)));
+                p.unseen(|p| p.gateway(card, row, i, page));
                 continue;
             }
-            p.gateway(card, row, (i, page.launch));
+            p.gateway(card, row, i, page);
         }
     }
     p.finish()
@@ -67,7 +70,7 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Small, FOOTNOTE, text, t.muted);
     }
 
-    fn gateway(&mut self, card: Rect, row: &Row, (index, launch): (usize, bool)) {
+    fn gateway(&mut self, card: Rect, row: &Row, index: usize, page: &Page) {
         let (s, t) = (self.s, self.t);
         self.framed(card, 10.0, t.card);
         let pad = s.px(20.0);
@@ -79,8 +82,18 @@ impl<M: Measure> Painter<'_, M> {
         let gap = s.px(16.0);
         let right = card.right() - pad;
         let button = self.button(card, right, tr(START));
-        let sessions = Rect::new(button.x - gap - s.px(120.0), card.y, s.px(120.0), card.h);
+        let side = s.px(32.0);
+        let terminal = Rect::new(button.x - s.px(8.0) - side, button.y, side, side);
+        let before = if page.terminal { terminal.x } else { button.x };
         let x = tile.right() + gap;
+        let full = s.px(120.0);
+        let dots = s.px(16.0);
+        let width = if before - gap - full - gap - x < s.px(MIN_NAME) {
+            dots
+        } else {
+            full
+        };
+        let sessions = Rect::new(before - gap - width, card.y, width, card.h);
         let w = (sessions.x - gap - x).max(0);
         let line = s.px(20.0);
         let top = card.y + (card.h - line - s.px(18.0)) / 2;
@@ -105,14 +118,35 @@ impl<M: Measure> Painter<'_, M> {
         self.text(Font::Mono, row.address.clone(), address, t.muted);
 
         self.eyes(sessions, row);
+        if page.terminal && row.config {
+            self.terminal(terminal, Zone::OpenTerminal(index), page.launch);
+        }
         self.start(
             button,
             icons::PLUS,
             tr(START),
             Zone::StartBrowser(index),
-            launch,
+            page.launch,
         );
         self.target(card, Zone::GatewayCard(index));
+    }
+
+    fn terminal(&mut self, button: Rect, zone: Zone, enabled: bool) {
+        let (s, t) = (self.s, self.t);
+        let glyph = Rect::new(button.x + s.px(8.0), button.y, s.px(16.0), button.h);
+        if !enabled {
+            self.push(Op::Round(button, s.pxf(6.0), t.tile));
+            self.icon(icons::TERMINAL, glyph, 16.0, t.eyes_idle);
+            return;
+        }
+        let fill = match self.v.pointer.look(zone) {
+            Look::Rest => t.card,
+            Look::Hover => t.caption_hover,
+            Look::Pressed => t.caption_pressed,
+        };
+        self.framed(button, 6.0, fill);
+        self.icon(icons::TERMINAL, glyph, 16.0, t.text);
+        self.target(button, zone);
     }
 
     fn eyes(&mut self, col: Rect, row: &Row) {
@@ -126,8 +160,10 @@ impl<M: Measure> Painter<'_, M> {
             self.push(Op::Round(Rect::new(x, y, dot_w, dot_h), radius, dot));
         }
         let x = col.x + 2 * (dot_w + dot_gap) + s.px(4.0);
-        let label = Rect::new(x, col.y, col.right() - x, col.h);
-        self.text(Font::Small, row.sessions.clone(), label, t.muted);
+        if x < col.right() {
+            let label = Rect::new(x, col.y, col.right() - x, col.h);
+            self.text(Font::Small, row.sessions.clone(), label, t.muted);
+        }
     }
 }
 
@@ -168,6 +204,7 @@ mod tests {
             footnote: rows.iter().any(|r| r.config),
             empty: rows.is_empty(),
             launch: true,
+            terminal: false,
             rows,
         }
     }
@@ -240,6 +277,7 @@ mod tests {
             empty: false,
             footnote: false,
             launch: false,
+            terminal: false,
         };
         let ops = draw(&page).ops;
         assert_eq!(
@@ -367,6 +405,124 @@ mod tests {
         );
     }
 
+    fn terminals(rows: Vec<Row>) -> Page {
+        Page {
+            terminal: true,
+            ..listed(rows)
+        }
+    }
+
+    const TERMINAL: Rect = Rect::new(809, FIRST + 20, 32, 32);
+
+    #[test]
+    fn a_running_agent_offers_a_terminal_beside_start_browser_on_config_rows() {
+        let page = terminals(vec![row("office", true), row("home", false)]);
+        let b = draw(&page);
+        assert_eq!(
+            b.targets,
+            [
+                ADDING,
+                (TERMINAL, Zone::OpenTerminal(0)),
+                (Rect::new(849, FIRST + 20, 143, 32), Zone::StartBrowser(0)),
+                (Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0)),
+                (Rect::new(849, FIRST + 102, 143, 32), Zone::StartBrowser(1)),
+                (Rect::new(248, FIRST + 82, 764, 72), Zone::GatewayCard(1)),
+            ]
+        );
+        assert_eq!(
+            inside(&b.ops, TERMINAL),
+            [
+                Op::Round(TERMINAL, 6.0, T.border),
+                Op::Round(Rect::new(810, FIRST + 21, 30, 30), 5.0, T.card),
+                Op::Icon(
+                    icons::TERMINAL,
+                    Rect::new(817, FIRST + 28, 16, 16),
+                    1.0,
+                    T.text
+                ),
+            ]
+        );
+        let linked = Rect {
+            y: TERMINAL.y + 82,
+            ..TERMINAL
+        };
+        assert_eq!(inside(&b.ops, linked), []);
+        for y in [FIRST, FIRST + 82] {
+            assert!(
+                b.ops
+                    .contains(&Op::Round(Rect::new(673, y + 32, 5, 7), 2.5, T.eyes_idle))
+            );
+            assert!(b.ops.contains(&text(
+                Font::Small,
+                "1 session",
+                Rect::new(699, y, 94, 72),
+                T.muted
+            )));
+        }
+        assert_eq!(
+            crate::board::tips(&b.targets),
+            [(TERMINAL, "Open terminal")]
+        );
+    }
+
+    #[test]
+    fn a_stopped_agent_offers_no_terminal() {
+        let page = listed(vec![row("office", true)]);
+        let b = draw(&page);
+        assert!(
+            !b.targets
+                .iter()
+                .any(|(_, z)| matches!(z, Zone::OpenTerminal(_)))
+        );
+        assert_eq!(inside(&b.ops, TERMINAL), []);
+    }
+
+    #[test]
+    fn a_pending_launch_disables_the_terminal_button() {
+        let mut page = terminals(vec![row("office", true)]);
+        page.launch = false;
+        let mut v = view();
+        v.pointer.moved(Zone::OpenTerminal(0));
+        let b = board(&layout(), S, &T, &v, &page, &Chars);
+        assert_eq!(
+            b.targets,
+            [
+                ADDING,
+                (Rect::new(248, FIRST, 764, 72), Zone::GatewayCard(0))
+            ]
+        );
+        assert_eq!(
+            inside(&b.ops, TERMINAL),
+            [
+                Op::Round(TERMINAL, 6.0, T.tile),
+                Op::Icon(
+                    icons::TERMINAL,
+                    Rect::new(817, FIRST + 28, 16, 16),
+                    1.0,
+                    T.eyes_idle
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_terminal_button_follows_the_pointer() {
+        let page = terminals(vec![row("office", true)]);
+        let mut v = view();
+        v.pointer.moved(Zone::OpenTerminal(0));
+        let hover = board(&layout(), S, &T, &v, &page, &Chars).ops;
+        assert_eq!(
+            inside(&hover, TERMINAL)[1],
+            Op::Round(Rect::new(810, FIRST + 21, 30, 30), 5.0, T.caption_hover)
+        );
+        v.pointer.down(Zone::OpenTerminal(0));
+        let pressed = board(&layout(), S, &T, &v, &page, &Chars).ops;
+        assert_eq!(
+            inside(&pressed, TERMINAL)[1],
+            Op::Round(Rect::new(810, FIRST + 21, 30, 30), 5.0, T.caption_pressed)
+        );
+    }
+
     #[test]
     fn linked_rows_have_no_lock_and_lit_rows_amber_eyes() {
         let mut linked = row("edge.example", false);
@@ -452,12 +608,23 @@ mod tests {
         for language in [Language::English, Language::Chinese] {
             let _speaking = speaking(language);
             for route in [Text::Mixed, Text::All] {
-                for config in [true, false] {
+                for (config, terminal) in
+                    [(true, false), (false, false), (true, true), (false, true)]
+                {
                     let mut long = row(&"n".repeat(100), config);
                     long.route = tr(route);
-                    let b = board(&l, S, &T, &view(), &listed(vec![long]), &Chars);
+                    let page = Page {
+                        terminal,
+                        ..listed(vec![long])
+                    };
+                    let b = board(&l, S, &T, &view(), &page, &Chars);
                     let card = b.targets.last().unwrap().0;
                     let start = b.targets[b.targets.len() - 2].0;
+                    let start = if terminal {
+                        Rect::new(start.x - 40, start.y, 32, 32)
+                    } else {
+                        start
+                    };
                     let pill = b
                         .ops
                         .iter()
@@ -487,6 +654,29 @@ mod tests {
                     assert_eq!(pill.w, Chars.width(Font::Pill, tr(route)) + 14);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn at_the_minimum_window_the_terminal_button_leaves_only_the_session_dots() {
+        let (w, h) = crate::layout::Layout::min_size(S);
+        let l = crate::layout::Layout::new(w, h, S, true);
+        for terminal in [false, true] {
+            let page = Page {
+                terminal,
+                ..listed(vec![row("office", true)])
+            };
+            let b = board(&l, S, &T, &view(), &page, &Chars);
+            let label = b
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Text(Font::Small, s, ..) if s == "1 session"));
+            let dots = b
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::Round(r, _, c) if *c == T.eyes_idle && r.h == 7))
+                .count();
+            assert_eq!((label, dots), (!terminal, 2));
         }
     }
 

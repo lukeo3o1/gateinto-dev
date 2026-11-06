@@ -722,11 +722,19 @@ impl App {
     }
 
     fn launch(&mut self, row: usize) -> bool {
+        self.pend(row, Command::Launch)
+    }
+
+    fn open_terminal(&mut self, row: usize) -> bool {
+        self.pend(row, Command::Terminal)
+    }
+
+    fn pend(&mut self, row: usize, command: fn(GatewayName) -> Command) -> bool {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
         let Some(name) = self.launches.start(&names.unwrap_or_default(), row) else {
             return false;
         };
-        self.link.send(Command::Launch(name));
+        self.link.send(command(name));
         self.retarget();
         self.invalidate();
         true
@@ -978,6 +986,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::Revoke(_)
         | Zone::More(_)
         | Zone::StartBrowser(_)
+        | Zone::OpenTerminal(_)
         | Zone::GatewayCard(_)
         | Zone::Picker
         | Zone::Entry(_)
@@ -1038,6 +1047,10 @@ fn perform(hwnd: HWND, action: Option<Action>) {
         }
         Some(Action::StartBrowser(row)) => {
             with_app(hwnd, |app| app.launch(row));
+            return;
+        }
+        Some(Action::OpenTerminal(row)) => {
+            with_app(hwnd, |app| app.open_terminal(row));
             return;
         }
         Some(Action::GatewayDetails(row)) => {

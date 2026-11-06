@@ -166,6 +166,7 @@ table! {
     AgentStartFailed => "Could not start the agent. Run `gateinto agent` to see why.", "無法啟動代理程式。請執行 `gateinto agent` 查看原因。";
     AgentCommandMissing => "gateinto.exe was not found next to Gateinto.", "在 Gateinto 旁找不到 gateinto.exe。";
     StartBrowser => "Start browser", "啟動瀏覽器";
+    OpenTerminal => "Open terminal", "開啟終端機";
     RevokeSession => "Revoke session", "撤銷工作階段";
     More => "More", "更多";
     ShowPassword => "Show password", "顯示密碼";

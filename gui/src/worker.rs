@@ -32,10 +32,6 @@ pub enum Command {
     Stop,
     Start,
     Launch(GatewayName),
-    #[cfg_attr(
-        all(windows, not(test)),
-        expect(dead_code, reason = "no Windows control sends it yet")
-    )]
     Terminal(GatewayName),
     Probe,
     Watch(bool),

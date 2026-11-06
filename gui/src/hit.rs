@@ -22,6 +22,7 @@ pub enum Zone {
     Revoke(u64),
     More(u64),
     StartBrowser(usize),
+    OpenTerminal(usize),
     GatewayCard(usize),
     Picker,
     Entry(usize),

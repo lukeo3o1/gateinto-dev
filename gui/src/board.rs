@@ -51,6 +51,7 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
         .filter_map(|&(r, zone)| match zone {
             Zone::Revoke(_) => Some((r, tr(REVOKE_TIP))),
             Zone::More(_) => Some((r, tr(MORE_TIP))),
+            Zone::OpenTerminal(_) => Some((r, tr(crate::gateways::OPEN_TERMINAL))),
             Zone::TogglePassword(false) => Some((r, tr(Text::ShowPassword))),
             Zone::TogglePassword(true) => Some((r, tr(Text::HidePassword))),
             Zone::Info(text) => Some((r, tr(text))),

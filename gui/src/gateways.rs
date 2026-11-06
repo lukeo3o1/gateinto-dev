@@ -16,6 +16,7 @@ pub const SUBTITLE: Text = Text::GatewaysSubtitle;
 pub const EMPTY: Text = Text::NoGatewaysHint;
 pub const FOOTNOTE: Text = Text::ConfigReadOnly;
 pub const START: Text = Text::StartBrowser;
+pub const OPEN_TERMINAL: Text = Text::OpenTerminal;
 pub const ADD: Text = Text::AddGateway;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub struct Page {
     pub empty: bool,
     pub footnote: bool,
     pub launch: bool,
+    pub terminal: bool,
 }
 
 pub fn read(config: Option<PathBuf>) -> Result<ConfigFile, String> {
@@ -103,6 +105,7 @@ pub fn page(
         empty: listing.is_ok() && rows.is_empty(),
         footnote: rows.iter().any(|row: &Row| row.config),
         launch: matches!(state, AgentState::Running(_)) && !busy,
+        terminal: matches!(state, AgentState::Running(_)),
         rows,
     }
 }
@@ -356,6 +359,7 @@ mod tests {
                 empty: false,
                 footnote: true,
                 launch: true,
+                terminal: true,
             }
         );
     }
@@ -590,6 +594,21 @@ mod tests {
             page(&listing, &AgentState::Stopped, None, false).rows[0].sessions,
             "No sessions"
         );
+    }
+
+    #[test]
+    fn only_a_running_agent_offers_a_terminal_even_while_a_launch_is_pending() {
+        let listing = known(vec![office()]);
+        let running = AgentState::Running(Vec::new());
+        assert!(page(&listing, &running, None, false).terminal);
+        let busy = page(&listing, &running, None, true);
+        assert!(busy.terminal && !busy.launch);
+        assert!(!page(&listing, &AgentState::Stopped, None, false).terminal);
+        let unreachable = AgentState::Unreachable(crate::i18n::Note::Agent("busy".to_owned()));
+        assert!(!page(&listing, &unreachable, None, false).terminal);
+        assert_eq!(OPEN_TERMINAL.english(), "Open terminal");
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(tr(OPEN_TERMINAL), "開啟終端機");
     }
 
     #[test]
