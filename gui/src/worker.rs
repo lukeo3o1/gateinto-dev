@@ -1865,6 +1865,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_terminal_for_a_stopped_agent_never_starts_it() {
+        let log = RefCell::new(Vec::new());
+        let (calls, seen) = starts(
+            listing(&log, stopped),
+            vec![(0, Command::Terminal("office".parse().unwrap()))],
+            Duration::from_secs(1),
+            None,
+            Duration::from_millis(4_500),
+        )
+        .await;
+        assert_eq!(calls, 0);
+        assert!(
+            seen.iter()
+                .all(|(_, starting, _)| *starting == Starting::Idle)
+        );
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|r| **r == terminal("office"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_failed_start_stays_shown_while_the_agent_stays_stopped() {
         let log = RefCell::new(Vec::new());
         let failed = Starting::Failed(crate::start::FAILED.into());
