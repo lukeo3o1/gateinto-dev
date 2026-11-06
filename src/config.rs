@@ -475,6 +475,7 @@ pub struct GatewayProfile {
     pub self_signed_client_cert: bool,
     pub portal_url: Option<PortalUrl>,
     pub route: Route,
+    pub verification_origins: Option<Vec<VerificationOrigin>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,6 +688,7 @@ impl ConfigFile {
             self_signed_client_cert,
             portal_url: section.portal_url,
             route,
+            verification_origins: section.verification_origins,
         })
     }
 
@@ -936,6 +938,7 @@ port = 443
                             .unwrap()
                     ),
                     route: Route::Mixed,
+                    verification_origins: None,
                 },
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
@@ -1316,6 +1319,20 @@ port = 443
         );
         let unset = ConfigFile::parse(MINIMAL).unwrap();
         assert_eq!(unset.gateways.0[&name("main")].verification_origins, None);
+    }
+
+    #[test]
+    fn the_gateway_profile_carries_the_verification_origins() {
+        let text = format!("{MINIMAL}verification_origins = [\"https://verify.example.test\"]\n");
+        let profile = settings(&text).unwrap().gateway;
+        assert_eq!(
+            profile.verification_origins,
+            Some(vec!["https://verify.example.test".parse().unwrap()])
+        );
+        assert_eq!(
+            settings(MINIMAL).unwrap().gateway.verification_origins,
+            None
+        );
     }
 
     #[test]
