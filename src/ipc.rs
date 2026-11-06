@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::config::GatewayName;
-use crate::proxy::{Route, SessionCredentials};
+use crate::proxy::{Route, SessionCredentials, Verification};
 use crate::sessions::SessionId;
 use crate::uri::LaunchRequest;
 
@@ -34,6 +34,8 @@ pub enum Request {
     List,
     Close(SessionId),
     Credentials(SessionId),
+    Verification(SessionId),
+    Dismiss(SessionId, u64),
     Stop,
     Log { after: u64 },
     Config,
@@ -150,6 +152,8 @@ impl fmt::Display for Request {
             Self::List => f.write_str("list"),
             Self::Close(id) => write!(f, "close {id}"),
             Self::Credentials(id) => write!(f, "credentials {id}"),
+            Self::Verification(id) => write!(f, "verification {id}"),
+            Self::Dismiss(id, serial) => write!(f, "dismiss {id} {serial}"),
             Self::Stop => f.write_str("stop"),
             Self::Log { after } => write!(f, "log {after}"),
             Self::Config => f.write_str("config"),
@@ -187,17 +191,25 @@ impl FromStr for Request {
             ["list"] => Ok(Self::List),
             ["close", id] => id.parse().map(Self::Close).map_err(|_| invalid),
             ["credentials", id] => id.parse().map(Self::Credentials).map_err(|_| invalid),
+            ["verification", id] => id.parse().map(Self::Verification).map_err(|_| invalid),
+            ["dismiss", id, serial] => match (id.parse(), canonical(serial)) {
+                (Ok(id), Some(serial)) => Ok(Self::Dismiss(id, serial)),
+                _ => Err(invalid),
+            },
             ["stop"] => Ok(Self::Stop),
             ["config"] => Ok(Self::Config),
-            ["log", word] => word
-                .parse()
-                .ok()
-                .filter(|after: &u64| after.to_string() == *word)
+            ["log", word] => canonical(word)
                 .map(|after| Self::Log { after })
                 .ok_or(invalid),
             _ => Err(invalid),
         }
     }
+}
+
+fn canonical(word: &str) -> Option<u64> {
+    word.parse()
+        .ok()
+        .filter(|number: &u64| number.to_string() == word)
 }
 
 fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
@@ -314,6 +326,26 @@ pub fn without_credentials(lines: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|line| !line.starts_with(USERNAME) && !line.starts_with(PASSWORD))
         .collect()
+}
+
+pub fn verification_lines(gateway: &GatewayName, verification: &Verification) -> Vec<String> {
+    let mut lines = vec![
+        format!("challenge: {}", verification.serial),
+        format!("gateway: {gateway}"),
+        format!("origin: {}", verification.origin.as_str()),
+        format!("auth_uri: {}", verification.auth_uri.as_str()),
+        format!("user_code: {}", verification.user_code.as_str()),
+        format!("expires_in: {}", verification.expires_in),
+    ];
+    lines.extend(
+        verification
+            .targets
+            .iter()
+            .map(|target| format!("target: {target}")),
+    );
+    lines.push(format!("more_targets: {}", verification.more_targets));
+    lines.push(format!("suppressed: {}", verification.suppressed));
+    lines
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1250,6 +1282,12 @@ mod tests {
             (Request::List, "list"),
             (Request::Close(SessionId(12)), "close 12"),
             (Request::Credentials(SessionId(7)), "credentials 7"),
+            (Request::Verification(SessionId(7)), "verification 7"),
+            (Request::Dismiss(SessionId(7), 3), "dismiss 7 3"),
+            (
+                Request::Dismiss(SessionId(7), u64::MAX),
+                "dismiss 7 18446744073709551615",
+            ),
             (Request::Stop, "stop"),
             (Request::Config, "config"),
             (Request::Log { after: 0 }, "log 0"),
@@ -1466,6 +1504,35 @@ mod tests {
     }
 
     #[test]
+    fn a_verification_is_sent_as_one_line_per_value_in_order() {
+        let verification = Verification {
+            serial: 4,
+            origin: Zeroizing::new("https://verify.example.test".to_owned()),
+            auth_uri: Zeroizing::new("https://verify.example.test/device?x=1".to_owned()),
+            user_code: Zeroizing::new("WDJB-MJHT".to_owned()),
+            expires_in: 299,
+            targets: vec!["example.com:443".to_owned(), "[::1]:8443".to_owned()],
+            more_targets: 2,
+            suppressed: 1,
+        };
+        assert_eq!(
+            verification_lines(&"office".parse().unwrap(), &verification),
+            [
+                "challenge: 4",
+                "gateway: office",
+                "origin: https://verify.example.test",
+                "auth_uri: https://verify.example.test/device?x=1",
+                "user_code: WDJB-MJHT",
+                "expires_in: 299",
+                "target: example.com:443",
+                "target: [::1]:8443",
+                "more_targets: 2",
+                "suppressed: 1",
+            ]
+        );
+    }
+
+    #[test]
     fn the_config_source_is_read_from_its_line() {
         let path = std::env::temp_dir().join("gateinto.toml");
         let line = config_line(&ConfigSource::File(path.clone())).unwrap();
@@ -1551,6 +1618,22 @@ mod tests {
             "credentials x",
             "credentials 1 2",
             "credentials  1",
+            "verification",
+            "verification x",
+            "verification 1 2",
+            "verification  1",
+            "VERIFICATION 1",
+            "dismiss",
+            "dismiss 1",
+            "dismiss x 1",
+            "dismiss 1 x",
+            "dismiss 1 -1",
+            "dismiss 1 +1",
+            "dismiss 1 01",
+            "dismiss 1 2 3",
+            "dismiss  1 2",
+            "dismiss 1  2",
+            "dismiss 1 18446744073709551616",
             "log",
             "log x",
             "log -1",

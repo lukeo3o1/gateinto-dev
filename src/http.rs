@@ -2,6 +2,8 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
+use zeroize::Zeroizing;
+
 pub const DEFAULT_MAX_HEADER_BYTES: usize = 16384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +132,43 @@ pub fn parse_connect_request(buf: &[u8], max_header_bytes: usize) -> ParseResult
 }
 
 pub fn parse_response(buf: &[u8], max_header_bytes: usize) -> ParseResult<u16> {
+    Ok(
+        parse_tunnel_response(buf, max_header_bytes)?.map(|parsed| Parsed {
+            value: parsed.value.status,
+            head_len: parsed.head_len,
+        }),
+    )
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TunnelResponse {
+    pub status: u16,
+    proxy_authenticate: Vec<Zeroizing<Vec<u8>>>,
+}
+
+impl TunnelResponse {
+    pub(crate) fn new(status: u16, proxy_authenticate: Vec<Zeroizing<Vec<u8>>>) -> Self {
+        Self {
+            status,
+            proxy_authenticate,
+        }
+    }
+
+    pub fn proxy_authenticate(&self) -> impl Iterator<Item = &[u8]> {
+        self.proxy_authenticate.iter().map(|value| value.as_slice())
+    }
+}
+
+impl fmt::Debug for TunnelResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelResponse")
+            .field("status", &self.status)
+            .field("proxy_authenticate", &self.proxy_authenticate.len())
+            .finish()
+    }
+}
+
+pub fn parse_tunnel_response(buf: &[u8], max_header_bytes: usize) -> ParseResult<TunnelResponse> {
     let Some(head_len) = head_len(buf, max_header_bytes)? else {
         return Ok(None);
     };
@@ -138,7 +177,7 @@ pub fn parse_response(buf: &[u8], max_header_bytes: usize) -> ParseResult<u16> {
     let rest = status_line
         .strip_prefix(b"HTTP/1.1 ")
         .ok_or(ParseError::Malformed)?;
-    let value = match rest {
+    let status = match rest {
         [
             a @ b'1'..=b'5',
             b @ b'0'..=b'9',
@@ -150,10 +189,20 @@ pub fn parse_response(buf: &[u8], max_header_bytes: usize) -> ParseResult<u16> {
         }
         _ => return Err(ParseError::Malformed),
     };
+    let mut proxy_authenticate = Vec::new();
     for line in lines {
-        parse_field(line)?;
+        let field = parse_field(line)?;
+        if status == 407 && field.name.eq_ignore_ascii_case(b"proxy-authenticate") {
+            proxy_authenticate.push(Zeroizing::new(field.value.to_vec()));
+        }
     }
-    Ok(Some(Parsed { value, head_len }))
+    Ok(Some(Parsed {
+        value: TunnelResponse {
+            status,
+            proxy_authenticate,
+        },
+        head_len,
+    }))
 }
 
 pub fn parse_status_line(buf: &[u8], max_header_bytes: usize) -> ParseResult<(u16, String)> {
@@ -754,6 +803,50 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn tunnel_response_returns_proxy_authenticate_values_of_a_407() {
+        let head = b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+            Proxy-Authenticate: Basic realm=\"x\"\r\n\
+            X-Other: y\r\n\
+            proxy-authenticate:  Gateinto auth_uri=\"https://a.test/\"  \r\n\
+            Content-Length: 4\r\n\r\nbody";
+        let parsed = parse_tunnel_response(head, MAX).unwrap().unwrap();
+        assert_eq!(parsed.head_len, head.len() - 4);
+        assert_eq!(parsed.value.status, 407);
+        let values: Vec<&[u8]> = parsed.value.proxy_authenticate().collect();
+        assert_eq!(
+            values,
+            [
+                &b"Basic realm=\"x\""[..],
+                b"Gateinto auth_uri=\"https://a.test/\""
+            ]
+        );
+        let debug = format!("{:?}", parsed.value);
+        assert!(!debug.contains("a.test"), "{debug}");
+        assert!(!debug.contains("realm"), "{debug}");
+    }
+
+    #[test]
+    fn tunnel_response_keeps_no_values_for_other_statuses() {
+        for status in [200, 403, 502] {
+            let head = format!("HTTP/1.1 {status} X\r\nProxy-Authenticate: Basic\r\n\r\n");
+            let parsed = parse_tunnel_response(head.as_bytes(), MAX)
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed.value.status, status);
+            assert_eq!(parsed.value.proxy_authenticate().count(), 0);
+        }
+        let parsed = parse_tunnel_response(b"HTTP/1.1 407 \r\n\r\n", MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.value.proxy_authenticate().count(), 0);
+        assert_eq!(parse_tunnel_response(b"HTTP/1.1 407 \r\n", MAX), Ok(None));
+        assert_eq!(
+            parse_tunnel_response(b"HTTP/1.1 407 \r\nBad Name: x\r\n\r\n", MAX),
+            Err(ParseError::Malformed)
+        );
     }
 
     #[test]

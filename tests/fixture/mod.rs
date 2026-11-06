@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gateinto::identity::certificates::{DeviceSigner, SelfSignedCertificates};
+use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::identity::x509::parse_certificate;
 use gateinto::proxy::{Config, Limits, LocalAuth, Proxy, Upstream};
 use gateinto::tls::TlsMode;
@@ -29,6 +30,13 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 pub const PROXY_NAME: &str = "proxy.test";
 pub const SECRET: &str = "fixture-secret-realm";
+pub const CHALLENGE_CODES: [&str; 3] = ["WDJB-MJHT", "BCDF-GHJK", "LMNP-QRST"];
+pub const CHALLENGE_URI: &str = "https://verify.test/device?cert_sha256=";
+
+pub fn challenge_value(certificate: &[u8], code: &str) -> String {
+    let fingerprint = sha256_fingerprint(certificate);
+    format!("Gateinto auth_uri=\"{CHALLENGE_URI}{fingerprint}\", user_code={code}, expires_in=300")
+}
 pub const HYBRID_GROUPS: &[&dyn SupportedKxGroup] = &[kx_group::X25519MLKEM768, kx_group::X25519];
 pub const CLASSICAL_GROUPS: &[&dyn SupportedKxGroup] = &[kx_group::X25519];
 
@@ -342,6 +350,8 @@ pub enum Behavior {
     Tunnel,
     TunnelWithBanner(&'static [u8]),
     Status(u16),
+    Challenge(&'static str),
+    ChallengeNamingFirst(&'static str),
     Hang,
     Close,
 }
@@ -416,6 +426,20 @@ impl UpstreamProxy {
                             let _ = tls.write_all(response.as_bytes()).await;
                             let _ = tls.shutdown().await;
                         }
+                        Behavior::Challenge(code) => {
+                            let leaf = tls
+                                .get_ref()
+                                .1
+                                .peer_certificates()
+                                .and_then(|chain| chain.first())
+                                .map(|leaf| leaf.to_vec())
+                                .unwrap_or_default();
+                            challenge(tls, &leaf, code).await
+                        }
+                        Behavior::ChallengeNamingFirst(code) => {
+                            let first = presented.lock().unwrap()[0][0].to_vec();
+                            challenge(tls, &first, code).await
+                        }
                         Behavior::Hang => {
                             tokio::time::sleep(Duration::from_secs(3600)).await;
                             drop(tls);
@@ -465,6 +489,19 @@ impl UpstreamProxy {
     pub fn client_certificates(&self) -> Vec<Vec<CertificateDer<'static>>> {
         self.client_certificates.lock().unwrap().clone()
     }
+}
+
+async fn challenge<S>(mut upstream: S, leaf: &[u8], code: &str)
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let response = format!(
+        "HTTP/1.1 407 Fixture\r\nProxy-Authenticate: Basic realm=\"{SECRET}\"\r\nProxy-Authenticate: {}\r\nContent-Length: {}\r\n\r\n{SECRET}",
+        challenge_value(leaf, code),
+        SECRET.len()
+    );
+    let _ = upstream.write_all(response.as_bytes()).await;
+    let _ = upstream.shutdown().await;
 }
 
 async fn tunnel<S>(mut upstream: S, head: &str, rest: &[u8], banner: &[u8])
@@ -602,6 +639,7 @@ pub fn agent_config(upstream: SocketAddr, roots: RootCertStore, server_name: &st
         client_certificate: None,
         limits: Limits::default(),
         os_user_job: None,
+        verification_origins: None,
     }
 }
 

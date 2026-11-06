@@ -243,6 +243,7 @@ mod tests {
             tunnels: 0,
             browser: None,
             shell: None,
+            verification: false,
         }
     }
 

@@ -14,6 +14,7 @@ use h2::Reason;
 use rustls::ServerConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, Sleep};
 use tokio_rustls::TlsAcceptor;
@@ -31,6 +32,7 @@ pub struct Server {
     pub blackhole_first_connection: Arc<AtomicBool>,
     pub pings: Arc<AtomicUsize>,
     pub ping_delay: Arc<Mutex<Duration>>,
+    pub release: Arc<Semaphore>,
     task: JoinHandle<()>,
 }
 
@@ -217,7 +219,10 @@ impl Server {
         let blackhole_first_connection = Arc::new(AtomicBool::new(false));
         let pings = Arc::new(AtomicUsize::new(0));
         let ping_delay = Arc::new(Mutex::new(Duration::ZERO));
+        let release = Arc::new(Semaphore::new(0));
+        let latest = Arc::new(Mutex::new(Arc::new(Vec::new())));
         let task = tokio::spawn({
+            let release = release.clone();
             let blackhole_first_connection = blackhole_first_connection.clone();
             let accepted = accepted.clone();
             let active = active.clone();
@@ -254,6 +259,8 @@ impl Server {
                     let certificates = certificates.clone();
                     let sent_bytes = sent_bytes.clone();
                     let frames = Frames::new(pings.clone(), ping_delay.clone());
+                    let release = release.clone();
+                    let latest = latest.clone();
                     let blackhole = if id == 0 {
                         blackhole_first_connection.clone()
                     } else {
@@ -273,9 +280,26 @@ impl Server {
                             }
                             return;
                         }
+                        let leaf = Arc::new(
+                            tls.get_ref()
+                                .1
+                                .peer_certificates()
+                                .and_then(|chain| chain.first())
+                                .map(|leaf| leaf.to_vec())
+                                .unwrap_or_default(),
+                        );
+                        *latest.lock().unwrap() = leaf.clone();
                         if tls.get_ref().1.alpn_protocol() == Some(b"http/1.1") {
                             use tokio::io::AsyncWriteExt;
-                            let _ = super::fixture::read_head(&mut tls).await;
+                            let (head, _) = super::fixture::read_head(&mut tls).await;
+                            if head.starts_with("CONNECT challenge.") {
+                                let response = format!(
+                                    "HTTP/1.1 407 Fixture\r\nProxy-Authenticate: {}\r\n\r\n",
+                                    challenge(&leaf, id)
+                                );
+                                let _ = tls.write_all(response.as_bytes()).await;
+                                return;
+                            }
                             if tls.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.is_ok() {
                                 let (mut reader, mut writer) = tokio::io::split(tls);
                                 let _ = tokio::io::copy(&mut reader, &mut writer).await;
@@ -328,6 +352,12 @@ impl Server {
                                 respond,
                                 target,
                                 sent_bytes.clone(),
+                                Challenge {
+                                    connection: id,
+                                    leaf: leaf.clone(),
+                                    latest: latest.clone(),
+                                    release: release.clone(),
+                                },
                             ));
                         }
                         streams.shutdown().await;
@@ -346,6 +376,7 @@ impl Server {
             blackhole_first_connection,
             pings,
             ping_delay,
+            release,
             task,
         }
     }
@@ -371,12 +402,52 @@ async fn send_data(send: &mut h2::SendStream<Bytes>, mut bytes: Bytes) -> Result
     Ok(())
 }
 
+fn challenge(leaf: &[u8], connection: usize) -> String {
+    let codes = super::fixture::CHALLENGE_CODES;
+    super::fixture::challenge_value(leaf, codes[connection % codes.len()])
+}
+
+struct Challenge {
+    connection: usize,
+    leaf: Arc<Vec<u8>>,
+    latest: Arc<Mutex<Arc<Vec<u8>>>>,
+    release: Arc<Semaphore>,
+}
+
 async fn serve(
     mut recv: h2::RecvStream,
     mut respond: h2::server::SendResponse<Bytes>,
-    target: String,
+    mut target: String,
     sent_bytes: Arc<AtomicUsize>,
+    challenge: Challenge,
 ) {
+    if let Some(held) = target.strip_prefix("held.") {
+        target = held.to_owned();
+        challenge.release.acquire().await.unwrap().forget();
+    }
+    let named = match target.strip_prefix("foreign.") {
+        Some(foreign) => {
+            target = foreign.to_owned();
+            challenge.latest.lock().unwrap().clone()
+        }
+        None => challenge.leaf.clone(),
+    };
+    if target.starts_with("challenge.") {
+        let response = http::Response::builder()
+            .status(407)
+            .header(
+                "proxy-authenticate",
+                format!("Basic realm=\"{}\"", super::fixture::SECRET),
+            )
+            .header(
+                "proxy-authenticate",
+                self::challenge(&named, challenge.connection),
+            )
+            .body(())
+            .unwrap();
+        let _ = respond.send_response(response, true);
+        return;
+    }
     if target.starts_with("reset.") {
         respond.send_reset(Reason::REFUSED_STREAM);
         return;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::browser::{self, BrowserProcess, ProfileDir};
 use crate::clock::unix_now;
@@ -389,6 +389,8 @@ impl Agent {
             Request::List => Ok(self.list().await),
             Request::Close(id) => self.close(id).await.map(|()| Vec::new()),
             Request::Credentials(id) => self.credentials(id).await,
+            Request::Verification(id) => self.verification(id).await,
+            Request::Dismiss(id, serial) => self.dismiss(id, serial).await.map(|()| Vec::new()),
             Request::Stop => {
                 self.inner.stop.notify_one();
                 let terminals = self.close_all().await;
@@ -811,6 +813,29 @@ impl Agent {
         Ok(lines)
     }
 
+    async fn verification(&self, id: SessionId) -> Result<Vec<String>, String> {
+        debug!(session = %id, "verification requested");
+        let sessions = self.inner.sessions.lock().await;
+        let session = sessions
+            .session(id)
+            .ok_or_else(|| format!("no session {id}"))?;
+        let verification = session
+            .verifications()
+            .get()
+            .ok_or_else(|| format!("session {id} has no pending verification"))?;
+        Ok(ipc::verification_lines(session.gateway(), &verification))
+    }
+
+    async fn dismiss(&self, id: SessionId, serial: u64) -> Result<(), String> {
+        debug!(session = %id, "verification dismissal requested");
+        let sessions = self.inner.sessions.lock().await;
+        let session = sessions
+            .session(id)
+            .ok_or_else(|| format!("no session {id}"))?;
+        session.verifications().dismiss(serial);
+        Ok(())
+    }
+
     async fn close(&self, id: SessionId) -> Result<(), String> {
         let browser = self.inner.browsers.lock().await.remove(&id);
         if let Some(browser) = browser {
@@ -1165,6 +1190,7 @@ mod tests {
                 client_certificate: None,
                 limits: proxy::Limits::default(),
                 os_user_job: None,
+                verification_origins: None,
             }
         }
 

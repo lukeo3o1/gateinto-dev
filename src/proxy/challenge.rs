@@ -3,14 +3,26 @@ use std::fmt;
 use std::net::Ipv6Addr;
 use std::str::FromStr;
 
+use zeroize::Zeroizing;
+
 pub(crate) const MAX_AUTH_URI_LEN: usize = 2048;
 pub(crate) const MAX_EXPIRES_IN: u64 = 600;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) struct Challenge {
     auth_uri: AuthUri,
-    user_code: String,
+    user_code: Zeroizing<String>,
     expires_in: u64,
+}
+
+impl fmt::Debug for Challenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Challenge")
+            .field("auth_uri", &self.auth_uri)
+            .field("user_code", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 impl Challenge {
@@ -66,7 +78,7 @@ pub(crate) fn parse(
     fingerprint: &str,
     origins: Option<&[VerificationOrigin]>,
 ) -> Result<Challenge, Invalid> {
-    let combined = values.join(&b", "[..]);
+    let combined = Zeroizing::new(values.join(&b", "[..]));
     let challenges = challenges(&combined).ok_or(Invalid::Malformed)?;
     let mut ours = challenges
         .into_iter()
@@ -102,7 +114,7 @@ pub(crate) fn parse(
         return Err(Invalid::Fingerprint);
     }
     if let Some(origins) = origins
-        && !origins.iter().any(|origin| origin.0 == auth_uri.origin)
+        && !origins.iter().any(|origin| origin.0 == *auth_uri.origin)
     {
         return Err(Invalid::Origin);
     }
@@ -123,7 +135,7 @@ const CODE_LETTERS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 struct RawChallenge<'a> {
     scheme: &'a [u8],
     token68: bool,
-    params: Vec<(&'a [u8], Vec<u8>)>,
+    params: Vec<(&'a [u8], Zeroizing<Vec<u8>>)>,
 }
 
 struct Cursor<'a> {
@@ -174,30 +186,43 @@ impl<'a> Cursor<'a> {
         Some(self.take_while(is_tchar)).filter(|token| !token.is_empty())
     }
 
-    fn quoted_string(&mut self) -> Option<Vec<u8>> {
+    fn quoted_string(&mut self) -> Option<Zeroizing<Vec<u8>>> {
         if self.peek() != Some(b'"') {
             return None;
         }
         self.pos += 1;
-        let mut value = Vec::new();
+        let start = self.pos;
+        let len = self.quoted_body(|_| {})?;
+        let end = self.pos;
+        self.pos = start;
+        let mut value = Zeroizing::new(Vec::with_capacity(len));
+        self.quoted_body(|byte| value.push(byte))?;
+        debug_assert_eq!((self.pos, value.len()), (end, len));
+        Some(value)
+    }
+
+    fn quoted_body(&mut self, mut push: impl FnMut(u8)) -> Option<usize> {
+        let mut len = 0;
         loop {
             let byte = self.peek()?;
             self.pos += 1;
-            match byte {
-                b'"' => return Some(value),
+            let decoded = match byte {
+                b'"' => return Some(len),
                 b'\\' => {
                     let escaped = self.peek().filter(|&b| b == b'\t' || is_text(b))?;
                     self.pos += 1;
-                    value.push(escaped);
+                    escaped
                 }
-                b'\t' => value.push(byte),
-                _ if is_text(byte) => value.push(byte),
+                b'\t' => byte,
+                _ if is_text(byte) => byte,
                 _ => return None,
-            }
+            };
+            push(decoded);
+            len += 1;
         }
     }
 
-    fn param(&mut self) -> Option<(&'a [u8], Vec<u8>)> {
+    fn param(&mut self) -> Option<(&'a [u8], Zeroizing<Vec<u8>>)> {
         let start = self.pos;
         let param = self.try_param();
         if param.is_none() {
@@ -206,7 +231,7 @@ impl<'a> Cursor<'a> {
         param
     }
 
-    fn try_param(&mut self) -> Option<(&'a [u8], Vec<u8>)> {
+    fn try_param(&mut self) -> Option<(&'a [u8], Zeroizing<Vec<u8>>)> {
         let name = self.token()?;
         self.ows();
         if self.peek() != Some(b'=') {
@@ -216,7 +241,7 @@ impl<'a> Cursor<'a> {
         self.ows();
         let value = match self.peek() {
             Some(b'"') => self.quoted_string()?,
-            _ => self.token()?.to_vec(),
+            _ => Zeroizing::new(self.token()?.to_vec()),
         };
         Some((name, value))
     }
@@ -266,7 +291,10 @@ fn challenges(bytes: &[u8]) -> Option<Vec<RawChallenge<'_>>> {
     }
 }
 
-fn params<'a>(cursor: &mut Cursor<'a>, params: &mut Vec<(&'a [u8], Vec<u8>)>) -> Option<()> {
+fn params<'a>(
+    cursor: &mut Cursor<'a>,
+    params: &mut Vec<(&'a [u8], Zeroizing<Vec<u8>>)>,
+) -> Option<()> {
     loop {
         cursor.ows();
         if !cursor.at_element_end() {
@@ -288,11 +316,17 @@ fn is_text(byte: u8) -> bool {
     matches!(byte, b' '..=b'~' | 0x80..=0xff)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct AuthUri {
-    url: String,
-    origin: String,
+    url: Zeroizing<String>,
+    origin: Zeroizing<String>,
     cert_sha256: String,
+}
+
+impl fmt::Debug for AuthUri {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AuthUri(<redacted>)")
+    }
 }
 
 fn auth_uri(value: &[u8]) -> Result<AuthUri, UriError> {
@@ -302,10 +336,10 @@ fn auth_uri(value: &[u8]) -> Result<AuthUri, UriError> {
     if !value.iter().copied().all(is_uri_char) {
         return Err(UriError::Character);
     }
-    let url = String::from_utf8(value.to_vec()).map_err(|_| UriError::Character)?;
+    let url = Zeroizing::new(String::from_utf8(value.to_vec()).map_err(|_| UriError::Character)?);
     let rest = strip_https(&url).ok_or(UriError::Scheme)?;
     let (authority, tail) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
-    let origin = origin(authority)?;
+    let origin = Zeroizing::new(origin(authority)?);
     if tail.contains(['[', ']']) {
         return Err(UriError::Bracket);
     }
@@ -332,7 +366,7 @@ fn cert_sha256(query: &str) -> Result<String, UriError> {
         if let Some(value) = value {
             decode(value)?;
         }
-        if key == CERT_KEY {
+        if *key == CERT_KEY {
             if found.replace(value).is_some() {
                 return Err(UriError::CertKey);
             }
@@ -352,9 +386,9 @@ fn cert_sha256(query: &str) -> Result<String, UriError> {
         .ok_or(UriError::CertKey)
 }
 
-fn decode(component: &str) -> Result<Vec<u8>, UriError> {
+fn decode(component: &str) -> Result<Zeroizing<Vec<u8>>, UriError> {
     let mut bytes = component.bytes();
-    let mut decoded = Vec::with_capacity(component.len());
+    let mut decoded = Zeroizing::new(Vec::with_capacity(component.len()));
     while let Some(byte) = bytes.next() {
         let byte = if byte == b'%' {
             let mut digit = || {
@@ -462,7 +496,7 @@ fn is_ipv4(host: &str) -> bool {
         })
 }
 
-fn user_code(value: &[u8]) -> Option<String> {
+fn user_code(value: &[u8]) -> Option<Zeroizing<String>> {
     let valid = value.len() == 9
         && value.iter().enumerate().all(|(index, byte)| match index {
             4 => *byte == b'-',
@@ -471,7 +505,7 @@ fn user_code(value: &[u8]) -> Option<String> {
     if !valid {
         return None;
     }
-    String::from_utf8(value.to_vec()).ok()
+    String::from_utf8(value.to_vec()).ok().map(Zeroizing::new)
 }
 
 fn expires_in(value: &[u8]) -> Option<u64> {
@@ -566,6 +600,35 @@ mod tests {
 
     fn origins(entries: &[&str]) -> Vec<VerificationOrigin> {
         entries.iter().map(|entry| entry.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn debug_output_redacts_the_challenge() {
+        let challenge = one(&standard()).unwrap();
+        let debug = format!("{challenge:?} {:?}", challenge.auth_uri);
+        for secret in ["verify.example.test", "WDJB", FP, "x=1"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
+        assert!(debug.contains("300"), "{debug}");
+    }
+
+    #[test]
+    fn parameter_values_reserve_no_more_than_their_own_length() {
+        let mut header = b"Foo a=\"\"".to_vec();
+        while header.len() < 16 * 1024 {
+            header.extend_from_slice(b",a=\"\",b=\"x\\\"y\"");
+        }
+        let parsed = challenges(&header).unwrap();
+        let params: Vec<_> = parsed.iter().flat_map(|c| &c.params).collect();
+        assert!(params.len() > 1000, "{}", params.len());
+        let reserved: usize = params.iter().map(|(_, value)| value.capacity()).sum();
+        assert!(reserved <= header.len(), "{reserved} > {}", header.len());
+        assert!(
+            params
+                .iter()
+                .all(|(name, value)| value.capacity() == value.len()
+                    && (*name != b"b" || value.as_slice() == b"x\"y"))
+        );
     }
 
     #[test]
@@ -824,10 +887,10 @@ mod tests {
         ];
         for (value, origin) in cases {
             let parsed = uri(&value).unwrap_or_else(|error| panic!("{value}: {error:?}"));
-            assert_eq!(parsed.url, value);
+            assert_eq!(*parsed.url, value);
             assert_eq!(parsed.cert_sha256, FP, "{value}");
             if !origin.is_empty() {
-                assert_eq!(parsed.origin, origin, "{value}");
+                assert_eq!(*parsed.origin, origin, "{value}");
             }
         }
     }
@@ -960,8 +1023,8 @@ mod tests {
             ),
         ] {
             let parsed = uri(&value).unwrap_or_else(|error| panic!("{value}: {error:?}"));
-            assert_eq!(parsed.url, value);
-            assert_eq!(parsed.origin, origin, "{value}");
+            assert_eq!(*parsed.url, value);
+            assert_eq!(*parsed.origin, origin, "{value}");
         }
     }
 
@@ -1054,7 +1117,10 @@ mod tests {
     #[test]
     fn user_codes_are_two_groups_of_four_consonants() {
         for value in ["WDJB-MJHT", "BCDF-ZZZZ", "XWVT-SRQP"] {
-            assert_eq!(user_code(value.as_bytes()).as_deref(), Some(value));
+            assert_eq!(
+                user_code(value.as_bytes()).as_deref().map(String::as_str),
+                Some(value)
+            );
         }
         for value in [
             "",

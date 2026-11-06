@@ -729,6 +729,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
             ..Limits::default()
         },
         os_user_job: None,
+        verification_origins: settings.gateway.verification_origins.clone(),
     })
 }
 
@@ -1776,10 +1777,17 @@ mod tests {
         let Command::Session(SessionCommand::Browser(args)) = cli.command else {
             unreachable!()
         };
-        let settings = args.upstream.settings(|_| {}).unwrap();
+        let mut settings = args.upstream.settings(|_| {}).unwrap();
         assert_eq!(
             proxy_config(&settings).unwrap().local_auth,
             LocalAuth::SESSION_CREDENTIALS
+        );
+        assert_eq!(proxy_config(&settings).unwrap().verification_origins, None);
+        let origins = vec!["https://verify.example.test".parse().unwrap()];
+        settings.gateway.verification_origins = Some(origins.clone());
+        assert_eq!(
+            proxy_config(&settings).unwrap().verification_origins,
+            Some(origins)
         );
     }
 
