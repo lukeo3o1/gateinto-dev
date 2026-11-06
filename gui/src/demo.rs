@@ -180,6 +180,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             tunnels: s.tunnels,
             browser: s.browser,
             shell: s.shell.map(str::to_owned),
+            verification: false,
         })
         .collect()
 }

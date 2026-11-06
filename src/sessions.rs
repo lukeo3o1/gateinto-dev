@@ -150,6 +150,7 @@ impl Session {
             tunnels: self.open_tunnels.count() as u64,
             browser,
             shell: None,
+            verification: false,
         }
     }
 

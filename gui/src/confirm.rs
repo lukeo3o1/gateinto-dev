@@ -103,6 +103,7 @@ mod tests {
             tunnels: 0,
             browser: None,
             shell: shell.map(str::to_owned),
+            verification: false,
         }
     }
 

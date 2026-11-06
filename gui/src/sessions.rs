@@ -268,6 +268,7 @@ mod tests {
             tunnels,
             browser: Some(BrowserKind::Edge),
             shell: None,
+            verification: false,
         }
     }
 

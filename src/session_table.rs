@@ -68,6 +68,7 @@ mod tests {
             tunnels: 3,
             browser,
             shell: None,
+            verification: false,
         }
     }
 
