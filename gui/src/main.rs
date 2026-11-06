@@ -5,6 +5,7 @@ mod add;
 mod agent;
 mod approval;
 mod board;
+mod confirm;
 mod credentials;
 mod demo;
 mod device;

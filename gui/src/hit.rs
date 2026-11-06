@@ -46,6 +46,7 @@ pub enum Zone {
     ConfirmAdd,
     RemoveGateway,
     ConfirmRemove,
+    ConfirmEnd,
     OpenMain,
     DenyLink,
     AllowLink,

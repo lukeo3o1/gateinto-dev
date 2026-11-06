@@ -346,6 +346,10 @@ table! {
     TerminalTooOld => "the agent is too old for terminal sessions; restart it", "代理程式版本過舊，不支援終端機工作階段；請重新啟動它";
     ClosedTerminal => "Closed 1 terminal session", "已關閉 1 個終端機工作階段";
     ClosedTerminals => "Closed {0} terminal sessions", "已關閉 {0} 個終端機工作階段";
+    CloseTerminal => "Close terminal", "關閉終端機";
+    CloseTerminalAsk => "Close {0}{1} on {2}? Its shell and everything started from it end, and unsaved work there is lost.", "要關閉「{2}」上的 {0}{1} 嗎？它的殼層及從中啟動的所有程式都會結束，未儲存的工作將會遺失。";
+    StopTerminalAsk => "Stop the agent? 1 terminal session is open. Stopping closes it: its shell and everything started from it end, and unsaved work there is lost.", "要停止代理程式嗎？目前有 1 個終端機工作階段開啟中。停止會關閉它：它的殼層及從中啟動的所有程式都會結束，未儲存的工作將會遺失。";
+    StopTerminalsAsk => "Stop the agent? {0} terminal sessions are open. Stopping closes them: their shells and everything started from them end, and unsaved work there is lost.", "要停止代理程式嗎？目前有 {0} 個終端機工作階段開啟中。停止會關閉它們：它們的殼層及從中啟動的所有程式都會結束，未儲存的工作將會遺失。";
 }
 
 impl Text {

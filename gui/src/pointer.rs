@@ -39,6 +39,7 @@ pub enum Action {
     ConfirmAdd,
     RemoveGateway,
     ConfirmRemove,
+    ConfirmEnd,
     OpenMain,
     Explain,
 }
@@ -93,6 +94,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::ConfirmAdd => Some(Action::ConfirmAdd),
         Zone::RemoveGateway => Some(Action::RemoveGateway),
         Zone::ConfirmRemove => Some(Action::ConfirmRemove),
+        Zone::ConfirmEnd => Some(Action::ConfirmEnd),
         Zone::OpenMain => Some(Action::OpenMain),
         Zone::Info(_) => Some(Action::Explain),
         _ => None,
@@ -458,6 +460,13 @@ mod tests {
             assert!(p.down(zone));
             assert_eq!(p.up(zone), Some(action));
         }
+    }
+
+    #[test]
+    fn confirming_an_ending_acts() {
+        let mut p = Pointer::default();
+        assert!(p.down(Zone::ConfirmEnd));
+        assert_eq!(p.up(Zone::ConfirmEnd), Some(Action::ConfirmEnd));
     }
 
     #[test]
