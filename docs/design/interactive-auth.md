@@ -1,11 +1,15 @@
 # Design: certificate-bound interactive authentication
 
-Status: design decided, not implemented. The decisions are listed in
-[Decisions](#decisions). None of the behaviour it expects from gateways,
-identity products, browsers or Windows has been tried; what must be checked
-first is under [Needs verification](#needs-verification). Names marked
-*(proposed)* do not exist in the code yet; every other name refers to code on
-`master` at the time of writing.
+Status: implemented on `feat/interactive-auth`. The decisions are listed in
+[Decisions](#decisions). Only the automated tests have run: the CI checks (12
+of 12, including `ubuntu-latest`, `windows-latest` and `i686-pc-windows-msvc`
+under WOW64) passed on the heads of the pull requests #90, #91, #92, #94 and
+#96 into `feat/interactive-auth`, the last on 3500292 (run 42340455556). None
+of the behaviour it expects from gateways, identity products, browsers or
+Windows has been tried, and the manual checks on real Windows remain open (as
+for issue #23). What must be checked is under [Needs
+verification](#needs-verification). Names refer to code on
+`feat/interactive-auth` at the time of writing.
 
 ## Summary
 
@@ -171,12 +175,11 @@ Gateinto-Auth-Version: 1
 HTTP/2: `user-agent: Gateinto/<version>` and `gateinto-auth-version: 1` as
 regular fields of the `CONNECT` request (lowercase, as RFC 9113 requires).
 
-`<version>` is the same string `gateinto --version` prints. `VERSION` moves
-from `src/main.rs` into the library *(proposed: `gateinto::VERSION`)*; a
-compile-time check rejects a `GATEINTO_BUILD_VERSION` that is not an RFC 9110
-token, so the header can always be written. `Gateinto-Auth-Version` is `1`;
-it is a protocol number for this challenge format only, not a product
-version.
+`<version>` is the same string `gateinto --version` prints. `VERSION` lives
+in the library (`gateinto::VERSION`); a compile-time check rejects a
+`GATEINTO_BUILD_VERSION` that is not an RFC 9110 token, so the header can
+always be written. `Gateinto-Auth-Version` is `1`; it is a protocol number
+for this challenge format only, not a product version.
 
 `check-upstream` sends the same headers, because it calls the same
 `request_tunnel` and `h2::request`; it keeps printing only the status (see
@@ -209,7 +212,7 @@ the client.
 
 ### Parsing
 
-The parser *(proposed: `proxy::challenge`)* follows the RFC 9110
+The parser (`proxy::challenge`) follows the RFC 9110
 `Proxy-Authenticate` grammar:
 
 - All `Proxy-Authenticate` field lines are combined in order, as a
@@ -236,7 +239,7 @@ Only a `407` is parsed for a challenge. Any other status keeps today's
 behaviour; a `Gateinto` challenge on a `401`, `403` or `2xx` is ignored.
 
 On HTTP/1.1 the legacy path replaces `parse_response` with a response parser
-*(proposed: `http::parse_tunnel_response`)* that returns the status and, for
+(`http::parse_tunnel_response`) that returns the status and, for
 `407`, the `Proxy-Authenticate` values. `parse_status_line`, which
 `check-upstream` uses, is unchanged. The body of a `407` is not read: the TLS
 connection is closed, as for every refused legacy tunnel. On HTTP/2,
@@ -275,7 +278,7 @@ values is logged at `debug` (see [Agent behaviour](#agent-behaviour)).
   clone when a `407` arrives; a connection that replaces `state.current`
   meanwhile does not affect it. Legacy: `Pool::open` keeps a clone of the
   resolver it passes to `State::register` and passes it on to `Pool::legacy`
-  *(new parameter)*. The existing `certificate` field, used for renewal
+  as a parameter. The existing `certificate` field, used for renewal
   detection and `None` for `Fixed` sources, is not used.
 - The `auth_uri` query must contain exactly one key `cert_sha256`, and its
   value must equal that fingerprint.
@@ -292,7 +295,7 @@ command-line argument (see [GUI](#gui)).
 - Only RFC 3986 URI characters: letters, digits, `-._~`, `:/?[]@`,
   `!$&'()*+,=`, and `%`. This excludes space, control characters, non-ASCII
   and at least everything `PortalUrl` excludes (``"<>\^`{|}``). `#` is
-  excluded (no fragment) and so is `;` in the query (see below).
+  excluded (no fragment) and so is `;` (see below), anywhere in the URL.
 - Scheme `https`, case-insensitive, followed by `//` and an authority that
   ends at the first `/`, `?` or the end of the URL.
 - The authority has no userinfo (`@` does not appear in it) and an optional
@@ -313,7 +316,8 @@ command-line argument (see [GUI](#gui)).
   query on `&` and then on the first `=`; each segment, key and value is
   percent-decoded once, and none may then contain a control character
   (`0x00` to `0x1f`, `0x7f`).
-- `;` in the query is rejected, because some servers treat it as a pair
+- `;` is not in the character set, so it is rejected anywhere in the URL.
+  This matters in the query, because some servers treat it as a pair
   separator like `&`, and the server and Gateinto would then disagree on how
   many `cert_sha256` keys there are.
 - Keys are compared after decoding. A key equal to `cert_sha256` must appear
@@ -324,8 +328,8 @@ command-line argument (see [GUI](#gui)).
 - The origin is `https://<host>[:<port>]` with the host lowercased, an IPv6
   address in its canonical RFC 5952 form, and the port omitted when it is
   `443`. A Punycode name stays visible as Punycode.
-  The origin is checked against the gateway's `verification_origins`
-  *(proposed)* if that is set (Decision 1).
+  The origin is checked against the gateway's `verification_origins` if
+  that is set (Decision 1).
 
 ### `user_code` and `expires_in`
 
@@ -343,7 +347,7 @@ CLI for in-process `session browser` and `session terminal`.
 
 ### Refused tunnel
 
-A valid challenge becomes `UpstreamError::Challenge` *(proposed)*. The
+A valid challenge becomes `UpstreamError::Challenge`. The
 challenge is entered in the session's store before `Shared::handle` writes the
 local response, so a client that retries right after its `502` finds the
 session already marked. It then maps to a local `502`, exactly as
@@ -361,7 +365,7 @@ today.
 
 ### Pending challenges
 
-Each session owns a bounded store *(proposed: `Verifications`)*, shared with
+Each session owns a bounded store (`Verifications`), shared with
 its proxy like `OpenTunnels`. An entry holds the fingerprint, `auth_uri`,
 `user_code`, deadline, the affected targets, counters for further targets and
 suppressed challenges, and a serial number assigned by the session that
@@ -380,8 +384,10 @@ rule that matches decides:
 2. If F is not the current certificate's fingerprint (a stream on a
    connection from before a renewal), the challenge is dropped.
 3. If the pending entry has the same fingerprint, `auth_uri` and
-   `user_code`, the target is added if it is new, up to 8 distinct targets;
-   further ones are counted. Deadline, code and serial stay.
+   `user_code`, a target already stored changes nothing; another target is
+   stored while fewer than 8 are, and otherwise only increments
+   `more_targets`, so a repeat of an unstored target is counted again.
+   Deadline, code and serial stay.
 4. If an entry is pending, the challenge is counted as suppressed and
    dropped: the first is kept until it expires or is dismissed. At most one
    challenge is pending per session.
@@ -399,7 +405,8 @@ Expiry is both swept and checked: the store arms one
 entry when it fires, and every read also applies rule 1, so an entry is never
 returned after its deadline even if the timer is late. An entry is also
 removed when the user dismisses it, when the session closes, and when the
-agent or CLI process stops. Removal zeroizes URL and code. Nothing is written
+agent or CLI process stops. URL and code are held in `Zeroizing` buffers, so
+removal zeroizes them; targets are plain strings. Nothing is written
 to logs, the logbook, telemetry, configuration or any file.
 
 Dismissal is local: it removes the entry in this process and tells the
@@ -420,6 +427,7 @@ standard error is a terminal (`is_terminal()`), the same rule
 ```
 verification required for gateway <name>
   target: example.com:443
+  more targets: 2
   verify at: https://verify.example.test
   link: https://verify.example.test/device?x=1&cert_sha256=...
   pairing code: WDJB-MJHT
@@ -427,11 +435,14 @@ verification required for gateway <name>
 Complete verification, then retry the connection.
 ```
 
+There is one `target:` line per stored target; the `more targets:` line
+appears only when `more_targets` is not zero.
+
 When standard error is redirected, the CLI prints only the fixed line
 `verification required for gateway <name>; not shown because standard error
 is not a terminal`, with the gateway name, which is a validated
 `GatewayName`, and no URL, code, origin or target. Under the `test-hooks`
-feature, `GATEINTO_TEST_VERIFICATION_FILE` *(proposed)* receives the full
+feature, `GATEINTO_TEST_VERIFICATION_FILE` receives the full
 text instead, like `GATEINTO_TEST_CREDENTIALS_FILE`.
 
 Every printed value has passed validation, so it is printable ASCII; targets
@@ -443,19 +454,19 @@ console. No browser is opened and no QR code is printed.
 
 ### IPC
 
-- `SessionInfo` gains `verification: bool` *(proposed)*, `serde(default)` and
+- `SessionInfo` has `verification: bool`, `serde(default)` and
   skipped when false. The `list` reply carries only this flag, never URL,
   code, origin, serial or fingerprint.
-- `verification {id}` *(proposed)* returns, for a pending challenge:
+- `verification {id}` returns, for a pending challenge:
   `challenge: <serial>`, `gateway: <name>`, `origin: <origin>`,
   `auth_uri: <url>`, `user_code: <code>`, `expires_in: <remaining seconds>`,
   one `target: <authority>` line per target, `more_targets: <n>` and
   `suppressed: <n>`. Errors are `no session {id}` and
   `session {id} has no pending verification`. The reply fits well within
   `MAX_RESPONSE_BYTES`.
-- `dismiss {id} {serial}` *(proposed)* removes the pending challenge only if
+- `dismiss {id} {serial}` removes the pending challenge only if
   its serial matches, so a dismissal cannot remove a challenge the user has
-  not seen.
+  not seen. It answers `ok` whether or not anything was removed.
 - Rejected requests are logged as today; the agent's log line for a
   `verification` request names the session id only.
 
@@ -465,8 +476,8 @@ console. No browser is opened and no QR code is printed.
   required" marker and a "Show verification" action; the tray tooltip says
   that a session needs verification. Nothing opens by itself.
 - "Show verification" works like Show credentials: the window increments its
-  ticket, opens a dialog *(proposed: `verification::Dialog`)* and sends
-  `Command::Verification(id, ticket)` *(proposed)*. The dialog accepts only
+  ticket, opens a dialog (`verification::Dialog`) and sends
+  `Command::Verification(id, ticket)`. The dialog accepts only
   the reply for its id and ticket and remembers the reply's serial.
 - While the dialog is open, the worker sends the same ticketed
   `verification {id}` once per 2-s poll, together with `list` and never more
@@ -482,15 +493,21 @@ console. No browser is opened and no QR code is printed.
   apart. When the gateway has a `portal_url` (from the configuration or from
   its link), a fixed line says whether the verification origin is the same as
   the portal's origin or different. Below follow the gateway's display name,
-  the targets, the full URL, the pairing code, a countdown from the received
-  remaining seconds on the GUI's monotonic clock, the QR code, and the line
-  "Complete verification, then retry the connection." All values are drawn
-  as plain text through DirectWrite; nothing is interpreted as markup.
+  the targets (the stored ones joined with `, `, then "and N more" when
+  `more_targets` is not zero), the full URL in the monospace face, a "Pairing
+  code" label, the pairing code, a countdown from the received remaining
+  seconds on the GUI's monotonic clock, the QR code, and the line "Complete
+  verification, then retry the connection." The pairing code uses the same
+  font as the origin, so the two share the largest size in the dialog. All
+  values are drawn as plain text through DirectWrite; nothing is interpreted
+  as markup.
 - Buttons: "Open verification", "Copy link", "Dismiss" and "Close". "Open
-  verification" is mouse-only: Enter, Space and Escape close the dialog, as in
-  the approval dialog. "Dismiss" sends `dismiss`; "Close" only closes the
-  dialog, and the challenge stays pending in the agent until expiry.
-- "Open verification" calls `ShellExecuteExW` *(proposed in `sys`)* with a
+  verification", "Copy link" and "Dismiss" are all mouse-only: they are not
+  keyboard focus stops, so no key reaches them, and Enter, Space and Escape
+  close the dialog while it is open.
+  "Dismiss" sends `dismiss`; "Close" only closes the dialog, and the
+  challenge stays pending in the agent until expiry.
+- "Open verification" calls `ShellExecuteExW` (`sys::open_verification`) with a
   `SHELLEXECUTEINFOW` of: `fMask = SEE_MASK_FLAG_NO_UI`, `hwnd` the main
   window, `lpVerb = "open"`, `lpFile` the validated URL, `lpParameters` and
   `lpDirectory` null, `nShow = SW_SHOWNORMAL`. Windows looks up the `https`
@@ -509,7 +526,11 @@ console. No browser is opened and no QR code is printed.
   Gateinto's fixed text, and because failure is reported as `FALSE` plus
   `GetLastError` rather than through the `HINSTANCE` convention. Any `FALSE`
   return, whatever the error code, shows the fixed text "The browser could
-  not be opened."; the code is logged at `debug` without the URL.
+  not be opened."; only the error code is written, with
+  `OutputDebugStringW`, as `gateinto-gui: ShellExecuteExW failed with error
+  <code>`, without the URL. The same fixed text is shown when the URL does
+  not pass the GUI's own `launchable` check, which repeats the scheme,
+  length and character rules. The portal keeps using `ShellExecuteW`.
 - Gateinto does not open the URL through its own proxy, does not pass its
   client certificate, and does not use a session browser or its isolated
   profile.
@@ -517,15 +538,30 @@ console. No browser is opened and no QR code is printed.
   `clear_secret` when the dialog ends, only if the sequence number is
   unchanged. There is no copy action for the pairing code (Decision 2).
 - The QR code is encoded with error-correction level M; if the URL does not
-  fit at M it falls back to L. Levels Q and H are never used, since a
-  2048-byte URL does not fit at either. If encoding fails, no QR code is shown
+  fit at M it falls back to L. The fallback is unreachable for any URL of at
+  most 2048 bytes, which is every URL that passes validation: in byte mode a
+  version 40 symbol holds 2331 bytes at M. Levels Q and H are never used. If encoding fails, no QR code is shown
   and a fixed text says "No QR code for this link."; the rest of the dialog is
   unchanged. Encoding uses `qrcodegen-no-heap` with caller-owned buffers held
   by the dialog, so they can be zeroized (Decision 4).
 - Errors are fixed texts: verification unavailable, browser could not be
   opened, clipboard failed, no QR code. They never include the URL or code.
-- On close and on every ending, URL, code, the QR buffers and the drawn
-  module list are zeroized.
+- On close and on every ending, the dialog's received URL and code, the
+  encoder's buffers and the module list are zeroized. The encoder's buffers
+  are also wiped after every encoding. After every paint the owned texts and
+  the QR rectangles of the drawn operations are zeroized.
+- Not zeroized: temporary strings made while wrapping or cutting text,
+  buffers left behind when a `Vec` of drawing operations grows or
+  reallocates (such as `ops.extend(app.adopt(board))`), copies inside
+  DirectWrite and Direct2D, the tray's tooltip and menu operations, the
+  strings of an IPC `Response` while it is encoded and decoded, and the
+  dialog's targets, countdown and gateway strings. The CLI's received reply
+  lines and the GUI worker's reply lines and error messages are zeroized.
+  Outside the GUI, also not zeroized: the `h2` crate's `HeaderMap` and HPACK
+  buffers that hold the `proxy-authenticate` values on HTTP/2 (Gateinto
+  copies them into `Zeroizing` buffers), rustls's plaintext buffers on both
+  HTTP/1.1 and HTTP/2, and the fingerprint, which is a plain `String` in
+  `Refusal` and `Entry` and as `cert_sha256` in `AuthUri`.
 - The GUI keeps the 2-s poll; it never polls faster and never starts the agent
   to show a verification.
 
@@ -534,7 +570,7 @@ console. No browser is opened and no QR code is printed.
 - `gateinto session list` keeps its table; after it, a line on standard error
   names each session with a pending verification and the command to show it.
   `--json` carries the `verification` field.
-- `gateinto session verification <id>` *(proposed)* sends `verification {id}`
+- `gateinto session verification <id>` sends `verification {id}`
   and prints the block shown under [In-process CLI](#in-process-cli) to
   standard error, only when standard error is a terminal; otherwise it prints
   nothing of the challenge and fails with the fixed error `the verification
@@ -597,14 +633,14 @@ exposure already accepted in the [threat model](../threat-model.md); the URL
 and code are no more sensitive than the session credentials such a process
 can already read.
 
-### Threat-model additions *(to be made with the implementation)*
+### Threat-model additions
 
 | Threat | Mitigation |
 | --- | --- |
 | Tunnelled content imitates a challenge | Only the gateway's `CONNECT` response is parsed; tunnel bytes and non-`407` responses are never inspected |
 | Another server's challenge is replayed through the gateway | The fingerprint must match the certificate sent on this connection; anonymous handshakes disable the flow |
 | Challenge bound to a renewed or different certificate | Per-connection snapshot, not the session's current certificate; certificate change clears pending challenges |
-| URL with userinfo, fragment, control characters or ambiguous encoding | Byte-level validation; RFC 3986 characters only; a decoded key `cert_sha256` must appear once with a literal lowercase hex value; `;` rejected in the query |
+| URL with userinfo, fragment, control characters or ambiguous encoding | Byte-level validation; RFC 3986 characters only; a decoded key `cert_sha256` must appear once with a literal lowercase hex value; `;` rejected anywhere |
 | URL that displays one origin and navigates to another (`\` read as `/` by browsers, odd host forms) | `\` and every `PortalUrl` exclusion rejected; LDH host labels, strict IPv4, bracketed IPv6 only; numeric last labels must be IPv4 |
 | Argument injection into the `https` handler's command line | No `"`, space or control character can pass validation, so the substituted URL stays one argument |
 | Lookalike verification origin | Host lowercased in a monospace face; exact `verification_origins` match; same-or-different note against the gateway's `portal_url` |
@@ -614,7 +650,7 @@ can already read.
 | Stale dialog shows a replaced challenge | The open dialog re-checks the serial once per poll and ends on a change |
 | Phishing verification page from a linked gateway | Origin shown first; `verification_origins` for configuration-file gateways; residual risk documented |
 | Flood of challenges | One pending per session, 16 per agent, 8 targets per challenge; extras counted only |
-| URL and code leak to logs or disk | Never logged or stored, also at `RUST_LOG=trace` (tested, including `h2` and `rustls`); fixed error texts; zeroized on every ending, QR buffers included |
+| URL and code leak to logs or disk | Never logged or stored; a test with a trace-level subscriber over HTTP/1.1 and HTTP/2, `h2` traces included, finds none of them; fixed error texts; zeroized where listed under [GUI](#gui), with the gaps listed there |
 | Clipboard leak | Same `copy_secret` and `clear_secret` rules as credentials; no code copy |
 | Automatic browser opening or loops | Opening is mouse-only and per click; repeated `407`s never open anything |
 | Local application learns of the challenge | Upstream `407` stays a local `502`; no header or body is forwarded |
@@ -624,7 +660,8 @@ can already read.
 ## Compatibility
 
 Nothing here has been verified against real gateways or older releases;
-"Expected" rows follow from the code and need a check.
+"Expected" rows follow from the code and need a check, and "Tested" rows are
+covered by CI tests only.
 
 | Case | Behaviour | Status |
 | --- | --- | --- |
@@ -632,7 +669,7 @@ Nothing here has been verified against real gateways or older releases;
 | Gateway that answers `407` without a `Gateinto` challenge | Local `502`, as today | Expected, by design |
 | Newer GUI with an older agent | The `list` reply has no `verification` field, so it reads as `false` and the GUI never sends `verification` or `dismiss` | Expected, by `serde(default)` |
 | Older GUI with a newer agent | Ignores the unknown `verification` field; the challenge can still be shown with `gateinto session verification <id>` | Expected, no `deny_unknown_fields` on `SessionInfo` |
-| Newer CLI with an older agent | The agent answers `invalid request` to `verification` and `dismiss`; the CLI reports `the agent is too old for verification; restart it`, as it does for `terminal` | Expected, needs a test |
+| Newer CLI with an older agent | The agent answers `invalid request` to `verification`; the CLI reports `the agent is too old for verification; restart it`, as it does for `terminal` | Tested, in `tests/cli.rs` |
 | Configuration file with `verification_origins` read by an older Gateinto | Refused as an unknown key | Expected, by `deny_unknown_fields` |
 | `check-upstream` against a gateway that challenges | Prints the `407` status only, as today | Expected, by design |
 
@@ -674,8 +711,8 @@ source proposal and these decisions differ, the decision applies.
    heap-based `qrcodegen::QrCode` cannot be zeroized, while the no-heap form
    writes into caller-owned buffers that the dialog zeroizes. The GUI draws
    the modules itself with Direct2D rectangles and a four-module quiet zone.
-   Error correction is M, falling back to L; Q and H cannot hold a 2048-byte
-   URL. On encoding failure no QR code is shown, with a fixed text. The
+   Error correction is M, falling back to L; the fallback is unreachable for
+   URLs of at most 2048 bytes, and Q and H are never used. On encoding failure no QR code is shown, with a fixed text. The
    crate needs the usual dependency review (licence, maintenance,
    `unsafe`). It is a GUI dependency only, so it enters `Cargo.lock`; the fuzz
    crate does not depend on the GUI, so `fuzz/Cargo.lock` does not change.
@@ -683,7 +720,8 @@ source proposal and these decisions differ, the decision applies.
    builds each with `--locked`. No new Windows import is expected from it.
 5. **Coalescing keeps the first challenge.** One entry per (session,
    handshake fingerprint, `auth_uri`, `user_code`). Identical repeats add
-   targets, at most 8, without touching deadline or code. A different
+   targets, at most 8 stored and the rest counted, without touching deadline
+   or code. A different
    challenge while one is pending is counted and dropped: showing several
    codes for one session would make the user guess which one counts, and
    completing one registers the certificate the others name too (an
@@ -730,8 +768,9 @@ source proposal and these decisions differ, the decision applies.
     repeats the ticketed `verification {id}` once per 2-s poll; the dialog
     ends when the serial changes or nothing is pending. The `list` flag alone
     cannot show a replacement.
-18. **`;` is rejected in the `auth_uri` query**, so Gateinto and a server
-    that splits on `;` cannot disagree on the `cert_sha256` key.
+18. **`;` is rejected in the `auth_uri`**, anywhere, so Gateinto and a
+    server that splits the query on `;` cannot disagree on the `cert_sha256`
+    key.
 
 ## Alternatives rejected
 
@@ -757,6 +796,9 @@ source proposal and these decisions differ, the decision applies.
 - **Copying the pairing code.** See Decision 2.
 
 ## Tests planned
+
+This is the plan from the design. Where a planned test is missing or is
+covered differently, the item says so.
 
 ### Unit
 
@@ -820,7 +862,11 @@ source proposal and these decisions differ, the decision applies.
   `state.current` has been replaced by a connection with a renewed
   certificate (between `drop(state)` and the response); its challenge
   naming the first connection's certificate passes the binding check, and a
-  challenge naming the new certificate does not.
+  challenge naming the new certificate does not. Covered in part by
+  `a_challenge_answered_after_a_renewal_is_dropped` in `tests/h2_connect.rs`:
+  both held responses leave the renewed entry unchanged, but that the first
+  passes the binding check before rule 2 drops it is not observed
+  separately.
 - Legacy: the resolver passed to `Pool::legacy` is the one used for that
   tunnel's handshake.
 
@@ -839,23 +885,37 @@ HTTP/1.1 and HTTP/2:
   connection, is rejected, and neither session is marked.
 - A challenge with a wrong fingerprint, a challenge when no client certificate
   was sent, and a direct tunnel on the mixed route leave no pending entry.
+  The first two are covered by the unit test
+  `a_challenge_without_a_sent_certificate_or_binding_is_a_plain_status` in
+  `src/proxy/mod.rs` and by
+  `a_challenge_naming_another_sessions_certificate_is_not_offered`; the
+  direct tunnel on the mixed route is not tested.
 - Renewal: with a short certificate lifetime in the test, a pending entry is
   removed after the self-signed certificate renews, a challenge for the new
   certificate becomes pending, and `verification {id}` returns a new serial.
-- Log capture: with `RUST_LOG=trace` on the agent and an in-process session,
-  standard error and the logbook (`log`) contain neither the URL, the code,
-  the fingerprint in the URL, nor the `Proxy-Authenticate` value, over both
-  HTTP/1.1 and HTTP/2; this covers `h2`, `rustls` and Gateinto's own targets.
-  If a dependency prints them, Gateinto's filter caps that dependency's
-  target below the level that does, whatever `RUST_LOG` says.
-- Session close and `stop` clear pending entries.
+  Tested against the store in `tests/h2_connect.rs`
+  (`a_challenge_answered_after_a_renewal_is_dropped`), not through
+  `verification {id}` in `tests/agent.rs`.
+- Log capture: `tests/verification_log.rs` installs a `TRACE` subscriber
+  and the logbook in the test process, starts in-process sessions over
+  HTTP/1.1 and HTTP/2, and checks that the captured output, the logbook and
+  the local answers contain neither the URL, the code, the fingerprint nor
+  the `Proxy-Authenticate` value; it asserts that `h2` traces were captured.
+  Not done: running the agent with `RUST_LOG=trace`, asserting that `rustls`
+  traces were captured, and a filter that caps a dependency's target.
+- Session close and `stop` clear pending entries. Session close is covered
+  by `a_refused_tunnel_flags_its_session_until_the_session_closes` in
+  `tests/sessions.rs`; `stop` is not tested.
 
 ### CLI
 
 In `tests/cli.rs`:
 
 - `session browser` with standard error redirected to a file prints the
-  fixed line only: no URL, code, origin or target in the file.
+  fixed line only: no URL, code, origin or target in the file. Not covered
+  by an integration test: only the unit test
+  `an_announcement_off_a_terminal_is_only_the_fixed_line` in `src/prompt.rs`
+  checks the fixed line.
 - `session verification <id>` with standard error redirected fails with the
   fixed error and prints none of the challenge; with the `test-hooks`
   `GATEINTO_TEST_VERIFICATION_FILE`, the full text arrives there.
@@ -878,7 +938,7 @@ In `tests/cli.rs`:
 
 ### Fuzzing
 
-A new target *(proposed: `fuzz/fuzz_targets/proxy-authenticate.rs`)* drives
+The target `fuzz/fuzz_targets/proxy-authenticate.rs` drives
 the challenge parser and the URL, code and expiry validation through
 `src/proxy/fuzzing.rs`. It asserts that an accepted challenge re-validates,
 that every accepted value is printable ASCII, and that no accepted
@@ -926,9 +986,9 @@ These could not be settled from the code.
 - **`check-upstream`.** It sends the new headers; whether it should also say
   that a valid challenge was offered (without printing URL or code) is open.
   The design keeps today's output.
-- **`ShellExecuteExW` and the portal.** The portal opener uses `ShellExecuteW`
-  through `sys::open_https`. Whether the portal should move to
-  `ShellExecuteExW` too, so both use one helper, is left to step 5.
+- **`ShellExecuteExW` and the portal.** The portal opener still uses
+  `ShellExecuteW` through `sys::open_https`. Whether the portal should move
+  to `ShellExecuteExW` too, so both use one helper, is open.
 - **Retry on the same HTTP/2 connection.** After verification the
   application's retry may reuse the pooled connection; whether gateways
   re-evaluate the certificate per stream or only per connection is unknown
