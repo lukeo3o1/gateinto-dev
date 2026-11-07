@@ -91,9 +91,10 @@ limits apply. A response is accepted only when:
 A `407` sent on a connection that presented no client certificate, or that
 fails any rule, is a plain `407`. Either way the local client gets `502`
 without any upstream header, and nothing is replayed. An accepted challenge
-may become the session's pending verification, subject to the rules in
-[the design](../design/interactive-auth.md#pending-challenges), and is then
-shown by the GUI or by `gateinto session verification <id>`. `Cache-Control` is not required.
+may become the session's pending verification, subject to the rules in [the
+design](../design/interactive-auth.md#pending-challenges), and is then shown
+by the GUI or by `gateinto session verification <id>`. `Cache-Control` is
+not required.
 
 ## Mixed routing
 
