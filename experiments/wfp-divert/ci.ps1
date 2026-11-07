@@ -71,6 +71,12 @@ try {
       @{ name="external-wfp-$api-tcp"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true }
     )
   }
+  $cases += @(
+    @{ name='retransmit-wfp-poll'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='retransmit' },
+    @{ name='reuse-wfp-poll'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='reuse' },
+    @{ name='hold-wfp-poll-tcp-repeat'; source='wfp'; api='poll'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+    @{ name='redirect-wfp-poll-repeat'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false }
+  )
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
     $arguments = @("$PSScriptRoot\run.py", '--bin', $Bin, '--fixture', $Fixture,

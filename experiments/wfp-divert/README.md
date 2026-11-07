@@ -86,12 +86,22 @@ unread event or failed.
 reported as `kind:"wfp"` and validated identically. `subscribe2` uses
 FwpmNetEventSubscribe2/FWPM_NET_EVENT3, `subscribe4` uses
 FwpmNetEventSubscribe4/FWPM_NET_EVENT5 (Windows 10 1809+), and `poll`
-enumerates the stored net events every `--poll-interval-ms` (default 5) over a
-window that starts `--poll-overlap-ms` (default 1000) before the previous poll
-end, deduplicated on timestamp, tuple and app ID. A polled event's `recv_qpc` is
-when the poll observed it, so `notification_minus_capture_ms` includes polling
-latency. The summary reports `wfp_api`, `wfp_polls`, `wfp_poll_errors` (capped
-`wfp_poll_error` lines, not collector errors) and `wfp_poll_max_ms`.
+enumerates only CLASSIFY_ALLOW stored net events (an `FWPM_CONDITION_NET_EVENT_TYPE`
+enum condition), waiting `--poll-interval-ms` (default 5) on a high-resolution
+waitable timer between polls, over a window that starts `--poll-overlap-ms`
+(default 300) before the previous poll end, deduplicated on timestamp, tuple and
+app ID. A polled event's `recv_qpc` is when the poll observed it, so
+`notification_minus_capture_ms` includes polling latency. The summary reports
+`wfp_api`, `wfp_polls`, `wfp_polls_with_new_events`, poll thread start/stop QPC,
+total, mean and max poll duration, total wait and maximum wait overshoot,
+`wfp_poll_timer` (`high_resolution`, or `sleep_for` when that timer is
+unavailable), `wfp_poll_errors` (capped `wfp_poll_error` lines, not collector
+errors) and `wfp_poll_missed`: CLASSIFY_ALLOW events in the final enumeration
+minus unique polled events, including events stored after the last poll. It is
+null when not polling or when the final enumeration was truncated or had errors,
+and negative if stored events were evicted before it. A poll case whose summary
+reports `wfp_polls` 0 ends as FAIL. Poll mode additionally runs the retransmit
+and reuse scenarios and repeats the TCP hold and redirect cases for stability.
 
 Evidence includes raw native/packet JSONL, decision/control logs, translation and
 bridge logs, gateway requests, target payload hex and client nonces/tuples. Driver
