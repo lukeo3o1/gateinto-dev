@@ -2,10 +2,15 @@
 
 Date: 2026-11-07. Experiment baseline: PR #95, head `e3336bd`.
 
-The strongest next candidates are asynchronous stored-event lookup with measured
-filter capability caching, and a separate live ALE endpoint probe. Neither has
-new Windows runtime results yet. The existing TCP feasibility conclusion remains
-restricted to the runs in [the evidence review](windows-per-app-feasibility.md).
+The latest [Windows comparison](evidence/wfp-divert-run-42356168781.md) supports
+asynchronous stored-event lookup for reducing already-decided packet stalls:
+50-client decided-direct p95 fell from 17.3 to 2.7 ms on Server 2022 and from
+32.9 to 12.0 ms on Server 2025. First-decision latency did not consistently improve.
+All 16 non-shadow in-process cases passed on each OS, including real UDP, QUIC
+controls and observed resets. ALE endpoint shadow observations returned System
+rather than the original app and remain unsuitable as implemented. The existing
+TCP feasibility conclusion stays restricted to the runs in
+[the evidence review](windows-per-app-feasibility.md).
 
 ## What is established
 
@@ -20,9 +25,9 @@ That run does not demonstrate an in-process speedup. It also shows a structural
 problem: a single worker waited for BFE enumeration while already-decided packets
 and other pending-flow deadlines waited behind it.
 
-## Prepared comparisons
+## Implemented comparisons
 
-| Variant | Implementation and intended benefit | Evidence still required |
+| Variant | Implementation and intended benefit | Evidence boundary |
 | --- | --- | --- |
 | Inline, cache off | `--lookup-mode inline --filter-cache off`; freshly enumerate on the packet worker, preserving the corrected decision clock. | Baseline call counts, phase cost, held/direct/proxy latency. |
 | Inline, cache on | Skip only previously rejected filter capability patterns within the same collector, separating protocol and single/multiple local-port conditions. | Rejection codes, cache hits and actual reduction in create calls. Generic INVALID_PARAMETER is deliberately not cached. |
@@ -127,6 +132,9 @@ released before attribution, and a later reset cannot undo transmitted bytes.
 Dropping all unknown traffic would affect other apps. Faster observation alone
 does not prove either zero leakage or universal noninterference.
 
-Current checks are local Python/portable-model tests and Windows object compilation.
-New runtime speed, resource-use or reliability claims require the prepared CI
-comparisons to execute and retain their evidence.
+Local Python/portable-model tests, Windows object compilation and the Server
+2022/2025 comparison have executed. The [retained report](evidence/wfp-divert-run-42356168781.md)
+separates passing runtime cases, inconclusive alternatives and remaining limits.
+Fresh snapshot creation accounted for about 82–90% of elapsed query work in the
+cache-on concurrency cases. This narrows the next optimization target, while the
+cache comparison alone does not establish a CPU or first-packet latency gain.

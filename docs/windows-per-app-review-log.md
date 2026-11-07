@@ -77,7 +77,7 @@ native_wfp_subscription: RUN, NOT USABLE (Subscribe2 no callbacks; Subscribe4 la
 native_wfp_stored_event_poll: PASS_RESTRICTED (Enum3, 11/11 cases in 42340194216)
 security_5156_subscription: PASS_RESTRICTED except UDP at 1000 ms hold (about 330-1024 ms; TCP hold, redirect with 3 gateway CONNECTs, retransmit, external and UDP at 2000 ms hold passed)
 normal_win32_allow_event_coverage: PASS_RESTRICTED (TCP and UDP, build 20348 only)
-tcp_syn_vs_event_delivery: MEASURED (event after capture; poll p50 10.4-25.6 ms)
+tcp_syn_vs_event_delivery: MEASURED (poll observation after capture; poll p50 10.4-25.6 ms)
 udp_first_datagram_vs_event_delivery: MEASURED (within hold; attribution only)
 mapping_retransmit_close_reuse: PARTIAL (retransmit pass; reuse characterized rejection; close not qualified)
 ownership_delay_skip_injection: PARTIAL (delayed, too-late, missing)
@@ -187,3 +187,39 @@ Development and review use
 separate agents under AGENTS.md. See
 [the low-latency research](windows-per-app-low-latency.md) for exact mechanisms,
 official references, remaining reliability limits and benchmark acceptance.
+
+## Executed comparison on Server 2022 and 2025
+
+Published implementation `58e2f80` to the existing draft PR #95. Its first
+Windows matrix, run 42355949237, failed at the ALE probe's MSVC SDK include
+dependency and did not execute traffic. The one-line winternl.h correction in
+`804e004` built on both operating systems. That commit's
+[run 42356168781](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42356168781)
+executed both matrices; standard repository CI and the model job passed.
+
+The Windows jobs are red because subscription comparisons, Security UDP at the
+short hold and ALE shadow alternatives fail or are inconclusive. Per case, all
+16 non-shadow in-process cases passed on each OS, and all 11 split poll cases
+reached expected statuses. Deterministic leak cases now prove three selected
+timeouts, three later ownership matches, three checked RST pairs and three
+client-observed resets, with non-selected echo controls.
+
+Async reduced the 50-client decided-direct added-latency p95 from 17.260 to
+2.683 ms on build 20348 and from 32.901 to 12.043 ms on build 26100. First-decision
+latency was mixed. Fresh snapshot creation, including rejected filter attempts,
+occupied about 82–90% of elapsed query work in the cache-on concurrency cases.
+Caller CPU sampling was too coarse for a CPU-efficiency conclusion and excludes
+the BFE service.
+
+Subscribe2/3 still delivered zero raw callbacks after the longer drain. Subscribe4
+delivered stored events about one second late. Exact callback/Enum5 identities
+agree on raw direction/loopback fields, while Enum3 differs; undocumented
+normalization was not used for authority. The ALE API completed without errors
+but returned System rather than the original app, and repeated endpoint IDs
+across tuples. All four shadow cases correctly stayed inconclusive.
+
+The complete tables, exact jobs/artifacts, native field examples, compile repair
+and evidence boundaries are retained in
+[evidence/wfp-divert-run-42356168781.md](evidence/wfp-divert-run-42356168781.md).
+This extends the restricted runtime evidence; it does not qualify desktop
+Windows, external routing, sustained load, safe reuse or UDP forwarding.

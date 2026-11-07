@@ -233,7 +233,10 @@ The delay changes when selected ownership is consumed, preserving native timesta
 
 The original in-process Windows run had measurement and coverage gaps; see
 [the evidence audit](../../docs/evidence/wfp-divert-run-42348888370.md).
-The repaired timing, UDP/QUIC and live-reset cases await Windows execution.
+The repaired timing, real UDP/QUIC and live-reset paths have now executed on
+Server 2022 and 2025: all 16 non-shadow in-process cases passed per OS. Async
+reduced decided-direct packet stalls, while first-decision latency did not
+consistently improve. See [the measured comparison](../../docs/evidence/wfp-divert-run-42356168781.md).
 
 Additional CI cases compare cache-off inline, cache-on inline, and cache-on async
 lookup, including concurrency, UDP, QUIC and deterministic leak/reset checks.
@@ -242,5 +245,7 @@ cases. Every controlled client's exact app/tuple must be observed in a complete
 query interval between capture and decision, or the shadow case is inconclusive.
 The sampler does not supply routing authority, event timestamps or packet-visible
 socket identity. Keep its extra BFE load outside the performance A/B comparison.
+The first shadow runs completed without native errors but returned System for
+controlled original-app tuples; all four shadow cases correctly stayed inconclusive.
 See [the low-latency research](../../docs/windows-per-app-low-latency.md) for the
 design, official API references, qualification limits and comparison criteria.
