@@ -27,6 +27,8 @@ jobs:
           /tmp/native-events-test
           g++ -std=c++17 -DWFP_PACKET_STATE_TEST experiments/wfp-divert/packets.cpp -o /tmp/packet-state-test
           /tmp/packet-state-test
+          g++ -std=c++17 -Wall -Wextra experiments/wfp-divert/inproc.cpp -o /tmp/inproc-test
+          /tmp/inproc-test
 
   windows:
     runs-on: windows-2022

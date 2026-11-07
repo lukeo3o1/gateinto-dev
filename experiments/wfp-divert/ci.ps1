@@ -123,12 +123,49 @@ try {
       Get-Content $packetLog | Select-Object -First 30 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
     }
   }
+  $inprocCases = @(
+    @{ name='hold-inproc-tcp'; mode='hold'; protocol='tcp' },
+    @{ name='hold-inproc-udp'; mode='hold'; protocol='udp' },
+    @{ name='redirect-inproc'; mode='redirect'; protocol='tcp' },
+    @{ name='hold-inproc-tcp-repeat'; mode='hold'; protocol='tcp' },
+    @{ name='redirect-inproc-repeat'; mode='redirect'; protocol='tcp' },
+    @{ name='leakcheck-inproc'; mode='hold'; protocol='tcp'; hold=15; rst=$true },
+    @{ name='concurrency-inproc'; mode='redirect'; protocol='tcp'; concurrency=50 },
+    @{ name='quic-inproc'; mode='redirect'; protocol='udp'; quic=$true }
+  )
+  foreach ($case in $inprocCases) {
+    Write-Host "Running $($case.name)"
+    $arguments = @("$PSScriptRoot\run.py", '--bin', $Bin, '--fixture', $Fixture,
+      '--out', (Join-Path $OutDir $case.name), '--engine', 'inproc', '--private-dir', $privateDir,
+      '--mode', $case.mode, '--protocol', $case.protocol,
+      '--hold-ms', ($case.ContainsKey('hold') ? $case.hold : 1000), '--seconds', 35)
+    if ($case.ContainsKey('concurrency')) { $arguments += @('--concurrency', $case.concurrency) }
+    if ($case.ContainsKey('quic')) { $arguments += '--quic' }
+    if ($case.ContainsKey('rst')) { $arguments += '--send-rst' }
+    python @arguments
+    if ($LASTEXITCODE) { $failures.Add($case.name) }
+    $caseDir = Join-Path $OutDir $case.name
+    foreach ($file in @('inproc.stdout.txt')) {
+      $logPath = Join-Path $caseDir $file
+      if (Test-Path $logPath) { Get-Content $logPath -Tail 12 }
+    }
+    $engineSummary = Join-Path $caseDir 'engine-summary.json'
+    if (Test-Path $engineSummary) { Get-Content $engineSummary | ForEach-Object { Write-Host "ENGINE $($case.name) $_" } }
+    $packetLog = Join-Path $caseDir 'packets.jsonl'
+    if (Test-Path $packetLog) {
+      Get-Content $packetLog | Where-Object { $_ -match '"kind":"(ready|decision|translation|rst|leaked|error|summary|complete)"' } |
+        Select-Object -First 40 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
+    }
+    $bridgeLog = Join-Path $caseDir 'bridge.jsonl'
+    if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
+  }
 } finally {
   & auditpol /restore "/file:$audit"
   if ($LASTEXITCODE) { $failures.Add('audit-policy-restore') }
   Get-ChildItem $OutDir -Recurse -Filter 'private-manifest.json' | Remove-Item -Force
   @{ failed_cases = @($failures); windows_desktop = 'NOT RUN'; remote_topology = 'NOT RUN';
-     udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN' } |
+     udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN';
+     inproc_engine = 'RUN (hold, redirect, repeats, leak-check, concurrency stress, QUIC drop)' } |
     ConvertTo-Json | Set-Content (Join-Path $OutDir 'ci-summary.json')
 }
 if ($failures.Count) { throw "PoC cases failed: $($failures -join ', ')" }

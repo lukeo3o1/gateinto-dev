@@ -93,6 +93,43 @@ def native_command(bin_dir, out_dir, seconds, wfp_api):
             "--wfp-api", wfp_api]
 
 
+def inproc_command(bin_dir, out_dir, manifest, selected_app, args):
+    port = manifest["target_port"]
+    command = [bin_dir / "inproc.exe", "--target", manifest["target_ip"], "--port", port,
+               "--out", (out_dir / "packets.jsonl").resolve(),
+               "--summary", (out_dir / "engine-summary.json").resolve(),
+               "--state-out", (out_dir / "bfe-state.json").resolve(),
+               "--stop-file", (out_dir / "inproc.stop").resolve(),
+               "--selected-app", selected_app, "--mode", args.mode,
+               "--hold-ms", args.hold_ms, "--seconds", args.seconds,
+               "--window-before-ms", args.window_before_ms, "--window-after-ms", args.window_after_ms,
+               "--leak-ms", args.leak_ms, "--send-rst", 1 if args.send_rst else 0]
+    if args.protocol == "udp":
+        command += ["--udp-port", manifest["udp_ports"][0]]
+    if args.quic:
+        command += ["--udp-port", manifest["udp_ports"][0], "--quic-port", manifest["udp_ports"][0]]
+    return command
+
+
+def inproc_evaluate(summary, mode, protocol, quic, expected_proxy_clients, gateway_count):
+    if not summary or summary.get("engine") != "inproc" or not summary.get("success"):
+        return "FAIL", "inproc engine summary missing or reported failure"
+    redirecting = mode == "redirect" and protocol == "tcp"
+    expected = expected_proxy_clients if redirecting else 0
+    if summary.get("decided_proxy") != expected:
+        return "FAIL", f"decided_proxy {summary.get('decided_proxy')} != expected {expected}"
+    if gateway_count != expected:
+        return "FAIL", f"gateway CONNECT count {gateway_count} != expected {expected}"
+    if quic and not summary.get("quic_drops"):
+        return "FAIL", "QUIC case dropped no selected UDP/443 flow"
+    return "PASS_RESTRICTED_CASE", None
+
+
+def wrong_app_redirected(decisions, selected_tuples):
+    return any(d.get("kind") == "decision" and d.get("action") == "proxy" and
+               tuple_key(d) not in selected_tuples for d in decisions)
+
+
 def collector_errors(records):
     return any(r.get("kind") == "error" for r in records)
 
@@ -252,6 +289,188 @@ def qpc():
     return result.value
 
 
+def run_inproc(args, parser):
+    if args.seconds < 15 or args.hold_ms < 1:
+        parser.error("require --seconds >= 15 and --hold-ms >= 1")
+    if args.out.exists() and any(args.out.iterdir()):
+        parser.error("--out must be empty to avoid stale evidence")
+    args.out.mkdir(parents=True, exist_ok=True)
+    args.bin = args.bin.resolve()
+    redirecting = args.mode == "redirect" and not args.quic
+    processes, logs = [], []
+    private = tempfile.TemporaryDirectory(prefix="gateinto-wfp-private-", dir=args.private_dir)
+    bridge = None
+    summary = dict(status="NOT_COMPLETED", engine="inproc", mode=args.mode, protocol=args.protocol,
+                   quic=args.quic, concurrency=args.concurrency, topology="single-host-local")
+
+    def start(command, name):
+        output = (args.out / (name + ".stdout.txt")).open("w", encoding="utf-8")
+        logs.append(output)
+        process = subprocess.Popen([str(x) for x in command], stdout=output, stderr=subprocess.STDOUT,
+                                   creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        processes.append(process)
+        return process
+
+    def alive(process, label):
+        if process.poll() is not None:
+            raise RuntimeError(f"{label} exited early with code {process.returncode}; see its log")
+
+    try:
+        manifest_path = pathlib.Path(private.name) / "private-manifest.json"
+        fixture = start([args.fixture.resolve(), "--manifest", manifest_path.resolve(), "--out", args.out.resolve(),
+                         "--seconds", args.seconds + 15, "--bind-ip", args.bind_ip], "fixture")
+        deadline = time.monotonic() + 15
+        while True:
+            alive(fixture, "fixture")
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                break
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            if time.monotonic() > deadline:
+                raise TimeoutError("fixture manifest missing")
+            time.sleep(.02)
+        manifest_path.chmod(0o600)
+        selected_app = native_path(args.bin / "app-a.exe")
+        summary["selected_app"] = selected_app
+        packet_file = args.out / "packets.jsonl"
+        packet_tail = JsonTail(packet_file)
+        if redirecting:
+            from bridge import Bridge
+            bridge = Bridge(manifest, packet_file, args.out / "bridge.jsonl")
+            bridge.start()
+        engine_args = inproc_command(args.bin, args.out, manifest, selected_app, args)
+        if redirecting:
+            engine_args += ["--listener-port", bridge.port]
+        engine = start(engine_args, "inproc")
+        packet_ready = False
+        deadline = time.monotonic() + 10
+        while not packet_ready:
+            alive(engine, "inproc engine")
+            for record in packet_tail.read():
+                if record.get("kind") == "ready":
+                    packet_ready = True
+            if time.monotonic() > deadline:
+                raise TimeoutError("inproc engine readiness missing")
+            time.sleep(.01)
+
+        quic_port = manifest["udp_ports"][0]
+        clients = []
+
+        def launch(app, iteration, protocol, port):
+            command = [args.bin / f"app-{app}.exe", "--target", manifest["target_ip"], "--port", port,
+                       "--protocol", protocol, "--nonce", f"inproc-{args.mode}-{app}-{protocol}-{iteration}"]
+            clients.append((app, protocol, start(command, f"client-{app}-{protocol}-{iteration}")))
+
+        if args.quic:
+            for iteration in range(3):
+                launch("a", iteration, "udp", quic_port)
+        elif args.concurrency:
+            for index in range(args.concurrency):
+                launch("a" if index % 2 == 0 else "b", index, "tcp", manifest["target_port"])
+        else:
+            for iteration in range(3):
+                for app in ["a", "b"]:
+                    launch(app, iteration, "tcp", manifest["target_port"])
+
+        deadline = time.monotonic() + min(args.seconds - 5, 40)
+        while any(p.poll() is None for _, _, p in clients):
+            alive(engine, "inproc engine")
+            if time.monotonic() > deadline:
+                raise TimeoutError("client timeout")
+            time.sleep(.01)
+
+        (args.out / "inproc.stop").touch()
+        try:
+            engine.wait(timeout=args.seconds + 15)
+        except subprocess.TimeoutExpired:
+            engine.terminate()
+            raise RuntimeError("inproc engine did not exit")
+        packet_records = JsonTail(packet_file).read()
+        decisions = [r for r in packet_records if r.get("kind") == "decision"]
+
+        selected_tuples = set()
+        dropped_client_fail = 0
+        client_results = []
+        for stdout in sorted(args.out.glob("client-*.stdout.txt")):
+            client_results.extend(JsonTail(stdout).read())
+
+        for app, protocol, process in clients:
+            if args.quic and app == "a":
+                if process.returncode == 0:
+                    raise RuntimeError("selected QUIC UDP flow was not dropped; client unexpectedly echoed")
+                dropped_client_fail += 1
+            elif process.returncode != 0:
+                raise RuntimeError(f"client app-{app}/{protocol} failed; trace retained")
+        for record in client_results:
+            if record.get("status") == "echo_ok" and record.get("nonce", "").split("-")[2] == "a" \
+                    and record.get("protocol") == 6:
+                key = tuple_key(record)
+                if key:
+                    selected_tuples.add(key)
+
+        if wrong_app_redirected(decisions, selected_tuples):
+            raise RuntimeError("a non-selected client tuple was redirected to the proxy")
+
+        gateway_records = []
+        gateway_path = args.out / "gateway.jsonl"
+        expected_proxy = len(selected_tuples) if redirecting and args.protocol == "tcp" else 0
+        for _ in range(20):
+            try:
+                gateway_records = [json.loads(line) for line in gateway_path.read_text().splitlines() if line.strip()]
+                if len(gateway_records) == expected_proxy:
+                    break
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            time.sleep(.05)
+        expected_line = f"CONNECT {manifest['target_ip']}:{manifest['target_port']} HTTP/1.1"
+        if any(r.get("kind") != "gateway_connect" or r.get("request_line") != expected_line for r in gateway_records):
+            raise RuntimeError("gateway CONNECT destination differs from expected transparent tunnels")
+
+        try:
+            engine_summary = json.loads((args.out / "engine-summary.json").read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            engine_summary = None
+        summary["engine_summary"] = engine_summary
+        if any(r.get("kind") == "error" for r in packet_records):
+            raise RuntimeError("inproc engine reported an error")
+        complete = [r for r in packet_records if r.get("kind") == "complete"]
+        if not complete or not complete[-1].get("success"):
+            raise RuntimeError("inproc engine did not complete successfully")
+        if engine.returncode != 0:
+            raise RuntimeError("inproc engine exit code was nonzero")
+        status, error = inproc_evaluate(engine_summary, args.mode, "udp" if args.quic else args.protocol,
+                                        args.quic, expected_proxy, len(gateway_records))
+        summary["status"] = status
+        if error:
+            summary["error"] = error
+        summary["selected_tuple_count"] = len(selected_tuples)
+        summary["gateway_connect_count"] = len(gateway_records)
+        summary["quic_dropped_clients"] = dropped_client_fail
+    except Exception as error:
+        summary.update(status="FAIL", error=str(error))
+    finally:
+        for name in ["inproc.stop"]:
+            (args.out / name).touch()
+        if bridge:
+            bridge.close()
+        for process in reversed(processes):
+            if process.poll() is None:
+                process.terminate()
+        for process in processes:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for stream in logs:
+            stream.close()
+        private.cleanup()
+        (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(summary))
+    return 0 if summary["status"] == "PASS_RESTRICTED_CASE" else 1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin", type=pathlib.Path, required=True)
@@ -271,9 +490,18 @@ def main():
     parser.add_argument("--external-port", type=int, default=443)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--seconds", type=int, default=35)
+    parser.add_argument("--engine", choices=["external", "inproc"], default="external")
+    parser.add_argument("--concurrency", type=int, default=0)
+    parser.add_argument("--quic", action="store_true")
+    parser.add_argument("--window-before-ms", type=int, default=500)
+    parser.add_argument("--window-after-ms", type=int, default=50)
+    parser.add_argument("--leak-ms", type=int, default=2000)
+    parser.add_argument("--send-rst", action="store_true")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("Windows is required; pure attribution tests run on other hosts")
+    if args.engine == "inproc":
+        return run_inproc(args, parser)
     if args.seconds < 15 or args.iterations < 1 or args.hold_ms < 1 or args.delay_ms < 0:
         parser.error("require --seconds >= 15, --iterations >= 1, --hold-ms >= 1 and --delay-ms >= 0")
     if args.scenario != "baseline" and args.protocol != "tcp":

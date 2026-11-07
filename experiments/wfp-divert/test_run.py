@@ -218,6 +218,67 @@ class AttributionTests(unittest.TestCase):
                          lab.poll_evidence_status("FAIL", "native collector missing", "poll", None))
 
 
+class InprocEngineTests(unittest.TestCase):
+    def args(self, **changes):
+        base = dict(mode="redirect", protocol="tcp", hold_ms=1000, seconds=35, window_before_ms=500,
+                    window_after_ms=50, leak_ms=2000, send_rst=True, quic=False)
+        base.update(changes)
+        return type("Args", (), base)()
+
+    def manifest(self):
+        return dict(target_ip="127.0.0.1", target_port=9000, udp_ports=[9100, 9101])
+
+    def test_inproc_command_includes_engine_options(self):
+        command = [str(x) for x in lab.inproc_command(
+            pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe", self.args())]
+        self.assertEqual(str(pathlib.Path("bin") / "inproc.exe"), command[0])
+        self.assertEqual("redirect", command[command.index("--mode") + 1])
+        self.assertEqual("\\device\\app-a.exe", command[command.index("--selected-app") + 1])
+        self.assertEqual("500", command[command.index("--window-before-ms") + 1])
+        self.assertEqual("1", command[command.index("--send-rst") + 1])
+        self.assertTrue(command[command.index("--summary") + 1].endswith("engine-summary.json"))
+        self.assertNotIn("--quic-port", command)
+
+    def test_inproc_command_quic_adds_drop_port(self):
+        command = [str(x) for x in lab.inproc_command(
+            pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe",
+            self.args(quic=True, protocol="udp"))]
+        self.assertEqual("9100", command[command.index("--quic-port") + 1])
+
+    def test_inproc_evaluate_redirect_requires_matching_proxy_and_gateway(self):
+        summary = dict(engine="inproc", success=True, decided_proxy=3, quic_drops=0)
+        self.assertEqual("PASS_RESTRICTED_CASE",
+                         lab.inproc_evaluate(summary, "redirect", "tcp", False, 3, 3)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "redirect", "tcp", False, 3, 2)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(dict(summary, decided_proxy=2), "redirect", "tcp", False, 3, 3)[0])
+
+    def test_inproc_evaluate_hold_and_udp_expect_no_proxy(self):
+        summary = dict(engine="inproc", success=True, decided_proxy=0, quic_drops=0)
+        self.assertEqual("PASS_RESTRICTED_CASE", lab.inproc_evaluate(summary, "hold", "tcp", False, 3, 0)[0])
+        self.assertEqual("PASS_RESTRICTED_CASE", lab.inproc_evaluate(summary, "redirect", "udp", False, 0, 0)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(dict(summary, decided_proxy=1), "hold", "tcp", False, 3, 0)[0])
+
+    def test_inproc_evaluate_requires_success_and_engine(self):
+        self.assertEqual("FAIL", lab.inproc_evaluate(None, "hold", "tcp", False, 0, 0)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(dict(engine="inproc", success=False), "hold", "tcp", False, 0, 0)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(dict(engine="poll", success=True), "hold", "tcp", False, 0, 0)[0])
+
+    def test_inproc_evaluate_quic_requires_a_drop(self):
+        summary = dict(engine="inproc", success=True, decided_proxy=0, quic_drops=0)
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "redirect", "udp", True, 0, 0)[0])
+        self.assertEqual("PASS_RESTRICTED_CASE",
+                         lab.inproc_evaluate(dict(summary, quic_drops=2), "redirect", "udp", True, 0, 0)[0])
+
+    def test_wrong_app_redirected_detects_unselected_proxy(self):
+        selected = {("10.0.0.1", 1111, "10.0.0.2", 443, 6)}
+        good = dict(kind="decision", action="proxy", local_ip="10.0.0.1", local_port=1111,
+                    remote_ip="10.0.0.2", remote_port=443, protocol=6)
+        bad = dict(good, local_port=2222)
+        self.assertFalse(lab.wrong_app_redirected([good], selected))
+        self.assertTrue(lab.wrong_app_redirected([good, bad], selected))
+        self.assertFalse(lab.wrong_app_redirected([dict(bad, action="direct")], selected))
+
+
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):
         with tempfile.TemporaryDirectory() as directory:

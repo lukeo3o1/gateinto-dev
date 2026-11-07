@@ -17,6 +17,7 @@ SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
 | --- | --- |
 | `native-events.cpp` | Native WFP net events (`--wfp-api subscribe2`, `subscribe4` or `poll`) and Security 5156; raw App ID/path, validity flags, tuples, event FILETIME, callback QPC, and raw Security XML. Native PID is null. |
 | `packets.cpp` | NETWORK capture with bounded queues, first-packet buffering, generation-qualified control, pinned timeout-direct policy, and candidate TCP forward/reverse translation. |
+| `inproc.cpp` | Single-process `inproc` engine: WinDivert NETWORK capture/reinject, on-demand native WFP stored-event lookup, generation match, TCP redirect translation and post-hoc leak check in one native process. Portable match and metric helpers are unit-tested (`g++ -std=c++17 -Wall -Wextra inproc.cpp`). |
 | `run.py`, `test_run.py` | Correlate the selected native source, full device path and tuple; inject delayed/missing attribution; verify per-client evidence and final collector status. |
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
 | `client.cpp` | Built twice as app-a.exe and app-b.exe; echo nonces and original socket tuples provide test ground truth, never ownership authority. |
@@ -136,3 +137,52 @@ Local model/helper and fixture tests are separate from Windows runtime results.
 See [the review](../../docs/windows-per-app-feasibility.md) and
 [execution record](../../docs/windows-per-app-review-log.md) for the evidence
 boundary and the full qualification matrix.
+
+## In-process engine (`--engine inproc`)
+
+`inproc.exe` collapses the split `native-events.exe` + `packets.exe` + `run.py`
+control-file pipeline into one native process. It removes the file and
+control-file hops and the sleep-quantized 2 ms packet loop: a blocking
+`WinDivertRecv` receive thread feeds a worker that waits on a condition variable
+until the nearest pending-flow deadline or retry, and a high-resolution waitable
+timer is used for the native collector's own timing elsewhere.
+
+When a new flow's first packet is held, the engine enumerates stored net events
+on demand with an `FWPM_NET_EVENT_ENUM_TEMPLATE0` filtered to net event type
+`CLASSIFY_ALLOW`, the IP protocol, the pending local ports (combined as OR'ed
+`FWPM_CONDITION_IP_LOCAL_PORT` conditions, batched across flows pending at the
+same moment) and a tight `[capture − window, now]` time window. If a condition
+key is rejected at runtime the filter falls back to protocol-only, then type-only,
+then time-window-only, and the filter actually used is reported in the summary as
+`enum_filter`. Lookups retry with a 0, 1, 2, 4, 8 ms backoff until the hold
+deadline.
+
+A held flow is decided proxy/direct only when the generation match in the
+portable, unit-tested `inproc::match_generation` accepts an event: exact tuple,
+outbound direction, layer `ALE_AUTH_CONNECT` (48/50), and an `event_filetime`
+inside a configurable window (`--window-before-ms`, `--window-after-ms`) around
+the first-packet capture time converted through the QPC/FILETIME anchor. For a
+reused tuple the newest qualifying event that precedes the SYN wins; two
+different apps in the window is ambiguous and is never proxied. Once decided,
+packets are translated and forwarded straight from the worker.
+
+The selected app's UDP to the QUIC port (`--quic-port`) is dropped and counted
+once attributed; other UDP is released direct. Flows released direct on a
+timeout or missing event are re-checked for a bounded period (`--leak-ms`); a
+flow later shown to be the selected app is counted as `leaked` and, with
+`--send-rst`, a TCP RST is injected to kill it. Gateinto's own upstream and the
+local adapter stay outside the static WinDivert filter.
+
+`engine-summary.json` reports: first-packet decision latency p50/p95/max; lookup
+calls total, per flow and duration; per-packet added latency (capture to
+reinject) for held, decided-direct and decided-proxy classes; `unattributed`,
+`leaked` and `rst_count`; `quic_drops`; whether a non-selected client was
+disrupted; and the `enum_filter` and window in effect.
+
+`ci.ps1` runs the engine in `hold-inproc-tcp`, `hold-inproc-udp`,
+`redirect-inproc`, `hold-inproc-tcp-repeat`, `redirect-inproc-repeat`,
+`leakcheck-inproc` (short hold forcing the post-hoc leak path with RST),
+`concurrency-inproc` (50 parallel clients split app-a/app-b, checking no
+wrong-app redirection and all CONNECTs correct) and `quic-inproc` (selected
+app UDP/QUIC drop). The existing poll and subscription cases are kept for
+comparison.
