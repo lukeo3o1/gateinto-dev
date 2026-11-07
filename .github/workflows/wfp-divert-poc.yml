@@ -25,13 +25,21 @@ jobs:
         run: |
           g++ -std=c++17 experiments/wfp-divert/native-events.cpp -o /tmp/native-events-test
           /tmp/native-events-test
+          g++ -std=c++17 -Wall -Wextra experiments/wfp-divert/ale-endpoints.cpp -o /tmp/ale-endpoints-test
+          /tmp/ale-endpoints-test
           g++ -std=c++17 -DWFP_PACKET_STATE_TEST experiments/wfp-divert/packets.cpp -o /tmp/packet-state-test
           /tmp/packet-state-test
           g++ -std=c++17 -Wall -Wextra experiments/wfp-divert/inproc.cpp -o /tmp/inproc-test
           /tmp/inproc-test
+          g++ -std=c++17 -Wall -Wextra -DWFP_CLIENT_STATE_TEST experiments/wfp-divert/client.cpp -o /tmp/client-state-test
+          /tmp/client-state-test
 
   windows:
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     defaults:
       run:
@@ -55,7 +63,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: wfp-divert-windows-2022-${{ github.run_id }}
+          name: wfp-divert-${{ matrix.os }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/wfp-divert-results/**
             !${{ runner.temp }}/wfp-divert-results/**/private-manifest.json

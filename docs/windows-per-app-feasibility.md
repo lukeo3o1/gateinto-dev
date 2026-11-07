@@ -2,7 +2,7 @@
 
 Review date: 2026-11-06. Source baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`.
 
-Updated 2026-11-07 with Windows runtime evidence from GitHub Actions runs 42280670136, 42282264784 and 42340194216 of the PoC at `experiments/wfp-divert`. See [Measured Windows evidence](#measured-windows-evidence) for exact runs and limits.
+Updated 2026-11-07 with Windows runtime evidence from GitHub Actions runs 42280670136, 42282264784, 42340194216 and 42348888370 of the PoC at `experiments/wfp-divert`. See [Measured Windows evidence](#measured-windows-evidence) for exact runs and limits.
 
 ## Verdict and evidence boundary
 
@@ -19,13 +19,14 @@ The review workspace is Linux x86_64 (kernel `6.18.57`), without a supplied Wind
 
 ## Measured Windows evidence
 
-All runs used the GitHub-hosted `windows-2022` image (OS build 10.0.20348), one host, IPv4, controlled loopback echo endpoints, two distinct test EXEs A and B, and the official signed WinDivert driver. `external-*` cases additionally connected to `api.github.com:443` (140.82.112.6) for connection and attribution only, with no payload, echo or proxy validation. Each job's overall conclusion is failure because Subscribe2 and Subscribe4 cases fail, and in run 42340194216 also `hold-security-udp`; the statements below are per case.
+All runs used the GitHub-hosted `windows-2022` image (OS build 10.0.20348), one host, IPv4, controlled loopback echo endpoints, two distinct test EXEs A and B, and the official signed WinDivert driver. `external-*` cases additionally connected to `api.github.com:443` (140.82.112.6) for connection and attribution only, with no payload, echo or proxy validation. Each job's overall conclusion is failure because Subscribe2 and Subscribe4 cases fail; runs 42340194216 and 42348888370 also fail `hold-security-udp`, and the latter fails in-process QUIC startup. The statements below are per case.
 
 | Run (head) | Measured | Consequence |
 | --- | --- | --- |
 | 42280670136 (`a46493b`) | `FwpmNetEventSubscribe2` delivered 0 callbacks of any type in every case, while `collect_after=1` and `keywords_after=16` confirmed the engine options were applied. `FwpmNetEventEnum3` found 6–72 stored CLASSIFY_ALLOW events per case with the correct app path and full outbound tuple at layer 48 (ALE_AUTH_CONNECT); their `event_filetime` was about 0.03–0.09 ms before WinDivert captured the first packet. | Ordinary Win32 TCP/UDP allow events are produced on this build; Subscribe2 does not deliver them here. |
 | 42282264784 (`ae22135`) | `FwpmNetEventSubscribe4` delivered callbacks equal to the enumeration total, but receipt was about 1004 ms after the event (apparently batched). classifyAllow read through `FWPM_NET_EVENT5` reported direction unknown and `is_loopback` true, contradicting the same events read through Enum3 (outbound, not loopback), so those events were unusable. Poll mode (5 ms `sleep_for`, 1 s overlap, unfiltered) passed 7/7 cases with notification−capture 20–46 ms. | Subscribe4 is too late and its decoded fields are not trusted; polling is viable. |
 | [42340194216](evidence/wfp-divert-run-42340194216.md) (`edba304`) | Poll mode on a high-resolution waitable timer (5 ms wait), enumeration filtered to CLASSIFY_ALLOW, 300 ms overlap. 11/11 poll cases reached their pass status: hold tcp, udp, delayed, too-late and missing; redirect through the real Gateinto proxy and CONNECT fixture; external connect; SYN retransmit; tuple reuse (CHARACTERIZED_REUSE_REJECTION); repeats of hold tcp and redirect. | First-packet hold with polled native ownership works for this restricted topology. |
+| [42348888370](evidence/wfp-divert-run-42348888370.md) (`e3336bd`) | All 11 split poll cases again reached expected statuses. Seven in-process cases reported PASS, but decision latency omitted blocking enumeration time, UDP launched TCP clients, and leakcheck had zero timeouts/leaks/RSTs. QUIC failed before readiness. Reconstructing complete small-case decision logs gives p50 about 25.7–33.1 ms for TCP hold/redirect, rather than the reported 10.4–11.9 ms. | In-process TCP redirection is promising, but a speedup, real UDP/QUIC coverage and live connection termination are not established. Validation repairs are locally tested and await a new Windows run. |
 
 Run 42340194216 poll-mode measurements:
 
@@ -35,7 +36,7 @@ Run 42340194216 poll-mode measurements:
 - Redirect cases passed only with other-app noninterference (no B proxy packets) and the expected upstream CONNECT destinations and counts (3 bridge tunnels and 3 gateway CONNECTs; 1 for reuse). The reuse case is a characterized conservative rejection: the reused SYN was dropped and the non-selected client was disrupted, which is not normal application connectivity.
 - Security 5156 in the same job gave notification−capture of roughly 330–1024 ms across the 9 timed cases. It passed TCP hold, delayed and too-late; redirect with 3 bridge tunnels and 3 gateway CONNECTs; redirect with missing ownership; SYN retransmit; external connect; and UDP hold at 2000 ms. Reuse ended as CHARACTERIZED_REUSE_REJECTION. The UDP case at a 1000 ms hold failed.
 
-Still unqualified: Windows 10/11 client SKUs and other builds; external routing beyond the connect-only case, including a topology that denies the direct path; IPv6, fragmentation and other packet modifiers; load and stress (matrix O1, M7); polling cost at scale and with longer-lived collectors; stored-history eviction under high event volume; UDP end to end; and the Subscribe4 field-read anomaly, possibly a structure or version mismatch, which was not root-caused. A zero wrong-app count over these finite runs is evidence for those runs only.
+Still unqualified: Windows 10/11 client SKUs and other builds; external routing beyond the connect-only case, including a topology that denies the direct path; IPv6, fragmentation and other packet modifiers; load and stress (matrix O1, M7); polling cost at scale and with longer-lived collectors; stored-history eviction under high event volume; UDP end to end; and the Subscribe4 field-read anomaly. The source-level Subscribe4/CALLBACK4/EVENT5 pairing matches Microsoft's declarations; a structure or version mismatch has not been established. A zero wrong-app count over these finite runs is evidence for those runs only.
 
 ## Existing source
 

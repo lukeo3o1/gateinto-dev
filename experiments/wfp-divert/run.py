@@ -87,10 +87,10 @@ def timing_summary(clients, packets, events, decisions, frequency):
                 decision_minus_capture_ms=distribution(r["decision_minus_capture_ms"] for r in rows), rows=rows)
 
 
-def native_command(bin_dir, out_dir, seconds, wfp_api):
+def native_command(bin_dir, out_dir, seconds, wfp_api, callback_drain_ms=0):
     return [bin_dir / "native-events.exe", "--seconds", seconds, "--out", (out_dir / "native.jsonl").resolve(),
             "--stop-file", (out_dir / "native.stop").resolve(), "--state-out", (out_dir / "bfe-state.json").resolve(),
-            "--wfp-api", wfp_api]
+            "--wfp-api", wfp_api, "--callback-drain-ms", callback_drain_ms]
 
 
 def inproc_command(bin_dir, out_dir, manifest, selected_app, args):
@@ -100,28 +100,226 @@ def inproc_command(bin_dir, out_dir, manifest, selected_app, args):
                "--summary", (out_dir / "engine-summary.json").resolve(),
                "--state-out", (out_dir / "bfe-state.json").resolve(),
                "--stop-file", (out_dir / "inproc.stop").resolve(),
-               "--selected-app", selected_app, "--mode", args.mode,
+               "--selected-app", selected_app, "--mode", "hold" if args.protocol == "udp" or args.quic else args.mode,
                "--hold-ms", args.hold_ms, "--seconds", args.seconds,
                "--window-before-ms", args.window_before_ms, "--window-after-ms", args.window_after_ms,
-               "--leak-ms", args.leak_ms, "--send-rst", 1 if args.send_rst else 0]
-    if args.protocol == "udp":
+               "--leak-ms", args.leak_ms, "--send-rst", 1 if args.send_rst else 0,
+               "--delay-ms", args.delay_ms,
+               "--lookup-mode", getattr(args, "lookup_mode", "inline"),
+               "--filter-cache", getattr(args, "filter_cache", "on")]
+    if args.protocol == "udp" or args.quic:
         command += ["--udp-port", manifest["udp_ports"][0]]
     if args.quic:
-        command += ["--udp-port", manifest["udp_ports"][0], "--quic-port", manifest["udp_ports"][0]]
+        command += ["--quic-port", manifest["udp_ports"][0]]
     return command
 
 
-def inproc_evaluate(summary, mode, protocol, quic, expected_proxy_clients, gateway_count):
+def inproc_client_plan(args, manifest):
+    protocol = "udp" if args.quic else args.protocol
+    port = manifest["udp_ports"][0] if protocol == "udp" else manifest["target_port"]
+    apps = [("a" if index % 2 == 0 else "b", index) for index in range(args.concurrency)] \
+        if args.concurrency else [(app, iteration) for iteration in range(3) for app in ["a", "b"]]
+    return [dict(app=app, iteration=iteration, protocol=protocol, port=port) for app, iteration in apps]
+
+
+def ale_probe_command(bin_dir, out_dir, manifest, args):
+    protocol = "udp" if args.quic else args.protocol
+    port = manifest["udp_ports"][0] if protocol == "udp" else manifest["target_port"]
+    return [bin_dir / "ale-endpoints.exe", "--target", manifest["target_ip"], "--port", port,
+            "--protocol", protocol, "--out", (out_dir / "ale-endpoints.jsonl").resolve(),
+            "--stop-file", (out_dir / "ale-endpoints.stop").resolve(), "--seconds", args.seconds,
+            "--interval-ms", 5]
+
+
+def ale_probe_report(clients, packets, records, app_paths, frequency, returncode):
+    summaries = [r for r in records if r.get("kind") == "summary" and r.get("source") == "ale_endpoint"]
+    native = summaries[-1] if summaries else None
+    report = dict(status="INCONCLUSIVE_ALE_ENDPOINT_PROBE", routing_authority=False,
+                  qualification="Shadow native WFP endpoint observations only; no socket-generation or routing guarantee",
+                  native_summary=native, rows=[])
+    if (not native or returncode != 0 or not native.get("available") or not native.get("success")
+            or native.get("errors") or native.get("truncated") or frequency <= 0):
+        report["reason"] = "probe unavailable, incomplete, failed, or missing a clean native summary"
+        return report
+    snapshots = {r["snapshot_id"]: r for r in records
+                 if r.get("kind") == "ale_snapshot" and r.get("complete") and "snapshot_id" in r}
+    endpoint_index = {}
+    for entry in records:
+        if entry.get("kind") == "ale_endpoint" and entry.get("snapshot_complete"):
+            endpoint_index.setdefault((entry.get("snapshot_id"), tuple_key(entry)), []).append(entry)
+    for client in clients:
+        attempts = client.get("attempts", [])
+        if len(attempts) != 1 or not tuple_key(attempts[0]):
+            report["reason"] = "client attempted tuple missing"
+            return report
+        key = tuple_key(attempts[0])
+        decisions = [p for p in packets if p.get("kind") == "decision" and tuple_key(p) == key]
+        if not decisions:
+            report["reason"] = "packet decision/capture missing"
+            return report
+        decision = min(decisions, key=lambda p: p.get("qpc", 0))
+        capture = decision.get("capture_qpc", 0)
+        candidates = []
+        ambiguous = False
+        for snapshot_id, snapshot in snapshots.items():
+            began, observed = snapshot.get("query_start_qpc", 0), snapshot.get("observed_qpc", 0)
+            if capture <= 0 or began < capture or observed < began:
+                continue
+            matches = [e for e in endpoint_index.get((snapshot_id, key), [])
+                       if e.get("query_start_qpc") == began and e.get("observed_qpc") == observed
+                       and e.get("endpoint_id", 0) > 0 and e.get("app_path")]
+            identities = {(e["endpoint_id"], normalized_path(e["app_path"])) for e in matches}
+            if identities and (len(identities) != 1 or any(
+                    path != normalized_path(app_paths[client["app"]]) for _, path in identities)):
+                ambiguous = True
+            elif matches:
+                candidates.append(min(matches, key=lambda e: e["observed_qpc"]))
+        row = dict(app=client["app"], tuple=list(key), capture_qpc=capture,
+                   decision_qpc=decision.get("qpc"), ambiguous=ambiguous,
+                   observed_before_decision=False)
+        if candidates and not ambiguous:
+            first = min(candidates, key=lambda e: e["observed_qpc"])
+            row.update(endpoint_id=first["endpoint_id"], snapshot_id=first["snapshot_id"],
+                       app_path=first["app_path"], observed_qpc=first["observed_qpc"],
+                       observation_minus_capture_ms=(first["observed_qpc"] - capture) * 1000 / frequency,
+                       observed_before_decision=first["observed_qpc"] < decision.get("qpc", 0))
+        report["rows"].append(row)
+    report["observed_while_held"] = sum(row["observed_before_decision"] for row in report["rows"])
+    if report["rows"] and report["observed_while_held"] == len(report["rows"]):
+        report["status"] = "OBSERVED_WHILE_HELD"
+    else:
+        report["reason"] = "not every client had a unique native endpoint snapshot observed while its packet was held"
+    return report
+
+
+def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect_leak=False):
+    selected_tuples, all_tuples = set(), set()
+    quic_dropped = 0
+    for client in clients:
+        app, nonce = client["app"], client["nonce"]
+        attempts = [r for r in client["attempts"] if r.get("kind") == "client_attempt" and r.get("nonce") == nonce]
+        if len(attempts) != 1 or not tuple_key(attempts[0]):
+            raise RuntimeError(f"client {nonce} lacks one valid attempted tuple")
+        key = tuple_key(attempts[0])
+        if key in all_tuples or key[-1] != (6 if client["protocol"] == "tcp" else 17):
+            raise RuntimeError(f"client {nonce} reused a tuple or ran the wrong protocol")
+        all_tuples.add(key)
+        if app == "a":
+            selected_tuples.add(key)
+        decisions = [r for r in records if r.get("kind") == "decision" and tuple_key(r) == key]
+        selected = app == "a"
+        leaking = selected and expect_leak
+        dropping = selected and quic
+        action = "proxy" if selected and mode == "redirect" and key[-1] == 6 else "direct"
+        reason = "selected" if selected else "other_app"
+        if selected and key[-1] == 17:
+            action, reason = ("drop", "selected_quic") if dropping else ("direct", "selected_udp_direct")
+        if leaking:
+            action, reason = "direct", "timeout"
+        matching = [d for d in decisions if d.get("action") == action and d.get("reason") == reason]
+        reset_drops = [d for d in decisions if leaking and d.get("action") == "drop"
+                       and d.get("reason") == "leak_reset"]
+        if not matching or leaking and len(matching) != 1 or len(matching) + len(reset_drops) != len(decisions):
+            raise RuntimeError(f"client {nonce} lacks the expected {reason}/{action} decision")
+        decision = matching[0]
+        generation = decision.get("generation")
+        if not isinstance(generation, int) or generation <= 0 or any(d.get("generation") != generation for d in decisions):
+            raise RuntimeError(f"client {nonce} lacks one valid packet generation")
+        capture = decision.get("capture_qpc", 0)
+        decided = decision.get("qpc", 0)
+        deadline = decision.get("deadline_qpc", 0)
+        if capture <= 0 or deadline <= capture or decided < capture or not leaking and decided >= deadline:
+            raise RuntimeError(f"client {nonce} has invalid decision timing")
+        ownership = [r for r in records if r.get("kind") == "ownership" and tuple_key(r) == key
+                     and r.get("generation") == generation and r.get("capture_qpc") == capture
+                     and normalized_path(r.get("app_path", "")) == normalized_path(app_paths[app])
+                     and r.get("event_filetime", 0) > 0]
+        if not ownership:
+            raise RuntimeError(f"client {nonce} lacks generation-matched native ownership")
+        if any(normalized_path(r.get("app_path", "")) != normalized_path(app_paths[app])
+               for r in records if r.get("kind") == "ownership" and tuple_key(r) == key
+               and r.get("generation") == generation):
+            raise RuntimeError(f"client {nonce} has conflicting native ownership")
+        results = [r for r in client["results"] if r.get("kind") == "client" and r.get("nonce") == nonce]
+        if dropping:
+            if client["returncode"] == 0 or results:
+                raise RuntimeError(f"selected QUIC client {nonce} unexpectedly succeeded")
+            quic_dropped += 1
+        else:
+            status = "reset_observed" if leaking else "echo_ok"
+            if client["returncode"] != 0 or len(results) != 1 or results[0].get("status") != status \
+                    or tuple_key(results[0]) != key:
+                raise RuntimeError(f"client {nonce} lacks a matching {status} result")
+        if leaking:
+            leaks = [r for r in records if r.get("kind") == "leaked" and tuple_key(r) == key
+                     and r.get("generation") == generation]
+            resets = [r for r in records if r.get("kind") == "rst" and tuple_key(r) == key
+                      and r.get("generation") == generation]
+            if not leaks or not resets or not any(
+                    decided <= o.get("qpc", 0) <= l.get("qpc", 0) <= r.get("qpc", 0)
+                    and results[0].get("done_qpc", 0) >= l.get("qpc", 0)
+                    for o in ownership for l in leaks for r in resets):
+                raise RuntimeError(f"client {nonce} lacks timeout, late ownership, leak and observed reset evidence")
+            if decided < deadline:
+                raise RuntimeError(f"client {nonce} was released before its timeout deadline")
+            if any(d.get("qpc", 0) < min(r.get("qpc", 0) for r in resets) for d in reset_drops):
+                raise RuntimeError(f"client {nonce} was dropped before its checked reset")
+        elif not any(o.get("qpc", 0) <= decided for o in ownership):
+            raise RuntimeError(f"client {nonce} was decided before native ownership was observed")
+
+    if not clients or not selected_tuples:
+        raise RuntimeError("inproc case lacks selected client attempts")
+    if quic and not all_tuples - selected_tuples:
+        raise RuntimeError("QUIC case lacks a non-selected UDP echo control")
+    if wrong_app_redirected(records, selected_tuples) or any(
+            tuple_key(r) not in selected_tuples and (r.get("kind") == "rst" or
+            r.get("kind") == "decision" and r.get("action") == "drop") for r in records):
+        raise RuntimeError("a non-selected tuple was redirected, dropped or reset")
+    return dict(selected_tuples=selected_tuples, quic_dropped_clients=quic_dropped)
+
+
+def inproc_client_results(path):
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def inproc_evaluate(summary, mode, protocol, quic, expected_proxy_clients, gateway_count,
+                    expect_leak=False, expected_selected_clients=None,
+                    expected_lookup_mode=None, expected_filter_cache=None):
     if not summary or summary.get("engine") != "inproc" or not summary.get("success"):
         return "FAIL", "inproc engine summary missing or reported failure"
+    if summary.get("lookup_errors") or summary.get("bfe_errors"):
+        return "FAIL", "inproc native lookup or BFE restoration reported an error"
+    if expected_lookup_mode is not None and summary.get("lookup_mode") != expected_lookup_mode:
+        return "FAIL", "native lookup mode differs from the requested comparison"
+    if expected_filter_cache is not None and summary.get("filter_cache") is not expected_filter_cache:
+        return "FAIL", "native filter cache differs from the requested comparison"
     redirecting = mode == "redirect" and protocol == "tcp"
     expected = expected_proxy_clients if redirecting else 0
     if summary.get("decided_proxy") != expected:
         return "FAIL", f"decided_proxy {summary.get('decided_proxy')} != expected {expected}"
     if gateway_count != expected:
         return "FAIL", f"gateway CONNECT count {gateway_count} != expected {expected}"
+    if summary.get("nonselected_client_disrupted"):
+        return "FAIL", "inproc engine disrupted a non-selected client"
+    if not expect_leak and (summary.get("unattributed") or summary.get("leaked") or summary.get("rst_count")):
+        return "FAIL", "normal inproc case had unattributed, leaked or reset flows"
+    if expect_leak and (not expected_selected_clients or any(
+            summary.get(key) != expected_selected_clients for key in ["unattributed", "leaked", "rst_count"])):
+        return "FAIL", "leak case did not time out, identify and reset every selected flow"
     if quic and not summary.get("quic_drops"):
         return "FAIL", "QUIC case dropped no selected UDP/443 flow"
+    if quic and expected_selected_clients is not None and summary.get("quic_drops") != expected_selected_clients:
+        return "FAIL", "QUIC drop count differs from selected client count"
     return "PASS_RESTRICTED_CASE", None
 
 
@@ -138,9 +336,13 @@ def clean_native_summary(native_summary):
     return bool(native_summary) and not native_summary.get("errors") and not native_summary.get("queue_dropped")
 
 
-def native_evidence_status(status, source, native_summary):
-    if (status not in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"] or source != "wfp" or
-            (native_summary or {}).get("wfp_count")):
+def native_evidence_status(status, source, native_summary, usable_events=None):
+    if status not in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"] or source != "wfp":
+        return status, None
+    if (native_summary or {}).get("wfp_count"):
+        if usable_events == 0:
+            return ("INCONCLUSIVE_NO_USABLE_NATIVE_EVENTS",
+                    "WFP callbacks contained no usable target ownership; negative controls did not exercise attribution")
         return status, None
     return ("INCONCLUSIVE_NO_NATIVE_EVENTS",
             "native summary reported wfp_count 0; WFP produced no CLASSIFY_ALLOW events, so this result does not exercise WFP attribution")
@@ -289,19 +491,54 @@ def qpc():
     return result.value
 
 
+def stop_inproc_collectors(engine, probe, bin_dir, out_dir):
+    report = dict(cleanup_forced_pids=[])
+    for process in [probe, engine]:
+        if process is None or process.poll() is not None:
+            continue
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            report["cleanup_forced_pids"].append(process.pid)
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    state = out_dir / "bfe-state.json"
+    if engine is not None and (report["cleanup_forced_pids"] or engine.poll() != 0) and state.exists():
+        try:
+            restore = subprocess.run([str(bin_dir / "native-events.exe"), "--restore-state", str(state.resolve()),
+                                      "--out", str((out_dir / "restore.jsonl").resolve())],
+                                     capture_output=True, text=True, timeout=10)
+            (out_dir / "restore.stdout.txt").write_text(restore.stdout + restore.stderr, encoding="utf-8")
+            report["fallback_restore_exit_code"] = restore.returncode
+        except Exception as error:
+            report["fallback_restore_error"] = str(error)
+    return report
+
+
 def run_inproc(args, parser):
-    if args.seconds < 15 or args.hold_ms < 1:
-        parser.error("require --seconds >= 15 and --hold-ms >= 1")
+    if args.seconds < 15 or args.hold_ms < 1 or not 0 <= args.delay_ms <= 10000 or not 0 <= args.concurrency <= 4096:
+        parser.error("require --seconds >= 15, --hold-ms >= 1, --delay-ms 0..10000 and --concurrency 0..4096")
+    if args.expect_leak and (args.mode != "redirect" or args.protocol != "tcp" or args.quic or not args.send_rst
+                             or not args.hold_ms < args.delay_ms < args.hold_ms + args.leak_ms):
+        parser.error("--expect-leak requires TCP redirect, --send-rst and a selected-app delay inside the post-timeout leak window")
     if args.out.exists() and any(args.out.iterdir()):
         parser.error("--out must be empty to avoid stale evidence")
     args.out.mkdir(parents=True, exist_ok=True)
     args.bin = args.bin.resolve()
-    redirecting = args.mode == "redirect" and not args.quic
+    redirecting = args.mode == "redirect" and args.protocol == "tcp" and not args.quic
     processes, logs = [], []
     private = tempfile.TemporaryDirectory(prefix="gateinto-wfp-private-", dir=args.private_dir)
     bridge = None
-    summary = dict(status="NOT_COMPLETED", engine="inproc", mode=args.mode, protocol=args.protocol,
-                   quic=args.quic, concurrency=args.concurrency, topology="single-host-local")
+    probe = None
+    engine = None
+    summary = dict(status="NOT_COMPLETED", engine="inproc", mode=args.mode, protocol="udp" if args.quic else args.protocol,
+                   quic=args.quic, expect_leak=args.expect_leak, delay_ms=args.delay_ms,
+                   lookup_mode=args.lookup_mode, filter_cache=args.filter_cache,
+                   concurrency=args.concurrency, topology="single-host-local")
 
     def start(command, name):
         output = (args.out / (name + ".stdout.txt")).open("w", encoding="utf-8")
@@ -331,7 +568,8 @@ def run_inproc(args, parser):
                 raise TimeoutError("fixture manifest missing")
             time.sleep(.02)
         manifest_path.chmod(0o600)
-        selected_app = native_path(args.bin / "app-a.exe")
+        app_paths = {app: native_path(args.bin / f"app-{app}.exe") for app in ["a", "b"]}
+        selected_app = app_paths["a"]
         summary["selected_app"] = selected_app
         packet_file = args.out / "packets.jsonl"
         packet_tail = JsonTail(packet_file)
@@ -344,42 +582,59 @@ def run_inproc(args, parser):
             engine_args += ["--listener-port", bridge.port]
         engine = start(engine_args, "inproc")
         packet_ready = False
+        packet_frequency = 0
         deadline = time.monotonic() + 10
         while not packet_ready:
             alive(engine, "inproc engine")
             for record in packet_tail.read():
                 if record.get("kind") == "ready":
                     packet_ready = True
+                    packet_frequency = record.get("qpc_frequency", 0)
             if time.monotonic() > deadline:
                 raise TimeoutError("inproc engine readiness missing")
             time.sleep(.01)
 
-        quic_port = manifest["udp_ports"][0]
+        if args.ale_probe:
+            probe = start(ale_probe_command(args.bin, args.out, manifest, args), "ale-endpoints")
+            probe_tail = JsonTail(args.out / "ale-endpoints.jsonl")
+            deadline = time.monotonic() + 10
+            while probe.poll() is None:
+                if any(r.get("kind") == "ready" for r in probe_tail.read()):
+                    break
+                if time.monotonic() > deadline:
+                    raise TimeoutError("ALE endpoint probe readiness missing")
+                time.sleep(.01)
+
         clients = []
 
         def launch(app, iteration, protocol, port):
+            name = f"client-{app}-{protocol}-{iteration}"
+            nonce = f"inproc-{args.mode}-{app}-{protocol}-{iteration}"
+            attempt_file = args.out / f"{name}.attempt.jsonl"
             command = [args.bin / f"app-{app}.exe", "--target", manifest["target_ip"], "--port", port,
-                       "--protocol", protocol, "--nonce", f"inproc-{args.mode}-{app}-{protocol}-{iteration}"]
-            clients.append((app, protocol, start(command, f"client-{app}-{protocol}-{iteration}")))
+                       "--protocol", protocol, "--nonce", nonce, "--attempt-out", attempt_file.resolve()]
+            if args.expect_leak and app == "a":
+                command += ["--expect-reset", 1]
+            clients.append(dict(app=app, protocol=protocol, nonce=nonce, process=start(command, name),
+                                attempt_file=attempt_file, stdout_file=args.out / f"{name}.stdout.txt"))
 
-        if args.quic:
-            for iteration in range(3):
-                launch("a", iteration, "udp", quic_port)
-        elif args.concurrency:
-            for index in range(args.concurrency):
-                launch("a" if index % 2 == 0 else "b", index, "tcp", manifest["target_port"])
-        else:
-            for iteration in range(3):
-                for app in ["a", "b"]:
-                    launch(app, iteration, "tcp", manifest["target_port"])
+        for client in inproc_client_plan(args, manifest):
+            launch(**client)
 
         deadline = time.monotonic() + min(args.seconds - 5, 40)
-        while any(p.poll() is None for _, _, p in clients):
+        while any(c["process"].poll() is None for c in clients):
             alive(engine, "inproc engine")
             if time.monotonic() > deadline:
                 raise TimeoutError("client timeout")
             time.sleep(.01)
 
+        if probe:
+            (args.out / "ale-endpoints.stop").touch()
+            try:
+                probe.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                probe.terminate()
+                probe.wait(timeout=5)
         (args.out / "inproc.stop").touch()
         try:
             engine.wait(timeout=args.seconds + 15)
@@ -387,34 +642,28 @@ def run_inproc(args, parser):
             engine.terminate()
             raise RuntimeError("inproc engine did not exit")
         packet_records = JsonTail(packet_file).read()
-        decisions = [r for r in packet_records if r.get("kind") == "decision"]
-
-        selected_tuples = set()
-        dropped_client_fail = 0
-        client_results = []
-        for stdout in sorted(args.out.glob("client-*.stdout.txt")):
-            client_results.extend(JsonTail(stdout).read())
-
-        for app, protocol, process in clients:
-            if args.quic and app == "a":
-                if process.returncode == 0:
-                    raise RuntimeError("selected QUIC UDP flow was not dropped; client unexpectedly echoed")
-                dropped_client_fail += 1
-            elif process.returncode != 0:
-                raise RuntimeError(f"client app-{app}/{protocol} failed; trace retained")
-        for record in client_results:
-            if record.get("status") == "echo_ok" and record.get("nonce", "").split("-")[2] == "a" \
-                    and record.get("protocol") == 6:
-                key = tuple_key(record)
-                if key:
-                    selected_tuples.add(key)
-
-        if wrong_app_redirected(decisions, selected_tuples):
-            raise RuntimeError("a non-selected client tuple was redirected to the proxy")
+        try:
+            engine_summary = json.loads((args.out / "engine-summary.json").read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            engine_summary = None
+        summary["engine_summary"] = engine_summary
+        client_evidence = []
+        for client in clients:
+            client_evidence.append(dict(app=client["app"], protocol=client["protocol"], nonce=client["nonce"],
+                                        attempts=JsonTail(client["attempt_file"]).read(),
+                                        results=inproc_client_results(client["stdout_file"]),
+                                        returncode=client["process"].returncode))
+        summary["clients"] = client_evidence
+        if probe:
+            summary["ale_probe"] = ale_probe_report(client_evidence, packet_records,
+                JsonTail(args.out / "ale-endpoints.jsonl").read(), app_paths, packet_frequency, probe.returncode)
+        evidence = inproc_client_evidence(client_evidence, packet_records, app_paths, args.mode,
+                                         quic=args.quic, expect_leak=args.expect_leak)
+        selected_tuples = evidence["selected_tuples"]
 
         gateway_records = []
         gateway_path = args.out / "gateway.jsonl"
-        expected_proxy = len(selected_tuples) if redirecting and args.protocol == "tcp" else 0
+        expected_proxy = len(selected_tuples) if redirecting and not args.expect_leak else 0
         for _ in range(20):
             try:
                 gateway_records = [json.loads(line) for line in gateway_path.read_text().splitlines() if line.strip()]
@@ -427,11 +676,6 @@ def run_inproc(args, parser):
         if any(r.get("kind") != "gateway_connect" or r.get("request_line") != expected_line for r in gateway_records):
             raise RuntimeError("gateway CONNECT destination differs from expected transparent tunnels")
 
-        try:
-            engine_summary = json.loads((args.out / "engine-summary.json").read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            engine_summary = None
-        summary["engine_summary"] = engine_summary
         if any(r.get("kind") == "error" for r in packet_records):
             raise RuntimeError("inproc engine reported an error")
         complete = [r for r in packet_records if r.get("kind") == "complete"]
@@ -440,18 +684,27 @@ def run_inproc(args, parser):
         if engine.returncode != 0:
             raise RuntimeError("inproc engine exit code was nonzero")
         status, error = inproc_evaluate(engine_summary, args.mode, "udp" if args.quic else args.protocol,
-                                        args.quic, expected_proxy, len(gateway_records))
+                                        args.quic, expected_proxy, len(gateway_records), expect_leak=args.expect_leak,
+                                        expected_selected_clients=len(selected_tuples), expected_lookup_mode=args.lookup_mode,
+                                        expected_filter_cache=args.filter_cache == "on")
         summary["status"] = status
         if error:
             summary["error"] = error
         summary["selected_tuple_count"] = len(selected_tuples)
         summary["gateway_connect_count"] = len(gateway_records)
-        summary["quic_dropped_clients"] = dropped_client_fail
+        summary["quic_dropped_clients"] = evidence["quic_dropped_clients"]
+        if args.ale_probe and status == "PASS_RESTRICTED_CASE" and summary["ale_probe"]["status"] != "OBSERVED_WHILE_HELD":
+            summary.update(routing_case_status=status, status="INCONCLUSIVE_ALE_ENDPOINT_PROBE",
+                           error=summary["ale_probe"].get("reason"))
     except Exception as error:
         summary.update(status="FAIL", error=str(error))
     finally:
-        for name in ["inproc.stop"]:
+        for name in ["inproc.stop", "ale-endpoints.stop"]:
             (args.out / name).touch()
+        cleanup = stop_inproc_collectors(engine, probe, args.bin, args.out)
+        summary.update(cleanup)
+        if cleanup["cleanup_forced_pids"] or cleanup.get("fallback_restore_exit_code", 0) or cleanup.get("fallback_restore_error"):
+            summary.update(status="FAIL", cleanup_failed=True)
         if bridge:
             bridge.close()
         for process in reversed(processes):
@@ -478,7 +731,8 @@ def main():
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--private-dir", type=pathlib.Path)
     parser.add_argument("--source", choices=["wfp", "security5156"], default="wfp")
-    parser.add_argument("--wfp-api", choices=["subscribe2", "subscribe4", "poll"], default="subscribe2")
+    parser.add_argument("--wfp-api", choices=["subscribe2", "subscribe3", "subscribe4", "poll"], default="subscribe2")
+    parser.add_argument("--callback-drain-ms", type=int, default=0)
     parser.add_argument("--mode", choices=["hold", "redirect"], default="hold")
     parser.add_argument("--protocol", choices=["tcp", "udp"], default="tcp")
     parser.add_argument("--scenario", choices=["baseline", "retransmit", "reuse"], default="baseline")
@@ -497,6 +751,10 @@ def main():
     parser.add_argument("--window-after-ms", type=int, default=50)
     parser.add_argument("--leak-ms", type=int, default=2000)
     parser.add_argument("--send-rst", action="store_true")
+    parser.add_argument("--expect-leak", action="store_true")
+    parser.add_argument("--lookup-mode", choices=["inline", "async"], default="inline")
+    parser.add_argument("--filter-cache", choices=["on", "off"], default="on")
+    parser.add_argument("--ale-probe", action="store_true")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("Windows is required; pure attribution tests run on other hosts")
@@ -572,7 +830,7 @@ def main():
         native_tail, packet_tail = JsonTail(native_file), JsonTail(packet_file)
         control = args.out / "control.txt"
         control.touch()
-        native = start(native_command(args.bin, args.out, args.seconds, args.wfp_api), "native")
+        native = start(native_command(args.bin, args.out, args.seconds, args.wfp_api, args.callback_drain_ms), "native")
         native_ready = False
         deadline = time.monotonic() + 10
         while not native_ready:
@@ -785,7 +1043,7 @@ def main():
         for process in processes:
             if process.poll() is None and process not in ([fixture] if "fixture" in locals() else []):
                 try:
-                    process.wait(timeout=5)
+                    process.wait(timeout=10 if "native" in locals() and process is native else 5)
                 except subprocess.TimeoutExpired:
                     process.terminate()
                     forced.append(process.pid)
@@ -825,7 +1083,8 @@ def main():
                 summary["native_summary"] = native_summary[-1]
             except Exception as error:
                 summary.update(status="FAIL", error=str(error))
-        status, error = native_evidence_status(summary["status"], args.source, summary.get("native_summary"))
+        status, error = native_evidence_status(summary["status"], args.source, summary.get("native_summary"),
+                                               summary.get("source_target_complete_outbound_events"))
         if error:
             summary.update(status=status, error=error)
         status, error = poll_evidence_status(summary["status"], summary.get("error"), args.wfp_api, summary.get("native_summary"))

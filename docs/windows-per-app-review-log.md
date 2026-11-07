@@ -92,4 +92,98 @@ udp_end_to_end: NOT RUN (UDP forwarding unimplemented)
 
 Conclusions are limited to this runner and topology. TCP first-packet hold works with polled native WFP stored net events as the ownership source; subscription delivery is not usable there. UDP attribution timing works under hold, but UDP end to end stays "cannot guarantee". Still unqualified: Windows 10/11 client SKUs, other builds, external routing beyond the connect-only case, load and stress, polling cost at scale, longer-lived collectors, and the Subscribe4 field-read anomaly (possibly a structure or version mismatch, not root-caused).
 
-Figures for runs 42280670136 and 42282264784 are from the summary of their job logs; their head SHAs and job IDs were confirmed with `gh run view`. Run 42340194216 figures were re-extracted from its job log, and only it has an excerpt in `docs/evidence`.
+Figures for runs 42280670136 and 42282264784 are from the summary of their job logs; their head SHAs and job IDs were confirmed with `gh run view`. Run 42340194216 figures were re-extracted from its job log and retained in `docs/evidence`.
+
+## In-process follow-up audit and validation repairs
+
+Inspected 2026-11-07: [run 42348888370](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42348888370),
+head `e3336bd9a361dde7b3ea3c5c68d98b41a0a814db`, Windows job 128332553899.
+Read PR #95 metadata, comments, changed filenames, checks and decoded Windows job
+log through the GitHub connector. The full findings and raw decision excerpts are
+in [evidence/wfp-divert-run-42348888370.md](evidence/wfp-divert-run-42348888370.md).
+
+The 11 split poll cases again reached their expected statuses. The new in-process
+TCP cases produced echo/CONNECT evidence, including 25 CONNECTs for 50 clients,
+but their decision summaries omitted blocking enumeration time. Recalculated
+complete small TCP hold/redirect traces have decision p50 25.7–33.1 ms; the
+concurrency excerpt is incomplete and cannot correct the full-run percentile.
+The nominal UDP case used TCP clients, QUIC failed before readiness, and leakcheck
+passed with no timeout/leak/RST. Those three cases do not qualify the named paths.
+
+Prepared on local branch `research/wfp-inproc-validation`, in the isolated worktree
+`/workspace/gateinto-wfp-research`; the original checkout was clean and unchanged.
+Changes affect only experiment code, its workflow and documentation:
+
+- Corrected the decision clock/deadline and capture-to-successful-send metrics;
+  discarded incomplete/error enumeration results; required native validity flags
+  and app path; restored BFE options with guards before final success.
+- Corrected UDP/QUIC client plans and required each client's native ownership,
+  tuple, generation, protocol, decision and echo/drop evidence.
+- Replaced vacuous leakcheck with 100 ms hold / 250 ms selected-app evidence delay,
+  TCP redirect, checked bidirectional RST and a live client that must observe reset.
+  Added selected generation-qualified post-reset drop validation.
+- Retained native/client evidence on validation failures and printed ownership
+  and filter-fallback diagnostics in bounded CI excerpts.
+
+Actual local verification, Linux x86_64, kernel 6.18.57:
+
+| Check | Result and boundary |
+| --- | --- |
+| Python failing-first regression checks | Covered missing native authority, actual UDP protocol, selected QUIC/non-selected echo, leak/reset trace and selected post-reset enforcement; initially failed before the relevant changes. |
+| `python3 -m unittest discover -s experiments/wfp-divert -p 'test_*.py' -v` | 37 passed with loopback socket permission, including bridge response/early-data/half-close. Sandboxed execution alone skips that bridge test. |
+| Native-event, packet-state, in-process and client-state portable self-tests, `g++ -std=c++17 -Wall -Wextra` | Passed. Added deadline boundary, incomplete/empty ownership and BFE concurrent-change checks; these are model/helper checks. |
+| Windows x64 object compilation of `inproc.cpp` and `client.cpp` | Passed with official LLVM-MinGW 20261104 and Microsoft's WFP headers from win32metadata, plus official WinDivert v2.2.2 header, all downloaded into `/tmp`. This is a compile check, not MSVC linking or driver execution. |
+| Separate read-only reviewer | Reviewed the completed code and documentation. Required a larger hold for the other-app control and validation of legitimate post-reset drops; fixes applied. |
+| `git diff --check` | Passed. |
+
+No new Windows runtime run, push, PR comment or merge was performed. Repaired
+timings, strict late-decision rejection, real in-process UDP/QUIC, live reset and
+Windows cleanup remain pending the next Actions run. Synchronous BFE RPC can
+still delay the worker past a hold deadline; the patch rejects late authorization
+but does not provide a hard release-time bound or bounded receive backlog.
+
+Subscribe4's source-level CALLBACK4/EVENT5 pairing matches Microsoft's API
+declarations. The unknown-direction anomaly remains unresolved; no ABI/version
+mismatch was established. A further runtime diagnostic should correlate raw
+classifyAllow fields from identical callback/Enum3/Enum5 events.
+
+## Lower-latency research follow-up
+
+The next implementation compares inline lookup with filter capability caching
+off/on and asynchronous lookup with the same ownership/decision checks. The
+background executor owns one immutable request/result at a time, tags subjects
+with tuple/capture/generation, discards failed or stale results and joins before
+BFE cleanup. Past retry times cannot spin the worker while a query is active.
+Queries report create/enum/destroy/process elapsed time, call/event counts,
+backpressure, cache activity and query-thread CPU. These CPU samples exclude BFE
+service and other process/thread work.
+
+A separate `ale-endpoints.cpp` shadow probe uses documented native WFP
+FwpsAleEndpoint APIs to inspect live appId/tuple/endpointId while packets are held.
+It neither changes routing nor invents event timestamps or socket generations.
+The harness requires complete, unique matching observations inside the hold
+interval; unavailable, partial, late or ambiguous observations are inconclusive.
+The extra sampler cases are excluded from normal performance comparisons.
+
+Subscribe3 is added alongside Subscribe2/4, with 1500 ms diagnostic drain cases,
+raw allow fields/ABI metadata and Enum3/Enum5 comparison over the same time window.
+Unknown direction stays unusable. Raw callbacks without usable target ownership
+can no longer make WFP negative controls pass.
+
+The prepared Windows matrix covers Server 2022 and 2025 separately. The in-process
+harness now waits for cooperative collector exit on failure and invokes the
+persisted guarded BFE restoration after forced or failed engine exit. No live
+Windows performance improvement is asserted by these implementation changes.
+
+Local verification: 46 Python tests passed with loopback permission, including
+new red-first authority, shadow snapshot, mode-selection and cleanup regressions;
+all five portable native helper programs passed. Four changed Windows programs
+(`native-events`, `inproc`, `ale-endpoints`, `client`) have x64 object-compilation
+checks with LLVM-MinGW and official API headers. PowerShell 7.5.4 parsed both
+Windows scripts, and documentation whitespace/local-link checks passed.
+Native event snapshots cap individual app-ID copies at 64 KiB and total copied
+app-ID bytes per request at 8 MiB, discarding the entire result on overflow.
+Development and review use
+separate agents under AGENTS.md. See
+[the low-latency research](windows-per-app-low-latency.md) for exact mechanisms,
+official references, remaining reliability limits and benchmark acceptance.

@@ -77,6 +77,10 @@ try {
     @{ name='hold-wfp-poll-tcp-repeat'; source='wfp'; api='poll'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
     @{ name='redirect-wfp-poll-repeat'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false }
   )
+  foreach ($api in @('subscribe2', 'subscribe3', 'subscribe4')) {
+    $cases += @{ name="hold-wfp-$api-drain"; source='wfp'; api=$api; mode='hold'; protocol='tcp';
+                 delay=0; hold=2000; skip=$false; drain=1500 }
+  }
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
     $arguments = @("$PSScriptRoot\run.py", '--bin', $Bin, '--fixture', $Fixture,
@@ -86,6 +90,7 @@ try {
       '--hold-ms', $case.hold, '--delay-ms', $case.delay, '--iterations', 3, '--seconds', 35)
     if ($case.skip) { $arguments += '--skip-all' }
     if ($case.ContainsKey('api')) { $arguments += @('--wfp-api', $case.api) }
+    if ($case.ContainsKey('drain')) { $arguments += @('--callback-drain-ms', $case.drain) }
     if ($case.ContainsKey('scenario')) {
       $arguments += @('--scenario', $case.scenario)
       if ($case.scenario -eq 'reuse') { $arguments += @('--iterations', 1) }
@@ -113,10 +118,10 @@ try {
     if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
     $nativeLog = Join-Path $caseDir 'native.jsonl'
     if (Test-Path $nativeLog) {
-      Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum"' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"wfp_poll_error"|"kind":"ready"|"kind":"summary"' } |
+      Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"wfp_poll_error"|"kind":"ready"|"kind":"summary"' } |
         Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
-      Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum(_error)?"' } |
-        Select-Object -First 30 | ForEach-Object { Write-Host "WFPENUM $($case.name) $_" }
+      Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum(5)?(_error|_summary)?"' } |
+        Select-Object -First 100 | ForEach-Object { Write-Host "WFPENUM $($case.name) $_" }
     }
     $packetLog = Join-Path $caseDir 'packets.jsonl'
     if (Test-Path $packetLog) {
@@ -129,9 +134,19 @@ try {
     @{ name='redirect-inproc'; mode='redirect'; protocol='tcp' },
     @{ name='hold-inproc-tcp-repeat'; mode='hold'; protocol='tcp' },
     @{ name='redirect-inproc-repeat'; mode='redirect'; protocol='tcp' },
-    @{ name='leakcheck-inproc'; mode='hold'; protocol='tcp'; hold=15; rst=$true },
+    @{ name='leakcheck-inproc'; mode='redirect'; protocol='tcp'; hold=100; delay=250; rst=$true; leak=$true },
     @{ name='concurrency-inproc'; mode='redirect'; protocol='tcp'; concurrency=50 },
-    @{ name='quic-inproc'; mode='redirect'; protocol='udp'; quic=$true }
+    @{ name='quic-inproc'; mode='redirect'; protocol='udp'; quic=$true },
+    @{ name='concurrency-inproc-cacheoff'; mode='redirect'; protocol='tcp'; concurrency=50; cache='off' },
+    @{ name='hold-inproc-async-tcp'; mode='hold'; protocol='tcp'; lookup='async' },
+    @{ name='hold-inproc-async-udp'; mode='hold'; protocol='udp'; lookup='async' },
+    @{ name='redirect-inproc-async'; mode='redirect'; protocol='tcp'; lookup='async' },
+    @{ name='redirect-inproc-async-repeat'; mode='redirect'; protocol='tcp'; lookup='async' },
+    @{ name='concurrency-inproc-async'; mode='redirect'; protocol='tcp'; concurrency=50; lookup='async' },
+    @{ name='leakcheck-inproc-async'; mode='redirect'; protocol='tcp'; hold=100; delay=250; rst=$true; leak=$true; lookup='async' },
+    @{ name='quic-inproc-async'; mode='redirect'; protocol='udp'; quic=$true; lookup='async' },
+    @{ name='ale-probe-inproc-tcp'; mode='hold'; protocol='tcp'; lookup='async'; ale=$true },
+    @{ name='ale-probe-inproc-udp'; mode='hold'; protocol='udp'; lookup='async'; ale=$true }
   )
   foreach ($case in $inprocCases) {
     Write-Host "Running $($case.name)"
@@ -142,6 +157,11 @@ try {
     if ($case.ContainsKey('concurrency')) { $arguments += @('--concurrency', $case.concurrency) }
     if ($case.ContainsKey('quic')) { $arguments += '--quic' }
     if ($case.ContainsKey('rst')) { $arguments += '--send-rst' }
+    if ($case.ContainsKey('delay')) { $arguments += @('--delay-ms', $case.delay) }
+    if ($case.ContainsKey('leak')) { $arguments += '--expect-leak' }
+    if ($case.ContainsKey('lookup')) { $arguments += @('--lookup-mode', $case.lookup) }
+    if ($case.ContainsKey('cache')) { $arguments += @('--filter-cache', $case.cache) }
+    if ($case.ContainsKey('ale')) { $arguments += '--ale-probe' }
     python @arguments
     if ($LASTEXITCODE) { $failures.Add($case.name) }
     $caseDir = Join-Path $OutDir $case.name
@@ -151,10 +171,14 @@ try {
     }
     $engineSummary = Join-Path $caseDir 'engine-summary.json'
     if (Test-Path $engineSummary) { Get-Content $engineSummary | ForEach-Object { Write-Host "ENGINE $($case.name) $_" } }
+    $aleLog = Join-Path $caseDir 'ale-endpoints.jsonl'
+    if (Test-Path $aleLog) {
+      Get-Content $aleLog | Select-Object -Last 20 | ForEach-Object { Write-Host "ALE $($case.name) $_" }
+    }
     $packetLog = Join-Path $caseDir 'packets.jsonl'
     if (Test-Path $packetLog) {
-      Get-Content $packetLog | Where-Object { $_ -match '"kind":"(ready|decision|translation|rst|leaked|error|summary|complete)"' } |
-        Select-Object -First 40 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
+      Get-Content $packetLog | Where-Object { $_ -match '"kind":"(ready|ownership|enum_filter_fallback|decision|translation|rst|leaked|error|summary|complete)"' } |
+        Select-Object -First 256 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
     }
     $bridgeLog = Join-Path $caseDir 'bridge.jsonl'
     if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }

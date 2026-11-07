@@ -20,6 +20,8 @@ std::string xml_value(const std::string&, const std::string&);
 std::string counts_json(const std::map<unsigned, unsigned long long>&);
 std::string error_line_json(const std::string&, const std::string&, unsigned long);
 std::string poll_missed_json(bool, unsigned long long, unsigned long long, bool, unsigned long long);
+std::string direction_label(unsigned long);
+std::string allow_diagnostics_json(unsigned long, long, unsigned long, unsigned long);
 
 struct PollStats {
     unsigned long long started = 0, stopped = 0, polls = 0, productive = 0;
@@ -58,6 +60,12 @@ int self_test() {
     if (!xml_value(xml, "Missing").empty()) throw std::runtime_error("XML missing field");
     if (counts_json({}) != "{}") throw std::runtime_error("Empty type counts");
     if (counts_json({{3, 2}, {0, 1}}) != "{\"0\":1,\"3\":2}") throw std::runtime_error("Type counts");
+    if (direction_label(0) != "outbound" || direction_label(1) != "inbound" ||
+        direction_label(0x3900) != "unknown" || direction_label(0xffffffffUL) != "unknown")
+        throw std::runtime_error("Only documented direction values are authoritative");
+    if (allow_diagnostics_json(0x3900, 7, 2, 4) !=
+        "\"direction_raw\":14592,\"is_loopback_raw\":7,\"original_profile\":2,\"current_profile\":4")
+        throw std::runtime_error("Allow diagnostics preserve raw values");
     if (error_line_json("wfp_enum_error", "FwpmNetEventEnum3", 5) != "{\"kind\":\"wfp_enum_error\",\"operation\":\"FwpmNetEventEnum3\",\"code\":5}")
         throw std::runtime_error("Enumeration error line");
     CappedCounter capped(2);
@@ -137,6 +145,18 @@ std::string counts_json(const std::map<unsigned, unsigned long long>& counts) {
         result += "\"" + std::to_string(entry.first) + "\":" + std::to_string(entry.second);
     }
     return result + '}';
+}
+
+std::string direction_label(unsigned long raw) {
+    return raw == 0 ? "outbound" : raw == 1 ? "inbound" : "unknown";
+}
+
+std::string allow_diagnostics_json(unsigned long direction, long loopback,
+                                   unsigned long original, unsigned long current) {
+    return "\"direction_raw\":" + std::to_string(direction) +
+        ",\"is_loopback_raw\":" + std::to_string(loopback) +
+        ",\"original_profile\":" + std::to_string(original) +
+        ",\"current_profile\":" + std::to_string(current);
 }
 
 std::string error_line_json(const std::string& kind, const std::string& operation, unsigned long code) {
@@ -227,6 +247,7 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -236,6 +257,7 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #pragma comment(lib, "fwpuclnt.lib")
@@ -246,6 +268,25 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
+
+static_assert(FWP_DIRECTION_OUTBOUND == 0 && FWP_DIRECTION_INBOUND == 1);
+
+static std::string abi_json() {
+    std::ostringstream s;
+    s << "{\"pointer_bytes\":" << sizeof(void*) << ",\"compiled_ntddi\":" << NTDDI_VERSION
+      << ",\"header3_size\":" << sizeof(FWPM_NET_EVENT_HEADER3)
+      << ",\"event3_size\":" << sizeof(FWPM_NET_EVENT3)
+      << ",\"event4_size\":" << sizeof(FWPM_NET_EVENT4)
+      << ",\"event5_size\":" << sizeof(FWPM_NET_EVENT5)
+      << ",\"event3_type_offset\":" << offsetof(FWPM_NET_EVENT3, type)
+      << ",\"event5_type_offset\":" << offsetof(FWPM_NET_EVENT5, type)
+      << ",\"event3_allow_offset\":" << offsetof(FWPM_NET_EVENT3, classifyAllow)
+      << ",\"event5_allow_offset\":" << offsetof(FWPM_NET_EVENT5, classifyAllow)
+      << ",\"allow_size\":" << sizeof(FWPM_NET_EVENT_CLASSIFY_ALLOW0)
+      << ",\"allow_direction_offset\":" << offsetof(FWPM_NET_EVENT_CLASSIFY_ALLOW0, msFwpDirection)
+      << ",\"allow_loopback_offset\":" << offsetof(FWPM_NET_EVENT_CLASSIFY_ALLOW0, isLoopback) << "}";
+    return s.str();
+}
 
 static unsigned long long qpc() {
     LARGE_INTEGER value{};
@@ -332,9 +373,11 @@ struct Output {
     std::atomic<unsigned long long> errors{0};
     std::atomic<unsigned long long> wfp_count{0};
     std::atomic<unsigned long long> wfp_raw_count{0};
+    unsigned long long subscription_start_qpc = 0, subscription_stop_qpc = 0;
     std::mutex type_mutex;
     std::map<unsigned, unsigned long long> wfp_type_counts;
     unsigned long long enum_total = 0, enum_emitted = 0;
+    unsigned long long enum_window_start = 0, enum_window_end = 0;
     CappedCounter enum_errors{5};
     bool enum_truncated = false;
     PollStats poll_stats;
@@ -424,7 +467,8 @@ static std::string identity(const Header& h) {
 
 template <typename Event>
 static std::string wfp_line(const char* kind, const Event* event,
-                            unsigned long long received, unsigned long long receipt_utc) {
+                            unsigned long long received, unsigned long long receipt_utc,
+                            unsigned long long callback_sequence = 0) {
     const auto& h = event->header;
     const auto flags = h.flags;
     const UINT32 required = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
@@ -436,12 +480,14 @@ static std::string wfp_line(const char* kind, const Event* event,
     const auto path = app_set ? blob_path(h.appId) : std::string{};
     const auto local = (flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) ? address(h, true) : std::string{};
     const auto remote = (flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) ? address(h, false) : std::string{};
-    const bool direction_known = allow && (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND || allow->msFwpDirection == FWP_DIRECTION_INBOUND);
+    const bool direction_known = allow && direction_label(allow->msFwpDirection) != "unknown";
     const bool complete = (flags & required) == required && direction_known && !path.empty() && !local.empty() && !remote.empty();
     std::ostringstream s;
     s << "{\"kind\":" << json(kind) << ",\"recv_qpc\":" << received << ",\"receipt_filetime\":" << receipt_utc
       << ",\"event_filetime\":" << filetime(h.timeStamp) << ",\"flags\":" << flags
       << ",\"event_type\":" << event->type << ",\"pid\":null,\"app_path\":" << json(path)
+      << ",\"event_struct_version\":" << (std::is_same<Event, FWPM_NET_EVENT5>::value ? 5 :
+                                             std::is_same<Event, FWPM_NET_EVENT4>::value ? 4 : 3)
       << ",\"app_id_hex\":" << json(app_set ? blob_hex(h.appId) : std::string{})
       << ",\"app_id_bytes\":" << (app_set ? h.appId.size : 0)
       << ",\"ip_version\":" << static_cast<int>(h.ipVersion)
@@ -451,12 +497,16 @@ static std::string wfp_line(const char* kind, const Event* event,
       << ",\"remote_port\":" << ((flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET) ? std::to_string(h.remotePort) : "null")
       << ",\"scope_id\":" << ((flags & FWPM_NET_EVENT_FLAG_SCOPE_ID_SET) ? std::to_string(h.scopeId) : "null")
       << ",\"user_sid\":" << json((flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) ? sid_text(h.userId) : std::string{})
-      << ",\"direction\":" << json(!direction_known ? "unknown" : (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND ? "outbound" : "inbound"))
+      << ",\"direction\":" << json(allow ? direction_label(allow->msFwpDirection) : "unknown")
       << ",\"complete\":" << (complete ? "true" : "false")
       << ",\"layer_id\":" << (allow ? std::to_string(allow->layerId) : "null")
       << ",\"filter_id\":" << (allow ? std::to_string(allow->filterId) : "null")
       << ",\"reauth_reason\":" << (allow ? std::to_string(allow->reauthReason) : "null")
-      << ",\"is_loopback\":" << (allow && allow->isLoopback ? "true" : "false") << "}";
+      << ",\"is_loopback\":" << (allow && allow->isLoopback ? "true" : "false");
+    if (allow) s << ',' << allow_diagnostics_json(allow->msFwpDirection, allow->isLoopback,
+                                                allow->originalProfile, allow->currentProfile);
+    if (callback_sequence) s << ",\"callback_sequence\":" << callback_sequence;
+    s << "}";
     return s.str();
 }
 
@@ -466,12 +516,12 @@ static void CALLBACK net_event(void* context, const Event* event) noexcept {
     const auto receipt_utc = utc_now();
     auto& out = *static_cast<Output*>(context);
     try {
-        ++out.wfp_raw_count;
+        const auto sequence = out.wfp_raw_count.fetch_add(1) + 1;
         if (!event) return;
         out.count_type(static_cast<unsigned>(event->type));
         if (event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) return;
         ++out.wfp_count;
-        out.push(wfp_line("wfp", event, received, receipt_utc));
+        out.push(wfp_line("wfp", event, received, receipt_utc, sequence));
     } catch (...) { out.error("net_event_callback", ERROR_INVALID_DATA); }
 }
 
@@ -560,8 +610,10 @@ struct Engine {
     UINT32 old_collect = 0, old_keywords = 0;
     bool collect_changed = false, keywords_changed = false, enumerate_on_close = false;
     FILETIME start_time{};
+    FILETIME enum_end_time{};
     std::string api = "subscribe2";
     unsigned poll_interval_ms = 5, poll_overlap_ms = 300;
+    unsigned callback_drain_ms = 0;
     std::atomic<bool> poll_stop{false};
     std::thread poller;
     Output& out;
@@ -606,8 +658,11 @@ struct Engine {
         const auto keywords_after = get(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS);
         enumerate_on_close = true;
         FWPM_NET_EVENT_SUBSCRIPTION0 request{};
+        if (api != "poll") out.subscription_start_qpc = qpc();
         if (api == "subscribe2")
             check(FwpmNetEventSubscribe2(engine, &request, net_event<FWPM_NET_EVENT3>, &out, &subscription), "FwpmNetEventSubscribe2");
+        else if (api == "subscribe3")
+            check(FwpmNetEventSubscribe3(engine, &request, net_event<FWPM_NET_EVENT4>, &out, &subscription), "FwpmNetEventSubscribe3");
         else if (api == "subscribe4")
             check(FwpmNetEventSubscribe4(engine, &request, net_event<FWPM_NET_EVENT5>, &out, &subscription), "FwpmNetEventSubscribe4");
         else poller = std::thread([this] { poll_loop(); });
@@ -618,7 +673,8 @@ struct Engine {
         out.push("{\"kind\":\"ready\",\"recv_qpc\":" + std::to_string(qpc()) +
             ",\"receipt_filetime\":" + std::to_string(utc_now()) + ",\"qpc_frequency\":" + std::to_string(frequency.QuadPart) +
             ",\"old_collect\":" + std::to_string(old_collect) + ",\"old_keywords\":" + std::to_string(old_keywords) + ",\"wfp_api\":" + json(api) +
-            ",\"collect_after\":" + std::to_string(collect_after) + ",\"keywords_after\":" + std::to_string(keywords_after) + "}");
+            ",\"collect_after\":" + std::to_string(collect_after) + ",\"keywords_after\":" + std::to_string(keywords_after) +
+            ",\"wfp_abi\":" + abi_json() + "}");
     }
     void restore_from(const std::string& path) {
         std::ifstream input(path, std::ios::binary);
@@ -743,6 +799,9 @@ struct Engine {
             FWPM_NET_EVENT_ENUM_TEMPLATE0 window{};
             window.startTime = start_time;
             GetSystemTimePreciseAsFileTime(&window.endTime);
+            enum_end_time = window.endTime;
+            out.enum_window_start = filetime(window.startTime);
+            out.enum_window_end = filetime(window.endTime);
             const auto created = FwpmNetEventCreateEnumHandle0(engine, &window, &handle);
             if (created) { out.enum_error("FwpmNetEventCreateEnumHandle0", created); return; }
             const UINT32 batch = 256;
@@ -780,14 +839,76 @@ struct Engine {
             if (destroyed) out.enum_error("FwpmNetEventDestroyEnumHandle0", destroyed);
         }
     }
+    void enumerate5() noexcept {
+        HANDLE handle = nullptr;
+        unsigned long long total = 0, emitted = 0, errors = 0;
+        bool truncated = false;
+        auto error = [&](const char* operation, DWORD code) {
+            if (++errors <= 5) out.push(error_line_json("wfp_enum5_error", operation, code));
+        };
+        const auto module = GetModuleHandleW(L"fwpuclnt.dll");
+        const auto enumerate_fn = module ? reinterpret_cast<decltype(&FwpmNetEventEnum5)>(
+            GetProcAddress(module, "FwpmNetEventEnum5")) : nullptr;
+        try {
+            if (!enumerate_fn) error("FwpmNetEventEnum5_export", ERROR_PROC_NOT_FOUND);
+            else {
+                FWPM_NET_EVENT_ENUM_TEMPLATE0 window{};
+                window.startTime = start_time;
+                window.endTime = enum_end_time;
+                const auto created = FwpmNetEventCreateEnumHandle0(engine, &window, &handle);
+                if (created) error("FwpmNetEventCreateEnumHandle0", created);
+                else {
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                    for (unsigned batch = 0;; ++batch) {
+                        if (batch >= 64 || std::chrono::steady_clock::now() >= deadline) {
+                            truncated = true;
+                            break;
+                        }
+                        FWPM_NET_EVENT5** entries = nullptr;
+                        UINT32 count = 0;
+                        const auto result = enumerate_fn(engine, handle, 256, &entries, &count);
+                        if (result) {
+                            if (entries) FwpmFreeMemory0(reinterpret_cast<void**>(&entries));
+                            error("FwpmNetEventEnum5", result);
+                            break;
+                        }
+                        for (UINT32 i = 0; i < count; ++i) {
+                            ++total;
+                            try {
+                                if (entries[i] && entries[i]->type == FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW && emitted < 200) {
+                                    ++emitted;
+                                    out.push(wfp_line("wfp_enum5", entries[i], qpc(), utc_now()));
+                                }
+                            } catch (...) { error("FwpmNetEventEnum5_entry", ERROR_INVALID_DATA); }
+                        }
+                        if (entries) FwpmFreeMemory0(reinterpret_cast<void**>(&entries));
+                        if (count < 256) break;
+                    }
+                }
+            }
+        } catch (...) { error("net_event_enum5", ERROR_INVALID_DATA); }
+        if (handle) {
+            const auto destroyed = FwpmNetEventDestroyEnumHandle0(engine, handle);
+            if (destroyed) error("FwpmNetEventDestroyEnumHandle0", destroyed);
+        }
+        out.push("{\"kind\":\"wfp_enum5_summary\",\"total\":" + std::to_string(total) +
+                 ",\"emitted\":" + std::to_string(emitted) + ",\"errors\":" + std::to_string(errors) +
+                 ",\"truncated\":" + (truncated ? "true" : "false") +
+                 ",\"window_start_filetime\":" + std::to_string(filetime(start_time)) +
+                 ",\"window_end_filetime\":" + std::to_string(filetime(enum_end_time)) + "}");
+    }
     ~Engine() {
         poll_stop = true;
         if (poller.joinable()) poller.join();
+        if (subscription && callback_drain_ms)
+            std::this_thread::sleep_for(std::chrono::milliseconds(callback_drain_ms));
         if (security) EvtClose(security);
         if (engine && enumerate_on_close) enumerate();
+        if (engine && enumerate_on_close && (api == "subscribe3" || api == "subscribe4")) enumerate5();
         if (subscription) {
             const auto result = FwpmNetEventUnsubscribe0(engine, subscription);
             if (result) out.error("FwpmNetEventUnsubscribe0", result);
+            out.subscription_stop_qpc = qpc();
         }
         if (engine) {
             if (keywords_changed) {
@@ -824,12 +945,12 @@ struct Winsock {
 int main(int argc, char** argv) {
     try {
         int seconds = 30;
-        int poll_interval = 5, poll_overlap = 300;
+        int poll_interval = 5, poll_overlap = 300, callback_drain = 0;
         std::string output = "native-events.jsonl", stop_file, state_out, restore_state, api = "subscribe2";
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--self-test") return self_test();
-            if (i + 1 >= argc) throw std::runtime_error("Usage: native-events --seconds N --out PATH [--stop-file PATH] [--state-out PATH] [--wfp-api subscribe2|subscribe4|poll] [--poll-interval-ms N] [--poll-overlap-ms N] | --restore-state PATH --out PATH | --self-test");
+            if (i + 1 >= argc) throw std::runtime_error("Usage: native-events --seconds N --out PATH [--stop-file PATH] [--state-out PATH] [--wfp-api subscribe2|subscribe3|subscribe4|poll] [--callback-drain-ms N] [--poll-interval-ms N] [--poll-overlap-ms N] | --restore-state PATH --out PATH | --self-test");
             if (arg == "--seconds") seconds = std::stoi(argv[++i]);
             else if (arg == "--out") output = argv[++i];
             else if (arg == "--stop-file") stop_file = argv[++i];
@@ -838,10 +959,14 @@ int main(int argc, char** argv) {
             else if (arg == "--wfp-api") api = argv[++i];
             else if (arg == "--poll-interval-ms") poll_interval = std::stoi(argv[++i]);
             else if (arg == "--poll-overlap-ms") poll_overlap = std::stoi(argv[++i]);
+            else if (arg == "--callback-drain-ms") callback_drain = std::stoi(argv[++i]);
             else throw std::runtime_error("Unknown argument: " + arg);
         }
         if (seconds < 1 || seconds > 3600) throw std::runtime_error("seconds must be 1..3600");
-        if (api != "subscribe2" && api != "subscribe4" && api != "poll") throw std::runtime_error("wfp-api must be subscribe2, subscribe4 or poll");
+        if (api != "subscribe2" && api != "subscribe3" && api != "subscribe4" && api != "poll")
+            throw std::runtime_error("wfp-api must be subscribe2, subscribe3, subscribe4 or poll");
+        if (callback_drain < 0 || callback_drain > 3000 || (api == "poll" && callback_drain))
+            throw std::runtime_error("callback-drain-ms must be 0..3000 and is only valid for subscriptions");
         if (poll_interval < 1 || poll_interval > 1000) throw std::runtime_error("poll-interval-ms must be 1..1000");
         if (poll_overlap < 0 || poll_overlap > 60000) throw std::runtime_error("poll-overlap-ms must be 0..60000");
         Output out(output.c_str());
@@ -862,6 +987,7 @@ int main(int argc, char** argv) {
             engine.api = api;
             engine.poll_interval_ms = static_cast<unsigned>(poll_interval);
             engine.poll_overlap_ms = static_cast<unsigned>(poll_overlap);
+            engine.callback_drain_ms = static_cast<unsigned>(callback_drain);
             engine.start(state_out);
             const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
             while (!interrupted && std::chrono::steady_clock::now() < until) {
@@ -884,6 +1010,11 @@ int main(int argc, char** argv) {
             ",\"wfp_enum_emitted\":" + std::to_string(out.enum_emitted) +
             ",\"wfp_enum_errors\":" + std::to_string(out.enum_errors.count) +
             ",\"wfp_enum_truncated\":" + (out.enum_truncated ? "true" : "false") +
+            ",\"wfp_enum_window_start_filetime\":" + std::to_string(out.enum_window_start) +
+            ",\"wfp_enum_window_end_filetime\":" + std::to_string(out.enum_window_end) +
+            ",\"subscription_start_qpc\":" + std::to_string(out.subscription_start_qpc) +
+            ",\"subscription_stop_qpc\":" + std::to_string(out.subscription_stop_qpc) +
+            ",\"callback_drain_ms\":" + std::to_string(callback_drain) +
             "," + out.poll_stats.json(static_cast<unsigned long long>(frequency.QuadPart)) +
             ",\"wfp_poll_timer\":" + json(out.poll_timer) +
             ",\"wfp_poll_interval_ms\":" + std::to_string(poll_interval) +

@@ -8,12 +8,95 @@
 namespace inproc {
 
 enum class MatchOutcome { NoEvent, Matched, Ambiguous };
+enum class PendingResolution { Retry, Matched, Ambiguous, Timeout, Discard };
+enum class RestoreAction { AlreadyRestored, Restore, Conflict };
+
+PendingResolution pending_resolution(MatchOutcome outcome, int64_t observed, int64_t deadline) {
+    if (observed >= deadline) return PendingResolution::Timeout;
+    if (outcome == MatchOutcome::Matched) return PendingResolution::Matched;
+    if (outcome == MatchOutcome::Ambiguous) return PendingResolution::Ambiguous;
+    return PendingResolution::Retry;
+}
+
+struct GenerationTag {
+    int64_t generation;
+    int64_t capture_qpc;
+    bool operator==(const GenerationTag& other) const {
+        return generation == other.generation && capture_qpc == other.capture_qpc;
+    }
+};
+
+PendingResolution snapshot_resolution(MatchOutcome outcome, bool complete,
+        GenerationTag requested, GenerationTag current, int64_t observed, int64_t deadline) {
+    if (!complete || !(requested == current)) return PendingResolution::Discard;
+    return pending_resolution(outcome, observed, deadline);
+}
+
+int64_t lookup_wakeup(bool query_busy, int64_t retry, int64_t deadline) {
+    return query_busy || !retry ? deadline : (std::min)(retry, deadline);
+}
+
+class HandoffState {
+    enum class Phase { Idle, Queued, Running, Ready, Stopped };
+    Phase phase = Phase::Idle;
+    bool transition(Phase expected, Phase next) {
+        if (phase != expected) return false;
+        phase = next;
+        return true;
+    }
+public:
+    bool submit() { return transition(Phase::Idle, Phase::Queued); }
+    bool start() { return transition(Phase::Queued, Phase::Running); }
+    bool finish() { return transition(Phase::Running, Phase::Ready); }
+    bool consume() { return transition(Phase::Ready, Phase::Idle); }
+    bool busy() const { return phase == Phase::Queued || phase == Phase::Running || phase == Phase::Ready; }
+    bool ready() const { return phase == Phase::Ready; }
+    void stop() { phase = Phase::Stopped; }
+};
+
+struct FilterPattern {
+    uint8_t protocol;
+    int level;
+    bool multiple_ports;
+    bool operator<(const FilterPattern& other) const {
+        if (protocol != other.protocol) return protocol < other.protocol;
+        if (level != other.level) return level < other.level;
+        return multiple_ports < other.multiple_ports;
+    }
+};
+
+class FilterCapabilityCache {
+    std::set<FilterPattern> unsupported;
+public:
+    bool enabled = true;
+    bool skip(const FilterPattern& pattern) const { return enabled && unsupported.count(pattern) != 0; }
+    static bool cacheable(uint32_t error) {
+        return error == 0x80320002u || error == 0x8032002Au || error == 0x80320026u || error == 0x80320027u;
+    }
+    static bool fallback_allowed(uint32_t error) {
+        return cacheable(error) || error == 0x80320035u || error == 87;
+    }
+    bool reject(const FilterPattern& pattern, uint32_t error) {
+        return enabled && cacheable(error) && unsupported.insert(pattern).second;
+    }
+};
+
+bool copy_budget_allows(size_t copied, size_t next) {
+    constexpr size_t capacity = 8 * 1024 * 1024;
+    return next <= 65536 && copied <= capacity && next <= capacity - copied;
+}
+
+RestoreAction restore_action(uint32_t previous, uint32_t expected, uint32_t current) {
+    if (current == previous) return RestoreAction::AlreadyRestored;
+    return current == expected ? RestoreAction::Restore : RestoreAction::Conflict;
+}
 
 struct EventRef {
     int64_t event_filetime = 0;
     uint32_t layer_id = 0;
     bool outbound = false;
     bool tuple_match = false;
+    bool complete = false;
     std::string app_path;
     uint32_t ip_version = 0;
     uint32_t raw_local_addr = 0;
@@ -37,7 +120,7 @@ struct MatchResult {
 };
 
 static bool qualifies(const EventRef& event, int64_t capture, const MatchConfig& config) {
-    return event.tuple_match && event.outbound &&
+    return event.complete && !event.app_path.empty() && event.tuple_match && event.outbound &&
         (event.layer_id == config.ale_connect_v4 || event.layer_id == config.ale_connect_v6) &&
         event.event_filetime >= capture - config.window_before &&
         event.event_filetime <= capture + config.window_after;
@@ -129,6 +212,7 @@ static inproc::EventRef event_a(int64_t when, uint32_t layer = 48,
     event.layer_id = layer;
     event.outbound = true;
     event.tuple_match = true;
+    event.complete = true;
     event.app_path = app;
     return event;
 }
@@ -154,6 +238,76 @@ int inproc_self_test() {
     EventRef wrong_tuple = event_a(capture);
     wrong_tuple.tuple_match = false;
     assert(match_generation({wrong_tuple}, capture, config).outcome == MatchOutcome::NoEvent);
+
+    assert(match_generation({event_a(capture, 48, "")}, capture, config).outcome == MatchOutcome::NoEvent);
+    EventRef incomplete = event_a(capture);
+    incomplete.complete = false;
+    assert(match_generation({incomplete}, capture, config).outcome == MatchOutcome::NoEvent);
+
+    assert(pending_resolution(MatchOutcome::Matched, 1099, 1100) == PendingResolution::Matched);
+    assert(pending_resolution(MatchOutcome::Matched, 1100, 1100) == PendingResolution::Timeout);
+    assert(pending_resolution(MatchOutcome::Matched, 1115, 1100) == PendingResolution::Timeout);
+    assert(pending_resolution(MatchOutcome::NoEvent, 1099, 1100) == PendingResolution::Retry);
+    assert(pending_resolution(MatchOutcome::NoEvent, 1100, 1100) == PendingResolution::Timeout);
+    assert(pending_resolution(MatchOutcome::Ambiguous, 1099, 1100) == PendingResolution::Ambiguous);
+
+    GenerationTag requested{100, 1000};
+    GenerationTag current{100, 1000};
+    assert(snapshot_resolution(MatchOutcome::Matched, true, requested, current, 1101, 1100) == PendingResolution::Timeout);
+    assert(snapshot_resolution(MatchOutcome::Matched, true, requested, GenerationTag{101, 1000}, 1099, 1100) == PendingResolution::Discard);
+    assert(snapshot_resolution(MatchOutcome::Matched, true, requested, GenerationTag{100, 1001}, 1099, 1100) == PendingResolution::Discard);
+    assert(snapshot_resolution(MatchOutcome::Matched, false, requested, current, 1099, 1100) == PendingResolution::Discard);
+    assert(snapshot_resolution(MatchOutcome::Ambiguous, true, requested, current, 1099, 1100) == PendingResolution::Ambiguous);
+
+    HandoffState handoff;
+    assert(handoff.submit());
+    assert(!handoff.submit());
+    assert(handoff.start());
+    assert(!handoff.submit());
+    assert(handoff.finish());
+    assert(!handoff.submit());
+    assert(handoff.consume());
+    assert(handoff.submit());
+    handoff.stop();
+    assert(!handoff.start());
+    assert(!handoff.submit());
+    assert(!handoff.finish());
+    assert(!handoff.consume());
+
+    assert(lookup_wakeup(true, 900, 1100) == 1100);
+    assert(lookup_wakeup(true, 0, 1100) == 1100);
+    assert(lookup_wakeup(true, 800, 1200) == 1200);
+    assert(lookup_wakeup(false, 900, 1100) == 900);
+    assert(lookup_wakeup(false, 1200, 1100) == 1100);
+
+    FilterCapabilityCache capabilities;
+    FilterPattern single{6, 2, false}, multi{6, 2, true};
+    assert(!capabilities.skip(single));
+    assert(capabilities.reject(single, 0x80320002u));
+    assert(capabilities.skip(single));
+    assert(!capabilities.skip(multi));
+    assert(!capabilities.skip(FilterPattern{17, 2, false}));
+    assert(!capabilities.reject(multi, 5));
+    assert(!capabilities.reject(multi, 1722));
+    assert(!capabilities.reject(multi, 0x80320035u));
+    assert(!capabilities.skip(multi));
+    assert(FilterCapabilityCache::fallback_allowed(0x80320035u));
+    assert(FilterCapabilityCache::fallback_allowed(0x80320002u));
+    assert(!FilterCapabilityCache::fallback_allowed(5));
+    assert(!FilterCapabilityCache::fallback_allowed(1722));
+    capabilities.enabled = false;
+    assert(!capabilities.skip(single));
+    assert(!capabilities.reject(multi, 0x8032002Au));
+
+    assert(copy_budget_allows(0, 65536));
+    assert(!copy_budget_allows(0, 65537));
+    assert(copy_budget_allows(8 * 1024 * 1024 - 65536, 65536));
+    assert(!copy_budget_allows(8 * 1024 * 1024 - 1, 2));
+    assert(!copy_budget_allows(static_cast<size_t>(-1), 1));
+
+    assert(restore_action(0, 16, 0) == RestoreAction::AlreadyRestored);
+    assert(restore_action(0, 16, 16) == RestoreAction::Restore);
+    assert(restore_action(0, 16, 32) == RestoreAction::Conflict);
 
     assert(match_generation({event_a(capture, 44)}, capture, config).outcome == MatchOutcome::NoEvent);
     assert(match_generation({event_a(capture, 50)}, capture, config).outcome == MatchOutcome::Matched);
@@ -224,6 +378,7 @@ int main() { return inproc_self_test(); }
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <tuple>
@@ -391,6 +546,8 @@ struct Options {
     std::string stop_file;
     std::string state_out;
     std::string mode = "hold";
+    std::string lookup_mode = "inline";
+    bool filter_cache = true;
     uint16_t port = 0;
     uint16_t udp_port = 0;
     uint16_t quic_port = 443;
@@ -400,6 +557,7 @@ struct Options {
     int window_before_ms = 500;
     int window_after_ms = 50;
     int leak_ms = 2000;
+    int delay_ms = 0;
     bool send_rst = false;
 };
 
@@ -422,12 +580,18 @@ Options options(int argc, char** argv) {
         else if (key == "--quic-port") result.quic_port = static_cast<uint16_t>(number(value, 1, 65535));
         else if (key == "--listener-port") result.listener_port = static_cast<uint16_t>(number(value, 1, 65535));
         else if (key == "--mode") result.mode = value;
+        else if (key == "--lookup-mode") result.lookup_mode = value;
+        else if (key == "--filter-cache") {
+            if (value != "on" && value != "off") throw std::runtime_error("filter-cache must be on or off");
+            result.filter_cache = value == "on";
+        }
         else if (key == "--selected-app") result.selected_app = value;
         else if (key == "--seconds") result.seconds = static_cast<int>(number(value, 1, 600));
         else if (key == "--hold-ms") result.hold_ms = static_cast<int>(number(value, 1, 10000));
         else if (key == "--window-before-ms") result.window_before_ms = static_cast<int>(number(value, 0, 10000));
         else if (key == "--window-after-ms") result.window_after_ms = static_cast<int>(number(value, 0, 10000));
         else if (key == "--leak-ms") result.leak_ms = static_cast<int>(number(value, 0, 10000));
+        else if (key == "--delay-ms") result.delay_ms = static_cast<int>(number(value, 0, 10000));
         else if (key == "--send-rst") result.send_rst = number(value, 0, 1) != 0;
         else if (key == "--out") result.output = value;
         else if (key == "--summary") result.summary = value;
@@ -439,6 +603,8 @@ Options options(int argc, char** argv) {
         throw std::runtime_error("required: --target IPv4 --port N --out PATH --summary PATH");
     if (result.mode != "hold" && result.mode != "redirect")
         throw std::runtime_error("mode must be hold or redirect");
+    if (result.lookup_mode != "inline" && result.lookup_mode != "async")
+        throw std::runtime_error("lookup-mode must be inline or async");
     if (result.mode == "redirect" && !result.listener_port)
         throw std::runtime_error("redirect mode requires --listener-port");
     if (result.listener_port == result.port)
@@ -448,8 +614,10 @@ Options options(int argc, char** argv) {
 
 struct Bfe {
     HANDLE engine = nullptr;
+    Log* log = nullptr;
     UINT32 old_collect = 0, old_keywords = 0;
     bool collect_changed = false, keywords_changed = false;
+    unsigned errors = 0;
 
     static void check(DWORD result, const char* operation) {
         if (result != ERROR_SUCCESS) throw std::runtime_error(std::string(operation) + ": " + std::to_string(result));
@@ -489,25 +657,82 @@ struct Bfe {
             keywords_changed = true;
         }
     }
-    void restore(FWPM_ENGINE_OPTION option, UINT32 previous, const char* operation) noexcept {
+    void error(const char* operation, DWORD code) noexcept {
+        ++errors;
         try {
-            if (get(option) == previous) return;
-            const auto result = set(option, previous);
-            if (result) std::cerr << operation << " failed: " << result << '\n';
-        } catch (...) { std::cerr << operation << " failed\n"; }
+            if (log) log->write("{\"kind\":\"error\",\"operation\":" + json(operation) +
+                                ",\"code\":" + std::to_string(code) + "}");
+        } catch (...) {}
     }
-    ~Bfe() {
+    void restore(FWPM_ENGINE_OPTION option, UINT32 expected, UINT32 previous, const char* operation) noexcept {
+        try {
+            const auto action = inproc::restore_action(previous, expected, get(option));
+            if (action == inproc::RestoreAction::AlreadyRestored) return;
+            if (action == inproc::RestoreAction::Conflict) { error(operation, ERROR_BUSY); return; }
+            const auto result = set(option, previous);
+            if (result) error(operation, result);
+        } catch (...) { error(operation, ERROR_INVALID_DATA); }
+    }
+    void finish() noexcept {
         if (!engine) return;
-        if (keywords_changed) restore(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS, old_keywords, "Restore MATCH_ANY_KEYWORDS");
-        if (collect_changed) restore(FWPM_ENGINE_COLLECT_NET_EVENTS, old_collect, "Restore COLLECT_NET_EVENTS");
-        FwpmEngineClose0(engine);
+        if (keywords_changed) restore(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS,
+            old_keywords | FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW, old_keywords, "Restore MATCH_ANY_KEYWORDS");
+        if (collect_changed) restore(FWPM_ENGINE_COLLECT_NET_EVENTS, 1, old_collect, "Restore COLLECT_NET_EVENTS");
+        const auto closed = FwpmEngineClose0(engine);
+        if (closed) error("FwpmEngineClose0 BFE", closed);
+        engine = nullptr;
+    }
+    ~Bfe() { finish(); }
+};
+
+struct PhaseMetric {
+    uint64_t calls = 0;
+    double total_ms = 0, max_ms = 0;
+    void add(double ms) { ++calls; total_ms += ms; max_ms = (std::max)(max_ms, ms); }
+    void merge(const PhaseMetric& other) {
+        calls += other.calls; total_ms += other.total_ms; max_ms = (std::max)(max_ms, other.max_ms);
     }
 };
 
-struct Lookup {
-    std::string filter;
+struct QueryStats {
+    std::set<std::string> filters;
     unsigned calls = 0;
+    unsigned errors = 0;
     std::vector<double> durations_ms;
+    PhaseMetric create, enumerate, destroy, process;
+    uint64_t events = 0;
+    size_t copied_bytes = 0;
+    uint64_t cache_hits = 0, cache_misses = 0, cache_rejections = 0;
+    double busy_ms = 0;
+    double cpu_ms = 0;
+    unsigned cpu_samples = 0, cpu_errors = 0;
+    DWORD cpu_error_code = ERROR_SUCCESS;
+};
+
+struct Lookup : QueryStats {
+    std::string filter;
+    unsigned queries = 0, completed = 0, cancelled = 0, backpressure = 0;
+    unsigned stale_subjects = 0, incomplete_results = 0;
+    size_t max_subjects = 0;
+    std::vector<double> apply_ms;
+};
+
+struct QuerySubject {
+    Tuple tuple;
+    inproc::GenerationTag tag;
+    uint64_t capture_filetime;
+};
+
+struct QueryRequest {
+    uint64_t id = 0;
+    std::vector<QuerySubject> subjects;
+};
+
+struct QueryResult {
+    QueryRequest request;
+    std::map<Tuple, std::vector<inproc::EventRef>> events;
+    bool complete = false;
+    QueryStats stats;
 };
 
 struct Flow {
@@ -524,11 +749,13 @@ struct Flow {
     uint32_t syn_sequence = 0;
     uint32_t last_seq = 0;
     uint32_t last_ack = 0;
+    WINDIVERT_ADDRESS first_address{};
     unsigned lookup_calls = 0;
     SOCKET reservation = INVALID_SOCKET;
     uint16_t alias = 0;
     bool leak_selected = false;
     bool rst_sent = false;
+    std::string drop_reason = "selected_quic";
     std::deque<Packet> held;
     ~Flow() { if (reservation != INVALID_SOCKET) closesocket(reservation); }
 };
@@ -550,10 +777,19 @@ class Engine {
     std::atomic<bool> stopping{false};
     std::atomic<DWORD> receive_error{0};
     std::atomic<bool> fatal_send{false};
+    std::atomic<bool> lookup_worker_error{false};
     std::thread receiver;
+    std::thread lookup_thread;
     std::mutex mutex;
     std::condition_variable wake;
+    std::condition_variable query_wake;
     std::deque<Packet> input;
+    inproc::HandoffState query_handoff;
+    std::optional<QueryRequest> query_request;
+    std::optional<QueryResult> query_result;
+    bool lookup_stopping = false;
+    inproc::FilterCapabilityCache filter_capabilities;
+    int64_t engine_started_qpc = 0;
 
     std::map<Tuple, std::unique_ptr<Flow>> flows;
     std::map<std::pair<uint32_t, uint16_t>, Tuple> aliases;
@@ -566,6 +802,7 @@ class Engine {
     unsigned decided_proxy = 0, decided_direct = 0;
     bool reuse_disrupted = false;
     std::deque<std::pair<Tuple, int64_t>> leak_watch;
+    int64_t next_leak_check_qpc = 0;
 
     static constexpr size_t MAX_BYTES = 8 * 1024 * 1024;
     static constexpr size_t MAX_FLOWS = 4096;
@@ -574,7 +811,7 @@ class Engine {
         return anchor_filetime + static_cast<uint64_t>((capture - anchor_qpc) * 10'000'000 / frequency);
     }
 
-    void send(Packet& packet, const char* reason) {
+    bool send(Packet& packet, const char* reason) {
         UINT sent = 0;
         bool success = WinDivertSend(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                     &sent, &packet.address) != 0;
@@ -585,6 +822,7 @@ class Engine {
             log.write("{\"kind\":\"error\",\"operation\":\"send\",\"reason\":" + json(reason) +
                       ",\"code\":" + std::to_string(error) + "}");
         }
+        return success;
     }
 
     void record_added(bool held, const std::string& action, int64_t capture_qpc) {
@@ -642,8 +880,7 @@ class Engine {
             WinDivertHelperCalcChecksums(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                         &packet.address, 0);
         }
-        record_added(held, flow.action, packet.received);
-        send(packet, "forward");
+        if (send(packet, "forward")) record_added(held, flow.action, packet.address.Timestamp);
     }
 
     void flush(Flow& flow, const Tuple& tuple) {
@@ -675,6 +912,7 @@ class Engine {
     }
 
     void send_rst(const Tuple& tuple, Flow& flow) {
+        if (tuple.protocol != IPPROTO_TCP) return;
         unsigned char buffer[40]{};
         WINDIVERT_IPHDR* ip_header = reinterpret_cast<WINDIVERT_IPHDR*>(buffer);
         WINDIVERT_TCPHDR* tcp = reinterpret_cast<WINDIVERT_TCPHDR*>(buffer + 20);
@@ -683,33 +921,52 @@ class Engine {
         ip_header->Length = htons(40);
         ip_header->TTL = 64;
         ip_header->Protocol = IPPROTO_TCP;
-        ip_header->SrcAddr = tuple.local;
-        ip_header->DstAddr = tuple.remote;
-        tcp->SrcPort = htons(tuple.local_port);
-        tcp->DstPort = htons(tuple.remote_port);
-        tcp->SeqNum = htonl(flow.last_seq);
-        tcp->AckNum = htonl(flow.last_ack);
         tcp->HdrLength = 5;
         tcp->Rst = 1;
-        tcp->Ack = flow.last_ack ? 1 : 0;
         tcp->Window = 0;
-        Packet packet;
-        packet.bytes.assign(buffer, buffer + 40);
-        packet.address.Outbound = 1;
-        packet.address.Loopback = flow.outbound_loopback ? 1 : 0;
-        if (!WinDivertHelperCalcChecksums(packet.bytes.data(), 40, &packet.address, 0)) return;
-        UINT sent = 0;
-        WinDivertSend(divert, packet.bytes.data(), 40, &sent, &packet.address);
+        const int64_t send_qpc = qpc();
+        for (bool reverse_direction : {true, false}) {
+            ip_header->SrcAddr = reverse_direction ? tuple.remote : tuple.local;
+            ip_header->DstAddr = reverse_direction ? tuple.local : tuple.remote;
+            tcp->SrcPort = htons(reverse_direction ? tuple.remote_port : tuple.local_port);
+            tcp->DstPort = htons(reverse_direction ? tuple.local_port : tuple.remote_port);
+            tcp->SeqNum = htonl(reverse_direction ? flow.last_ack : flow.last_seq);
+            tcp->AckNum = htonl(reverse_direction ? flow.last_seq : flow.last_ack);
+            tcp->Ack = 1;
+            Packet packet;
+            packet.bytes.assign(buffer, buffer + 40);
+            packet.address = flow.first_address;
+            packet.address.Outbound = reverse_direction && !flow.outbound_loopback ? 0 : 1;
+            if (!WinDivertHelperCalcChecksums(packet.bytes.data(), 40, &packet.address, 0)) {
+                fatal_send = true;
+                log.write("{\"kind\":\"error\",\"operation\":\"rst_checksums\"}");
+                return;
+            }
+            if (!send(packet, reverse_direction ? "rst_client" : "rst_remote")) return;
+        }
         flow.rst_sent = true;
+        flow.action = "drop";
+        flow.drop_reason = "leak_reset";
         ++rst_count;
         log.write("{\"kind\":\"rst\"," + fields(tuple) + ",\"generation\":" +
-                  std::to_string(flow.generation) + ",\"qpc\":" + std::to_string(qpc()) + "}");
+                  std::to_string(flow.generation) + ",\"send_qpc\":" + std::to_string(send_qpc) +
+                  ",\"directions\":2,\"qpc\":" + std::to_string(qpc()) + "}");
     }
 
-    std::vector<inproc::EventRef> enumerate(uint8_t protocol, const std::vector<uint16_t>& ports,
-                                            uint64_t window_start) {
-        std::vector<inproc::EventRef> result;
-        if (!session) return result;
+    double elapsed_ms(int64_t began) const {
+        return static_cast<double>(qpc() - began) * 1000.0 / static_cast<double>(frequency);
+    }
+
+    void lookup_error(QueryStats& stats, const char* operation, DWORD code) {
+        ++stats.errors;
+        log.write("{\"kind\":\"error\",\"operation\":" + json(operation) +
+                  ",\"code\":" + std::to_string(code) + "}");
+    }
+
+    bool enumerate(uint8_t protocol, const std::vector<uint16_t>& ports,
+                   uint64_t window_start, QueryResult& result) {
+        auto& stats = result.stats;
+        if (!session) { lookup_error(stats, "lookup_session", ERROR_INVALID_HANDLE); return false; }
         std::vector<FWPM_FILTER_CONDITION0> conditions;
         FWPM_FILTER_CONDITION0 type_condition{};
         type_condition.fieldKey = FWPM_CONDITION_NET_EVENT_TYPE;
@@ -733,7 +990,7 @@ class Engine {
 
         auto build = [&](int level) {
             conditions.clear();
-            conditions.push_back(type_condition);
+            if (level >= 0) conditions.push_back(type_condition);
             if (level >= 1) conditions.push_back(protocol_condition);
             if (level >= 2) for (const auto& c : port_conditions) conditions.push_back(c);
         };
@@ -742,40 +999,74 @@ class Engine {
         range.startTime = to_filetime(window_start);
         GetSystemTimePreciseAsFileTime(&range.endTime);
 
-        HANDLE handle = nullptr;
+        struct EnumGuard {
+            HANDLE session;
+            HANDLE handle = nullptr;
+            ~EnumGuard() { if (handle) FwpmNetEventDestroyEnumHandle0(session, handle); }
+        } guard{session};
         int level = port_conditions.empty() ? 1 : 2;
         std::string chosen;
         for (;;) {
+            const inproc::FilterPattern pattern{protocol, level, ports.size() > 1};
+            if (level >= 0 && filter_capabilities.skip(pattern)) {
+                ++stats.cache_hits;
+                --level;
+                continue;
+            }
+            if (config.filter_cache && level >= 0) ++stats.cache_misses;
             build(level);
             range.numFilterConditions = static_cast<UINT32>(conditions.size());
-            range.filterCondition = conditions.data();
-            const auto created = FwpmNetEventCreateEnumHandle0(session, &range, &handle);
+            range.filterCondition = conditions.empty() ? nullptr : conditions.data();
+            const auto began = qpc();
+            const auto created = FwpmNetEventCreateEnumHandle0(session, &range, &guard.handle);
+            stats.create.add(elapsed_ms(began));
             if (!created) {
-                chosen = level >= 2 ? "type+protocol+local_port" : level == 1 ? "type+protocol" : "type";
+                chosen = level >= 2 ? "type+protocol+local_port" : level == 1 ? "type+protocol" :
+                    level == 0 ? "type" : "time_window_only";
                 break;
             }
-            if (level == 0) {
-                FWPM_NET_EVENT_ENUM_TEMPLATE0 bare{};
-                bare.startTime = range.startTime;
-                bare.endTime = range.endTime;
-                if (FwpmNetEventCreateEnumHandle0(session, &bare, &handle)) return result;
-                chosen = "time_window_only";
-                break;
+            if (level < 0 || !inproc::FilterCapabilityCache::fallback_allowed(created)) {
+                lookup_error(stats, "FwpmNetEventCreateEnumHandle0", created);
+                return false;
             }
+            const bool learned = filter_capabilities.reject(pattern, created);
+            if (learned) ++stats.cache_rejections;
+            log.write("{\"kind\":\"enum_filter_fallback\",\"level\":" + std::to_string(level) +
+                      ",\"protocol\":" + std::to_string(protocol) +
+                      ",\"multiple_ports\":" + (ports.size() > 1 ? "true" : "false") +
+                      ",\"cached\":" + (learned ? "true" : "false") +
+                      ",\"code\":" + std::to_string(created) + "}");
             --level;
         }
-        if (!lookup.filter.empty() && lookup.filter != chosen)
-            lookup.filter += "|" + chosen;
-        else if (lookup.filter.empty())
-            lookup.filter = chosen;
+        stats.filters.insert(chosen);
 
         const UINT32 batch = 256;
+        const int64_t enumeration_deadline = qpc() + frequency * 2;
+        unsigned batches = 0;
+        bool complete = true;
         for (;;) {
-            FWPM_NET_EVENT3** entries = nullptr;
+            struct EntriesGuard {
+                FWPM_NET_EVENT3** value = nullptr;
+                ~EntriesGuard() { if (value) FwpmFreeMemory0(reinterpret_cast<void**>(&value)); }
+            } entries;
             UINT32 count = 0;
-            if (FwpmNetEventEnum3(session, handle, batch, &entries, &count)) break;
+            const auto began = qpc();
+            const auto enumerated = FwpmNetEventEnum3(session, guard.handle, batch, &entries.value, &count);
+            stats.enumerate.add(elapsed_ms(began));
+            if (enumerated) {
+                lookup_error(stats, "FwpmNetEventEnum3", enumerated);
+                complete = false;
+                break;
+            }
+            if (count && !entries.value) {
+                lookup_error(stats, "FwpmNetEventEnum3_null_entries", ERROR_INVALID_DATA);
+                complete = false;
+                break;
+            }
+            const auto process_began = qpc();
+            stats.events += count;
             for (UINT32 i = 0; i < count; ++i) {
-                const auto* entry = entries[i];
+                const auto* entry = entries.value[i];
                 if (!entry || entry->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) continue;
                 const auto& header = entry->header;
                 const auto* allow = entry->classifyAllow;
@@ -783,170 +1074,356 @@ class Engine {
                 ref.event_filetime = static_cast<int64_t>(filetime(header.timeStamp));
                 ref.layer_id = allow ? allow->layerId : 0;
                 ref.outbound = allow && allow->msFwpDirection == FWP_DIRECTION_OUTBOUND;
-                ref.app_path = lower(blob_path(header.appId));
-                ref.tuple_match = false;
+                if (header.flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) {
+                    if (!inproc::copy_budget_allows(stats.copied_bytes, header.appId.size))
+                        throw std::runtime_error("native event snapshot byte limit");
+                    stats.copied_bytes += header.appId.size;
+                    ref.app_path = lower(blob_path(header.appId));
+                }
+                const UINT32 required = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_IP_VERSION_SET |
+                    FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET | FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET |
+                    FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET |
+                    FWPM_NET_EVENT_FLAG_APP_ID_SET;
+                ref.complete = (header.flags & required) == required && !ref.app_path.empty();
+                ref.tuple_match = header.ipVersion == FWP_IP_VERSION_V4;
                 ref.raw_local_addr = header.localAddrV4;
                 ref.raw_remote_addr = header.remoteAddrV4;
                 ref.match_local_port = static_cast<uint16_t>(header.localPort);
                 ref.match_remote_port = static_cast<uint16_t>(header.remotePort);
                 ref.match_protocol = static_cast<uint8_t>(header.ipProtocol);
                 ref.ip_version = header.ipVersion;
-                result.push_back(std::move(ref));
+                if (ref.ip_version != FWP_IP_VERSION_V4) continue;
+                Tuple key{htonl(ref.raw_local_addr), htonl(ref.raw_remote_addr),
+                    ref.match_local_port, ref.match_remote_port, ref.match_protocol};
+                result.events[key].push_back(std::move(ref));
             }
-            if (entries) FwpmFreeMemory0(reinterpret_cast<void**>(&entries));
+            stats.process.add(elapsed_ms(process_began));
             if (count < batch) break;
+            if (++batches >= 64 || qpc() >= enumeration_deadline) {
+                lookup_error(stats, "FwpmNetEventEnum3_limit", ERROR_MORE_DATA);
+                complete = false;
+                break;
+            }
         }
-        FwpmNetEventDestroyEnumHandle0(session, handle);
-        return result;
+        const auto destroy_began = qpc();
+        const auto destroyed = FwpmNetEventDestroyEnumHandle0(session, guard.handle);
+        guard.handle = nullptr;
+        stats.destroy.add(elapsed_ms(destroy_began));
+        if (destroyed) { lookup_error(stats, "FwpmNetEventDestroyEnumHandle0", destroyed); complete = false; }
+        return complete;
     }
 
-    inproc::MatchResult match(const Tuple& tuple, int64_t capture_filetime,
-                              std::vector<inproc::EventRef>& events) {
-        for (auto& event : events) {
-            event.tuple_match = event.ip_version == FWP_IP_VERSION_V4 &&
-                htonl(event.raw_local_addr) == tuple.local &&
-                htonl(event.raw_remote_addr) == tuple.remote &&
-                event.match_local_port == tuple.local_port &&
-                event.match_remote_port == tuple.remote_port &&
-                event.match_protocol == tuple.protocol;
-        }
+    inproc::MatchResult match(const Flow& flow, const std::vector<inproc::EventRef>& events, int64_t observed) {
         inproc::MatchConfig match_config;
         match_config.window_before = static_cast<int64_t>(config.window_before_ms) * 10000;
         match_config.window_after = static_cast<int64_t>(config.window_after_ms) * 10000;
         match_config.ale_connect_v4 = ALE_AUTH_CONNECT_V4;
         match_config.ale_connect_v6 = ALE_AUTH_CONNECT_V6;
-        return inproc::match_generation(events, capture_filetime, match_config);
+        auto result = inproc::match_generation(events, static_cast<int64_t>(flow.capture_filetime), match_config);
+        if (result.outcome == inproc::MatchOutcome::Matched && result.app_path == selected_app &&
+            observed < flow.capture_qpc + frequency * config.delay_ms / 1000)
+            return {};
+        return result;
     }
 
-    void resolve_pending(int64_t now) {
-        std::vector<uint16_t> tcp_ports, udp_ports;
-        uint64_t window_start = utc_now();
-        bool due = false;
-        for (auto& entry : flows) {
-            Flow& flow = *entry.second;
-            if (flow.action != "pending") continue;
-            if (flow.next_retry_qpc <= now || now >= flow.deadline_qpc) due = true;
-            window_start = (std::min)(window_start, flow.capture_filetime);
-            if (flow.protocol == 6) tcp_ports.push_back(entry.first.local_port);
-            else udp_ports.push_back(entry.first.local_port);
-        }
-        if (!due) return;
-        window_start -= static_cast<uint64_t>(config.window_before_ms) * 10000;
+    void log_ownership(const Tuple& tuple, const Flow& flow, const inproc::MatchResult& result, uint64_t query_id) {
+        log.write("{\"kind\":\"ownership\"," + fields(tuple) + ",\"generation\":" +
+                  std::to_string(flow.generation) + ",\"app_path\":" + json(result.app_path) +
+                  ",\"event_filetime\":" + std::to_string(result.event_filetime) +
+                  ",\"capture_qpc\":" + std::to_string(flow.capture_qpc) +
+                  ",\"query_id\":" + std::to_string(query_id) +
+                  ",\"qpc\":" + std::to_string(qpc()) + "}");
+    }
 
-        auto ports_tcp = inproc::pending_ports(tcp_ports);
-        auto ports_udp = inproc::pending_ports(udp_ports);
-        std::vector<inproc::EventRef> tcp_events, udp_events;
-        if (!tcp_ports.empty()) {
-            const auto began = qpc();
-            tcp_events = enumerate(6, ports_tcp, window_start);
-            lookup.durations_ms.push_back(static_cast<double>(qpc() - began) * 1000.0 / static_cast<double>(frequency));
-            ++lookup.calls;
+    QueryResult execute_query(QueryRequest request) {
+        QueryResult result;
+        result.request = std::move(request);
+        const int64_t began = qpc();
+        auto thread_cpu = [](uint64_t& ticks) {
+            FILETIME created{}, exited{}, kernel{}, user{};
+            if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return false;
+            ticks = filetime(kernel) + filetime(user);
+            return true;
+        };
+        uint64_t cpu_before = 0, cpu_after = 0;
+        const bool cpu_before_valid = thread_cpu(cpu_before);
+        const DWORD cpu_before_error = cpu_before_valid ? ERROR_SUCCESS : GetLastError();
+        bool complete = true;
+        try {
+            for (uint8_t protocol : {uint8_t(6), uint8_t(17)}) {
+                std::vector<uint16_t> ports;
+                uint64_t window_start = utc_now();
+                for (const auto& subject : result.request.subjects) {
+                    if (subject.tuple.protocol != protocol) continue;
+                    ports.push_back(subject.tuple.local_port);
+                    window_start = (std::min)(window_start, subject.capture_filetime);
+                }
+                if (ports.empty()) continue;
+                window_start -= static_cast<uint64_t>(config.window_before_ms) * 10000;
+                const int64_t query_began = qpc();
+                ++result.stats.calls;
+                complete = enumerate(protocol, inproc::pending_ports(ports), window_start, result);
+                result.stats.durations_ms.push_back(elapsed_ms(query_began));
+                if (!complete) break;
+            }
+        } catch (const std::exception& error) {
+            lookup_error(result.stats, "lookup_exception", ERROR_GEN_FAILURE);
+            log.write("{\"kind\":\"error\",\"operation\":\"lookup_exception_detail\",\"message\":" + json(error.what()) + "}");
+            complete = false;
+        } catch (...) {
+            lookup_error(result.stats, "lookup_exception", ERROR_GEN_FAILURE);
+            complete = false;
         }
-        if (!udp_ports.empty()) {
-            const auto began = qpc();
-            udp_events = enumerate(17, ports_udp, window_start);
-            lookup.durations_ms.push_back(static_cast<double>(qpc() - began) * 1000.0 / static_cast<double>(frequency));
-            ++lookup.calls;
+        result.complete = complete;
+        if (!complete) result.events.clear();
+        const bool cpu_after_valid = thread_cpu(cpu_after);
+        if (cpu_before_valid && cpu_after_valid && cpu_after >= cpu_before) {
+            result.stats.cpu_ms = static_cast<double>(cpu_after - cpu_before) / 10000.0;
+            result.stats.cpu_samples = 1;
+        } else {
+            ++result.stats.cpu_errors;
+            result.stats.cpu_error_code = !cpu_before_valid ? cpu_before_error :
+                !cpu_after_valid ? GetLastError() : ERROR_INVALID_DATA;
         }
+        result.stats.busy_ms = elapsed_ms(began);
+        return result;
+    }
 
-        for (auto& entry : flows) {
-            Flow& flow = *entry.second;
-            if (flow.action != "pending") continue;
-            ++flow.lookup_calls;
-            auto& events = flow.protocol == 6 ? tcp_events : udp_events;
-            auto outcome = match(entry.first, static_cast<int64_t>(flow.capture_filetime), events);
-            if (outcome.outcome == inproc::MatchOutcome::NoEvent) {
-                if (now >= flow.deadline_qpc) { decide(entry.first, flow, "direct", "timeout", now); continue; }
-                flow.backoff_ms = flow.backoff_ms == 0 ? 1 : (std::min)(flow.backoff_ms * 2, 8);
-                flow.next_retry_qpc = (std::min)(now + frequency * flow.backoff_ms / 1000, flow.deadline_qpc);
-                continue;
-            }
-            if (outcome.outcome == inproc::MatchOutcome::Ambiguous) {
-                decide(entry.first, flow, "direct", "ambiguous", now);
-                continue;
-            }
-            const bool selected = outcome.app_path == selected_app;
-            if (!selected) { decide(entry.first, flow, "direct", "other_app", now); continue; }
-            if (flow.protocol == 17) {
-                if (entry.first.remote_port == config.quic_port) {
-                    decide(entry.first, flow, "drop_quic", "selected_quic", now);
+    void merge_query_stats(const QueryResult& result) {
+        const auto& stats = result.stats;
+        ++lookup.completed;
+        lookup.calls += stats.calls;
+        lookup.errors += stats.errors;
+        lookup.durations_ms.insert(lookup.durations_ms.end(), stats.durations_ms.begin(), stats.durations_ms.end());
+        lookup.create.merge(stats.create);
+        lookup.enumerate.merge(stats.enumerate);
+        lookup.destroy.merge(stats.destroy);
+        lookup.process.merge(stats.process);
+        lookup.events += stats.events;
+        lookup.cache_hits += stats.cache_hits;
+        lookup.cache_misses += stats.cache_misses;
+        lookup.cache_rejections += stats.cache_rejections;
+        lookup.busy_ms += stats.busy_ms;
+        lookup.cpu_ms += stats.cpu_ms;
+        lookup.cpu_samples += stats.cpu_samples;
+        lookup.cpu_errors += stats.cpu_errors;
+        if (stats.cpu_errors) lookup.cpu_error_code = stats.cpu_error_code;
+        for (const auto& filter : stats.filters) {
+            if (!lookup.filters.insert(filter).second) continue;
+            if (!lookup.filter.empty()) lookup.filter += "|";
+            lookup.filter += filter;
+        }
+    }
+
+    void apply_query(QueryResult result, bool apply = true) {
+        merge_query_stats(result);
+        if (!result.complete) { ++lookup.incomplete_results; return; }
+        if (!apply) return;
+        const int64_t began = qpc();
+        for (const auto& subject : result.request.subjects) {
+            auto found = flows.find(subject.tuple);
+            if (found == flows.end()) { ++lookup.stale_subjects; continue; }
+            Flow& flow = *found->second;
+            const inproc::GenerationTag current{flow.generation, flow.capture_qpc};
+            if (!(subject.tag == current)) { ++lookup.stale_subjects; continue; }
+            auto evidence = result.events.find(subject.tuple);
+            const std::vector<inproc::EventRef> empty;
+            auto outcome = match(flow, evidence == result.events.end() ? empty : evidence->second, qpc());
+            const int64_t observed = qpc();
+            if (flow.action == "pending") {
+                const auto resolution = inproc::snapshot_resolution(outcome.outcome, result.complete,
+                    subject.tag, current, observed, flow.deadline_qpc);
+                if (resolution == inproc::PendingResolution::Discard) { ++lookup.stale_subjects; continue; }
+                if (resolution == inproc::PendingResolution::Timeout) {
+                    decide(subject.tuple, flow, "direct", "timeout");
+                    continue;
+                }
+                if (resolution == inproc::PendingResolution::Retry) {
+                    flow.backoff_ms = flow.backoff_ms == 0 ? 1 : (std::min)(flow.backoff_ms * 2, 8);
+                    flow.next_retry_qpc = (std::min)(observed + frequency * flow.backoff_ms / 1000, flow.deadline_qpc);
+                    continue;
+                }
+                if (resolution == inproc::PendingResolution::Ambiguous) {
+                    decide(subject.tuple, flow, "direct", "ambiguous");
+                    continue;
+                }
+                log_ownership(subject.tuple, flow, outcome, result.request.id);
+                if (outcome.app_path != selected_app) {
+                    decide(subject.tuple, flow, "direct", "other_app");
+                } else if (flow.protocol == 17) {
+                    decide(subject.tuple, flow, subject.tuple.remote_port == config.quic_port ? "drop_quic" : "direct",
+                           subject.tuple.remote_port == config.quic_port ? "selected_quic" : "selected_udp_direct");
                 } else {
-                    decide(entry.first, flow, "direct", "selected_udp_direct", now);
+                    decide(subject.tuple, flow, config.mode == "redirect" ? "proxy" : "direct", "selected");
                 }
                 continue;
             }
-            const bool proxy = config.mode == "redirect";
-            decide(entry.first, flow, proxy ? "proxy" : "direct", "selected", now);
+            auto watch = std::find_if(leak_watch.begin(), leak_watch.end(), [&](const auto& item) {
+                return item.first == subject.tuple && observed < item.second;
+            });
+            if (watch == leak_watch.end() || outcome.outcome != inproc::MatchOutcome::Matched) continue;
+            log_ownership(subject.tuple, flow, outcome, result.request.id);
+            if (outcome.app_path == selected_app && !flow.leak_selected) {
+                flow.leak_selected = true;
+                ++leaked;
+                log.write("{\"kind\":\"leaked\"," + fields(subject.tuple) + ",\"generation\":" +
+                    std::to_string(flow.generation) + ",\"qpc\":" + std::to_string(qpc()) + "}");
+                if (config.send_rst && !flow.rst_sent) send_rst(subject.tuple, flow);
+            }
+            leak_watch.erase(watch);
+        }
+        lookup.apply_ms.push_back(elapsed_ms(began));
+    }
+
+    void lookup_loop() {
+        for (;;) {
+            QueryRequest request;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                query_wake.wait(lock, [&] { return lookup_stopping || query_request.has_value(); });
+                if (lookup_stopping) return;
+                if (!query_handoff.start()) return;
+                request = std::move(*query_request);
+                query_request.reset();
+            }
+            QueryResult result = execute_query(std::move(request));
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                query_result = std::move(result);
+                query_handoff.finish();
+            }
+            wake.notify_one();
         }
     }
 
-    void decide(const Tuple& tuple, Flow& flow, const std::string& action, const char* reason, int64_t now) {
+    void consume_query(bool apply = true) {
+        std::optional<QueryResult> result;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!query_handoff.ready()) return;
+            result = std::move(query_result);
+            query_result.reset();
+            query_handoff.consume();
+        }
+        apply_query(std::move(*result), apply);
+    }
+
+    void stop_lookup() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            lookup_stopping = true;
+        }
+        query_wake.notify_all();
+        if (lookup_thread.joinable()) lookup_thread.join();
+        consume_query(false);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (query_request) { ++lookup.cancelled; query_request.reset(); }
+        query_handoff.stop();
+    }
+
+    void resolve_pending(int64_t now) {
+        consume_query();
+        now = qpc();
+        bool pending_due = false;
+        for (auto& entry : flows) {
+            Flow& flow = *entry.second;
+            if (flow.action != "pending") continue;
+            if (now >= flow.deadline_qpc) decide(entry.first, flow, "direct", "timeout");
+            else if (flow.next_retry_qpc <= now) pending_due = true;
+        }
+        leak_watch.erase(std::remove_if(leak_watch.begin(), leak_watch.end(),
+            [&](const auto& item) { return now >= item.second; }), leak_watch.end());
+        const bool leaks_due = !leak_watch.empty() && now >= next_leak_check_qpc;
+        if ((!pending_due && !leaks_due) || lookup.errors || lookup_stopping) return;
+        if (config.lookup_mode == "async") {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (query_handoff.busy()) { ++lookup.backpressure; return; }
+        }
+        QueryRequest request;
+        std::set<Tuple> watched_tuples;
+        if (leaks_due) for (const auto& watch : leak_watch) watched_tuples.insert(watch.first);
+        for (const auto& entry : flows) {
+            const Flow& flow = *entry.second;
+            const bool watched = watched_tuples.count(entry.first) != 0;
+            if (!(pending_due && flow.action == "pending") && !watched) continue;
+            request.subjects.push_back({entry.first, {flow.generation, flow.capture_qpc}, flow.capture_filetime});
+        }
+        if (request.subjects.empty()) return;
+        if (config.lookup_mode == "async") {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!query_handoff.submit()) { ++lookup.backpressure; return; }
+        }
+        request.id = ++lookup.queries;
+        lookup.max_subjects = (std::max)(lookup.max_subjects, request.subjects.size());
+        for (const auto& subject : request.subjects) {
+            Flow& flow = *flows.at(subject.tuple);
+            if (flow.action == "pending") ++flow.lookup_calls;
+        }
+        if (leaks_due) next_leak_check_qpc = now + frequency * 8 / 1000;
+        if (config.lookup_mode == "async") {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                query_request = std::move(request);
+            }
+            query_wake.notify_one();
+        } else {
+            apply_query(execute_query(std::move(request)));
+        }
+    }
+
+    void decide(const Tuple& tuple, Flow& flow, std::string action, const char* reason) {
+        if (action == "proxy" && !reserve(tuple, flow)) {
+            fatal_send = true;
+            action = "direct";
+            reason = "alias_failure";
+            log.write("{\"kind\":\"error\",\"operation\":\"reserve_alias_direct\"}");
+        }
+        const int64_t now = qpc();
+        if (now >= flow.deadline_qpc && std::string(reason) != "pending_capacity") {
+            action = "direct";
+            reason = "timeout";
+            if (flow.alias) {
+                aliases.erase({tuple.local, flow.alias});
+                closesocket(flow.reservation);
+                flow.reservation = INVALID_SOCKET;
+                flow.alias = 0;
+            }
+        }
         decision_latency_ms.push_back(static_cast<double>(now - flow.capture_qpc) * 1000.0 / static_cast<double>(frequency));
         lookups_per_flow.push_back(static_cast<double>(flow.lookup_calls));
         if (action == "drop_quic") {
             flow.action = "drop";
             ++quic_drops;
             while (!flow.held.empty()) {
-                log_decision(tuple, flow, "drop", "selected_quic");
+                log_decision(tuple, flow, "drop", "selected_quic", now);
                 flow.held.pop_front();
             }
-            if (config.send_rst) send_rst(tuple, flow);
             return;
         }
         flow.action = action;
-        if (action == "proxy" && !reserve(tuple, flow)) {
-            flow.action = "direct";
-            log.write("{\"kind\":\"error\",\"operation\":\"reserve_alias_direct\"}");
-        }
         if (flow.action == "proxy") ++decided_proxy;
         else {
             ++decided_direct;
             if (std::string(reason) == "timeout") {
                 ++unattributed;
-                leak_watch.emplace_back(tuple, now + frequency * config.leak_ms / 1000);
+                if (tuple.protocol == IPPROTO_TCP && config.leak_ms) {
+                    leak_watch.emplace_back(tuple, now + frequency * config.leak_ms / 1000);
+                    next_leak_check_qpc = now;
+                }
             }
         }
-        log_decision(tuple, flow, flow.action, reason);
+        log_decision(tuple, flow, flow.action, reason, now);
         flush(flow, tuple);
     }
 
-    void log_decision(const Tuple& tuple, Flow& flow, const std::string& action, const std::string& reason) {
+    void log_decision(const Tuple& tuple, Flow& flow, const std::string& action, const std::string& reason,
+                      int64_t now = 0) {
+        if (!now) now = qpc();
         log.write("{\"kind\":\"decision\"," + fields(tuple) + ",\"generation\":" +
                   std::to_string(flow.generation) + ",\"action\":" + json(action) +
-                  ",\"reason\":" + json(reason) + ",\"qpc\":" + std::to_string(qpc()) + "}");
-    }
-
-    void check_leaks(int64_t now) {
-        if (leak_watch.empty()) return;
-        std::vector<uint16_t> ports;
-        uint64_t window_start = utc_now();
-        for (const auto& watch : leak_watch) {
-            ports.push_back(watch.first.local_port);
-            auto flow_it = flows.find(watch.first);
-            if (flow_it != flows.end())
-                window_start = (std::min)(window_start, flow_it->second->capture_filetime);
-        }
-        window_start -= static_cast<uint64_t>(config.window_before_ms) * 10000;
-        auto events = enumerate(6, inproc::pending_ports(ports), window_start);
-        std::deque<std::pair<Tuple, int64_t>> remaining;
-        for (auto& watch : leak_watch) {
-            auto flow_it = flows.find(watch.first);
-            if (flow_it == flows.end()) continue;
-            Flow& flow = *flow_it->second;
-            auto outcome = match(watch.first, static_cast<int64_t>(flow.capture_filetime), events);
-            if (outcome.outcome == inproc::MatchOutcome::Matched && outcome.app_path == selected_app) {
-                if (!flow.leak_selected) {
-                    flow.leak_selected = true;
-                    ++leaked;
-                    log.write("{\"kind\":\"leaked\"," + fields(watch.first) + ",\"generation\":" +
-                              std::to_string(flow.generation) + ",\"qpc\":" + std::to_string(qpc()) + "}");
-                    if (config.send_rst && !flow.rst_sent) send_rst(watch.first, flow);
-                }
-                continue;
-            }
-            if (now < watch.second) remaining.push_back(watch);
-        }
-        leak_watch.swap(remaining);
+                  ",\"reason\":" + json(reason) + ",\"qpc\":" + std::to_string(now) +
+                  ",\"capture_qpc\":" + std::to_string(flow.capture_qpc) +
+                  ",\"deadline_qpc\":" + std::to_string(flow.deadline_qpc) + "}");
     }
 
     void handle(Packet packet) {
@@ -967,8 +1444,9 @@ class Engine {
             flow->generation = packet.address.Timestamp;
             flow->capture_qpc = packet.address.Timestamp;
             flow->capture_filetime = to_filetime_from_qpc(packet.address.Timestamp);
-            flow->deadline_qpc = packet.received + frequency * config.hold_ms / 1000;
+            flow->deadline_qpc = flow->capture_qpc + frequency * config.hold_ms / 1000;
             flow->protocol = tuple.protocol;
+            flow->first_address = packet.address;
             flow->outbound_loopback = packet.address.Loopback != 0;
             if (parsed.tcp && parsed.tcp->Syn && !parsed.tcp->Ack) {
                 flow->saw_syn = true;
@@ -980,7 +1458,10 @@ class Engine {
         }
         Flow& flow = *found->second;
         if (parsed.tcp) {
-            flow.last_seq = ntohl(parsed.tcp->SeqNum);
+            const unsigned headers = static_cast<unsigned>(parsed.ip_header->HdrLength + parsed.tcp->HdrLength) * 4;
+            const unsigned length = ntohs(parsed.ip_header->Length);
+            const unsigned payload = length >= headers ? length - headers : 0;
+            flow.last_seq = ntohl(parsed.tcp->SeqNum) + payload + (parsed.tcp->Syn ? 1 : 0) + (parsed.tcp->Fin ? 1 : 0);
             flow.last_ack = ntohl(parsed.tcp->AckNum);
             if (parsed.tcp->Syn && !parsed.tcp->Ack && flow.action == "proxy" &&
                 flow.saw_syn && parsed.tcp->SeqNum != flow.syn_sequence) {
@@ -990,7 +1471,7 @@ class Engine {
             }
         }
         if (flow.action == "drop") {
-            log_decision(tuple, flow, "drop", "selected_quic");
+            log_decision(tuple, flow, "drop", flow.drop_reason);
             return;
         }
         if (flow.action != "pending") {
@@ -998,7 +1479,7 @@ class Engine {
             return;
         }
         if (flow.held.size() >= 256) {
-            decide(tuple, flow, "direct", "pending_capacity", qpc());
+            decide(tuple, flow, "direct", "pending_capacity");
             forward(packet, tuple, flow, false);
             return;
         }
@@ -1013,10 +1494,10 @@ class Engine {
         for (const auto& entry : flows) {
             const Flow& flow = *entry.second;
             if (flow.action != "pending") continue;
-            consider(flow.next_retry_qpc ? flow.next_retry_qpc : flow.deadline_qpc);
-            consider(flow.deadline_qpc);
+            consider(inproc::lookup_wakeup(query_handoff.busy(), flow.next_retry_qpc, flow.deadline_qpc));
         }
-        for (const auto& watch : leak_watch) consider(watch.second);
+        for (const auto& watch : leak_watch)
+            consider(inproc::lookup_wakeup(query_handoff.busy(), next_leak_check_qpc, watch.second));
         return soonest;
     }
 
@@ -1050,6 +1531,8 @@ public:
         target = parse_ip(config.target);
         frequency = qpf();
         selected_app = lower(config.selected_app);
+        filter_capabilities.enabled = config.filter_cache;
+        bfe.log = &log;
     }
 
     ~Engine() {
@@ -1057,6 +1540,7 @@ public:
         wake.notify_all();
         if (divert != INVALID_HANDLE_VALUE) WinDivertShutdown(divert, WINDIVERT_SHUTDOWN_RECV);
         if (receiver.joinable()) receiver.join();
+        stop_lookup();
         if (divert != INVALID_HANDLE_VALUE) WinDivertClose(divert);
         if (session) FwpmEngineClose0(session);
     }
@@ -1068,6 +1552,7 @@ public:
 
         anchor_qpc = qpc();
         anchor_filetime = utc_now();
+        engine_started_qpc = anchor_qpc;
 
         std::string filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
             " and ((tcp and tcp.DstPort == " + std::to_string(config.port) + ")";
@@ -1092,18 +1577,31 @@ public:
                   ",\"qpc_frequency\":" + std::to_string(frequency) +
                   ",\"anchor_qpc\":" + std::to_string(anchor_qpc) +
                   ",\"anchor_filetime\":" + std::to_string(anchor_filetime) +
-                  ",\"mode\":" + json(config.mode) + ",\"hold_ms\":" + std::to_string(config.hold_ms) + "}");
+                  ",\"mode\":" + json(config.mode) + ",\"lookup_mode\":" + json(config.lookup_mode) +
+                  ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
+                  ",\"hold_ms\":" + std::to_string(config.hold_ms) + "}");
 
+        if (config.lookup_mode == "async") lookup_thread = std::thread([this] {
+            try { lookup_loop(); }
+            catch (const std::exception& error) {
+                lookup_worker_error = true;
+                log.write("{\"kind\":\"error\",\"operation\":\"lookup_worker_exception\",\"message\":" + json(error.what()) + "}");
+            } catch (...) {
+                lookup_worker_error = true;
+                log.write("{\"kind\":\"error\",\"operation\":\"lookup_worker_exception\"}");
+            }
+            wake.notify_one();
+        });
         receiver = std::thread([this] { receive(); });
         const int64_t end = qpc() + frequency * config.seconds;
 
-        while (qpc() < end && !receive_error && !fatal_send) {
+        while (qpc() < end && !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error) {
             if (!config.stop_file.empty() &&
                 GetFileAttributesA(config.stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
             std::deque<Packet> batch;
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                if (input.empty()) {
+                if (input.empty() && !query_handoff.ready() && !lookup_worker_error && !receive_error) {
                     int64_t deadline = next_deadline();
                     if (deadline) {
                         int64_t wait_ticks = deadline - qpc();
@@ -1118,36 +1616,36 @@ public:
             for (auto& packet : batch) handle(std::move(packet));
             const int64_t now = qpc();
             resolve_pending(now);
-            check_leaks(now);
         }
 
         stopping = true;
         WinDivertShutdown(divert, WINDIVERT_SHUTDOWN_RECV);
         wake.notify_all();
         if (receiver.joinable()) receiver.join();
+        stop_lookup();
         {
             std::deque<Packet> batch;
             { std::lock_guard<std::mutex> lock(mutex); batch.swap(input); }
             for (auto& packet : batch) handle(std::move(packet));
         }
-        const int64_t now = qpc();
-        resolve_pending(now);
         for (auto& entry : flows) {
             Flow& flow = *entry.second;
             if (flow.action == "pending") { flow.action = "direct"; ++unattributed; }
             flush(flow, entry.first);
         }
-        check_leaks(qpc());
 
+        bfe.finish();
         write_summary();
         if (receive_error)
             log.write("{\"kind\":\"error\",\"operation\":\"receive\",\"code\":" +
                       std::to_string(receive_error.load()) + "}");
         log.write("{\"kind\":\"complete\",\"qpc\":" + std::to_string(qpc()) +
                   ",\"flows\":" + std::to_string(flows.size()) +
-                  ",\"success\":" + ((!receive_error && !fatal_send) ? "true" : "false") + "}");
-        return receive_error || fatal_send ? 3 : 0;
+                  ",\"success\":" + (success() ? "true" : "false") + "}");
+        return success() ? 0 : 3;
     }
+
+    bool success() const { return !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error && !bfe.errors; }
 
     void write_summary() {
         auto dist = [](const std::vector<double>& values) {
@@ -1157,12 +1655,48 @@ public:
                 << ",\"max\":" << d.max << "}";
             return out.str();
         };
+        auto phase = [](const PhaseMetric& metric) {
+            std::ostringstream out;
+            out << "{\"calls\":" << metric.calls << ",\"total_ms\":" << metric.total_ms
+                << ",\"max_ms\":" << metric.max_ms << "}";
+            return out.str();
+        };
+        const double runtime_ms = elapsed_ms(engine_started_qpc);
         std::ostringstream out;
         out << "{\"engine\":\"inproc\",\"mode\":" << json(config.mode)
             << ",\"topology\":\"single-host-local\""
             << ",\"selected_app\":" << json(selected_app)
             << ",\"first_packet_decision_latency_ms\":" << dist(decision_latency_ms)
             << ",\"lookup_calls\":" << lookup.calls
+            << ",\"lookup_errors\":" << lookup.errors
+            << ",\"lookup_worker_error\":" << (lookup_worker_error ? "true" : "false")
+            << ",\"lookup_mode\":" << json(config.lookup_mode)
+            << ",\"filter_cache\":" << (config.filter_cache ? "true" : "false")
+            << ",\"lookup_query_count\":" << lookup.queries
+            << ",\"lookup_query_completed\":" << lookup.completed
+            << ",\"lookup_query_cancelled\":" << lookup.cancelled
+            << ",\"lookup_query_backpressure\":" << lookup.backpressure
+            << ",\"lookup_query_max_subjects\":" << lookup.max_subjects
+            << ",\"lookup_stale_subjects\":" << lookup.stale_subjects
+            << ",\"lookup_incomplete_results\":" << lookup.incomplete_results
+            << ",\"lookup_query_busy_ms\":" << lookup.busy_ms
+            << ",\"lookup_query_cpu_ms\":" << lookup.cpu_ms
+            << ",\"lookup_query_cpu_valid\":" << (lookup.cpu_samples && !lookup.cpu_errors ? "true" : "false")
+            << ",\"lookup_query_cpu_samples\":" << lookup.cpu_samples
+            << ",\"lookup_query_cpu_errors\":" << lookup.cpu_errors
+            << ",\"lookup_query_cpu_error_code\":" << lookup.cpu_error_code
+            << ",\"lookup_runtime_ms\":" << runtime_ms
+            << ",\"lookup_busy_share\":" << (runtime_ms > 0 ? lookup.busy_ms / runtime_ms : 0)
+            << ",\"lookup_create\":" << phase(lookup.create)
+            << ",\"lookup_enum\":" << phase(lookup.enumerate)
+            << ",\"lookup_destroy\":" << phase(lookup.destroy)
+            << ",\"lookup_process\":" << phase(lookup.process)
+            << ",\"lookup_result_apply_ms\":" << dist(lookup.apply_ms)
+            << ",\"lookup_returned_events\":" << lookup.events
+            << ",\"filter_cache_hits\":" << lookup.cache_hits
+            << ",\"filter_cache_misses\":" << lookup.cache_misses
+            << ",\"filter_cache_rejections\":" << lookup.cache_rejections
+            << ",\"bfe_errors\":" << bfe.errors
             << ",\"lookup_calls_per_flow\":" << dist(lookups_per_flow)
             << ",\"lookup_duration_ms\":" << dist(lookup.durations_ms)
             << ",\"added_latency_held_ms\":" << dist(added_held_ms)
@@ -1179,10 +1713,13 @@ public:
             << ",\"window_before_ms\":" << config.window_before_ms
             << ",\"window_after_ms\":" << config.window_after_ms
             << ",\"send_rst\":" << (config.send_rst ? "true" : "false")
-            << ",\"success\":" << ((!receive_error && !fatal_send) ? "true" : "false") << "}";
+            << ",\"delay_ms\":" << config.delay_ms
+            << ",\"success\":" << (success() ? "true" : "false") << "}";
         summary_file << out.str() << '\n';
         summary_file.flush();
         log.write("{\"kind\":\"summary\",\"enum_filter\":" + json(lookup.filter.empty() ? "none" : lookup.filter) +
+                  ",\"lookup_mode\":" + json(config.lookup_mode) +
+                  ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
                   ",\"lookup_calls\":" + std::to_string(lookup.calls) +
                   ",\"decided_proxy\":" + std::to_string(decided_proxy) +
                   ",\"decided_direct\":" + std::to_string(decided_direct) +

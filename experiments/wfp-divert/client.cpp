@@ -1,3 +1,22 @@
+namespace client {
+bool reset_observed(int received, int error) {
+    return received == -1 && error == 10054;
+}
+}
+
+#ifdef WFP_CLIENT_STATE_TEST
+#include <cassert>
+#include <iostream>
+
+int main() {
+    assert(client::reset_observed(-1, 10054));
+    assert(!client::reset_observed(0, 0));
+    assert(!client::reset_observed(-1, 10060));
+    assert(!client::reset_observed(-1, 10053));
+    assert(!client::reset_observed(1, 10054));
+    std::cout << "client reset-result self-tests passed\n";
+}
+#else
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <winsock2.h>
@@ -12,6 +31,7 @@
 #include <vector>
 
 #pragma comment(lib, "Ws2_32.lib")
+static_assert(SOCKET_ERROR == -1 && WSAECONNRESET == 10054);
 
 static long long qpc() {
     LARGE_INTEGER now;
@@ -46,7 +66,9 @@ int main(int argc, char** argv) {
         const auto nonce = args.at("--nonce");
         const bool udp = args.at("--protocol") == "udp";
         const bool connect_only = args.count("--connect-only") && args.at("--connect-only") == "1";
+        const bool expect_reset = args.count("--expect-reset") && args.at("--expect-reset") == "1";
         if (connect_only && udp) throw std::runtime_error("connect-only requires TCP");
+        if (expect_reset && (udp || connect_only)) throw std::runtime_error("expect-reset requires TCP echo");
         const auto close_mode = args.count("--close-mode") ? args.at("--close-mode") : "fin";
         if (close_mode != "fin" && close_mode != "reset") throw std::runtime_error("invalid close mode");
         if (!udp && args.at("--protocol") != "tcp") throw std::runtime_error("invalid protocol");
@@ -114,7 +136,7 @@ int main(int argc, char** argv) {
                     if (n <= 0) throw std::runtime_error("send failed");
                     sent += n;
                 }
-                if (close_mode == "fin") shutdown(socket.value, SD_SEND);
+                if (close_mode == "fin" && !expect_reset) shutdown(socket.value, SD_SEND);
             }
             std::string reply;
             do {
@@ -130,6 +152,15 @@ int main(int argc, char** argv) {
                 reply.append(buffer, n);
             } while (!udp && reply.size() < nonce.size());
             if (reply != nonce) throw std::runtime_error("echo differs");
+            const char* status = "echo_ok";
+            if (expect_reset) {
+                char byte = 0;
+                const int received = recv(socket.value, &byte, 1, 0);
+                const int error = received == SOCKET_ERROR ? WSAGetLastError() : 0;
+                if (!client::reset_observed(received, error))
+                    throw std::runtime_error("expected TCP reset was not observed");
+                status = "reset_observed";
+            }
             if (!udp && close_mode == "reset") {
                 linger reset{1, 0};
                 if (setsockopt(socket.value, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&reset), sizeof(reset)))
@@ -148,7 +179,7 @@ int main(int argc, char** argv) {
                       << ",\"local_port\":" << ntohs(bound.sin_port)
                       << ",\"remote_ip\":\"" << ip << "\",\"remote_port\":" << port
                       << ",\"protocol\":" << (udp ? 17 : 6)
-                      << ",\"nonce\":\"" << nonce << "\",\"status\":\"echo_ok\"}" << std::endl;
+                      << ",\"nonce\":\"" << nonce << "\",\"status\":\"" << status << "\"}" << std::endl;
         }
         return 0;
     } catch (const std::exception& error) {
@@ -156,3 +187,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+#endif

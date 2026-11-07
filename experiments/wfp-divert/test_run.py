@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location("lab_run", pathlib.Path(__file__).with_name("run.py"))
@@ -169,6 +170,13 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(("CHARACTERIZED_REUSE_REJECTION", None),
                          lab.native_evidence_status("CHARACTERIZED_REUSE_REJECTION", "security5156", dict(wfp_count=0)))
 
+    def test_raw_callbacks_without_usable_ownership_cannot_pass_negative_controls(self):
+        status, error = lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", dict(wfp_count=6), usable_events=0)
+        self.assertEqual("INCONCLUSIVE_NO_USABLE_NATIVE_EVENTS", status)
+        self.assertIn("usable", error)
+        self.assertEqual(("PASS_RESTRICTED_CASE", None),
+                         lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", dict(wfp_count=6), usable_events=3))
+
     def test_native_command_passes_wfp_api(self):
         command = [str(x) for x in lab.native_command(pathlib.Path("bin"), pathlib.Path("out"), 35, "poll")]
         self.assertEqual(str(pathlib.Path("bin") / "native-events.exe"), command[0])
@@ -221,7 +229,8 @@ class AttributionTests(unittest.TestCase):
 class InprocEngineTests(unittest.TestCase):
     def args(self, **changes):
         base = dict(mode="redirect", protocol="tcp", hold_ms=1000, seconds=35, window_before_ms=500,
-                    window_after_ms=50, leak_ms=2000, send_rst=True, quic=False)
+                    window_after_ms=50, leak_ms=2000, send_rst=True, quic=False, delay_ms=0,
+                    expect_leak=False, concurrency=0)
         base.update(changes)
         return type("Args", (), base)()
 
@@ -244,6 +253,134 @@ class InprocEngineTests(unittest.TestCase):
             pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe",
             self.args(quic=True, protocol="udp"))]
         self.assertEqual("9100", command[command.index("--quic-port") + 1])
+
+    def test_udp_command_does_not_require_a_tcp_listener(self):
+        command = [str(x) for x in lab.inproc_command(
+            pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe",
+            self.args(quic=True, protocol="udp"))]
+        self.assertEqual("hold", command[command.index("--mode") + 1])
+        self.assertEqual(1, command.count("--udp-port"))
+
+    def test_inproc_command_passes_selected_attribution_delay(self):
+        command = [str(x) for x in lab.inproc_command(
+            pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe",
+            self.args(delay_ms=150, expect_leak=True))]
+        self.assertEqual("150", command[command.index("--delay-ms") + 1])
+
+    def test_inproc_command_selects_async_and_cache_baselines(self):
+        command = [str(x) for x in lab.inproc_command(
+            pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe",
+            self.args(lookup_mode="async", filter_cache="off"))]
+        self.assertEqual("async", command[command.index("--lookup-mode") + 1])
+        self.assertEqual("off", command[command.index("--filter-cache") + 1])
+
+    def test_inproc_comparison_requires_the_requested_native_mode(self):
+        summary = dict(engine="inproc", success=True, decided_proxy=0, quic_drops=0,
+                       lookup_mode="inline", filter_cache=True)
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
+                                                    expected_lookup_mode="async")[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
+                                                    expected_filter_cache=False)[0])
+        self.assertEqual("PASS_RESTRICTED_CASE", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
+                            expected_lookup_mode="inline", expected_filter_cache=True)[0])
+
+    def test_udp_and_quic_plans_exercise_both_apps_with_udp(self):
+        for quic in [False, True]:
+            plan = lab.inproc_client_plan(self.args(protocol="udp", quic=quic), self.manifest())
+            self.assertEqual(6, len(plan))
+            self.assertEqual({"a", "b"}, {c["app"] for c in plan})
+            self.assertEqual({"udp"}, {c["protocol"] for c in plan})
+            self.assertEqual({9100}, {c["port"] for c in plan})
+
+    def client_evidence(self, app="a", protocol=6, action="proxy", reason="selected", status="echo_ok"):
+        attempt = dict(kind="client_attempt", local_ip="127.0.0.1", local_port=40000 if app == "a" else 40001,
+                       remote_ip="127.0.0.1", remote_port=9000, protocol=protocol, nonce=f"test-{app}")
+        result = dict(attempt, kind="client", status=status, done_qpc=150)
+        client = dict(app=app, protocol="tcp" if protocol == 6 else "udp", nonce=f"test-{app}",
+                      attempts=[attempt], results=[result], returncode=0)
+        ownership = dict(attempt, kind="ownership", generation=100, capture_qpc=100, qpc=110,
+                         event_filetime=1000, app_path=f"\\device\\lab\\app-{app}.exe")
+        decision = dict(attempt, kind="decision", generation=100, capture_qpc=100, deadline_qpc=120,
+                        qpc=115, action=action, reason=reason)
+        return client, [ownership, decision]
+
+    def validate_clients(self, clients, records, **changes):
+        args = dict(mode="redirect", quic=False, expect_leak=False)
+        args.update(changes)
+        return lab.inproc_client_evidence(clients, records,
+            {a: f"\\device\\lab\\app-{a}.exe" for a in ["a", "b"]}, **args)
+
+    def test_hold_udp_requires_real_udp_native_ownership_for_each_client(self):
+        a, a_records = self.client_evidence(protocol=17, action="direct", reason="selected_udp_direct")
+        b, b_records = self.client_evidence(app="b", protocol=17, action="direct", reason="other_app")
+        self.validate_clients([a, b], a_records + b_records, mode="hold")
+        for broken in [a_records[1:] + b_records,
+                       [dict(a_records[0], app_path="\\device\\elsewhere\\app-a.exe"), a_records[1]] + b_records,
+                       [dict(a_records[0], generation=99), a_records[1]] + b_records,
+                       [a_records[0], dict(a_records[1], qpc=125)] + b_records,
+                       [a_records[0], dict(a_records[1], reason="timeout")] + b_records]:
+            with self.assertRaises(RuntimeError):
+                self.validate_clients([a, b], broken, mode="hold")
+
+    def test_client_echo_and_decision_cannot_authorize_without_native_evidence(self):
+        client, records = self.client_evidence()
+        with self.assertRaisesRegex(RuntimeError, "ownership"):
+            self.validate_clients([client], records[1:])
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([dict(client, results=[])], records)
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([dict(client, attempts=[])], records)
+
+    def test_quic_proves_selected_drop_and_other_app_echo(self):
+        a, a_records = self.client_evidence(protocol=17, action="drop", reason="selected_quic")
+        a.update(returncode=1, results=[])
+        b, b_records = self.client_evidence(app="b", protocol=17, action="direct", reason="other_app")
+        self.validate_clients([a, b], a_records + b_records, quic=True)
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([a], a_records, quic=True)
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([a, dict(b, returncode=1, results=[])], a_records + b_records, quic=True)
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([a, b], [a_records[0]] + b_records, quic=True)
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([a, b], a_records + [b_records[0], dict(b_records[1], action="drop")], quic=True)
+
+    def test_leakcheck_requires_timeout_late_ownership_reset_and_client_reset(self):
+        client, records = self.client_evidence(action="direct", reason="timeout", status="reset_observed")
+        records[1]["qpc"] = 125
+        records[0]["qpc"] = 130
+        records += [dict(records[1], kind="leaked", qpc=135), dict(records[1], kind="rst", qpc=140)]
+        self.validate_clients([client], records, expect_leak=True)
+        post_reset_drop = dict(records[1], action="drop", reason="leak_reset", qpc=145)
+        self.validate_clients([client], records + [post_reset_drop], expect_leak=True)
+        for broken in [records[:-1], records[:2] + records[3:],
+                       [dict(records[0], qpc=105)] + records[1:],
+                       records[:3] + [dict(records[3], generation=99)],
+                       records + [dict(post_reset_drop, qpc=130)],
+                       records + [dict(post_reset_drop, generation=99)],
+                       records + [dict(post_reset_drop, reason="other_app")],
+                       records + [dict(records[1], qpc=126)]]:
+            with self.assertRaises(RuntimeError):
+                self.validate_clients([client], broken, expect_leak=True)
+        with self.assertRaises(RuntimeError):
+            self.validate_clients([dict(client, results=[dict(client["results"][0], status="echo_ok")])], records,
+                                  expect_leak=True)
+
+    def test_failed_quic_stdout_keeps_diagnostic_without_json_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "client.stdout.txt"
+            path.write_text('reply missing; WSA=10060\n', encoding="utf-8")
+            self.assertEqual([], lab.inproc_client_results(path))
+            path.write_text(json.dumps(dict(kind="client", status="echo_ok")) + '\n', encoding="utf-8")
+            self.assertEqual("echo_ok", lab.inproc_client_results(path)[0]["status"])
+
+    def test_inproc_summary_rejects_unexpected_leak_or_nonselected_disruption(self):
+        summary = dict(engine="inproc", success=True, decided_proxy=0, quic_drops=0)
+        for changes in [dict(unattributed=1), dict(leaked=1), dict(rst_count=1), dict(nonselected_client_disrupted=True),
+                        dict(lookup_errors=1), dict(bfe_errors=1)]:
+            self.assertEqual("FAIL", lab.inproc_evaluate(dict(summary, **changes), "hold", "tcp", False, 0, 0)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "redirect", "tcp", False, 0, 0,
+                                                    expect_leak=True, expected_selected_clients=3)[0])
 
     def test_inproc_evaluate_redirect_requires_matching_proxy_and_gateway(self):
         summary = dict(engine="inproc", success=True, decided_proxy=3, quic_drops=0)
@@ -277,6 +414,87 @@ class InprocEngineTests(unittest.TestCase):
         self.assertFalse(lab.wrong_app_redirected([good], selected))
         self.assertTrue(lab.wrong_app_redirected([good, bad], selected))
         self.assertFalse(lab.wrong_app_redirected([dict(bad, action="direct")], selected))
+
+
+class AleEndpointProbeTests(unittest.TestCase):
+    def fixture(self):
+        key = dict(local_ip="127.0.0.1", local_port=40000, remote_ip="127.0.0.1", remote_port=9000, protocol=6)
+        clients = [dict(app="a", attempts=[dict(key, kind="client_attempt", nonce="n")])]
+        packets = [dict(key, kind="decision", generation=100, capture_qpc=100, qpc=200)]
+        records = [dict(kind="summary", source="ale_endpoint", available=True, success=True, errors=0, truncated=False),
+                   dict(kind="ale_snapshot", snapshot_id=1, complete=True, query_start_qpc=110, observed_qpc=130),
+                   dict(key, kind="ale_endpoint", snapshot_id=1, endpoint_id=77, app_path="\\device\\app-a.exe",
+                        snapshot_complete=True, query_start_qpc=110, observed_qpc=130, recv_qpc=130)]
+        return clients, packets, records
+
+    def report(self, clients, packets, records):
+        return lab.ale_probe_report(clients, packets, records, {"a": "\\device\\app-a.exe"}, 1000, 0)
+
+    def test_endpoint_probe_is_a_distinct_source_with_observation_timing(self):
+        clients, packets, records = self.fixture()
+        result = self.report(clients, packets, records)
+        self.assertEqual("OBSERVED_WHILE_HELD", result["status"])
+        self.assertFalse(result["routing_authority"])
+        self.assertEqual(30, result["rows"][0]["observation_minus_capture_ms"])
+        self.assertEqual(77, result["rows"][0]["endpoint_id"])
+        self.assertNotIn("event_filetime", result["rows"][0])
+
+    def test_partial_failed_or_unavailable_snapshots_are_inconclusive(self):
+        for change in ["partial", "failed", "unavailable", "missing_summary"]:
+            clients, packets, records = self.fixture()
+            if change == "partial":
+                records[1]["complete"] = False
+            elif change == "failed":
+                records[0]["success"] = False
+            elif change == "unavailable":
+                records[0]["available"] = False
+            else:
+                records = records[1:]
+            self.assertEqual("INCONCLUSIVE_ALE_ENDPOINT_PROBE", self.report(clients, packets, records)["status"])
+
+    def test_endpoint_identity_path_and_tuple_ambiguity_are_rejected(self):
+        for field, value in [("app_path", "\\device\\other.exe"), ("local_port", 40001), ("endpoint_id", 0)]:
+            clients, packets, records = self.fixture()
+            records[2][field] = value
+            self.assertEqual("INCONCLUSIVE_ALE_ENDPOINT_PROBE", self.report(clients, packets, records)["status"])
+        clients, packets, records = self.fixture()
+        records.append(dict(records[2], endpoint_id=78))
+        self.assertEqual("INCONCLUSIVE_ALE_ENDPOINT_PROBE", self.report(clients, packets, records)["status"])
+
+    def test_endpoint_observed_after_decision_is_not_before_release_evidence(self):
+        clients, packets, records = self.fixture()
+        for record in records[1:]:
+            record["observed_qpc"] = 250
+        result = self.report(clients, packets, records)
+        self.assertEqual("INCONCLUSIVE_ALE_ENDPOINT_PROBE", result["status"])
+        self.assertFalse(result["rows"][0]["observed_before_decision"])
+
+
+class InprocCleanupTests(unittest.TestCase):
+    def test_cooperative_engine_exit_precedes_forced_termination(self):
+        engine = mock.Mock(pid=1)
+        engine.poll.return_value = None
+        engine.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as root:
+            report = lab.stop_inproc_collectors(engine, None, pathlib.Path("bin"), pathlib.Path(root))
+        engine.wait.assert_called_once_with(timeout=10)
+        engine.terminate.assert_not_called()
+        self.assertEqual([], report["cleanup_forced_pids"])
+
+    def test_forced_engine_exit_waits_before_bfe_fallback_restore(self):
+        engine = mock.Mock(pid=1)
+        engine.poll.side_effect = [None, 1]
+        engine.wait.side_effect = [lab.subprocess.TimeoutExpired("engine", 10), 1]
+        with tempfile.TemporaryDirectory() as root:
+            out = pathlib.Path(root)
+            (out / "bfe-state.json").write_text('{}')
+            with mock.patch.object(lab.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")) as restore:
+                report = lab.stop_inproc_collectors(engine, None, pathlib.Path("bin"), out)
+        engine.terminate.assert_called_once()
+        self.assertEqual(2, engine.wait.call_count)
+        self.assertIn("--restore-state", restore.call_args.args[0])
+        self.assertEqual([1], report["cleanup_forced_pids"])
+        self.assertEqual(0, report["fallback_restore_exit_code"])
 
 
 class BridgeProtocolTests(unittest.TestCase):
