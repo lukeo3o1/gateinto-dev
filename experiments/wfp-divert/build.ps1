@@ -29,10 +29,14 @@ Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-ar
 $sources = $PSScriptRoot
 Push-Location $OutDir
 try {
-  & cl /nologo /std:c++17 /EHsc /W4 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000002 /DUNICODE /D_UNICODE "$sources\native-events.cpp" /Fe:native-events.exe /link Fwpuclnt.lib Wevtapi.lib Ws2_32.lib Advapi32.lib
+  & cl /nologo /std:c++17 /EHsc /W4 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000006 /DUNICODE /D_UNICODE "$sources\native-events.cpp" /Fe:native-events.exe /link Fwpuclnt.lib Wevtapi.lib Ws2_32.lib Advapi32.lib
   if ($LASTEXITCODE) { throw 'Native collector compilation failed' }
+  & cl /nologo /std:c++17 /EHsc /W4 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000006 "$sources\ale-endpoints.cpp" /Fe:ale-endpoints.exe /link Fwpuclnt.lib Ws2_32.lib
+  if ($LASTEXITCODE) { throw 'ALE endpoint probe compilation failed' }
   & cl /nologo /std:c++17 /EHsc /W4 /D_WIN32_WINNT=0x0A00 "/I$sdk\include" "$sources\packets.cpp" /Fe:packets.exe /link "/LIBPATH:$sdk\x64" WinDivert.lib Ws2_32.lib
   if ($LASTEXITCODE) { throw 'Packet collector compilation failed' }
+  & cl /nologo /std:c++17 /EHsc /W4 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000006 /DUNICODE /D_UNICODE "/I$sdk\include" "$sources\inproc.cpp" /Fe:inproc.exe /link "/LIBPATH:$sdk\x64" WinDivert.lib Fwpuclnt.lib Ws2_32.lib Advapi32.lib
+  if ($LASTEXITCODE) { throw 'In-process engine compilation failed' }
   foreach ($name in @('app-a', 'app-b')) {
     & cl /nologo /std:c++17 /EHsc /W4 "$sources\client.cpp" "/Fe:$name.exe" /link Ws2_32.lib
     if ($LASTEXITCODE) { throw "Client compilation failed: $name" }
