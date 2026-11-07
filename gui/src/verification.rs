@@ -328,11 +328,6 @@ impl Dialog {
         self.id
     }
 
-    #[cfg(test)]
-    pub fn ticket(&self) -> u64 {
-        self.ticket
-    }
-
     pub fn receive(&mut self, check: Check, now: Instant) -> Received {
         if check.id != self.id || check.ticket != self.ticket {
             return Received::Lasts;
