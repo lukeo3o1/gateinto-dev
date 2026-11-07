@@ -19,7 +19,7 @@ The review workspace is Linux x86_64 (kernel `6.18.57`), without a supplied Wind
 
 ## Measured Windows evidence
 
-All runs used the GitHub-hosted `windows-2022` image (OS build 10.0.20348), one host, IPv4, controlled loopback echo endpoints, two distinct test EXEs A and B, and the official signed WinDivert driver. `external-*` cases additionally connected to `api.github.com:443` (140.82.112.6) for connection and attribution only, with no payload, echo or proxy validation. Each job's overall conclusion is failure because the subscription cases fail; the statements below are per case.
+All runs used the GitHub-hosted `windows-2022` image (OS build 10.0.20348), one host, IPv4, controlled loopback echo endpoints, two distinct test EXEs A and B, and the official signed WinDivert driver. `external-*` cases additionally connected to `api.github.com:443` (140.82.112.6) for connection and attribution only, with no payload, echo or proxy validation. Each job's overall conclusion is failure because Subscribe2 and Subscribe4 cases fail, and in run 42340194216 also `hold-security-udp`; the statements below are per case.
 
 | Run (head) | Measured | Consequence |
 | --- | --- | --- |
@@ -31,9 +31,9 @@ Run 42340194216 poll-mode measurements:
 
 - notification−capture p50 10.4–25.6 ms per case (max 29.2 ms). decision−capture p50 13.8–27.4 ms; the delayed case was 112.7 ms because of its deliberate consumption delay. In every case the native observation arrived after packet capture, so the hold buffer, not event ordering, carried the decision.
 - `wfp_poll_errors` 0, `wfp_poll_missed` 0, enumeration errors 0, no truncation, no queue drops. Timer `high_resolution` with maximum overshoot 0.5–1.6 ms.
-- Mean poll duration 7.1–9.5 ms, maximum 8.8–43 ms. Collector lifetime was about 0.43–0.69 s per case (2.5 s for retransmit), which explains the 34–187 polls. Enumeration took about 60% of each poll cycle, so the BFE RPC cost is not negligible.
+- Mean poll duration 7.1–9.5 ms, maximum 8.8–43 ms. Collector lifetime was about 0.43–0.69 s per case (2.5 s for retransmit), which explains the 34–187 polls. Polling took about 60% of each poll+wait cycle, so the BFE RPC cost is not negligible.
 - Redirect cases passed only with other-app noninterference (no B proxy packets) and the expected upstream CONNECT destinations and counts (3 bridge tunnels and 3 gateway CONNECTs; 1 for reuse). The reuse case is a characterized conservative rejection: the reused SYN was dropped and the non-selected client was disrupted, which is not normal application connectivity.
-- Security 5156 in the same job gave notification−capture of roughly 330–1024 ms, and the UDP case at a 1000 ms hold failed while a 2000 ms variant passed.
+- Security 5156 in the same job gave notification−capture of roughly 330–1024 ms across the 9 timed cases. It passed TCP hold, delayed and too-late; redirect with 3 bridge tunnels and 3 gateway CONNECTs; redirect with missing ownership; SYN retransmit; external connect; and UDP hold at 2000 ms. Reuse ended as CHARACTERIZED_REUSE_REJECTION. The UDP case at a 1000 ms hold failed.
 
 Still unqualified: Windows 10/11 client SKUs and other builds; external routing beyond the connect-only case, including a topology that denies the direct path; IPv6, fragmentation and other packet modifiers; load and stress (matrix O1, M7); polling cost at scale and with longer-lived collectors; stored-history eviction under high event volume; UDP end to end; and the Subscribe4 field-read anomaly, possibly a structure or version mismatch, which was not root-caused. A zero wrong-app count over these finite runs is evidence for those runs only.
 
@@ -79,7 +79,7 @@ Log distinct times: WFP occurrence FILETIME, WFP callback-entry QPC, evidence-co
 
 Proposed restricted state machine (a subset is implemented in the PoC; not production code):
 
-1. Start native subscriptions and the local adapter before admitting test apps. For a controlled destination, capture outbound TCP/UDP at NETWORK without SNIFF; otherwise a “held” copy cannot prevent escape. Receive continuously into a separately bounded userspace pending queue. Set and log driver queue length/size/time too; userspace buffering cannot recover a packet already dropped in the driver queue.
+1. Start the native ownership source (net-event subscription, polling of stored net events, or Security 5156 subscription) and the local adapter before admitting test apps. For a controlled destination, capture outbound TCP/UDP at NETWORK without SNIFF; otherwise a “held” copy cannot prevent escape. Receive continuously into a separately bounded userspace pending queue. Set and log driver queue length/size/time too; userspace buffering cannot recover a packet already dropped in the driver queue.
 2. Normalize key to address family, protocol, local IP/port, remote IP/port, scope/interface context where relevant. A full forward/reverse tuple is essential. Two apps connecting to the same remote endpoint usually have different local ports; remote IP/port alone mixes them.
 3. For a newly observed TCP SYN, create a tentative generation containing SYN sequence number and first capture QPC. Same-generation retransmitted SYNs share a decision. A conflicting SYN, reused tuple, missing lifecycle or stale event is ambiguous; invalidate rather than inherit ownership. Buffer subsequent packets too, not only one SYN/datagram.
 4. Commit only with complete, direction-correct native WFP evidence that is sufficiently fresh and unambiguous under the restricted test assumptions. App ID equality alone cannot prove the event describes this generation. Late events must never revive expired pending entries. Reject conflicting native events. SOCKET/FLOW controls must not authorize a decision.
@@ -177,7 +177,7 @@ Status after the runs in [Measured Windows evidence](#measured-windows-evidence)
 | --- | --- |
 | W1 | PARTIAL: collection and allow keyword set together, ordinary A/B TCP and UDP coverage counted by source/type/layer. Independent toggles and audit off/on not run. |
 | W2 | NOT RUN: elevated only. |
-| O1 | PARTIAL: idle host, 1–12 flows per case, p50/max only. 1,000 flows and load not run. |
+| O1 | PARTIAL: idle host, 2–6 client runs per case (at most 6 TCP connections or 12 UDP destination tuples), p50/max only. 1,000 flows and load not run. |
 | M1 | PARTIAL: A and B to the same controlled R:r with distinct local tuples, 3 iterations each per case. |
 | M2 | PARTIAL: one SYN retransmit scenario passed. |
 | M4 | PARTIAL: full-tuple reuse characterized as conservative rejection that disrupts the non-selected client. |

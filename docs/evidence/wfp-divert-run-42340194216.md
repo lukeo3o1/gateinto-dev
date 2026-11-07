@@ -7,7 +7,7 @@ Summarized from the decoded job log of the "Run first-packet hold and TCP redire
 
 Topology: one host, IPv4, controlled loopback echo, plus `external-*` cases that only connect to `140.82.112.6:443` (api.github.com) without payload, echo or proxy validation.
 
-The job conclusion is **failure**. The step fails because Subscribe2, Subscribe4 and one Security 5156 case fail (see below). The 11 poll-mode cases all reached their pass status.
+The job conclusion is **failure**. The step fails because Subscribe2 and Subscribe4 cases and `hold-security-udp` fail (see below). The 11 poll-mode cases all reached their pass status.
 
 ## Poll mode (`wfp_api: poll`)
 
@@ -55,7 +55,7 @@ Lifetime is `wfp_poll_thread_stop_qpc − wfp_poll_thread_start_qpc`. Poll share
 | Subscribe2 | hold missing/too-late, redirect missing | INCONCLUSIVE_NO_NATIVE_EVENTS: no callbacks, so WFP attribution was not exercised. |
 | Subscribe4 | hold tcp/udp/delayed, redirect, external | FAIL or NO_OWNERSHIP_CONFIRMATION, although `wfp_raw_count` equalled `wfp_enum_total` (6–42). |
 | Subscribe4 | hold missing/too-late | PASS_RESTRICTED_CASE (no ownership expected). |
-| Security 5156 | 9 cases | notification−capture p50 329–865 ms, max 1024 ms. `hold-security-udp` (1000 ms hold) FAIL: max 1011 ms exceeded the hold; `hold-security-udp-2000` passed. |
+| Security 5156 | 10 cases (9 with timing; `redirect-security-missing` has none by design) | notification−capture p50 329–865 ms, max 1024 ms. Passed: TCP hold, delayed and too-late; redirect with 3 bridge tunnels and 3 gateway CONNECTs; redirect with missing ownership; SYN retransmit; external connect; and UDP hold at 2000 ms. Reuse ended as CHARACTERIZED_REUSE_REJECTION. `hold-security-udp` (1000 ms hold) FAIL: max 1011 ms exceeded the hold. |
 
 Failing cases listed by the step (`ci.ps1:134`):
 

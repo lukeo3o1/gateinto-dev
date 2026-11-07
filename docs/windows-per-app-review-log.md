@@ -61,7 +61,7 @@ collector errors/overflow fail a case. See the PoC README for current restrictio
 
 ## Windows runtime runs
 
-Inspected 2026-11-07 from GitHub Actions job logs. All jobs ran on `windows-2022`, OS build 10.0.20348, single host, IPv4, controlled loopback endpoints, plus an external connect-only case to `api.github.com:443`. Every job concluded failure because subscription-based cases fail; results below are per case.
+Inspected 2026-11-07 from GitHub Actions job logs. All jobs ran on `windows-2022`, OS build 10.0.20348, single host, IPv4, controlled loopback endpoints, plus an external connect-only case to `api.github.com:443`. Every job concluded failure because Subscribe2 and Subscribe4 cases fail, and in run 42340194216 also `hold-security-udp`; results below are per case.
 
 | Run | Head | Job | What was measured |
 | --- | --- | --- | --- |
@@ -75,7 +75,7 @@ Status for the restricted topology above, replacing the matching initial-review 
 driver_load: PASS (official signed WinDivert, windows-2022)
 native_wfp_subscription: RUN, NOT USABLE (Subscribe2 no callbacks; Subscribe4 late and inconsistent fields)
 native_wfp_stored_event_poll: PASS_RESTRICTED (Enum3, 11/11 cases in 42340194216)
-security_5156_subscription: RUN, TOO SLOW FOR 1000 MS UDP HOLD (about 330-1024 ms)
+security_5156_subscription: PASS_RESTRICTED except UDP at 1000 ms hold (about 330-1024 ms; TCP hold, redirect with 3 gateway CONNECTs, retransmit, external and UDP at 2000 ms hold passed)
 normal_win32_allow_event_coverage: PASS_RESTRICTED (TCP and UDP, build 20348 only)
 tcp_syn_vs_event_delivery: MEASURED (event after capture; poll p50 10.4-25.6 ms)
 udp_first_datagram_vs_event_delivery: MEASURED (within hold; attribution only)
