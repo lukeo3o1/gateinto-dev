@@ -9,14 +9,16 @@ use gateinto::ipc::{
     SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, Source};
+use gateinto::proxy::Verification;
 use gateinto::sessions::SessionId;
+use zeroize::Zeroizing;
 
 use crate::agent::Config;
 use crate::credentials::{Issued, Reveal};
 use crate::device::{Key, KeyState, Probe, System};
 use crate::i18n::{Note, Text};
 use crate::settings::{self, AgentStart};
-use crate::worker::{Command, Loaded};
+use crate::worker::{Command, Loaded, Secret};
 
 pub const FLAG: &str = "--demo";
 pub const TITLE: Text = Text::DemoTitle;
@@ -32,6 +34,7 @@ pub const AGENT_START: AgentStart = AgentStart::On;
 
 const PROFILE: &str = "g-4f0c2a9d7e1b83c56a0d9e2f4b7c1a3e5d8f0b2c4a6e8d1f3b5c7e9a0c2e4d";
 const PID: u32 = 4242;
+const VERIFYING: u64 = 5;
 const FINGERPRINT: &str = "9c4e1a7f3b2d8e6c0a5f9b1d7e3c2a8f6b4d0e9c1a7f5b3d2e8c6a4f0b9d1e7c";
 const CONFIG: &str = r#"
 [gateways.office]
@@ -161,6 +164,25 @@ const LOG: [(u64, LogLevel, &str, &str); 9] = [
     ),
 ];
 
+fn profile() -> GatewayName {
+    PROFILE.parse().expect("the sample profile name is valid")
+}
+
+fn pending() -> Verification {
+    Verification {
+        serial: 1,
+        origin: Zeroizing::new("https://verify.northwind.example".to_owned()),
+        auth_uri: Zeroizing::new(
+            "https://verify.northwind.example/device?code=BCDF-GHJK".to_owned(),
+        ),
+        user_code: Zeroizing::new("BCDF-GHJK".to_owned()),
+        expires_in: 600,
+        targets: vec!["intranet.northwind.example:443".to_owned()],
+        more_targets: 0,
+        suppressed: 0,
+    }
+}
+
 pub fn requested<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(args: I) -> bool {
     args.into_iter().skip(1).any(|arg| arg.as_ref() == FLAG)
 }
@@ -180,6 +202,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             tunnels: s.tunnels,
             browser: s.browser,
             shell: s.shell.map(str::to_owned),
+            verification: s.id == VERIFYING,
         })
         .collect()
 }
@@ -215,9 +238,16 @@ pub fn answer(request: Request, now: u64) -> Response {
                 .map(|session| format!("listen: {}:{}", Ipv4Addr::LOCALHOST, session.port))
                 .collect(),
         ),
+        Request::Verification(id) if id == SessionId::from(VERIFYING) => {
+            Response::Ok(gateinto::ipc::verification_lines(&profile(), &pending()))
+        }
+        Request::Verification(id) => {
+            Response::Error(format!("session {id} has no pending verification"))
+        }
         Request::Launch(_)
         | Request::Terminal(_)
         | Request::Close(_)
+        | Request::Dismiss(..)
         | Request::Stop
         | Request::Config
         | Request::Approve(_)
@@ -231,7 +261,13 @@ pub fn refusal(command: &Command) -> Option<Text> {
         Command::Close(_) => Some(NOT_REVOKED),
         Command::Stop => Some(NOT_STOPPED),
         Command::Start => Some(AGENT_NOT_STARTED),
-        Command::Probe | Command::Watch(_) | Command::Credentials(..) | Command::Answer(..) => None,
+        Command::Probe
+        | Command::Watch(_)
+        | Command::Credentials(..)
+        | Command::Verification(..)
+        | Command::Unverify
+        | Command::Dismiss(..)
+        | Command::Answer(..) => None,
     }
 }
 
@@ -303,10 +339,13 @@ pub fn probe(_: &Config) -> Probe {
     }
 }
 
-pub fn reveal(reveal: Reveal) -> Reveal {
-    Reveal {
-        credentials: Some(Issued::Demo),
-        ..reveal
+pub fn reveal(secret: Secret) -> Secret {
+    match secret {
+        Secret::Credentials(reveal) => Secret::Credentials(Reveal {
+            credentials: Some(Issued::Demo),
+            ..reveal
+        }),
+        Secret::Verification(check) => Secret::Verification(check),
     }
 }
 
@@ -327,6 +366,7 @@ mod tests {
     use crate::gateways;
     use crate::sessions;
     use crate::start::Starting;
+    use crate::verification::Reply;
     use crate::worker::{Update, serve_with};
 
     const NOW: u64 = 1_800_000_000;
@@ -499,6 +539,7 @@ mod tests {
         tx.send(Command::Watch(true)).unwrap();
         tx.send(Command::Probe).unwrap();
         tx.send(Command::Credentials(3, 1)).unwrap();
+        tx.send(Command::Verification(VERIFYING, 2)).unwrap();
         tx.send(Command::Launch("office".parse().unwrap())).unwrap();
         let updates = RefCell::new(Vec::<Update>::new());
         let reveals = RefCell::new(Vec::new());
@@ -531,8 +572,25 @@ mod tests {
             .find(|s| s.id == 3)
             .unwrap()
             .listen;
-        assert_eq!(reveals[0].listen, Some(listen));
-        let issued = reveals[0].credentials.as_ref().unwrap();
+        let Secret::Credentials(revealed) = &reveals[0] else {
+            panic!("no credentials were revealed first");
+        };
+        assert_eq!(revealed.listen, Some(listen));
+        let Secret::Verification(check) = &reveals[1] else {
+            panic!("no verification followed");
+        };
+        assert_eq!((check.id, check.ticket), (VERIFYING, 2));
+        let Reply::Pending(gateway, pending) = &check.reply else {
+            panic!("the sample verification is not pending");
+        };
+        assert_eq!(gateway.as_str(), PROFILE);
+        assert!(crate::verification::launchable(&pending.auth_uri));
+        assert!(
+            sessions(u64::MAX)
+                .iter()
+                .all(|s| s.verification == (s.id == VERIFYING))
+        );
+        let issued = revealed.credentials.as_ref().unwrap();
         assert_eq!(
             (issued.username(), issued.password()),
             ("demo-user", "demo-password")

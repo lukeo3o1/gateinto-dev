@@ -22,9 +22,79 @@ one side can finish sending while the other continues receiving.
 
 A non-2xx response or a stream reset before establishment closes only that
 local tunnel: gateway `403` maps to local `403`, other statuses and stream
-errors to `502`. Response headers and bodies are not forwarded. Once a tunnel
+errors to `502`, including a `407` with a
+[verification challenge](#verification-challenge). Response headers and
+bodies are not forwarded. Once a tunnel
 is established, a reset closes its byte relay; it cannot send a second HTTP
 response to the local client.
+
+## Request headers
+
+Every gateway `CONNECT` carries two request headers, on HTTP/1.1 and HTTP/2,
+also from `check-upstream`:
+
+```
+CONNECT example.com:443 HTTP/1.1
+Host: example.com:443
+User-Agent: Gateinto/<version>
+Gateinto-Auth-Version: 1
+```
+
+On HTTP/2 they are the lowercase fields `user-agent` and
+`gateinto-auth-version`. `<version>` is the string `gateinto --version`
+prints; `Gateinto-Auth-Version` is the version of the challenge format below,
+not a product version. Direct routes send nothing upstream.
+
+## Verification challenge
+
+A gateway that does not yet trust the client certificate can answer
+`CONNECT` with `407` and a `Gateinto` challenge; the design is
+[design/interactive-auth.md](../design/interactive-auth.md).
+
+```
+HTTP/1.1 407 Proxy Authentication Required
+Proxy-Authenticate: Gateinto auth_uri="https://verify.example.test/device?cert_sha256=<64 hex>", user_code="WDJB-MJHT", expires_in="300"
+```
+
+Only a `407` is read for a challenge. All its `Proxy-Authenticate` fields
+(`get_all` on HTTP/2) are joined with `, ` and parsed as an RFC 9110
+challenge list: empty list elements and optional whitespace are allowed,
+other schemes are skipped, and a list that does not parse has no challenge.
+The scheme `Gateinto` and parameter names compare case-insensitively; values
+are a token or a quoted-string, whose quoted-pairs are unescaped before the
+limits apply. A response is accepted only when:
+
+- it has exactly one `Gateinto` challenge, with parameters rather than
+  `token68`, no parameter twice (unknown ones included), and all of
+  `auth_uri`, `user_code` and `expires_in`; other unknown parameters are
+  ignored;
+- `auth_uri` has at most 2048 bytes, only letters, digits and
+  ``-._~:/?[]@!$&'()*+,=%``, the scheme `https://` (any case), an authority
+  up to the first `/` or `?` without `@`, a host that is an LDH name of at
+  most 253 bytes (a numeric or `0x` last label must make it IPv4), a strict
+  IPv4 address or a bracketed IPv6 address, an optional port from 1 to 65535
+  without a leading zero, no `[` or `]` after the authority, and every `%`
+  followed by two hex digits that do not decode to a control character;
+- its query, split on `&` and then on the first `=`, has exactly one key that
+  decodes to `cert_sha256`, whose raw value is 64 lowercase hex digits equal
+  to the SHA-256 fingerprint of the client certificate sent in that
+  connection's handshake, and no key that is `cert_sha256` or `user_code` in
+  another case or decodes to `user_code`;
+- `user_code` is four letters from `BCDFGHJKLMNPQRSTVWXZ`, `-`, and four
+  more, uppercase only;
+- `expires_in` is 1 to 10 decimal digits without a leading zero; values
+  above 600 are clamped to 600;
+- the gateway has no `verification_origins`, or the origin
+  (`https://host[:port]`, host lowercased, IPv6 canonical, `:443` omitted) is
+  one of them.
+
+A `407` sent on a connection that presented no client certificate, or that
+fails any rule, is a plain `407`. Either way the local client gets `502`
+without any upstream header, and nothing is replayed. An accepted challenge
+may become the session's pending verification, subject to the rules in [the
+design](../design/interactive-auth.md#pending-challenges), and is then shown
+by the GUI or by `gateinto session verification <id>`. `Cache-Control` is
+not required.
 
 ## Mixed routing
 

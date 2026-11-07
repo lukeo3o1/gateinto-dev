@@ -24,6 +24,7 @@ kernel32.dll QueryFullProcessImageNameW
 oleaut32.dll GetErrorInfo
 secur32.dll GetUserNameExW
 shell32.dll ShellExecuteW
+shell32.dll ShellExecuteExW
 shell32.dll Shell_NotifyIconW
 user32.dll AdjustWindowRectEx
 user32.dll AllowSetForegroundWindow

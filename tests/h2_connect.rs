@@ -138,6 +138,43 @@ async fn check_upstream_uses_http2_and_reports_alpn_and_status_without_body() {
 }
 
 #[tokio::test]
+async fn agent_and_check_upstream_send_the_user_agent_and_auth_version_over_http2() {
+    let ca = TestCa::new();
+    let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
+    let config = agent_config(server.addr, ca.roots(), PROXY_NAME);
+    let upstream = config.upstream.clone();
+    let proxy = Proxy::bind(config).await.unwrap();
+    let agent = proxy.local_addr();
+    let running = tokio::spawn(proxy.run());
+    let (_, response) = send(
+        agent,
+        b"CONNECT echo.test:443 HTTP/1.1\r\nHost: echo.test:443\r\nUser-Agent: client\r\nX-Local: 1\r\n\r\n",
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.head);
+    running.abort();
+    gateinto::check::check_upstream(gateinto::check::CheckOptions {
+        upstream,
+        tls_mode: gateinto::tls::TlsMode::default(),
+        client_certificate: None,
+        target: Some("echo.test:443".parse().unwrap()),
+        timeout: Duration::from_secs(2),
+        max_header_bytes: 16384,
+    })
+    .await
+    .unwrap();
+
+    let expected = vec![
+        (
+            "user-agent".to_owned(),
+            format!("Gateinto/{}", gateinto::VERSION),
+        ),
+        ("gateinto-auth-version".to_owned(), "1".to_owned()),
+    ];
+    assert_eq!(*server.fields.lock().unwrap(), [expected.clone(), expected]);
+}
+
+#[tokio::test]
 async fn statuses_resets_and_opening_timeouts_do_not_break_other_streams() {
     let ca = TestCa::new();
     let server = h2_fixture::Server::start(ca.server_config(PROXY_NAME), 10).await;
@@ -308,6 +345,8 @@ mod renewal {
     use super::*;
     use gateinto::identity::certificates::{DeviceSigner, SelfSignedCertificates};
     use gateinto::identity::client_cert::ClientCertificate;
+    use gateinto::identity::encoding::sha256_fingerprint;
+    use gateinto::proxy::Verifications;
     use rcgen::PublicKeyData;
     use rustls::pki_types::UnixTime;
     use rustls::sign::{Signer, SigningKey};
@@ -369,6 +408,25 @@ mod renewal {
         SocketAddr,
         tokio::task::JoinHandle<()>,
     ) {
+        let (server, clock, failing, certificates, agent, running, _) =
+            setup_verifying(required, limit, false).await;
+        (server, clock, failing, certificates, agent, running)
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn setup_verifying(
+        required: bool,
+        limit: u32,
+        legacy_first: bool,
+    ) -> (
+        h2_fixture::Server,
+        Arc<Clock>,
+        Arc<AtomicBool>,
+        Arc<SelfSignedCertificates>,
+        SocketAddr,
+        tokio::task::JoinHandle<()>,
+        Verifications,
+    ) {
         let now = UnixTime::now().as_secs();
         let clock = Arc::new(Clock(AtomicU64::new(now)));
         let key = rcgen::KeyPair::generate().unwrap();
@@ -385,7 +443,7 @@ mod renewal {
         let mut tls =
             ca.server_config_requesting_client_spki(PROXY_NAME, key.subject_public_key_info());
         Arc::make_mut(&mut tls).time_provider = clock.clone();
-        let server = h2_fixture::Server::start(tls, limit).await;
+        let server = h2_fixture::Server::start_switching(tls, limit, legacy_first).await;
         let mut config = agent_config(server.addr, ca.roots(), PROXY_NAME);
         config.client_certificate = Some(ClientCertificate::SelfSigned {
             certificates: certificates.clone(),
@@ -395,8 +453,121 @@ mod renewal {
             .await
             .unwrap();
         let agent = proxy.local_addr();
+        let verifications = proxy.verifications();
         let running = tokio::spawn(proxy.run());
-        (server, clock, failing, certificates, agent, running)
+        (
+            server,
+            clock,
+            failing,
+            certificates,
+            agent,
+            running,
+            verifications,
+        )
+    }
+
+    async fn refused(agent: SocketAddr, target: &str) {
+        let (mut stream, response) = send(agent, &connect_request(target)).await;
+        assert_refused_without_challenge(&mut stream, response).await;
+    }
+
+    async fn assert_refused_without_challenge(stream: &mut TcpStream, response: Response) {
+        let rest = read_to_end_within(stream, Duration::from_secs(5)).await;
+        assert_eq!(response.status, 502, "{}", response.head);
+        let all = format!("{}{}", response.head, String::from_utf8_lossy(&rest));
+        for value in ["proxy-authenticate", "verify.test", SECRET] {
+            assert!(!all.to_ascii_lowercase().contains(value), "{all}");
+        }
+        for code in CHALLENGE_CODES {
+            assert!(!all.contains(code), "{all}");
+        }
+    }
+
+    fn current_uri(certificates: &SelfSignedCertificates) -> String {
+        let fingerprint = sha256_fingerprint(&certificates.current().cert[0]);
+        format!("{CHALLENGE_URI}{fingerprint}")
+    }
+
+    #[tokio::test]
+    async fn challenges_on_a_reused_http2_connection_share_one_entry() {
+        let (server, _, _, certificates, agent, running, verifications) =
+            setup_verifying(true, 10, false).await;
+        echo(&mut tunnel(agent, "echo.test:443").await, b"connected").await;
+        refused(agent, "challenge.a.test:443").await;
+        let pending = verifications
+            .get()
+            .expect("stored before the local response");
+        assert_eq!(*pending.user_code, CHALLENGE_CODES[0]);
+        assert_eq!(*pending.auth_uri, current_uri(&certificates));
+        assert_eq!(*pending.origin, "https://verify.test");
+        refused(agent, "challenge.b.test:443").await;
+        let again = verifications.get().unwrap();
+        assert_eq!(again.serial, pending.serial);
+        assert_eq!(
+            again.targets,
+            ["challenge.a.test:443", "challenge.b.test:443"]
+        );
+        assert_eq!((again.more_targets, again.suppressed), (0, 0));
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+        running.abort();
+    }
+
+    #[tokio::test]
+    async fn a_challenge_answered_after_a_renewal_is_dropped() {
+        let (server, clock, _, certificates, agent, running, verifications) =
+            setup_verifying(true, 10, false).await;
+        let issued = clock.0.load(Ordering::SeqCst);
+        let mut held = TcpStream::connect(agent).await.unwrap();
+        held.write_all(&connect_request("held.challenge.old.test:443"))
+            .await
+            .unwrap();
+        let mut foreign = TcpStream::connect(agent).await.unwrap();
+        foreign
+            .write_all(&connect_request("held.foreign.challenge.old.test:443"))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            while server.requests.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let original = certificates.current().cert[0].clone();
+        clock.0.store(issued + 43_200, Ordering::SeqCst);
+        refused(agent, "challenge.new.test:443").await;
+        assert_ne!(certificates.current().cert[0], original);
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
+        let renewed = verifications.get().unwrap();
+        assert_eq!(*renewed.user_code, CHALLENGE_CODES[1]);
+        server.release.add_permits(2);
+        for stream in [&mut held, &mut foreign] {
+            let response = timeout(Duration::from_secs(5), read_response(stream))
+                .await
+                .unwrap();
+            assert_refused_without_challenge(stream, response).await;
+        }
+        let pending = verifications.get().unwrap();
+        assert_eq!(pending.serial, renewed.serial);
+        assert_eq!(*pending.user_code, CHALLENGE_CODES[1]);
+        assert_eq!(*pending.auth_uri, current_uri(&certificates));
+        assert_eq!(pending.targets, ["challenge.new.test:443"]);
+        assert_eq!(pending.suppressed, 0);
+        running.abort();
+    }
+
+    #[tokio::test]
+    async fn a_challenge_over_a_legacy_connection_is_bound_to_its_certificate() {
+        let (_server, _, _, certificates, agent, running, verifications) =
+            setup_verifying(true, 10, true).await;
+        refused(agent, "challenge.test:443").await;
+        let pending = verifications
+            .get()
+            .expect("stored before the local response");
+        assert_eq!(*pending.user_code, CHALLENGE_CODES[0]);
+        assert_eq!(*pending.auth_uri, current_uri(&certificates));
+        assert_eq!(pending.targets, ["challenge.test:443"]);
+        running.abort();
     }
 
     #[tokio::test]

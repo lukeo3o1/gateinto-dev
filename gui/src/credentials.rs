@@ -274,6 +274,7 @@ mod tests {
             tunnels: 0,
             browser: Some(BrowserKind::Chrome),
             shell: None,
+            verification: false,
         }
     }
 

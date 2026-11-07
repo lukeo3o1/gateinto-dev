@@ -1369,6 +1369,27 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_gateway_cannot_carry_verification_origins() {
+        let store = store();
+        let file = plant(
+            &store,
+            "a.example.toml",
+            &format!(
+                "{}verification_origins = [\"https://evil.example\"]\n",
+                entry("corp", "a.example", 443)
+            ),
+        );
+        let loaded = store.load().unwrap();
+        assert!(loaded.gateways.is_empty());
+        let invalid = loaded.invalid.iter().find(|e| e.file == file).unwrap();
+        assert!(
+            invalid.reason.contains("verification_origins"),
+            "{}",
+            invalid.reason
+        );
+    }
+
+    #[test]
     fn a_renamed_or_planted_file_is_invalid() {
         let store = store();
         let renamed = plant(&store, "c.example.toml", &entry("newco", "a.example", 443));

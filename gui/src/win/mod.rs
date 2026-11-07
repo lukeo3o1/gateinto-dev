@@ -51,6 +51,7 @@ use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
 use gateinto::link::{handoff as reply, store};
 use gateinto::uri::LaunchRequest;
+use zeroize::Zeroizing;
 
 use self::approval::Approval;
 use self::icon::Owned;
@@ -74,12 +75,13 @@ use crate::nav::{self, Page as NavPage};
 use crate::pointer::{self, Action};
 use crate::remove::{self, Removal};
 use crate::scale::Scale;
-use crate::scene::{Op, View, scene};
+use crate::scene::{self, Op, View, scene};
 use crate::scroll::Pane;
 use crate::sessions;
 use crate::settings::{self, AgentStart};
 use crate::theme::{self, Theme};
 use crate::uninstall::{self, Mode};
+use crate::verification;
 use crate::worker::{Command, Update};
 use d2d::Graphics;
 use instance::{Start, WM_EXIT, WM_REVEAL};
@@ -94,6 +96,8 @@ const EX_STYLE: u32 = 0;
 const APP_ICON: usize = 1;
 const TITLE: &str = "Gateinto";
 const COPIED_TIMER: usize = 1;
+const VERIFY_TIMER: usize = 2;
+const VERIFY_MS: u32 = 1000;
 const IMMERSIVE: &str = "ImmersiveColorSet";
 const COPIED_MS: u32 = 1500;
 const PASTE_UNITS: usize = 4096;
@@ -168,6 +172,7 @@ struct App {
     filter: Filter,
     log: log::Body,
     dialog: Option<Dialog>,
+    verifying: Option<verification::Dialog>,
     details: Option<GatewayName>,
     adding: Option<Form>,
     removing: Option<Removal>,
@@ -228,6 +233,7 @@ impl App {
             filter: Filter::default(),
             log: log::Body::Rows(Vec::new()),
             dialog: None,
+            verifying: None,
             details: None,
             adding: None,
             removing: None,
@@ -311,6 +317,11 @@ impl App {
             let page = dialog.page(&update.state, &sessions::Names::new(&update.gateways));
             board::dialog::credentials(&mut board, l, s, t, v, &page, m);
         }
+        if let Some(verifying) = &self.verifying {
+            let names = sessions::Names::new(&update.gateways);
+            let page = verifying.page(&update.state, &update.gateways, &names, Instant::now());
+            board::dialog::verification::board(&mut board, l, s, t, v, &page, m);
+        }
         match self.removal() {
             Some(prompt) => board::dialog::remove(&mut board, l, s, t, v, &prompt, m),
             None => {
@@ -341,7 +352,7 @@ impl App {
 
     fn retarget(&mut self) {
         let board = self.board();
-        self.adopt(board);
+        scene::wipe(&mut self.adopt(board));
     }
 
     fn adopt(&mut self, board: Board) -> Vec<Op> {
@@ -458,6 +469,7 @@ impl App {
 
     fn modal(&self) -> bool {
         self.dialog.is_some()
+            || self.verifying.is_some()
             || self.details.is_some()
             || self.adding.is_some()
             || self.removing.is_some()
@@ -482,6 +494,7 @@ impl App {
             if self.dialog.take().is_some() {
                 self.forget_secret();
             }
+            self.end_verification();
             self.details = None;
             self.adding = None;
             self.removing = None;
@@ -532,6 +545,7 @@ impl App {
             return;
         };
         self.tickets = ticket;
+        self.end_verification();
         self.forget_secret();
         self.uncopy();
         self.details = None;
@@ -540,6 +554,83 @@ impl App {
         self.ending = None;
         self.dialog = Some(dialog);
         self.link.send(Command::Credentials(id, ticket));
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn show_verification(&mut self, id: u64) {
+        let Some(update) = &self.update else {
+            return;
+        };
+        let ticket = self.tickets.wrapping_add(1);
+        let Some(dialog) = verification::Dialog::open(&update.state, id, ticket) else {
+            return;
+        };
+        self.tickets = ticket;
+        while self.close_dialog() {}
+        self.verifying = Some(dialog);
+        self.link.send(Command::Verification(id, ticket));
+        unsafe { SetTimer(self.hwnd, VERIFY_TIMER, VERIFY_MS, None) };
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn end_verification(&mut self) -> bool {
+        let Some(mut dialog) = self.verifying.take() else {
+            return false;
+        };
+        dialog.wipe();
+        unsafe { KillTimer(self.hwnd, VERIFY_TIMER) };
+        self.link.send(Command::Unverify);
+        self.forget_secret();
+        self.uncopy();
+        true
+    }
+
+    fn tick_verification(&mut self) {
+        let lasts = match (&self.verifying, &self.update) {
+            (Some(dialog), Some(update)) => dialog.lasts(&update.state, Instant::now()),
+            _ => false,
+        };
+        if !lasts {
+            self.end_verification();
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn verification_url(&self) -> Option<Zeroizing<String>> {
+        let url = self.verifying.as_ref()?.url()?;
+        Some(Zeroizing::new(url.to_owned()))
+    }
+
+    fn copy_link(&mut self) {
+        let Some(url) = self.verification_url() else {
+            return;
+        };
+        if let Some(sequence) = device::copy_secret(self.hwnd, &url) {
+            self.secret = Some(sequence);
+            if let Some(dialog) = &mut self.verifying {
+                dialog.copied();
+            }
+            unsafe { SetTimer(self.hwnd, COPIED_TIMER, COPIED_MS, None) };
+        } else {
+            self.fail(verification::COPY_FAILED);
+        }
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn dismiss_verification(&mut self) {
+        let Some((id, serial)) = self.verifying.as_ref().map(|d| (d.id(), d.serial())) else {
+            return;
+        };
+        match serial {
+            Some(serial) => self.send(Command::Dismiss(id, serial)),
+            None => {
+                self.end_verification();
+            }
+        }
         self.retarget();
         self.invalidate();
     }
@@ -581,6 +672,9 @@ impl App {
         {
             self.retarget();
             self.invalidate();
+            return true;
+        }
+        if self.end_verification() {
             return true;
         }
         if self.dialog.take().is_none() {
@@ -731,6 +825,13 @@ impl App {
             self.dialog = None;
             self.forget_secret();
             self.uncopy();
+        }
+        if self
+            .verifying
+            .as_ref()
+            .is_some_and(|dialog| verification::ends(&command, dialog.id()))
+        {
+            self.end_verification();
         }
         self.link.send(command);
     }
@@ -917,6 +1018,9 @@ impl App {
         if let Some(dialog) = &mut self.dialog {
             dialog.uncopy();
         }
+        if let Some(dialog) = &mut self.verifying {
+            dialog.uncopy();
+        }
         self.retarget();
         self.invalidate();
     }
@@ -1056,6 +1160,9 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::TogglePassword(_)
         | Zone::RevokeCredentials
         | Zone::CloseDialog
+        | Zone::OpenVerification
+        | Zone::CopyLink
+        | Zone::DismissVerification
         | Zone::AddGateway
         | Zone::AddField(_)
         | Zone::AddRoute(_)
@@ -1134,6 +1241,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                     Some(Choice::Details(id)) => app.session_gateway(id),
                     Some(Choice::Portal(id)) => return app.portal(id),
                     Some(Choice::Credentials(id)) => app.reveal(id),
+                    Some(Choice::Verification(id)) => app.show_verification(id),
                     None => {}
                 }
                 None
@@ -1227,6 +1335,19 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             rehover(hwnd);
             return;
         }
+        Some(Action::OpenVerification) => {
+            open_verification(hwnd);
+            return;
+        }
+        Some(Action::CopyLink) => {
+            with_app(hwnd, App::copy_link);
+            return;
+        }
+        Some(Action::DismissVerification) => {
+            with_app(hwnd, App::dismiss_verification);
+            rehover(hwnd);
+            return;
+        }
         Some(Action::AddGateway) => {
             with_app(hwnd, App::open_add);
             rehover(hwnd);
@@ -1273,6 +1394,27 @@ fn perform(hwnd: HWND, action: Option<Action>) {
     unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0) };
 }
 
+fn open_verification(hwnd: HWND) {
+    let Some((url, demo)) =
+        with_app(hwnd, |app| Some((app.verification_url()?, app.demo))).flatten()
+    else {
+        return;
+    };
+    let failure = if demo {
+        Some(demo::NOT_OPENED)
+    } else {
+        (!sys::open_verification(hwnd, &url)).then_some(verification::NOT_OPENED)
+    };
+    drop(url);
+    if let Some(failure) = failure {
+        with_app(hwnd, |app| {
+            app.fail(failure);
+            app.retarget();
+            app.invalidate();
+        });
+    }
+}
+
 fn show_main(hwnd: HWND) {
     unsafe {
         if IsIconic(hwnd) != 0 {
@@ -1314,7 +1456,9 @@ fn on_paint(hwnd: HWND) {
         let board = app.board();
         ops.extend(app.adopt(board));
         ops.extend(app.ring());
-        if !app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts) {
+        let drawn = app.gfx.draw(dc, Rect::new(0, 0, w, h), &ops, &app.fonts);
+        scene::wipe(&mut ops);
+        if !drawn {
             app.invalidate();
         }
         let active = unsafe { GetActiveWindow() } == hwnd;
@@ -1358,11 +1502,24 @@ fn on_agent(hwnd: HWND) {
     if let Some(prompt) = mail.prompt {
         approval::prompt(hwnd, prompt);
     }
-    let (reveal, update) = (mail.reveal, mail.update);
+    let (reveal, check, update) = (mail.reveal, mail.verification, mail.update);
     let delivered = with_app(hwnd, |app| {
-        let revealed = reveal.is_some();
+        let revealed = reveal.is_some() || check.is_some();
         if let Some(reveal) = reveal {
             credentials::deliver(app.dialog.as_mut(), reveal);
+        }
+        if let Some(check) = check
+            && let Some(dialog) = &mut app.verifying
+        {
+            match dialog.receive(check, Instant::now()) {
+                verification::Received::Lasts => {}
+                verification::Received::Fails => {
+                    app.link.send(Command::Unverify);
+                }
+                verification::Received::Ends => {
+                    app.end_verification();
+                }
+            }
         }
         let Some(update) = update else {
             if revealed {
@@ -1393,6 +1550,13 @@ fn on_agent(hwnd: HWND) {
         app.launch_settled(update.failure.as_ref());
         if app.dialog.as_ref().is_some_and(|d| !d.lasts(&update.state)) {
             app.close_dialog();
+        }
+        if app
+            .verifying
+            .as_ref()
+            .is_some_and(|d| !d.lasts(&update.state, Instant::now()))
+        {
+            app.end_verification();
         }
         app.update = Some(update);
         app.config = app.config_view();
@@ -1609,6 +1773,10 @@ fn on_wheel(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
 
 fn on_char(hwnd: HWND, wp: WPARAM) -> Option<LRESULT> {
     let activates = wp == WPARAM::from(b'\r') || wp == WPARAM::from(b' ');
+    if activates && with_app(hwnd, |app| app.verifying.is_some())? {
+        perform(hwnd, Some(Action::CloseDialog));
+        return Some(0);
+    }
     if activates && let Some(action) = with_app(hwnd, |app| app.keyed_action())? {
         perform(hwnd, Some(action));
         rehover(hwnd);
@@ -1809,6 +1977,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             with_app(hwnd, App::uncopy);
             Some(0)
         }
+        WM_TIMER if wp == VERIFY_TIMER => {
+            with_app(hwnd, App::tick_verification);
+            Some(0)
+        }
         WM_ERASEBKGND => Some(1),
         WM_MOVE => {
             with_app(hwnd, |app| {
@@ -1865,7 +2037,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_DESTROY => {
             approval::destroy(hwnd);
             tray::destroy(hwnd);
-            with_app(hwnd, App::forget_secret);
+            with_app(hwnd, |app| {
+                app.end_verification();
+                app.forget_secret();
+            });
             unsafe { PostQuitMessage(0) };
             Some(0)
         }

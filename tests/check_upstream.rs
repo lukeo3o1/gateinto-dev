@@ -160,12 +160,7 @@ async fn target_sends_connect_and_reports_the_status_line() {
         report.connect_status,
         Some((200, "HTTP/1.1 200 Connection established".to_owned()))
     );
-    assert_eq!(
-        setup.upstream.requests(),
-        [format!(
-            "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n"
-        )]
-    );
+    assert_eq!(setup.upstream.requests(), [gateway_connect(target)]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

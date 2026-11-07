@@ -44,6 +44,7 @@ pub struct Row {
     pub address: String,
     pub uptime: String,
     pub active: bool,
+    pub verification: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +199,7 @@ pub fn row(session: &SessionInfo, now: u64, names: &Names) -> Row {
         address: address(&session.upstream),
         uptime: uptime(session.started, now),
         active: session.tunnels > 0,
+        verification: session.verification.then(|| tr(Text::VerificationRequired)),
     }
 }
 
@@ -268,6 +270,7 @@ mod tests {
             tunnels,
             browser: Some(BrowserKind::Edge),
             shell: None,
+            verification: false,
         }
     }
 
@@ -543,9 +546,25 @@ mod tests {
                 address: "proxy.example.com".to_owned(),
                 uptime: "3 min".to_owned(),
                 active: true,
+                verification: None,
             }
         );
         assert!(!row(&session(7, 0), 1_000, &NO_NAMES).active);
+    }
+
+    #[test]
+    fn a_session_awaiting_verification_shows_a_fixed_marker() {
+        let mut flagged = session(7, 0);
+        flagged.verification = true;
+        assert_eq!(
+            row(&flagged, 1_000, &NO_NAMES).verification,
+            Some("Verification required")
+        );
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(
+            row(&flagged, 1_000, &NO_NAMES).verification,
+            Some("需要驗證")
+        );
     }
 
     #[test]

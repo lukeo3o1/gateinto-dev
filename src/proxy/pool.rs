@@ -9,8 +9,9 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 
-use super::{Endpoint, Limits, UpstreamError, h2, request_tunnel};
-use crate::http::{Authority, parse_response};
+use super::challenge::VerificationOrigin;
+use super::{Endpoint, Limits, UpstreamError, h2, refused, request_tunnel};
+use crate::http::{Authority, parse_tunnel_response};
 use crate::tls::ClientCertificateResolver;
 
 pub(super) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -75,6 +76,7 @@ impl Pool {
         endpoint: &Endpoint,
         target: &Authority,
         limits: &Limits,
+        origins: Option<&[VerificationOrigin]>,
     ) -> Result<(Tunnel, Vec<u8>), UpstreamError> {
         let max_header_bytes = limits.max_header_bytes;
         let mut state = self.0.lock().await;
@@ -87,10 +89,10 @@ impl Pool {
             connected = true;
             state = self.0.lock().await;
             if state.current.is_none()
-                && let Some(tls) = state.register(tls, resolver, limits).await?
+                && let Some(tls) = state.register(tls, resolver.clone(), limits).await?
             {
                 drop(state);
-                return Self::legacy(tls, target, max_header_bytes).await;
+                return Self::legacy(tls, &resolver, target, max_header_bytes, origins).await;
             }
         }
         let probe_deadline = limits.handshake_timeout / 4;
@@ -121,20 +123,21 @@ impl Pool {
                 match h2::request(&mut current.sender, &current.liveness, target) {
                     Ok(pending) => {
                         let liveness = current.liveness.clone();
+                        let resolver = current.resolver.clone();
                         drop(state);
                         let watchdog = async {
                             tokio::time::sleep(probe_deadline).await;
                             liveness.check(probe_deadline).await;
                             std::future::pending::<Infallible>().await
                         };
-                        let (status, stream) = tokio::select! {
+                        let (response, stream) = tokio::select! {
                             response = pending.response() => response?,
                             never = watchdog => match never {},
                         };
-                        return if (200..300).contains(&status) {
+                        return if (200..300).contains(&response.status) {
                             Ok((Box::new(stream), Vec::new()))
                         } else {
-                            Err(UpstreamError::Status(status))
+                            Err(refused(response, resolver.sent_certificate(), origins))
                         };
                     }
                     Err(error) => {
@@ -154,24 +157,26 @@ impl Pool {
             connected = true;
             let resolver = Arc::new(endpoint.client_certificate.fresh());
             let tls = endpoint.connect_with(resolver.clone()).await?;
-            if let Some(tls) = state.register(tls, resolver, limits).await? {
+            if let Some(tls) = state.register(tls, resolver.clone(), limits).await? {
                 drop(state);
-                return Self::legacy(tls, target, max_header_bytes).await;
+                return Self::legacy(tls, &resolver, target, max_header_bytes, origins).await;
             }
         }
     }
 
     async fn legacy(
         mut tls: TlsStream<TcpStream>,
+        resolver: &ClientCertificateResolver,
         target: &Authority,
         max_header_bytes: usize,
+        origins: Option<&[VerificationOrigin]>,
     ) -> Result<(Tunnel, Vec<u8>), UpstreamError> {
-        let (status, early) =
-            request_tunnel(&mut tls, target, max_header_bytes, parse_response).await?;
-        if (200..300).contains(&status) {
+        let (response, early) =
+            request_tunnel(&mut tls, target, max_header_bytes, parse_tunnel_response).await?;
+        if (200..300).contains(&response.status) {
             Ok((Box::new(tls), early))
         } else {
-            Err(UpstreamError::Status(status))
+            Err(refused(response, resolver.sent_certificate(), origins))
         }
     }
 }

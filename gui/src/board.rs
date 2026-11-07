@@ -488,7 +488,17 @@ impl<'a, M: Measure> Painter<'a, M> {
         );
         let number = Rect::new(first.x + w, first.y, first.w - w, first.h);
         self.text(Font::Small, row.number.clone(), number, t.muted);
-        self.text(Font::Small, row.auth, line2(c.session), t.muted);
+        let second = line2(c.session);
+        match row.verification {
+            Some(marker) => {
+                let w = self.m.width(Font::Small, row.auth).min(second.w);
+                self.text(Font::Small, row.auth, Rect { w, ..second }, t.muted);
+                let x = (second.x + w + s.px(8.0)).min(second.right());
+                let rest = Rect::new(x, second.y, second.right() - x, second.h);
+                self.text(Font::Small, marker, rest, t.warning);
+            }
+            None => self.text(Font::Small, row.auth, second, t.muted),
+        }
 
         let first = line1(c.gateway);
         let pill_gap = s.px(PILL_GAP);
@@ -671,6 +681,32 @@ mod tests {
     }
 
     #[test]
+    fn a_session_awaiting_verification_shows_its_marker_after_the_auth_in_amber() {
+        let mut flagged = row(1);
+        flagged.verification = Some("Verification required");
+        let ops = draw(&running(vec![flagged])).ops;
+        let at = |want: &str| {
+            ops.iter()
+                .find_map(|op| match op {
+                    Op::Text(_, s, r, c) if s == want => Some((*r, *c)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (auth, _) = at("OS user");
+        let (marker, ink) = at("Verification required");
+        assert_eq!(ink, T.warning);
+        assert_eq!(marker.y, auth.y);
+        assert!(marker.x > auth.x);
+        let plain = draw(&running(vec![row(1)])).ops;
+        assert!(
+            !plain
+                .iter()
+                .any(|op| matches!(op, Op::Text(_, s, ..) if s == "Verification required"))
+        );
+    }
+
+    #[test]
     fn an_open_menu_hides_the_tips() {
         let r = Rect::new(1, 2, 3, 4);
         let targets = [(r, Zone::Entry(0)), (r, Zone::Menu), (r, Zone::Revoke(9))];
@@ -771,6 +807,7 @@ mod tests {
             address: "edge.example".to_owned(),
             uptime: "5 min".to_owned(),
             active: true,
+            verification: None,
         }
     }
 

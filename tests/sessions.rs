@@ -51,10 +51,14 @@ struct SpkiUpstream {
 
 impl SpkiUpstream {
     async fn start(key: &KeyPair) -> Self {
+        Self::behaving(key, Behavior::Tunnel).await
+    }
+
+    async fn behaving(key: &KeyPair, behavior: Behavior) -> Self {
         let ca = TestCa::new();
         let upstream = UpstreamProxy::start(
             ca.server_config_trusting_client_spki(PROXY_NAME, key.subject_public_key_info()),
-            Behavior::Tunnel,
+            behavior,
         )
         .await;
         Self { ca, upstream }
@@ -396,6 +400,7 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
             tunnels: 0,
             browser: Some(BrowserKind::Edge),
             shell: None,
+            verification: false,
         }
     );
     let mut stream = open_tunnel(session.local_addr(), target).await;
@@ -408,4 +413,38 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
         assert!(Instant::now() < deadline, "the tunnel is still counted");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_tunnel_flags_its_session_until_the_session_closes() {
+    let key = KeyPair::generate().unwrap();
+    let certificate = self_signed(&key, true);
+    let setup = SpkiUpstream::behaving(&key, Behavior::Challenge(CHALLENGE_CODES[0])).await;
+    let quiet = SpkiUpstream::start(&key).await;
+    let mut sessions = SessionManager::new();
+    let refused = sessions
+        .start(browser_session("office", setup.config(&certificate)))
+        .await
+        .unwrap();
+    let other = sessions
+        .start(browser_session("home", quiet.config(&certificate)))
+        .await
+        .unwrap();
+    let session = sessions.session(refused).unwrap();
+    assert!(!session.info(None).verification);
+
+    let (_, response) = send(session.local_addr(), &connect_request("example.test:443")).await;
+    assert_eq!(response.status, 502, "{}", response.head);
+
+    assert!(session.info(None).verification);
+    assert!(!sessions.session(other).unwrap().info(None).verification);
+    let verification = session.verifications().get().unwrap();
+    assert_eq!(verification.user_code.as_str(), CHALLENGE_CODES[0]);
+    assert_eq!(verification.targets, ["example.test:443"]);
+    assert_eq!(sessions.pending_verifications(), 1);
+
+    let verifications = session.verifications().clone();
+    assert!(sessions.close(refused).await);
+    assert!(!verifications.pending());
+    assert_eq!(sessions.pending_verifications(), 0);
 }

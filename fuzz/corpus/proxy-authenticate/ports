@@ -1,0 +1,2 @@
+Gateinto auth_uri="https://a.test:0443/?cert_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", user_code="WDJB-MJHT", expires_in="300"
+Gateinto auth_uri="https://a.test:65536/?cert_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", user_code="WDJB-MJHT", expires_in="300"

@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use zeroize::Zeroize;
+
 use crate::fonts::Font;
 use crate::hit::Zone;
 use crate::i18n::Text;
@@ -136,6 +138,16 @@ pub fn scene(l: &Layout, s: Scale, t: &Theme, v: &View) -> Vec<Op> {
         t.text,
     ));
     ops
+}
+
+pub fn wipe(ops: &mut [Op]) {
+    for op in ops {
+        match op {
+            Op::Text(_, Cow::Owned(text), ..) => text.zeroize(),
+            Op::Fill(rect, _) => rect.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -395,5 +407,27 @@ mod tests {
             ops[2],
             Op::Icon(icons::SESSIONS, item.icon, 3.0, T.rail_icon)
         );
+    }
+
+    #[test]
+    fn a_wipe_zeroes_owned_texts_and_fills_but_keeps_borrowed_texts() {
+        let r = Rect::new(1, 2, 3, 4);
+        let mut ops = vec![
+            Op::Text(Font::Mono, Cow::Owned("BCDF-GHJK".to_owned()), r, T.text),
+            Op::Text(Font::Body, Cow::Borrowed("Close"), r, T.text),
+            Op::Fill(r, T.text),
+            Op::Round(r, 2.0, T.text),
+        ];
+        wipe(&mut ops);
+        let Op::Text(_, Cow::Owned(owned), ..) = &ops[0] else {
+            panic!("not owned");
+        };
+        assert!(owned.is_empty());
+        assert_eq!(
+            ops[1],
+            Op::Text(Font::Body, Cow::Borrowed("Close"), r, T.text)
+        );
+        assert_eq!(ops[2], Op::Fill(Rect::default(), T.text));
+        assert_eq!(ops[3], Op::Round(r, 2.0, T.text));
     }
 }

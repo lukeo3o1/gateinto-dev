@@ -3,6 +3,8 @@ use std::time::Instant;
 use aws_lc_rs::error::Unspecified;
 use aws_lc_rs::rand::SystemRandom;
 
+pub use super::VerificationOrigin;
+use super::challenge;
 use super::session_credentials::{Verifier, encode, parse_basic};
 use super::{FailureLimit, HeadError, SessionCredentials, authenticate};
 use crate::http::parse_connect_request;
@@ -57,6 +59,31 @@ impl LocalAuthSession {
 
 pub fn basic_credential(value: &[u8]) -> Option<Vec<u8>> {
     parse_basic(value).ok()
+}
+
+pub const MAX_AUTH_URI_LEN: usize = challenge::MAX_AUTH_URI_LEN;
+pub const MAX_EXPIRES_IN: u64 = challenge::MAX_EXPIRES_IN;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationChallenge {
+    pub auth_uri: String,
+    pub origin: String,
+    pub user_code: String,
+    pub expires_in: u64,
+}
+
+pub fn verification_challenge(
+    values: &[&[u8]],
+    fingerprint: &str,
+    origins: Option<&[VerificationOrigin]>,
+) -> Option<VerificationChallenge> {
+    let challenge = challenge::parse(values, fingerprint, origins).ok()?;
+    Some(VerificationChallenge {
+        auth_uri: challenge.auth_uri().to_owned(),
+        origin: challenge.origin().to_owned(),
+        user_code: challenge.user_code().to_owned(),
+        expires_in: challenge.expires_in(),
+    })
 }
 
 #[cfg(test)]
@@ -146,6 +173,30 @@ mod tests {
             rejected_status(respond(&session, &request(Some(&issued)))),
             429
         );
+    }
+
+    #[test]
+    fn exposes_the_challenge_parser() {
+        let fingerprint = "ab".repeat(32);
+        let value = format!(
+            "Gateinto auth_uri=\"https://Verify.test/?cert_sha256={fingerprint}\", \
+             user_code=WDJB-MJHT, expires_in=900"
+        );
+        let challenge = verification_challenge(&[value.as_bytes()], &fingerprint, None).unwrap();
+        assert_eq!(
+            challenge,
+            VerificationChallenge {
+                auth_uri: format!("https://Verify.test/?cert_sha256={fingerprint}"),
+                origin: "https://verify.test".to_owned(),
+                user_code: "WDJB-MJHT".to_owned(),
+                expires_in: MAX_EXPIRES_IN,
+            }
+        );
+        let listed: VerificationOrigin = "https://login.test".parse().unwrap();
+        let refused = verification_challenge(&[value.as_bytes()], &fingerprint, Some(&[listed]));
+        assert_eq!(refused, None);
+        assert_eq!(verification_challenge(&[value.as_bytes()], "", None), None);
+        assert_eq!(MAX_AUTH_URI_LEN, 2048);
     }
 
     #[test]
