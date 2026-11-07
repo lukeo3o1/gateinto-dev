@@ -101,6 +101,7 @@ be uninstalled before a release MSI is installed.
 | `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions with their browser or shell, or close one (its browser is stopped, its profile deleted and its credentials revoked; a terminal's job is killed with its shell). |
 | `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
+| `gateinto session verification <id>` | Show the pending gateway verification of one of the agent's sessions (link, origin, pairing code, targets, remaining time) on standard error, only when it is a terminal; never on standard output and never in a browser. See [interactive verification](docs/design/interactive-auth.md). |
 | `gateinto stop` | Close all of the agent's sessions and stop it, saying how many terminal sessions it closed. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their default route and their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
 | `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
@@ -169,7 +170,8 @@ Local responses:
 | Direct TCP connected (mixed mode only) | `200 Connection Established`, then the tunnel |
 | Upstream `2xx` | `200 Connection Established`, then the tunnel |
 | Upstream `403` | `403` |
-| Upstream `407` or any other status | `502`; upstream headers and body are not forwarded |
+| Upstream `407` with a valid `Gateinto` challenge for the certificate sent | `502`; the session gets a pending verification (`gateinto session verification <id>`, or the GUI), and nothing is forwarded |
+| Upstream `407` without a valid challenge, or any other status | `502`; upstream headers and body are not forwarded |
 | Upstream connect, TLS or certificate failure, malformed reply | `502` |
 | `hybrid_required` and the upstream cannot negotiate `X25519MLKEM768` | `502` |
 | Upstream connect, handshake or reply timeout | `504` |
@@ -652,6 +654,7 @@ client_cert_file = "client.pem"
 self_signed_client_cert = false  # true: issue self-signed certificates instead of client_cert_file
 portal_url = "https://portal.example.invalid/"  # start page of browser sessions; https only
 route = "gateway"                # mixed (default) | gateway: default route of its browser sessions
+verification_origins = ["https://verify.example.invalid"]  # optional: the only accepted verification page origins
 
 [browser]
 executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'  # default: Chrome, then Edge
@@ -688,7 +691,7 @@ table, the flags alone describe the upstream, as an unnamed gateway
 | `[device_key] name` | `--key-name` (`check-upstream`, `session browser`), `--name` (`key init`, `key info`) |
 | `[device_key] preferred` | `--backend` (`key init`) |
 | `[device_key] software_fallback_on_first_create` | `--software-fallback` or `--no-software-fallback` (`key init`) |
-| `[gateways.<name>] display_name`, `portal_url`, `route`, `[browser] executable` | none |
+| `[gateways.<name>] display_name`, `portal_url`, `route`, `verification_origins`, `[browser] executable` | none |
 | `[limits] max_concurrent_tunnels`, `connect_timeout_seconds`, `idle_timeout_seconds`, `header_max_bytes` | none |
 
 Rules:
@@ -726,6 +729,14 @@ Rules:
   exposes your local DNS lookups and source IP address to those sites, and
   those connections bypass the gateway's policy.** Set `route = "gateway"`
   when all traffic must go through the gateway.
+- `verification_origins` lists the only origins a gateway's verification
+  page may have (see [the upstream protocol](docs/protocol/http-connect.md#verification-challenge)).
+  Each entry is `https://` with a host and an optional port, without a path,
+  a trailing slash or dot, user information or wildcards; the host is
+  lowercased and `:443` dropped, and a challenge must match an entry exactly
+  on host and port. An empty list is an error; without the key every valid
+  origin is accepted. A gateway added from a link cannot have it. An older
+  Gateinto refuses a file that contains it.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.

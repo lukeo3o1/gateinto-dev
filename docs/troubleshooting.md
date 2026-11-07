@@ -19,12 +19,13 @@ proxy's status line.
 | `405` | The method was not `CONNECT`. Plain HTTP requests such as `GET http://...` are not supported. | Use `https://` URLs, or send the client's plain HTTP traffic elsewhere. |
 | `408` | The request head was not complete within `[limits] connect_timeout_seconds`. | A client that opens the connection but does not send a request, or a very slow client. |
 | `431` | The request header block was larger than `[limits] header_max_bytes`. | Clients that send many or large headers with `CONNECT`. |
-| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). | The `warn` log line `upstream refused tunnel` shows the target `host:port` and the cause. See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
+| `502` | The upstream connection failed: TCP connect refused or unreachable, TLS handshake or certificate failure, a key exchange the TLS mode does not allow, a malformed or oversized reply, or any upstream status other than `2xx` and `403` (including `407`). A `407` with a valid verification challenge for the certificate sent also makes the session's verification pending. | The `warn` log line `upstream refused tunnel` shows the target `host:port` and the cause. If the session shows that verification is required, see [Verification required](#verification-required). See [Private CA certificates](#private-ca-certificates) and [hybrid_required fails](#hybrid_required-fails). |
 | `503` | `[limits] max_concurrent_tunnels` connections are already open in this session. | Raise `max_concurrent_tunnels` in the configuration file, or find the client holding connections open. |
 | `504` | The upstream TCP connect, TLS handshake and `CONNECT` reply did not finish within `[limits] connect_timeout_seconds`. | Network reachability of the upstream proxy, firewalls that drop instead of reject, or a slow upstream. |
 
 The upstream's own headers and body are never forwarded, so a `407` from the
-upstream appears as a `502` locally. An upstream that requires a client
+upstream appears as a `502` locally, also when it carries a verification
+challenge. An upstream that requires a client
 certificate rejects Gateinto when no client certificate is configured (see the
 "mTLS is not configured" warning at startup), and Gateinto returns `502`.
 
@@ -33,6 +34,58 @@ once and prints the negotiated TLS version, key exchange group, cipher suite,
 server certificate subject and whether a client certificate was sent. With
 `--target host:port` it also prints the upstream's `CONNECT` status line. It
 exits nonzero with the reason on stderr when anything fails.
+
+## Verification required
+
+A gateway can refuse a tunnel with a `407` that asks the user to verify the
+device in a browser. The application gets `502`, and the session's
+verification becomes pending. Nothing opens by itself:
+
+- In the GUI the session row shows "Verification required" and a "Show
+  verification" action, and the tray tooltip says that a session needs
+  verification.
+- `gateinto session list` prints, on standard error after the table,
+  ``session <id> needs verification; run `gateinto session verification <id>`
+  to show it``. That command prints the verification on standard error.
+- `gateinto session browser` and `gateinto session terminal` without
+  `--agent` print it on standard error when it becomes pending.
+
+To complete it:
+
+1. Check the origin first: the `verify at:` line on the terminal, or the
+   first and largest line in the GUI. When the gateway has a portal, the GUI
+   also says whether the origin is the same as the portal's. Do not continue
+   if you do not expect that site.
+2. Open the page ("Open verification" or "Copy link" in the GUI, or the
+   `link:` line on the terminal) and enter the pairing code there.
+3. Retry the connection from the application, for example by reloading the
+   page. There is no Retry button; Gateinto does not hold or repeat the
+   refused connection.
+
+A verification expires after the time shown, at most 600 seconds. While one
+is pending, other challenges for the session are not shown; a challenge that
+arrives after it expired or was dismissed becomes pending. In the GUI,
+"Dismiss" removes the pending verification in Gateinto only; it does not tell
+the gateway. "Close" closes the dialog and keeps it pending. Closing the
+session also removes it.
+
+Other messages:
+
+- `the agent is too old for verification; restart it`: the running agent was
+  started by an older Gateinto. Stop it with `gateinto stop`, which closes
+  its sessions, and start it again.
+- `the verification for session <id> was not shown: standard error is not a
+  terminal`: run `gateinto session verification <id>` in a console window,
+  not with standard error redirected to a file or pipe. In-process sessions
+  print only `verification required for gateway <name>; not shown because
+  standard error is not a terminal` in that case.
+- `session <id> has no pending verification`: it expired, was dismissed, or
+  the session was closed.
+
+A `407` whose challenge is invalid, names another certificate, or comes from
+an origin not listed in the gateway's `verification_origins` gives a plain
+`502` and nothing to verify. With `RUST_LOG=gateinto=debug` the log says
+`verification challenge ignored`; it never contains the link or the code.
 
 ## Private CA certificates
 

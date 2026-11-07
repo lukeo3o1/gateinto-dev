@@ -530,12 +530,12 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`), the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `session verification`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`), the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
 | `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting (with the `gateway forget` decision shared with the GUI) and purging. |
-| `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
+| `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); the pending verification text on a terminal or the fixed line without values; failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
 | `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
 | `src/logbook.rs` | The agent's in-memory logbook: a `tracing` layer that keeps the last 500 events at `info` and above, each message cut to 1000 characters and scoped to its session or module, and the page of events after a sequence number for the IPC `log` request. Never written to disk. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session caps, browser and terminal sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
@@ -548,6 +548,8 @@ The full protocol, limits and guarantees are in
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
 | `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
 | `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
+| `src/proxy/challenge.rs` | The `Gateinto` challenge in an upstream `407`: the `Proxy-Authenticate` parser, `auth_uri`, `user_code` and `expires_in` validation, the certificate fingerprint and `verification_origins` checks. |
+| `src/proxy/verifications.rs` | A session's pending verification: at most one per session and 16 per agent, at most 8 stored targets, expiry, dismissal by serial, and removal when the certificate it names is no longer current. |
 | `src/proxy/session_credentials.rs` | `session_credentials` local proxy authentication of one session: credential generation, realm, strict Basic and base64 parsing, keyed constant-time comparison with the issued credentials, failure rate limit. |
 | `src/proxy/local_auth.rs` | The configured local authentication methods (`LocalAuth`) and the per-connection decision between `os_user` and `session_credentials`. |
 | `src/proxy/os_user.rs`, `src/proxy/os_user/windows.rs` | `os_user`: denial reasons, the owner lookup interface, TCP table row matching, and the Windows lookup of the owning process, its user SID and its job. |
@@ -579,7 +581,8 @@ local `200`.
 | --- | --- |
 | Upstream `2xx` | `200 Connection Established`, then the tunnel |
 | Upstream `403` | `403` |
-| Upstream `407` or any other status | `502`; upstream headers and body are not forwarded |
+| Upstream `407` with a valid `Gateinto` challenge for the certificate sent | `502`; the challenge becomes the session's pending verification (see [design/interactive-auth.md](design/interactive-auth.md)) and is not forwarded |
+| Upstream `407` without a valid challenge, or any other status | `502`; upstream headers and body are not forwarded |
 | Upstream connect, TLS or certificate failure, malformed reply | `502` |
 | Upstream connect, handshake or reply timeout | `504` |
 | Method other than `CONNECT` | `405` with `Allow: CONNECT` |

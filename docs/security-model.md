@@ -536,6 +536,69 @@ Non-guarantees:
   Windows CI, and the suspended-and-assign fallback and the launch without a
   job on real Windows 7 and 8.1.
 
+### Interactive verification
+
+A gateway that does not yet trust the device's certificate can refuse a
+`CONNECT` with `407` and a `Gateinto` challenge naming a verification page
+and a pairing code. The design is
+[design/interactive-auth.md](design/interactive-auth.md); the code is
+`src/proxy/challenge.rs` and `src/proxy/verifications.rs`.
+
+Guarantees:
+
+- **Bound to the sent certificate.** Only the gateway's response to
+  Gateinto's own `CONNECT` is parsed, and only for a `407`. The `cert_sha256`
+  value in `auth_uri` must equal the SHA-256 fingerprint of the client
+  certificate sent in that connection's handshake. Without a sent
+  certificate, or with any invalid value, the `407` stays plain: nothing is
+  stored or shown, and a fixed reason without values is logged at `debug`.
+- **Strict values.** `auth_uri` is an `https` URL of at most 2048 bytes in
+  RFC 3986 characters only, so `;`, `#`, `"`, `\`, space, control
+  characters and non-ASCII are rejected anywhere in it; it has no userinfo,
+  an LDH, IPv4 or bracketed IPv6 host, and exactly one `cert_sha256` key.
+  `user_code` is `XXXX-XXXX` from `BCDFGHJKLMNPQRSTVWXZ`; lowercase is
+  rejected. `expires_in` above 600 is clamped to 600.
+- **The local client sees `502`.** A valid challenge does not change the
+  local status, and no upstream header is forwarded.
+- **Trust follows the gateway.** Any valid page from the authenticated
+  gateway is accepted and its origin shown first. A configuration-file
+  gateway can set `verification_origins`, matched exactly on host and
+  effective port; links can never set it, and the GUI never writes it.
+- **Handled like session credentials.** URL and code are available only
+  through the explicit `verification {id}` request on the per-user endpoint
+  (ticketed in the GUI), are never logged at any level (a test captures
+  `trace` logs over HTTP/1.1 and HTTP/2 and checks for them) and never
+  written to disk. The `list` reply carries only a `verification` flag. The
+  CLI prints them only when standard error is a terminal; otherwise
+  in-process sessions print a fixed line and `session verification` fails
+  with a fixed error. The agent's store and the GUI dialog hold them in
+  zeroized buffers; the gaps are listed in the design.
+- **Nothing opens by itself.** The GUI opens the URL in the default browser
+  only on a mouse click on "Open verification"; the CLI never opens a
+  browser. Copy link clears the clipboard like credentials; the pairing code
+  has no copy action.
+- **Bounded.** One pending challenge per session and 16 per agent, at most
+  8 stored targets per challenge; further targets and challenges are only
+  counted. A pending challenge is replaced only after the certificate it
+  names is no longer the session's current one, by a challenge for the
+  current certificate.
+- **Request headers to the gateway only.** Every gateway `CONNECT` carries
+  `User-Agent: Gateinto/<version>` and `Gateinto-Auth-Version: 1`, inside
+  TLS; direct routes send nothing upstream.
+
+Non-guarantees:
+
+- **Phishing pages from the gateway.** Without `verification_origins`, and
+  always for linked gateways, the gateway can present any valid HTTPS page
+  as its verification page. Gateinto cannot stop a user from typing the code
+  into an attacker's page.
+- **Same-user programs** can read or dismiss a pending verification over
+  IPC, as they can read session credentials.
+- **Memory.** IPC responses are ordinary strings while they are encoded and
+  decoded, and the GUI's drawing leaves copies that are not zeroized.
+- **Not verified:** gateways, identity products, browsers and Windows with a
+  real challenge; only the automated tests have run.
+
 ### The tunnel content
 
 - **No MITM of the inner TLS.** Gateinto does not terminate, inspect or modify

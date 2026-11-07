@@ -410,6 +410,41 @@ expiry and 60-second retry, with required and optional modes and matching
 server-side certificate validation time. No real gateway has been tested with
 HTTP/2.
 
+## Interactive verification
+
+The `Gateinto` challenge in an upstream `407` (see
+[design/interactive-auth.md](design/interactive-auth.md)) is covered by
+automated tests only:
+
+- Unit tests in `src/proxy/challenge.rs` (parsing and validation of
+  `auth_uri`, `user_code` and `expires_in`, the origin check and
+  `verification_origins`), `src/proxy/verifications.rs` (the store's rules,
+  limits, expiry and dismissal), `src/prompt.rs` (the printed block and the
+  fixed line), `src/ipc.rs` (the `verification` and `dismiss` requests) and
+  the GUI crate (`gui/src/verification.rs`: the ticketed reply, the per-poll
+  re-check, the end conditions, the countdown, the link check, the QR code
+  and the zeroized buffers; `gui/src/board/dialog/verification.rs`: the
+  layout; `gui/src/pointer.rs`: the mouse-only buttons).
+- `tests/agent.rs`: a refused tunnel is shown on request until it is
+  dismissed, and a challenge naming another session's certificate is not
+  offered to it. `tests/h2_connect.rs`: challenges on a reused HTTP/2
+  connection share one entry, a challenge answered after a renewal is
+  dropped, a challenge over a legacy connection is bound to its certificate,
+  and the agent and `check-upstream` send `User-Agent` and
+  `Gateinto-Auth-Version: 1` over HTTP/2. `tests/proxy.rs`: an upstream `407`
+  maps to `502` without its headers or body. `tests/verification_log.rs`:
+  logs at trace level never contain the link, the code or the challenge.
+- `tests/cli.rs`: `session verification` on a redirected standard error, a
+  verification file that cannot be written, the whole block on standard
+  error and nothing on standard output, the "too old" agent message, and the
+  `session list` note. The in-process `session browser` on a redirected
+  standard error has no integration test; only the unit test
+  `an_announcement_off_a_terminal_is_only_the_fixed_line` in `src/prompt.rs`
+  checks the fixed line.
+- The fuzz target `fuzz/fuzz_targets/proxy-authenticate.rs`.
+
+No real gateway, identity product, browser or Windows desktop has been used.
+
 ## Client certificate (mTLS)
 
 Design choices:
@@ -587,6 +622,14 @@ Design-only, not exercised at all:
 - The proxy against a real third-party upstream HTTPS proxy, and with
   browsers. `curl.exe` through the proxy runs only in the `quickstart` CI job,
   against the local test upstream `examples/test_upstream.rs`.
+- Interactive verification with a real gateway or identity product: the
+  challenge format, the binding to `cert_sha256`, and whether a retry on the
+  same HTTP/2 connection is accepted after verification. The checks are
+  listed under
+  [Needs verification](design/interactive-auth.md#needs-verification).
+- The verification dialog on a real Windows desktop: "Open verification"
+  through `ShellExecuteExW` with the default browser, "Copy link", scanning
+  the QR code with a phone, and the dialog on Windows 7.
 
 ## Open issues
 
