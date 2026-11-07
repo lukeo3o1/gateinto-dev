@@ -19,6 +19,15 @@ std::string json(const std::string&);
 std::string xml_value(const std::string&, const std::string&);
 std::string counts_json(const std::map<unsigned, unsigned long long>&);
 std::string error_line_json(const std::string&, const std::string&, unsigned long);
+std::string poll_missed_json(bool, unsigned long long, unsigned long long, bool, unsigned long long);
+
+struct PollStats {
+    unsigned long long started = 0, stopped = 0, polls = 0, productive = 0;
+    unsigned long long busy = 0, busy_max = 0, slept = 0, overshoot_max = 0;
+    void poll(unsigned long long elapsed, bool fresh);
+    void sleep(unsigned long long requested, unsigned long long actual);
+    std::string json(unsigned long long frequency) const;
+};
 
 struct CappedCounter {
     unsigned long long count = 0;
@@ -70,6 +79,28 @@ int self_test() {
     if (window.size() != 3) throw std::runtime_error("Poll capacity");
     window.finish(1600);
     if (window.begin() != 1500) throw std::runtime_error("Poll horizon is monotonic");
+    PollStats idle;
+    if (idle.json(1000) != "\"wfp_poll_thread_start_qpc\":null,\"wfp_poll_thread_stop_qpc\":null,\"wfp_polls\":0,"
+        "\"wfp_polls_with_new_events\":0,\"wfp_poll_total_ms\":0.000000,\"wfp_poll_mean_ms\":null,\"wfp_poll_max_ms\":0.000000,"
+        "\"wfp_poll_sleep_total_ms\":0.000000,\"wfp_poll_sleep_overshoot_max_ms\":0.000000")
+        throw std::runtime_error("Idle poll stats");
+    PollStats stats;
+    stats.started = 100;
+    stats.poll(4, false);
+    stats.poll(8, true);
+    stats.sleep(5, 16);
+    stats.sleep(5, 6);
+    stats.sleep(5, 3);
+    stats.stopped = 200;
+    if (stats.json(1000) != "\"wfp_poll_thread_start_qpc\":100,\"wfp_poll_thread_stop_qpc\":200,\"wfp_polls\":2,"
+        "\"wfp_polls_with_new_events\":1,\"wfp_poll_total_ms\":12.000000,\"wfp_poll_mean_ms\":6.000000,\"wfp_poll_max_ms\":8.000000,"
+        "\"wfp_poll_sleep_total_ms\":25.000000,\"wfp_poll_sleep_overshoot_max_ms\":11.000000")
+        throw std::runtime_error("Poll stats");
+    if (poll_missed_json(false, 5, 3, false, 0) != "null") throw std::runtime_error("Missed is null without polling");
+    if (poll_missed_json(true, 5, 3, false, 0) != "2") throw std::runtime_error("Missed polled events");
+    if (poll_missed_json(true, 3, 5, false, 0) != "-2") throw std::runtime_error("Missed is signed");
+    if (poll_missed_json(true, 5, 3, true, 0) != "null") throw std::runtime_error("Missed is null when truncated");
+    if (poll_missed_json(true, 5, 3, false, 1) != "null") throw std::runtime_error("Missed is null on enumeration error");
     std::cout << "native-events helper self-tests passed\n";
     return 0;
 }
@@ -113,6 +144,36 @@ std::string error_line_json(const std::string& kind, const std::string& operatio
 }
 
 bool CappedCounter::record() { return ++count <= cap; }
+
+std::string poll_missed_json(bool polling, unsigned long long enumerated, unsigned long long polled,
+                             bool truncated, unsigned long long enum_errors) {
+    if (!polling || truncated || enum_errors) return "null";
+    return enumerated >= polled ? std::to_string(enumerated - polled) : "-" + std::to_string(polled - enumerated);
+}
+
+void PollStats::poll(unsigned long long elapsed, bool fresh) {
+    ++polls;
+    if (fresh) ++productive;
+    busy += elapsed;
+    if (elapsed > busy_max) busy_max = elapsed;
+}
+
+void PollStats::sleep(unsigned long long requested, unsigned long long actual) {
+    slept += actual;
+    if (actual > requested && actual - requested > overshoot_max) overshoot_max = actual - requested;
+}
+
+std::string PollStats::json(unsigned long long frequency) const {
+    const auto ms = [frequency](unsigned long long ticks, unsigned long long divisor = 1) {
+        return std::to_string(static_cast<double>(ticks) * 1000.0 / static_cast<double>(frequency) / static_cast<double>(divisor));
+    };
+    const auto qpc_or_null = [](unsigned long long value) { return value ? std::to_string(value) : std::string("null"); };
+    return "\"wfp_poll_thread_start_qpc\":" + qpc_or_null(started) + ",\"wfp_poll_thread_stop_qpc\":" + qpc_or_null(stopped) +
+        ",\"wfp_polls\":" + std::to_string(polls) + ",\"wfp_polls_with_new_events\":" + std::to_string(productive) +
+        ",\"wfp_poll_total_ms\":" + ms(busy) + ",\"wfp_poll_mean_ms\":" + (polls ? ms(busy, polls) : std::string("null")) +
+        ",\"wfp_poll_max_ms\":" + ms(busy_max) + ",\"wfp_poll_sleep_total_ms\":" + ms(slept) +
+        ",\"wfp_poll_sleep_overshoot_max_ms\":" + ms(overshoot_max);
+}
 
 PollWindow::PollWindow(unsigned long long start, unsigned long long margin, std::size_t limit)
     : floor(start), overlap(margin), horizon(start), capacity(limit) {}
@@ -159,6 +220,7 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <initguid.h>
 #include <fwpmu.h>
 #include <winevt.h>
 #include <sddl.h>
@@ -180,6 +242,10 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #pragma comment(lib, "wevtapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 static unsigned long long qpc() {
     LARGE_INTEGER value{};
@@ -271,7 +337,8 @@ struct Output {
     unsigned long long enum_total = 0, enum_emitted = 0;
     CappedCounter enum_errors{5};
     bool enum_truncated = false;
-    unsigned long long polls = 0, poll_max_qpc = 0;
+    PollStats poll_stats;
+    std::string poll_timer = "none";
     CappedCounter poll_errors{5};
     std::map<unsigned, unsigned long long> enum_type_counts;
     std::atomic<unsigned long long> security_count{0};
@@ -494,7 +561,7 @@ struct Engine {
     bool collect_changed = false, keywords_changed = false, enumerate_on_close = false;
     FILETIME start_time{};
     std::string api = "subscribe2";
-    unsigned poll_interval_ms = 5, poll_overlap_ms = 1000;
+    unsigned poll_interval_ms = 5, poll_overlap_ms = 300;
     std::atomic<bool> poll_stop{false};
     std::thread poller;
     Output& out;
@@ -588,14 +655,22 @@ struct Engine {
             if (result) out.error(operation, result);
         } catch (...) { out.error(operation, ERROR_INVALID_DATA); }
     }
-    bool poll_once(HANDLE session, PollWindow& window) {
+    unsigned long long poll_once(HANDLE session, PollWindow& window) {
+        FWPM_FILTER_CONDITION0 allow_only{};
+        allow_only.fieldKey = FWPM_CONDITION_NET_EVENT_TYPE;
+        allow_only.matchType = FWP_MATCH_EQUAL;
+        allow_only.conditionValue.type = FWP_UINT32;
+        allow_only.conditionValue.uint32 = static_cast<UINT32>(FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW);
         FWPM_NET_EVENT_ENUM_TEMPLATE0 range{};
         range.startTime = to_filetime(window.begin());
         GetSystemTimePreciseAsFileTime(&range.endTime);
+        range.numFilterConditions = 1;
+        range.filterCondition = &allow_only;
         HANDLE handle = nullptr;
         const auto created = FwpmNetEventCreateEnumHandle0(session, &range, &handle);
-        if (created) { out.poll_error("FwpmNetEventCreateEnumHandle0", created); return false; }
+        if (created) { out.poll_error("FwpmNetEventCreateEnumHandle0", created); return 0; }
         bool complete = true;
+        unsigned long long fresh = 0;
         const UINT32 batch = 256;
         for (;;) {
             FWPM_NET_EVENT3** entries = nullptr;
@@ -608,6 +683,7 @@ struct Engine {
                     if (!entry || entry->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) continue;
                     if (!window.accept(filetime(entry->header.timeStamp), identity(entry->header))) continue;
                     ++out.wfp_count;
+                    ++fresh;
                     out.push(wfp_line("wfp", entry, qpc(), utc_now()));
                 } catch (...) { out.poll_error("FwpmNetEventEnum3_entry", ERROR_INVALID_DATA); }
             }
@@ -617,28 +693,48 @@ struct Engine {
         const auto destroyed = FwpmNetEventDestroyEnumHandle0(session, handle);
         if (destroyed) out.poll_error("FwpmNetEventDestroyEnumHandle0", destroyed);
         if (complete) window.finish(filetime(range.endTime));
-        return complete;
+        return fresh;
+    }
+    void pause(HANDLE timer) {
+        if (timer) {
+            LARGE_INTEGER due{};
+            due.QuadPart = -static_cast<LONGLONG>(poll_interval_ms) * 10000;
+            if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) out.poll_error("SetWaitableTimer", GetLastError());
+            else if (WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0) out.poll_error("WaitForSingleObject", GetLastError());
+            else return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
     }
     void poll_loop() noexcept {
+        out.poll_stats.started = qpc();
         HANDLE session = nullptr;
+        HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        out.poll_timer = timer ? "high_resolution" : "sleep_for";
         try {
             const auto opened = FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &session);
-            if (opened) { out.poll_error("FwpmEngineOpen0", opened); return; }
-            PollWindow window(filetime(start_time), poll_overlap_ms * 10000ULL, 65536);
-            while (!poll_stop) {
-                const auto began = qpc();
-                try { poll_once(session, window); }
-                catch (...) { out.poll_error("poll_once", ERROR_INVALID_DATA); }
-                ++out.polls;
-                const auto elapsed = qpc() - began;
-                if (elapsed > out.poll_max_qpc) out.poll_max_qpc = elapsed;
-                std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
+            if (opened) out.poll_error("FwpmEngineOpen0", opened);
+            else {
+                LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
+                const auto requested = static_cast<unsigned long long>(frequency.QuadPart) * poll_interval_ms / 1000;
+                PollWindow window(filetime(start_time), poll_overlap_ms * 10000ULL, 65536);
+                while (!poll_stop) {
+                    const auto began = qpc();
+                    unsigned long long fresh = 0;
+                    try { fresh = poll_once(session, window); }
+                    catch (...) { out.poll_error("poll_once", ERROR_INVALID_DATA); }
+                    const auto polled = qpc();
+                    out.poll_stats.poll(polled - began, fresh > 0);
+                    pause(timer);
+                    out.poll_stats.sleep(requested, qpc() - polled);
+                }
             }
         } catch (...) { out.poll_error("poll_loop", ERROR_INVALID_DATA); }
         if (session) {
             const auto closed = FwpmEngineClose0(session);
             if (closed) out.poll_error("FwpmEngineClose0", closed);
         }
+        if (timer) CloseHandle(timer);
+        out.poll_stats.stopped = qpc();
     }
     void enumerate() noexcept {
         HANDLE handle = nullptr;
@@ -728,7 +824,7 @@ struct Winsock {
 int main(int argc, char** argv) {
     try {
         int seconds = 30;
-        int poll_interval = 5, poll_overlap = 1000;
+        int poll_interval = 5, poll_overlap = 300;
         std::string output = "native-events.jsonl", stop_file, state_out, restore_state, api = "subscribe2";
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -776,6 +872,8 @@ int main(int argc, char** argv) {
         SetConsoleCtrlHandler(console_control, FALSE);
         LARGE_INTEGER frequency{};
         QueryPerformanceFrequency(&frequency);
+        const auto allow_entry = out.enum_type_counts.find(static_cast<unsigned>(FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW));
+        const auto allow_enumerated = allow_entry == out.enum_type_counts.end() ? 0ULL : allow_entry->second;
         out.push("{\"kind\":\"summary\",\"recv_qpc\":" + std::to_string(qpc()) +
             ",\"wfp_api\":" + json(api) +
             ",\"wfp_count\":" + std::to_string(out.wfp_count.load()) +
@@ -786,9 +884,13 @@ int main(int argc, char** argv) {
             ",\"wfp_enum_emitted\":" + std::to_string(out.enum_emitted) +
             ",\"wfp_enum_errors\":" + std::to_string(out.enum_errors.count) +
             ",\"wfp_enum_truncated\":" + (out.enum_truncated ? "true" : "false") +
-            ",\"wfp_polls\":" + std::to_string(out.polls) +
+            "," + out.poll_stats.json(static_cast<unsigned long long>(frequency.QuadPart)) +
+            ",\"wfp_poll_timer\":" + json(out.poll_timer) +
+            ",\"wfp_poll_interval_ms\":" + std::to_string(poll_interval) +
+            ",\"wfp_poll_overlap_ms\":" + std::to_string(poll_overlap) +
+            ",\"wfp_poll_missed\":" + poll_missed_json(api == "poll", allow_enumerated, out.wfp_count.load(),
+                                                       out.enum_truncated, out.enum_errors.count) +
             ",\"wfp_poll_errors\":" + std::to_string(out.poll_errors.count) +
-            ",\"wfp_poll_max_ms\":" + std::to_string(static_cast<double>(out.poll_max_qpc) * 1000.0 / static_cast<double>(frequency.QuadPart)) +
             ",\"security5156_count\":" + std::to_string(out.security_count.load()) +
             ",\"queue_dropped\":" + std::to_string(out.dropped.load()) +
             ",\"errors\":" + std::to_string(out.errors.load()) + "}");
