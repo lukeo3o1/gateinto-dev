@@ -59,9 +59,13 @@ def main():
             raise RuntimeError('blocked client did not record a successful bind and connect attempt')
         drops = matching_drops(records, expected, attempts[0])
         final = next((r for r in reversed(records) if r.get('kind') == 'summary'), None)
-        summary.update(client_exit=client.returncode, matching_native_drops=len(drops), native_summary=final)
-        for event in drops:
-            print('NATIVE_POSITIVE ' + json.dumps(event))
+        diagnostic = [dict(event_type=r.get('event_type'), flags=r.get('flags'),
+                           app_path_matches=normalized_path(r.get('app_path', '')) == expected,
+                           protocol=r.get('protocol'),
+                           bound_port_matches=r.get('local_port') == attempts[0]['local_port'])
+                      for r in records if r.get('kind') == 'wfp_other']
+        summary.update(client_exit=client.returncode, matching_native_drops=len(drops),
+                       native_summary=final, diagnostic_events=diagnostic)
         if client.returncode == 0 or not drops or process.returncode != 0 or not final or final.get('errors') or final.get('queue_dropped'):
             raise RuntimeError('blocked connection and native drop notification were not both verified')
         summary['status'] = 'PASS_BLOCKED_EVENT_CONTROL'
@@ -83,8 +87,18 @@ def main():
                 summary['restore_exit'] = restore.returncode
             except Exception as error:
                 summary['restore_error'] = str(error)
-        (args.out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-    print(json.dumps(summary))
+        (args.out / 'summary-private.json').write_text(json.dumps(summary, indent=2) + '\n')
+    safe = {k: summary[k] for k in ['status', 'purpose', 'client_exit', 'matching_native_drops',
+                                    'diagnostic_events', 'restore_exit'] if k in summary}
+    counts = summary.get('native_summary') or {}
+    safe['native_summary'] = {k: counts[k] for k in ['wfp_count', 'security5156_count', 'queue_dropped', 'errors',
+                                                    'wfp_callback_count', 'wfp_drop_count', 'wfp_type_counts'] if k in counts}
+    if 'error' in summary:
+        safe['failure_reason'] = 'blocked_event_control_not_verified'
+    if 'restore_error' in summary:
+        safe['restore_failed'] = True
+    (args.out / 'summary.json').write_text(json.dumps(safe, indent=2) + '\n')
+    print(json.dumps(safe))
     return 0 if summary['status'] == 'PASS_BLOCKED_EVENT_CONTROL' else 1
 
 

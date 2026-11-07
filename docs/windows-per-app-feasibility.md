@@ -1,19 +1,37 @@
 # Windows per-app transparent proxy feasibility review
 
-Review date: 2026-11-06. Source baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`.
+Initial review: 2026-11-06; updated with Windows measurements on 2026-11-07. Source review baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`. Runtime evidence identifies its own tested PoC SHA below.
 
 ## Verdict and evidence boundary
 
 | Transport | Verdict | Meaning |
 | --- | --- | --- |
-| TCP | Conditionally usable (有條件可用), as an engineering design only | A restricted, newly started TCP flow can plausibly be buffered, attributed by native WFP notifications, and translated to a new local adapter. Gateinto itself needs no packet support if the adapter speaks authenticated CONNECT. This has **not** been demonstrated on Windows here. Arbitrary flows cannot be promised exact takeover. |
+| TCP | Conditionally usable (有條件可用), demonstrated in a restricted Windows lab | With Security 5156 as the native WFP audit source and WinDivert NETWORK holding first packets, three selected-app tunnels completed authenticated local CONNECT through actual Gateinto and its TLS gateway fixture; three other-app connections remained direct. Retransmission also passed. Five-tuple reuse was conservatively rejected and disrupted the other app. Subscribe2 allow-event attribution did not work in the tested environment. |
 | UDP | Cannot guarantee (無法保證) with current Gateinto | Packet capture and ALE attribution are separate from transport support. Gateinto implements TCP byte tunnels, not a datagram gateway protocol. A new UDP-capable upstream and adapter would be needed; attribution races would remain. |
 
-Neither transport qualifies as precise takeover (精確接管). If “conditionally usable” means a working tested product rather than a bounded design, TCP is also unverified and must not be released on this evidence.
+Neither transport qualifies as precise takeover (精確接管). TCP is a working bounded PoC, not a production guarantee. If ownership is required specifically from `FwpmNetEventSubscribe*` rather than WFP-generated Security 5156, this PoC has **not** demonstrated the requested TCP takeover with that source.
 
 The required division is preserved: native `FwpmNetEventSubscribe*` or Security 5156 supplies ownership; official WinDivert at `NETWORK` captures and reinjects packets. `SOCKET`/`FLOW` may be logged as diagnostic controls only. IP Helper tables, ETW TCP providers, PID polling and DLL injection must not become fallback ownership sources. No new kernel driver is proposed.
 
-This workspace is Linux x86_64 (kernel `6.18.57`), without a supplied Windows host or Windows driver execution facility. A follow-up now implements an independent [PoC and Actions workflow](../experiments/wfp-divert/README.md) to test the first-packet-hold hypothesis. Cross-compilation and local model tests are not Windows runtime evidence. Until an Actions run is inspected, WFP subscription, Security 5156 delivery, signed driver loading, first-packet ordering and TCP redirection remain **NOT RUN**. UDP forwarding remains unimplemented. The run record is [windows-per-app-review-log.md](windows-per-app-review-log.md).
+The workspace is Linux, but the independent [PoC and Actions workflow](../experiments/wfp-divert/README.md) ran on GitHub-hosted **Windows Server 2022, build 20348**, with official signed WinDivert 2.2.2. [Run 42278267576](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42278267576), PoC head `e2990fa13365ca666644ae8797a2f11e2904fe25`, supplies the results below. The job is red because it deliberately tests unsupported/insufficient cases too; a successful TCP subcase does not mean the entire matrix passed. [Aggregate evidence](evidence/wfp-divert-run-42278267576-aggregate.json) omits paths, PIDs, endpoints and absolute timestamps. Full traces are retained in original Actions artifacts and locally; they are not reposted as Git source. See [execution record](windows-per-app-review-log.md).
+
+## Measured Windows results
+
+| Case | Actual observation |
+| --- | --- |
+| Subscribe2 allow coverage | Subscription and engine-option calls succeeded, but recognized CLASSIFY_ALLOW count was zero for tested normal Win32 loopback TCP/UDP and external TCP. A blocked-flow control later received one callback whose type the collector did not recognize as documented drop/allow. The native source is **unqualified**: this does not prove Windows lacks allow events, and decoder/runtime-version questions remain. |
+| 5156 TCP hold | Six complete client tuples, six accepted native controls and six successful echoes. All six notifications arrived after SYN capture and receive: **414.23–418.47 ms** after capture in this run. The earlier run observed 378.84–385.38 ms. These are sample ranges, not delivery bounds. |
+| TCP transparent relay | Three A clients proxied; three B clients direct; all six echoed successfully. Three bridge tunnels and exactly three gateway CONNECT requests to the recovered destination. Gateinto is embedded in the fixture process; its additional target connections were confirmed nonselected/direct, and its TLS gateway endpoint was outside the capture filter. |
+| TCP retransmission | Dropping the first native-confirmed SYN led to a later capture with the same tuple, generation and sequence. Six clients succeeded and only three selected-app gateway CONNECTs were opened. |
+| TCP close / reuse | Ordinary half-close completed in the relay case. A reset-close followed by B binding the same full tuple produced a different SYN sequence; the PoC rejected it rather than inheriting A's proxy decision. B was disrupted. This is **CHARACTERIZED_REUSE_REJECTION**, not a noninterference pass. Maps are retained until process exit; general reclamation remains unqualified. |
+| Delayed / skipped ownership | An additional 100 ms consumption delay worked within a 2 s hold. A 250 ms deadline and skip-all controls produced zero proxy tunnels; the decision stayed direct. Missing/late attribution can therefore leak selected traffic directly under this explicit policy. |
+| UDP two destinations, 1 s hold | Six sockets, two destinations each: all twelve datagrams echoed directly, but only the first six tuple controls were accepted. Some second-destination notifications arrived **1010–1013 ms** after capture and missed the hold deadline. No collector queue loss was reported. |
+| UDP two destinations, 2 s hold | Twelve tuple controls accepted, twelve direct echoes. Notification range **443.28–1006.14 ms**; still **no UDP forwarding through Gateinto**. |
+| External TCP observation | Two ordinary external TCP connections completed; 5156 matched both, arriving about **338.95–339.62 ms** after capture. This connect-only probe sent no application payload and did not validate external transparent NAT or a restricted service. Subscribe2 supplied no allow attribution there. |
+
+The local target, adapter, Gateinto and gateway fixture share one Windows host. The gateway path uses real TLS and CONNECT, but production mTLS identity, an external controlled target, Windows 10/11, IPv6 and load/loss stress remain unverified. Both apps' first packets are buffered, so even direct B connections incur attribution latency. “Other app direct” means connectivity and route were preserved in the fresh-tuple case, not that timing was unaffected. [Run 42394400675](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42394400675) repeated the successful TCP relay and retransmission, the disruptive reuse rejection, the 1 s UDP deadline failure and the 2 s success; its [aggregate record](evidence/wfp-divert-run-42394400675-aggregate.json) also records the unsuccessful native-drop recognition control.
+
+The corrected loopback injection uses outbound direction for translated local-to-local packets and restores direction according to the original flow. Earlier inbound injection timed out; that was a PoC packet-path bug, not evidence that buffering cannot work. Full local raw records are available separately from the redacted Git summaries.
 
 ## Existing source
 
@@ -53,9 +71,9 @@ The official UWP troubleshooting example proves the allow mechanism exists, not 
 
 ALE AUTH_CONNECT classifies TCP connect attempts and first UDP sends to each unique remote address/port. That is a kernel authorization point, before a normally permitted packet continues. It does **not** synchronously deliver the user callback first [8]. FLOW_ESTABLISHED for TCP occurs after the handshake and therefore cannot be a SYN ownership gate.
 
-Log distinct times: WFP occurrence FILETIME, WFP callback-entry QPC, evidence-consumption/decision-ready QPC, WinDivert capture `addr.Timestamp` (QPC clock), and `WinDivertRecv` return QPC [13]. For 5156 additionally log TimeCreated and callback-entry QPC. Compare the two receive QPC values to answer which consumer received first. Compare decision-ready QPC against packet capture QPC to determine whether the ownership decision was available at interception; callback receipt alone does not establish this when evidence processing is queued or artificially delayed. Calibrate UTC/QPC using tightly bracketed `GetSystemTimePreciseAsFileTime` samples and report uncertainty and clock jumps. Never subtract raw FILETIME from QPC or label UTC audit timestamps exact classifyFn execution measurements. No ordering or latency numbers were measured here.
+The PoC logs distinct times: WFP occurrence FILETIME, WFP callback-entry QPC, evidence-consumption/decision-ready QPC, WinDivert capture `addr.Timestamp` (QPC clock), and `WinDivertRecv` return QPC [13]. For 5156 it also logs TimeCreated and callback-entry QPC. Compare receive QPC values for notification order, and decision-ready QPC against capture QPC for decision availability. The tested runs use one tightly bracketed UTC/QPC anchor; reported bracket widths were microseconds, but wall-clock steps during a run are not monitored. Cross-clock occurrence estimates are consequently approximate. Receipt/capture comparisons use QPC directly. TimeCreated is not an exact classifyFn execution measurement.
 
-Proposed restricted state machine (not implemented):
+State-machine requirements (the PoC implements the fresh-flow subset and retains maps until process exit):
 
 1. Start native subscriptions and the local adapter before admitting test apps. For a controlled destination, capture outbound TCP/UDP at NETWORK without SNIFF; otherwise a “held” copy cannot prevent escape. Receive continuously into a separately bounded userspace pending queue. Set and log driver queue length/size/time too; userspace buffering cannot recover a packet already dropped in the driver queue.
 2. Normalize key to address family, protocol, local IP/port, remote IP/port, scope/interface context where relevant. A full forward/reverse tuple is essential. Two apps connecting to the same remote endpoint usually have different local ports; remote IP/port alone mixes them.
@@ -88,7 +106,7 @@ Use release-unchanged for the noninterference experiment and separately test dro
 
 ## 3. Actual TCP redirection design to test
 
-The following is a candidate, not observed behavior. Use a controlled IPv4 destination R:r, one selected EXE A and distinct EXE B, with fresh sockets and no shared ports. Start the bridge listener before enabling diversion. Use a dedicated Gateinto credential session with route Gateway.
+The following describes the tested local IPv4 layout and the candidate external expansion. Use a controlled destination R:r, one selected EXE A and distinct EXE B, with fresh sockets and no shared ports. Start the bridge listener before enabling diversion. Use a dedicated Gateinto credential session with route Gateway.
 
 An explicit packet translation layout avoids pretending that changing only destination port is enough:
 
@@ -102,7 +120,7 @@ adapter TCP stream -> authenticated CONNECT R:r to Gateinto loopback listener
 Gateinto -> TLS to configured gateway -> CONNECT R:r -> controlled server
 ```
 
-Allocate/reserve q to avoid local TCP socket/alias collisions and retain it through teardown/quarantine. Keep an injective map `(L,q,L,t,TCP) -> (L,p,R,r,TCP,generation,app-evidence)` **before** reinjecting the SYN. All original outgoing packets use the forward rewrite; listener responses use its inverse, reconstructing the original remote IP/port and injecting in the direction accepted by the original TCP socket. Recompute IP/TCP checksums and respect address/interface metadata. Local delivery, direction flags, routing to a local address and alias reservation must be validated on Windows; the diagram is not proof Windows accepts this layout. Use the official streamdump example as a packet-to-local-TCP reference [14], not as proof of native-WFP attribution or a finished NAT.
+Allocate/reserve q to avoid local TCP socket/alias collisions and retain it through teardown/quarantine. Keep an injective map `(L,q,L,t,TCP) -> (L,p,R,r,TCP,generation,app-evidence)` **before** reinjecting the SYN. Forward packets use the rewrite; listener responses use its inverse. Recompute checksums and preserve interface metadata. Local-to-local packets are injected outbound; restored responses use outbound for an original loopback flow and inbound otherwise. Windows loopback operation passed the measured case; the non-loopback NAT branch remains unverified. The official streamdump example [14] is a reference, not proof of this implementation or native ownership.
 
 The bridge recovers original destination from this map using its accepted peer **and local endpoint**, not from `getsockname`, Host, SNI, or an unsupported assumption that WFP redirect-context IOCTLs apply to WinDivert NAT. A dedicated bridge-originated CONNECT supplies the recovered IP literal and port to Gateinto. Ordinary HTTP CONNECT preserves TCP bytes; it does not discover the original hostname. If gateway policy needs a hostname rather than an IP literal, additional design is needed, and SNI cannot be assumed for arbitrary TCP.
 
@@ -112,7 +130,7 @@ Exclude bridge-to-Gateinto local traffic, listener traffic after inverse transla
 
 UDP needs another design: per-destination datagram association, message boundaries, reply sender restoration, fragmentation/MTU/ICMP handling, timeouts, and an upstream datagram protocol such as a separately implemented CONNECT-UDP capability. Raw UDP cannot be made functional by writing datagrams to the existing CONNECT byte stream. UDP/QUIC success must be separately demonstrated end to end.
 
-## 4. Windows reproduction procedure (pending)
+## 4. Reproduction and remaining qualification
 
 ### Preparation and required harness
 
@@ -137,7 +155,7 @@ Get-WinEvent -FilterHashtable @{LogName='Security'; Id=5156} -MaxEvents 20 |
   ForEach-Object { $_.ToXml() } | Set-Content -Encoding utf8 security-5156-sanity.xml
 ```
 
-This query is retrospective, **not** a delivery-latency measurement. The missing native harness must:
+This query is retrospective, **not** a delivery-latency measurement. The full qualification harness should:
 
 - Subscribe1/2 with matching SDK callback, save/set/restore engine options, deep-copy valid event fields before returning, and log callbacks without blocking them on network I/O. Keep net events and 5156 as separately selectable ownership sources; do not merge them into assumed truth.
 - Use EvtSubscribe future-events plus Strict, record delivery/error actions, render raw XML, persist bookmarks and distinguish log-clear epochs. Do not treat historic replay as fresh authorization.
@@ -149,7 +167,7 @@ The follow-up PoC implements a subset of these harness requirements, described i
 
 ### Test matrix and pass evidence
 
-All rows have status **NOT RUN**.
+The full target matrix follows. Measured subset: W1 (elevated enabled-policy coverage only), O1/M1 (six fresh client flows, no load stress), M2 (injected SYN loss), M3 (half-close/reset only), M4 (one conservative same-tuple reuse rejection), M5 (two UDP destinations per socket), M6 (delay/skip controls), and R1/R2 (same-host nonce relay, not external restricted-service proof). All remaining variants in those rows and W2/M7/R3/R4 remain pending; U1 remains unimplemented. Do not read an entire row as passed from a partial case.
 
 | ID | Execution | Required evidence / pass condition |
 | --- | --- | --- |

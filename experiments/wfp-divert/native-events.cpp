@@ -83,6 +83,7 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -420,7 +421,11 @@ struct Engine {
         LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
         out.push("{\"kind\":\"ready\",\"recv_qpc\":" + std::to_string(qpc()) +
             ",\"receipt_filetime\":" + std::to_string(utc_now()) + ",\"qpc_frequency\":" + std::to_string(frequency.QuadPart) +
-            ",\"old_collect\":" + std::to_string(old_collect) + ",\"old_keywords\":" + std::to_string(old_keywords) + "}");
+            ",\"old_collect\":" + std::to_string(old_collect) + ",\"old_keywords\":" + std::to_string(old_keywords) +
+            ",\"header_size\":" + std::to_string(sizeof(FWPM_NET_EVENT_HEADER3)) +
+            ",\"event_size\":" + std::to_string(sizeof(FWPM_NET_EVENT3)) +
+            ",\"event_type_offset\":" + std::to_string(offsetof(FWPM_NET_EVENT3, type)) +
+            ",\"event_union_offset\":" + std::to_string(offsetof(FWPM_NET_EVENT3, classifyAllow)) + "}");
     }
     void restore_from(const std::string& path) {
         std::ifstream input(path, std::ios::binary);

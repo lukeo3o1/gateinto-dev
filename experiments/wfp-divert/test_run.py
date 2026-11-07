@@ -152,6 +152,72 @@ class AttributionTests(unittest.TestCase):
         self.assertFalse(lab.valid_client_result(result, connect_only=True))
 
 
+class PublicSummaryTests(unittest.TestCase):
+    def test_recursive_projection_excludes_raw_telemetry(self):
+        token = "PRIVATE-TOKEN-192.0.2.44-C:\\private\\owner.exe"
+        value = dict(status="FAIL", source="security5156", mode="redirect", protocol="tcp",
+                     scenario="baseline", topology="single-host-local", selected_path=token,
+                     external_target=token, error=token, anchor_filetime=1234567890123,
+                     cleanup_forced_pids=[1234], clients=[dict(app=token, pid=1234, exit_code=0),
+                                                        dict(app=token, exit_code=1)],
+                     timing=dict(matched_client_tuples=2, rows=[dict(app_path=token, recv_qpc=123)],
+                                 anchor_uncertainty_ms=.01,
+                                 notification_minus_capture_ms=dict(count=2, min=-1, max=2, p50=0, p95=2, raw_xml=token)),
+                     native_summary=dict(recv_qpc=123, wfp_count=2, errors=0, raw_xml=token),
+                     diagnostic_events=[dict(event_type=3, flags=32, app_path_matches=True,
+                                             bound_port_matches=False, raw_xml=token, path=token)])
+        result = lab.public_summary(value)
+        encoded = json.dumps(result)
+        self.assertNotIn(token, encoded)
+        for field in ["rows", "recv_qpc", "anchor_filetime", "cleanup_forced_pids", "raw_xml", "selected_path"]:
+            self.assertNotIn('"' + field + '"', encoded)
+        self.assertEqual(dict(total=2, success=1, failure=1), result["clients"])
+        self.assertEqual("inspect_local_records", result["reason"])
+        self.assertEqual(2, result["native_summary"]["wfp_count"])
+
+    def test_string_and_numeric_type_checks_prevent_side_channels(self):
+        token = "PRIVATE-PATH"
+        result = lab.public_summary(dict(status=token, source=token, purpose=token,
+                                         decisions=token, native_summary=dict(wfp_count=token),
+                                         timing=dict(anchor_uncertainty_ms=token,
+                                                     notification_minus_capture_ms=dict(min=token)),
+                                         diagnostic_events=[dict(flags=token, event_type=token,
+                                                                 app_path_matches=token)]))
+        self.assertNotIn(token, json.dumps(result))
+        self.assertEqual("UNKNOWN", result["status"])
+
+    def test_native_unconfirmed_and_positive_control_are_preserved_safely(self):
+        result = lab.public_summary(dict(status="NO_OWNERSHIP_CONFIRMATION", error="C:\\sensitive"))
+        self.assertEqual("native_source_unconfirmed", result["reason"])
+        positive = lab.public_summary(dict(status="PASS_BLOCKED_EVENT_CONTROL", client_exit=1,
+                                           purpose="blocked-flow positive control, never an allow ownership source",
+                                           matching_native_drops=2, native_summary=dict(wfp_drop_count=2)))
+        self.assertEqual(2, positive["matching_native_drops"])
+        self.assertEqual(1, positive["client_exit"])
+        self.assertEqual("PASS_BLOCKED_EVENT_CONTROL", positive["status"])
+
+    def test_already_public_counts_and_numeric_event_types_survive_aggregation(self):
+        value = dict(status="PASS_RESTRICTED_CASE", clients=[dict(exit_code=0), dict(exit_code=1)],
+                     native_summary=dict(wfp_callback_count=3, wfp_type_counts={"3": 2, "6": 1, "PRIVATE": 99}))
+        public = lab.public_summary(value)
+        self.assertEqual(public, lab.public_summary(public))
+        self.assertEqual({"3": 2, "6": 1}, public["native_summary"]["wfp_type_counts"])
+        self.assertEqual(3, public["native_summary"]["wfp_callback_count"])
+
+    def test_directory_aggregation_does_not_publish_case_paths(self):
+        spec = importlib.util.spec_from_file_location("lab_summarize", pathlib.Path(__file__).with_name("summarize.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            case = root / "PRIVATE-PATH-192.0.2.7"
+            case.mkdir()
+            (case / "summary.json").write_text(json.dumps(dict(status="FAIL", error="PRIVATE-ERROR")))
+            result = module.aggregate(root)
+            self.assertEqual(1, result["case_count"])
+            self.assertNotIn("PRIVATE", json.dumps(result))
+
+
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):
         with tempfile.TemporaryDirectory() as directory:

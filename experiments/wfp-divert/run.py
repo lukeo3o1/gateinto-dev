@@ -17,6 +17,80 @@ class NoOwnershipConfirmation(RuntimeError):
     pass
 
 
+def public_summary(summary):
+    if not isinstance(summary, dict):
+        summary = {}
+    enums = dict(
+        status=("NOT_COMPLETED", "FAIL", "NO_OWNERSHIP_CONFIRMATION", "PASS_RESTRICTED_CASE",
+                "CHARACTERIZED_REUSE_REJECTION", "PASS_BLOCKED_EVENT_CONTROL"),
+        source=("wfp", "security5156"), mode=("hold", "redirect"), protocol=("tcp", "udp"),
+        scenario=("baseline", "retransmit", "reuse"),
+        topology=("single-host-local", "external-connect-only"))
+    result = {key: summary[key] for key, choices in enums.items()
+              if key in summary and summary[key] in choices}
+    result.setdefault("status", "UNKNOWN")
+
+    def numeric_fields(value, keys, integers=False):
+        if not isinstance(value, dict):
+            return {}
+        return {key: value[key] for key in keys if key in value and
+                type(value[key]) in ((int,) if integers else (int, float)) and
+                math.isfinite(value[key])}
+
+    count_keys = ("decisions", "selected_confirmed", "redirected", "client_tuple_count",
+                  "accepted_controls", "effective_proxy_packets", "bridge_tunnels", "gateway_connect_count",
+                  "source_target_complete_outbound_events", "matching_native_drops", "client_exit",
+                  "restore_exit", "fallback_restore_exit_code")
+    result.update(numeric_fields(summary, count_keys, integers=True))
+    for key in ("controlled_echo", "reused_syn_rejected", "nonselected_client_disrupted", "restore_failed"):
+        if type(summary.get(key)) is bool:
+            result[key] = summary[key]
+    if isinstance(summary.get("clients"), list):
+        clients = summary["clients"]
+        success = sum(isinstance(client, dict) and type(client.get("exit_code")) is int and
+                      client["exit_code"] == 0 for client in clients)
+        result["clients"] = dict(total=len(clients), success=success, failure=len(clients) - success)
+    elif isinstance(summary.get("clients"), dict):
+        result["clients"] = numeric_fields(summary["clients"], ("total", "success", "failure"), integers=True)
+    if isinstance(summary.get("native_summary"), dict):
+        result["native_summary"] = numeric_fields(summary["native_summary"],
+            ("wfp_count", "wfp_callback_count", "wfp_drop_count", "wfp_other_count", "security5156_count", "queue_dropped", "errors"), integers=True)
+        types = summary["native_summary"].get("wfp_type_counts")
+        if isinstance(types, dict):
+            result["native_summary"]["wfp_type_counts"] = {
+                str(int(key)): value for key, value in types.items()
+                if isinstance(key, str) and key.isascii() and key.isdecimal() and len(key) <= 3
+                and 0 <= int(key) <= 255 and type(value) is int}
+    if isinstance(summary.get("timing"), dict):
+        timing = summary["timing"]
+        projected = numeric_fields(timing, ("matched_client_tuples", "unmatched_client_tuples",
+                                            "native_after_packet_capture", "native_after_packet_receive"), integers=True)
+        projected.update(numeric_fields(timing, ("anchor_uncertainty_ms",)))
+        for key in ("notification_minus_capture_ms", "decision_minus_capture_ms"):
+            if isinstance(timing.get(key), dict):
+                projected[key] = numeric_fields(timing[key], ("count", "min", "max", "p50", "p95"))
+        result["timing"] = projected
+    purpose = "blocked-flow positive control, never an allow ownership source"
+    if summary.get("purpose") == purpose:
+        result["purpose"] = purpose
+    if isinstance(summary.get("diagnostic_events"), list):
+        diagnostics = []
+        for event in summary["diagnostic_events"]:
+            projected = numeric_fields(event, ("event_type", "flags", "protocol"), integers=True)
+            for key in ("app_path_matches", "bound_port_matches"):
+                if isinstance(event, dict) and type(event.get(key)) is bool:
+                    projected[key] = event[key]
+            if projected:
+                diagnostics.append(projected)
+        result["diagnostic_events"] = diagnostics
+    if result["status"] == "NO_OWNERSHIP_CONFIRMATION":
+        result["reason"] = "native_source_unconfirmed"
+    elif result["status"] in ("FAIL", "UNKNOWN", "NOT_COMPLETED") or any(
+            key in summary for key in ("error", "restore_error", "fallback_restore_error", "native_summary_read_error")):
+        result["reason"] = "inspect_local_records"
+    return result
+
+
 def normalized_path(value):
     return str(value).replace("/", "\\").lower().removeprefix("\\??\\")
 
@@ -584,7 +658,7 @@ def main():
             stream.close()
         private.cleanup()
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(summary))
+    print(json.dumps(public_summary(summary)))
     return 0 if summary["status"] in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION"] else 1
 
 

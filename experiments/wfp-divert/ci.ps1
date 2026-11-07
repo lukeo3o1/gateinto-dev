@@ -86,38 +86,12 @@ try {
     }
     python @arguments
     if ($LASTEXITCODE) { $failures.Add($case.name) }
-    $caseDir = Join-Path $OutDir $case.name
-    foreach ($file in @('native.stdout.txt', 'packet.stdout.txt', 'restore.stdout.txt')) {
-      $logPath = Join-Path $caseDir $file
-      if (Test-Path $logPath) { Get-Content $logPath -Tail 12 }
-    }
-    $bridgeLog = Join-Path $caseDir 'bridge.jsonl'
-    if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
-    $nativeLog = Join-Path $caseDir 'native.jsonl'
-    if (Test-Path $nativeLog) {
-      Get-Content $nativeLog | Where-Object { $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"ready"|"kind":"summary"' } |
-        Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
-    }
-    $packetLog = Join-Path $caseDir 'packets.jsonl'
-    if (Test-Path $packetLog) {
-      Get-Content $packetLog | Select-Object -First 30 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
-    }
   }
-  $ruleName = 'Gateinto-WFP-positive-' + [guid]::NewGuid().ToString('N')
   try {
-    $external = [System.Net.Dns]::GetHostAddresses('api.github.com') |
-      Where-Object AddressFamily -eq InterNetwork | Select-Object -First 1
-    if (-not $external) { throw 'No external IPv4 address resolved for drop control' }
-    New-NetFirewallRule -Name $ruleName -DisplayName $ruleName -Action Block -Direction Outbound `
-      -Program (Join-Path $Bin 'app-b.exe') -RemoteAddress $external.IPAddressToString `
-      -RemotePort 443 -Protocol TCP -Profile Any | Out-Null
-    python "$PSScriptRoot\positive_control.py" --bin $Bin --out (Join-Path $OutDir 'native-drop-control') --target $external.IPAddressToString
-    if ($LASTEXITCODE) { $failures.Add('native-drop-control') }
+    & "$PSScriptRoot\drop-control.ps1" -Bin $Bin -OutDir (Join-Path $OutDir 'native-drop-control')
   } catch {
-    $failures.Add('native-drop-control-setup')
-    Write-Host "Native drop control setup failed: $_"
-  } finally {
-    Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    $failures.Add('native-drop-control')
+    Write-Host "Native drop callback control failed: $_"
   }
 } finally {
   & auditpol /restore "/file:$audit"
@@ -126,5 +100,7 @@ try {
   @{ failed_cases = @($failures); windows_desktop = 'NOT RUN'; remote_topology = 'NOT RUN';
      udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN' } |
     ConvertTo-Json | Set-Content (Join-Path $OutDir 'ci-summary.json')
+  python "$PSScriptRoot\summarize.py" --root $OutDir --out (Join-Path $OutDir 'aggregate-evidence.json')
+  if ($LASTEXITCODE) { $failures.Add('aggregate-evidence') }
 }
 if ($failures.Count) { throw "PoC cases failed: $($failures -join ', ')" }

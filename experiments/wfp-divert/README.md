@@ -20,6 +20,7 @@ SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
 | `run.py`, `test_run.py` | Correlate the selected native source, full device path and tuple; inject delayed/missing attribution; verify per-client evidence and final collector status. |
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
 | `client.cpp` | Built twice as app-a.exe and app-b.exe; echo nonces and original socket tuples provide test ground truth, never ownership authority. |
+| `positive_control.py` | A narrowly scoped blocked connection checks native drop-callback delivery. Drops are diagnostic only and cannot authorize proxying. |
 | `../../examples/wfp_lab.rs` | Controlled echo endpoints, TLS CONNECT upstream and actual Gateinto proxy with session credentials and forced Gateway routing. |
 | `build.ps1`, `ci.ps1` | Download official signed WinDivert, compile probes, back up/restore audit policy, run cases and retain evidence. |
 
@@ -62,15 +63,21 @@ and restoration after interruption.
 ## Interpretation
 
 The workflow tests TCP hold, both native attribution sources, a short injected
-delay, skipped attribution, attribution later than the deadline, UDP hold/direct,
-and TCP redirection including a skip-all negative control. PASS_RESTRICTED_CASE
+delay, skipped attribution, attribution later than the deadline, UDP multi-peer hold/direct,
+TCP redirection, SYN retransmission and a conservative tuple-reuse rejection. It
+also tests external TCP connect-only attribution and a temporary firewall-block
+positive control. The rule is removed in finally. PASS_RESTRICTED_CASE
 requires client echo success, native evidence for each expected confirmed flow,
 accepted packet decisions, no B proxy packets, correct bridge count and gateway
 CONNECT destination/count, successful collector exit, and no collector error or
 overflow. Issuing a proxy command or accepting a local socket alone cannot pass.
 
-Evidence includes raw native/packet JSONL, decision/control logs, translation and
-bridge logs, gateway requests, target payload hex and client nonces/tuples. Driver
+Local evidence includes raw native/packet JSONL, decision/control logs, translation and
+bridge logs, gateway requests, target payload hex and client nonces/tuples. New
+Actions artifacts and console summaries retain only aggregate counts and relative
+latency statistics. Raw local files, XML, paths, PIDs, endpoints and per-flow
+timestamps are excluded from those uploads. Historical runs retain the artifacts
+they originally generated. Driver
 load failure is a failed environment probe, not an attribution result. A failed
 redirect with successful hold is a redirection failure, not proof native WFP
 attribution is impossible.
@@ -82,7 +89,10 @@ identity or desktop Windows 10/11. Gateinto is embedded in the fixture process;
 its outgoing target traffic is attributed to that process and must remain direct.
 Packet capture of the gateway's own TLS endpoint is outside the target filter.
 
-The NAT layout and alias reservation are candidates requiring Windows execution.
+The loopback NAT layout and alias reservation passed the limited Windows TCP case
+in [run 42278267576](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42278267576).
+Three selected-app connections reached the gateway and three other-app connections
+stayed direct. Outbound injection was required for the local-to-local path.
 Holding a tuple is not a socket-identity oracle: the correlator accepts only fresh
 unique test sockets within a bounded timestamp window. Native events have no
 packet-correlatable generation cookie. Same tuples are never recycled during a
@@ -92,11 +102,14 @@ This deliberately avoids claiming production-safe tuple reuse or reclamation.
 Active translated sessions must finish before stopping the collector.
 
 UDP currently supports hold and unchanged reinjection **only**. It cannot proxy
-UDP through Gateinto. The client has a multi-destination send option, but the CI
-filter captures one target port, so same-socket multi-peer attribution coverage
-is still pending. SYN retransmission, deliberate TCP source-port/full-tuple reuse,
-queue stress, late historic-event replay against real reused sockets, IPv6,
-fragmentation, external target topology and desktop Windows remain pending.
+UDP through Gateinto. The filter captures both fixture ports and tests one socket
+against both. A 1 s hold missed late second-peer controls; 2 s passed the twelve
+tuple case. SYN retransmission passed; deliberate full-tuple reuse was safely
+rejected but disrupted B, reported CHARACTERIZED_REUSE_REJECTION rather than a
+connectivity pass. External TCP connect-only attribution is observation, not a
+transparent external relay test. Queue stress, historic-event replay on real
+reused sockets, general map reclamation, IPv6, fragmentation, external controlled
+target NAT and desktop Windows remain pending.
 
 Local model/helper and fixture tests are separate from Windows runtime results.
 See [the review](../../docs/windows-per-app-feasibility.md) and
