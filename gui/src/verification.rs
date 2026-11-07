@@ -9,7 +9,6 @@ use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 use zeroize::{DefaultIsZeroes, Zeroize, Zeroizing};
 
 use crate::agent::AgentState;
-use crate::approval::Key;
 use crate::i18n::{Text, fill, tr};
 use crate::sessions;
 use crate::worker::Command;
@@ -73,18 +72,6 @@ pub fn ends(command: &Command, id: u64) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
-    Open,
-    CopyLink,
-    Dismiss,
-    Close,
-}
-
-pub fn key(_: Key) -> Button {
-    Button::Close
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Medium,
     Low,
@@ -98,10 +85,12 @@ pub struct Qr {
 }
 
 impl Qr {
+    #[cfg(test)]
     pub fn size(&self) -> usize {
         self.size
     }
 
+    #[cfg(test)]
     pub fn level(&self) -> Level {
         self.level
     }
@@ -339,6 +328,7 @@ impl Dialog {
         self.id
     }
 
+    #[cfg(test)]
     pub fn ticket(&self) -> u64 {
         self.ticket
     }
@@ -724,13 +714,6 @@ mod tests {
         assert!(!ends(&Command::Close(4), 3));
         assert!(!ends(&Command::Dismiss(4, 7), 3));
         assert!(!ends(&Command::Probe, 3));
-    }
-
-    #[test]
-    fn no_key_opens_the_verification() {
-        for pressed in [Key::Enter, Key::Space, Key::Escape] {
-            assert_eq!(key(pressed), Button::Close);
-        }
     }
 
     #[test]
