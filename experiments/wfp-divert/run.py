@@ -109,6 +109,13 @@ def native_evidence_status(status, source, native_summary):
             "native summary reported wfp_count 0; WFP produced no CLASSIFY_ALLOW events, so this result does not exercise WFP attribution")
 
 
+def poll_evidence_status(status, error, wfp_api, native_summary):
+    if wfp_api != "poll" or native_summary is None or native_summary.get("wfp_polls", 0):
+        return status, error
+    reason = "native summary reported wfp_polls 0; the poll thread never completed an enumeration, so poll mode was not exercised"
+    return "FAIL", f"{error}; {reason}" if error else reason
+
+
 def security_fields(value):
     if "raw_xml" not in value:
         return value
@@ -593,6 +600,10 @@ def main():
         status, error = native_evidence_status(summary["status"], args.source, summary.get("native_summary"))
         if error:
             summary.update(status=status, error=error)
+        status, error = poll_evidence_status(summary["status"], summary.get("error"), args.wfp_api, summary.get("native_summary"))
+        summary.update(status=status)
+        if error:
+            summary["error"] = error
         if bridge:
             bridge.close()
         for process in reversed(processes):

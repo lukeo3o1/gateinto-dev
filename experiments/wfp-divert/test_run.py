@@ -200,6 +200,23 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual("INCONCLUSIVE_NO_NATIVE_EVENTS",
                          lab.native_evidence_status("PASS_RESTRICTED_CASE", "wfp", summary)[0])
 
+    def test_poll_case_without_polls_fails(self):
+        for status in ["PASS_RESTRICTED_CASE", "CHARACTERIZED_REUSE_REJECTION", "INCONCLUSIVE_NO_NATIVE_EVENTS"]:
+            result, error = lab.poll_evidence_status(status, None, "poll", dict(wfp_polls=0, wfp_count=0))
+            self.assertEqual("FAIL", result)
+            self.assertIn("wfp_polls", error)
+        result, error = lab.poll_evidence_status("FAIL", "client timeout", "poll", dict(wfp_polls=0))
+        self.assertEqual("FAIL", result)
+        self.assertIn("client timeout", error)
+        self.assertIn("wfp_polls", error)
+        self.assertEqual("FAIL", lab.poll_evidence_status("PASS_RESTRICTED_CASE", None, "poll", dict(kind="summary"))[0])
+        self.assertEqual(("PASS_RESTRICTED_CASE", None),
+                         lab.poll_evidence_status("PASS_RESTRICTED_CASE", None, "poll", dict(wfp_polls=3)))
+        self.assertEqual(("PASS_RESTRICTED_CASE", None),
+                         lab.poll_evidence_status("PASS_RESTRICTED_CASE", None, "subscribe4", dict(wfp_polls=0)))
+        self.assertEqual(("FAIL", "native collector missing"),
+                         lab.poll_evidence_status("FAIL", "native collector missing", "poll", None))
+
 
 class BridgeProtocolTests(unittest.TestCase):
     def test_consumes_http_response_preserves_early_data_and_half_close(self):
