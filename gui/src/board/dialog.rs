@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use gateinto::proxy::Route;
 
+pub mod verification;
+
 use super::{Board, Painter};
 use crate::add::{self, Sheet, Tone};
 use crate::confirm;

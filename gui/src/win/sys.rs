@@ -3,11 +3,14 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
+use zeroize::Zeroize;
+
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE, HWND, RECT,
-    SYSTEMTIME,
+    ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE, GetLastError,
+    HWND, RECT, SYSTEMTIME,
 };
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, HMONITOR, LOGPIXELSY, ReleaseDC};
+use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -17,7 +20,9 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, OSVERSIONINFOW};
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::Shell::{
+    SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW, ShellExecuteW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, GetSystemMetrics, SM_CXPADDEDBORDER, SM_CYFRAME, SPI_GETWHEELSCROLLLINES,
     SW_SHOWNORMAL, SYSTEM_METRICS_INDEX, SetProcessDPIAware, SystemParametersInfoW,
@@ -27,6 +32,7 @@ use crate::log;
 use crate::menu;
 use crate::settings::{self, RegValue};
 use crate::theme;
+use crate::verification;
 
 pub fn utc_offset() -> u64 {
     let seconds = |t: SYSTEMTIME| {
@@ -143,6 +149,35 @@ pub fn reg_dword(root: HKEY, key: &str, name: &str) -> Option<u32> {
 
 pub fn open_https(hwnd: HWND, url: &str) -> bool {
     menu::https(url) && open(hwnd, wide(url))
+}
+
+pub fn open_verification(hwnd: HWND, url: &str) -> bool {
+    if !verification::launchable(url) {
+        return false;
+    }
+    let verb = wide("open");
+    let mut file = wide(url);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI,
+        hwnd,
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: null(),
+        lpDirectory: null(),
+        nShow: SW_SHOWNORMAL,
+        ..Default::default()
+    };
+    let opened = unsafe { ShellExecuteExW(&mut info) } != 0;
+    let code = if opened { 0 } else { unsafe { GetLastError() } };
+    file.zeroize();
+    if !opened {
+        let line = wide(&format!(
+            "gateinto-gui: ShellExecuteExW failed with error {code}\n"
+        ));
+        unsafe { OutputDebugStringW(line.as_ptr()) };
+    }
+    opened
 }
 
 pub fn open_file(hwnd: HWND, path: &Path) -> bool {
