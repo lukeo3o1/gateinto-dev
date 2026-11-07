@@ -414,9 +414,15 @@ HTTP/2.
 
 The `Gateinto` challenge in an upstream `407` (see
 [design/interactive-auth.md](design/interactive-auth.md)) is covered by
-automated tests only:
+automated tests only. The CI checks (12 of 12, including `ubuntu-latest`,
+`windows-latest` and `i686-pc-windows-msvc` under WOW64) passed on the heads
+of the pull requests #90, #91, #92, #94 and #96 into `feat/interactive-auth`,
+the last on 3500292 (run 42340455556). The tests are:
 
-- Unit tests in `src/proxy/challenge.rs` (parsing and validation of
+- Unit tests in `src/proxy/mod.rs`
+  (`a_challenge_without_a_sent_certificate_or_binding_is_a_plain_status`,
+  `a_challenge_answers_bad_gateway_with_a_fixed_text`),
+  `src/proxy/challenge.rs` (parsing and validation of
   `auth_uri`, `user_code` and `expires_in`, the origin check and
   `verification_origins`), `src/proxy/verifications.rs` (the store's rules,
   limits, expiry and dismissal), `src/prompt.rs` (the printed block and the
@@ -434,13 +440,20 @@ automated tests only:
   `Gateinto-Auth-Version: 1` over HTTP/2. `tests/proxy.rs`: an upstream `407`
   maps to `502` without its headers or body. `tests/verification_log.rs`:
   logs at trace level never contain the link, the code or the challenge.
-- `tests/cli.rs`: `session verification` on a redirected standard error, a
-  verification file that cannot be written, the whole block on standard
-  error and nothing on standard output, the "too old" agent message, and the
-  `session list` note. The in-process `session browser` on a redirected
-  standard error has no integration test; only the unit test
-  `an_announcement_off_a_terminal_is_only_the_fixed_line` in `src/prompt.rs`
-  checks the fixed line.
+  `tests/sessions.rs`: a refused tunnel flags its session until the session
+  closes.
+- `tests/cli.rs`, against a fake agent: `session verification` on a
+  redirected standard error fails with the fixed error; with the
+  `test-hooks` file `GATEINTO_TEST_VERIFICATION_FILE`, the whole block
+  arrives in that file, standard output stays empty and standard error
+  carries no secret, and a file that cannot be written is reported; the
+  "too old" agent message; the `session list` note.
+- Not covered by an integration test: printing to a real terminal (only the
+  unit test `a_verification_reaches_only_a_terminal` in `src/prompt.rs`
+  checks `show_on_terminal` with an in-memory writer), and the in-process
+  `session browser` on a redirected standard error (only the unit test
+  `an_announcement_off_a_terminal_is_only_the_fixed_line` checks the fixed
+  line).
 - The fuzz target `fuzz/fuzz_targets/proxy-authenticate.rs`.
 
 No real gateway, identity product, browser or Windows desktop has been used.

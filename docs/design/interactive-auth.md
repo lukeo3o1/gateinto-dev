@@ -1,11 +1,15 @@
 # Design: certificate-bound interactive authentication
 
 Status: implemented on `feat/interactive-auth`. The decisions are listed in
-[Decisions](#decisions). Only the automated tests in CI have run; none of the
-behaviour it expects from gateways, identity products, browsers or Windows has
-been tried, and the manual checks on real Windows remain open (as for issue
-#23). What must be checked is under [Needs verification](#needs-verification).
-Names refer to code on `feat/interactive-auth` at the time of writing.
+[Decisions](#decisions). Only the automated tests have run: the CI checks (12
+of 12, including `ubuntu-latest`, `windows-latest` and `i686-pc-windows-msvc`
+under WOW64) passed on the heads of the pull requests #90, #91, #92, #94 and
+#96 into `feat/interactive-auth`, the last on 3500292 (run 42340455556). None
+of the behaviour it expects from gateways, identity products, browsers or
+Windows has been tried, and the manual checks on real Windows remain open (as
+for issue #23). What must be checked is under [Needs
+verification](#needs-verification). Names refer to code on
+`feat/interactive-auth` at the time of writing.
 
 ## Summary
 
@@ -553,6 +557,11 @@ console. No browser is opened and no QR code is printed.
   strings of an IPC `Response` while it is encoded and decoded, and the
   dialog's targets, countdown and gateway strings. The CLI's received reply
   lines and the GUI worker's reply lines and error messages are zeroized.
+  Outside the GUI, also not zeroized: the `h2` crate's `HeaderMap` and HPACK
+  buffers that hold the `proxy-authenticate` values on HTTP/2 (Gateinto
+  copies them into `Zeroizing` buffers), rustls's plaintext buffers on both
+  HTTP/1.1 and HTTP/2, and the fingerprint, which is a plain `String` in
+  `Refusal` and `Entry` and as `cert_sha256` in `AuthUri`.
 - The GUI keeps the 2-s poll; it never polls faster and never starts the agent
   to show a verification.
 
@@ -788,8 +797,8 @@ source proposal and these decisions differ, the decision applies.
 
 ## Tests planned
 
-This is the plan from the design. Where a planned test is known to be
-missing, the item says so.
+This is the plan from the design. Where a planned test is missing or is
+covered differently, the item says so.
 
 ### Unit
 
@@ -853,7 +862,11 @@ missing, the item says so.
   `state.current` has been replaced by a connection with a renewed
   certificate (between `drop(state)` and the response); its challenge
   naming the first connection's certificate passes the binding check, and a
-  challenge naming the new certificate does not.
+  challenge naming the new certificate does not. Covered in part by
+  `a_challenge_answered_after_a_renewal_is_dropped` in `tests/h2_connect.rs`:
+  both held responses leave the renewed entry unchanged, but that the first
+  passes the binding check before rule 2 drops it is not observed
+  separately.
 - Legacy: the resolver passed to `Pool::legacy` is the one used for that
   tunnel's handshake.
 
@@ -872,16 +885,27 @@ HTTP/1.1 and HTTP/2:
   connection, is rejected, and neither session is marked.
 - A challenge with a wrong fingerprint, a challenge when no client certificate
   was sent, and a direct tunnel on the mixed route leave no pending entry.
+  The first two are covered by the unit test
+  `a_challenge_without_a_sent_certificate_or_binding_is_a_plain_status` in
+  `src/proxy/mod.rs` and by
+  `a_challenge_naming_another_sessions_certificate_is_not_offered`; the
+  direct tunnel on the mixed route is not tested.
 - Renewal: with a short certificate lifetime in the test, a pending entry is
   removed after the self-signed certificate renews, a challenge for the new
   certificate becomes pending, and `verification {id}` returns a new serial.
-- Log capture: with `RUST_LOG=trace` on the agent and an in-process session,
-  standard error and the logbook (`log`) contain neither the URL, the code,
-  the fingerprint in the URL, nor the `Proxy-Authenticate` value, over both
-  HTTP/1.1 and HTTP/2; this covers `h2`, `rustls` and Gateinto's own targets.
-  If a dependency prints them, Gateinto's filter caps that dependency's
-  target below the level that does, whatever `RUST_LOG` says.
-- Session close and `stop` clear pending entries.
+  Tested against the store in `tests/h2_connect.rs`
+  (`a_challenge_answered_after_a_renewal_is_dropped`), not through
+  `verification {id}` in `tests/agent.rs`.
+- Log capture: `tests/verification_log.rs` installs a `TRACE` subscriber
+  and the logbook in the test process, starts in-process sessions over
+  HTTP/1.1 and HTTP/2, and checks that the captured output, the logbook and
+  the local answers contain neither the URL, the code, the fingerprint nor
+  the `Proxy-Authenticate` value; it asserts that `h2` traces were captured.
+  Not done: running the agent with `RUST_LOG=trace`, asserting that `rustls`
+  traces were captured, and a filter that caps a dependency's target.
+- Session close and `stop` clear pending entries. Session close is covered
+  by `a_refused_tunnel_flags_its_session_until_the_session_closes` in
+  `tests/sessions.rs`; `stop` is not tested.
 
 ### CLI
 

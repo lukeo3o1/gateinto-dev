@@ -581,7 +581,7 @@ local `200`.
 | --- | --- |
 | Upstream `2xx` | `200 Connection Established`, then the tunnel |
 | Upstream `403` | `403` |
-| Upstream `407` with a valid `Gateinto` challenge for the certificate sent | `502`; the challenge becomes the session's pending verification (see [design/interactive-auth.md](design/interactive-auth.md)) and is not forwarded |
+| Upstream `407` with a valid `Gateinto` challenge for the certificate sent | `502`; the challenge may become the session's pending verification, subject to the rules in [design/interactive-auth.md](design/interactive-auth.md#pending-challenges), and is not forwarded |
 | Upstream `407` without a valid challenge, or any other status | `502`; upstream headers and body are not forwarded |
 | Upstream connect, TLS or certificate failure, malformed reply | `502` |
 | Upstream connect, handshake or reply timeout | `504` |

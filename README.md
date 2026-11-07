@@ -170,7 +170,7 @@ Local responses:
 | Direct TCP connected (mixed mode only) | `200 Connection Established`, then the tunnel |
 | Upstream `2xx` | `200 Connection Established`, then the tunnel |
 | Upstream `403` | `403` |
-| Upstream `407` with a valid `Gateinto` challenge for the certificate sent | `502`; the session gets a pending verification (`gateinto session verification <id>`, or the GUI), and nothing is forwarded |
+| Upstream `407` with a valid `Gateinto` challenge for the certificate sent | `502`; the challenge may become the session's pending verification (`gateinto session verification <id>`, or the GUI), subject to the limits in [the design](docs/design/interactive-auth.md#pending-challenges), and nothing is forwarded |
 | Upstream `407` without a valid challenge, or any other status | `502`; upstream headers and body are not forwarded |
 | Upstream connect, TLS or certificate failure, malformed reply | `502` |
 | `hybrid_required` and the upstream cannot negotiate `X25519MLKEM768` | `502` |
@@ -736,7 +736,8 @@ Rules:
   lowercased and `:443` dropped, and a challenge must match an entry exactly
   on host and port. An empty list is an error; without the key every valid
   origin is accepted. A gateway added from a link cannot have it. An older
-  Gateinto refuses a file that contains it.
+  Gateinto is expected to refuse a file that contains it, because it does not
+  know the key; this has not been tried.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.

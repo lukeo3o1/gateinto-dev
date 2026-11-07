@@ -38,8 +38,11 @@ exits nonzero with the reason on stderr when anything fails.
 ## Verification required
 
 A gateway can refuse a tunnel with a `407` that asks the user to verify the
-device in a browser. The application gets `502`, and the session's
-verification becomes pending. Nothing opens by itself:
+device in a browser. The application gets `502`, and the challenge usually
+becomes the session's pending verification. It does not when another one is
+already pending, when the agent already holds 16, or when it names a
+certificate that is no longer the session's current one. Nothing opens by
+itself:
 
 - In the GUI the session row shows "Verification required" and a "Show
   verification" action, and the tray tooltip says that a session needs
