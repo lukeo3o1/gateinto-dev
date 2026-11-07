@@ -174,12 +174,16 @@ struct Output {
     std::atomic<unsigned long long> dropped{0};
     std::atomic<unsigned long long> errors{0};
     std::atomic<unsigned long long> wfp_count{0};
+    std::atomic<unsigned long long> wfp_callback_count{0};
+    std::atomic<unsigned long long> wfp_drop_count{0};
+    std::atomic<unsigned long long> wfp_type_counts[64];
     std::atomic<unsigned long long> security_count{0};
     bool stop = false;
     std::thread writer;
 
     explicit Output(const char* path) : file(path, std::ios::binary | std::ios::trunc) {
         if (!file) throw std::runtime_error("Cannot open output file");
+        for (auto& count : wfp_type_counts) count.store(0);
         writer = std::thread([this] {
             std::unique_lock<std::mutex> lock(mutex);
             while (!stop || !lines.empty()) {
@@ -210,6 +214,19 @@ struct Output {
              ",\"code\":" + std::to_string(code) + ",\"recv_qpc\":" + std::to_string(qpc()) + "}");
     }
 
+    std::string type_counts() const {
+        std::string result = "{";
+        bool first = true;
+        for (unsigned i = 0; i < 64; ++i) {
+            const auto count = wfp_type_counts[i].load();
+            if (!count) continue;
+            if (!first) result += ',';
+            first = false;
+            result += json(std::to_string(i)) + ':' + std::to_string(count);
+        }
+        return result + '}';
+    }
+
     void finish() {
         if (!writer.joinable()) return;
         {
@@ -227,16 +244,20 @@ static void CALLBACK net_event(void* context, const FWPM_NET_EVENT3* event) noex
     const auto received = qpc();
     const auto receipt_utc = utc_now();
     auto& out = *static_cast<Output*>(context);
+    ++out.wfp_callback_count;
+    const auto event_type = static_cast<unsigned>(event->type);
+    if (event_type < 64) ++out.wfp_type_counts[event_type];
+    const bool allow_event = event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW;
+    if (allow_event) ++out.wfp_count;
+    if (event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) ++out.wfp_drop_count;
     try {
-        if (event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) return;
-        ++out.wfp_count;
         const auto& h = event->header;
         const auto flags = h.flags;
         const UINT32 required = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
             FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET |
             FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET | FWPM_NET_EVENT_FLAG_APP_ID_SET |
             FWPM_NET_EVENT_FLAG_IP_VERSION_SET;
-        const auto* allow = event->classifyAllow;
+        const auto* allow = allow_event ? event->classifyAllow : nullptr;
         const bool app_set = (flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && h.appId.data && h.appId.size;
         const auto path = app_set ? blob_path(h.appId) : std::string{};
         const auto local = (flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) ? address(h, true) : std::string{};
@@ -244,9 +265,13 @@ static void CALLBACK net_event(void* context, const FWPM_NET_EVENT3* event) noex
         const bool direction_known = allow && (allow->msFwpDirection == FWP_DIRECTION_OUTBOUND || allow->msFwpDirection == FWP_DIRECTION_INBOUND);
         const bool complete = (flags & required) == required && direction_known && !path.empty() && !local.empty() && !remote.empty();
         std::ostringstream s;
-        s << "{\"kind\":\"wfp\",\"recv_qpc\":" << received << ",\"receipt_filetime\":" << receipt_utc
+        s << "{\"kind\":" << json(allow_event ? "wfp" : "wfp_other")
+          << ",\"recv_qpc\":" << received << ",\"receipt_filetime\":" << receipt_utc
           << ",\"event_filetime\":" << filetime(h.timeStamp) << ",\"flags\":" << flags
-          << ",\"event_type\":" << event->type << ",\"pid\":null,\"app_path\":" << json(path)
+          << ",\"event_type\":" << event->type
+          << ",\"event_type_name\":" << json(allow_event ? "classify_allow" :
+                 event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP ? "classify_drop" : "other")
+          << ",\"pid\":null,\"app_path\":" << json(path)
           << ",\"app_id_hex\":" << json(app_set ? blob_hex(h.appId) : std::string{})
           << ",\"app_id_bytes\":" << (app_set ? h.appId.size : 0)
           << ",\"ip_version\":" << static_cast<int>(h.ipVersion)
@@ -511,6 +536,9 @@ int main(int argc, char** argv) {
         SetConsoleCtrlHandler(console_control, FALSE);
         out.push("{\"kind\":\"summary\",\"recv_qpc\":" + std::to_string(qpc()) +
             ",\"wfp_count\":" + std::to_string(out.wfp_count.load()) +
+            ",\"wfp_callback_count\":" + std::to_string(out.wfp_callback_count.load()) +
+            ",\"wfp_drop_count\":" + std::to_string(out.wfp_drop_count.load()) +
+            ",\"wfp_type_counts\":" + out.type_counts() +
             ",\"security5156_count\":" + std::to_string(out.security_count.load()) +
             ",\"queue_dropped\":" + std::to_string(out.dropped.load()) +
             ",\"errors\":" + std::to_string(out.errors.load()) + "}");
