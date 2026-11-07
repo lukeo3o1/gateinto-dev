@@ -75,6 +75,7 @@ int main() {
 #include <ws2tcpip.h>
 #include <mswsock.h>
 #include <windows.h>
+#include <winternl.h>
 #include <fwpmu.h>
 #include <fwpsu.h>
 #include <algorithm>
