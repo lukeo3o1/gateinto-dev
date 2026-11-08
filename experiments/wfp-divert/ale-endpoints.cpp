@@ -1,6 +1,8 @@
+#include <cstddef>
 #include <cstdint>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <tuple>
 #include <vector>
 
@@ -12,13 +14,43 @@ struct Endpoint {
     uint16_t local_port = 0, remote_port = 0;
     uint8_t protocol = 0;
     std::string app_path;
+    uint64_t local_token_modified_id = 0, mm_sa_id = 0, qm_sa_id = 0;
+    uint32_t ipsec_status = 0, flags = 0, app_id_size = 0;
+    std::string app_id_hex{};
+    bool app_id_hex_truncated = false;
 
     bool operator<(const Endpoint& other) const {
-        return std::tie(id, local, remote, local_port, remote_port, protocol, app_path) <
+        return std::tie(id, local, remote, local_port, remote_port, protocol, app_path,
+                        local_token_modified_id, mm_sa_id, qm_sa_id, ipsec_status, flags,
+                        app_id_size, app_id_hex, app_id_hex_truncated) <
             std::tie(other.id, other.local, other.remote, other.local_port, other.remote_port,
-                     other.protocol, other.app_path);
+                     other.protocol, other.app_path, other.local_token_modified_id, other.mm_sa_id,
+                     other.qm_sa_id, other.ipsec_status, other.flags, other.app_id_size,
+                     other.app_id_hex, other.app_id_hex_truncated);
     }
 };
+
+void copy_app_id(Endpoint& endpoint, const uint8_t* data, uint32_t size) {
+    if (size && !data) throw std::runtime_error("ALE null appId data");
+    const char* digits = "0123456789abcdef";
+    endpoint.app_id_size = size;
+    endpoint.app_id_hex_truncated = size > 128;
+    endpoint.app_id_hex.clear();
+    for (uint32_t i = 0; i < size && i < 128; ++i) {
+        endpoint.app_id_hex += digits[data[i] >> 4];
+        endpoint.app_id_hex += digits[data[i] & 15];
+    }
+}
+
+size_t snapshot_bytes(const Endpoint& endpoint) {
+    return sizeof(Endpoint) + endpoint.app_path.size() + endpoint.app_id_size + endpoint.app_id_hex.size();
+}
+
+bool snapshot_fits(size_t used, const Endpoint& endpoint) {
+    const size_t limit = 8 * 1024 * 1024;
+    const auto bytes = snapshot_bytes(endpoint);
+    return bytes <= limit && used <= limit - bytes;
+}
 
 std::vector<Endpoint> completed_snapshot(const std::vector<Endpoint>& entries, bool complete,
                                        uint32_t target, uint16_t port, uint8_t protocol) {
@@ -58,6 +90,31 @@ int main() {
     conflict.app_path = "\\device\\lab\\app-b.exe";
     assert(ale::completed_snapshot({endpoint, conflict}, true, 0x7f000001, 443, 6).size() == 2);
     assert(ale::completed_snapshot({endpoint, conflict}, false, 0x7f000001, 443, 6).empty());
+    auto diagnostics = endpoint;
+    diagnostics.local_token_modified_id = 42;
+    diagnostics.mm_sa_id = 43;
+    diagnostics.qm_sa_id = 44;
+    diagnostics.ipsec_status = 45;
+    diagnostics.flags = 46;
+    uint8_t app_id[]{'S', 0, 'y', 0, 's', 0, 't', 0, 'e', 0, 'm', 0, 0, 0};
+    ale::copy_app_id(diagnostics, app_id, sizeof(app_id));
+    app_id[0] = 'X';
+    assert(diagnostics.app_id_size == sizeof(app_id));
+    assert(diagnostics.app_id_hex == "530079007300740065006d000000");
+    assert(!diagnostics.app_id_hex_truncated);
+    auto copied = ale::completed_snapshot({diagnostics}, true, 0x7f000001, 443, 6);
+    assert(copied.size() == 1 && copied[0].local_token_modified_id == 42);
+    assert(copied[0].mm_sa_id == 43 && copied[0].qm_sa_id == 44);
+    assert(copied[0].ipsec_status == 45 && copied[0].flags == 46);
+    auto changed = diagnostics;
+    changed.flags = 47;
+    assert(ale::completed_snapshot({diagnostics, changed}, true, 0x7f000001, 443, 6).size() == 2);
+    std::vector<uint8_t> large_id(129, 0xab);
+    ale::copy_app_id(diagnostics, large_id.data(), static_cast<uint32_t>(large_id.size()));
+    assert(diagnostics.app_id_hex.size() == 256 && diagnostics.app_id_hex_truncated);
+    assert(ale::snapshot_bytes(diagnostics) >= sizeof(ale::Endpoint) + 129 + 256);
+    assert(ale::snapshot_fits(8 * 1024 * 1024 - ale::snapshot_bytes(diagnostics), diagnostics));
+    assert(!ale::snapshot_fits(8 * 1024 * 1024 - ale::snapshot_bytes(diagnostics) + 1, diagnostics));
     std::cout << "ALE endpoint snapshot self-tests passed\n";
 }
 #endif
@@ -105,6 +162,55 @@ std::string json(const std::string& value) {
         else result += static_cast<char>(c);
     }
     return result + '"';
+}
+
+std::string abi_metadata() {
+#if defined(_M_X64) || defined(__x86_64__)
+    const char* architecture = "x64";
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    const char* architecture = "arm64";
+#elif defined(_M_IX86) || defined(__i386__)
+    const char* architecture = "x86";
+#else
+    const char* architecture = "unknown";
+#endif
+    std::ostringstream out;
+    out << "{\"pointer_bits\":" << sizeof(void*) * 8 << ",\"expected_pointer_bits\":64"
+        << ",\"architecture\":" << json(architecture) << ",\"expected_architecture\":\"x64\""
+        << ",\"endpoint_properties_size\":" << sizeof(FWPS_ALE_ENDPOINT_PROPERTIES0)
+        << ",\"endpoint_properties_alignment\":" << alignof(FWPS_ALE_ENDPOINT_PROPERTIES0)
+        << ",\"endpoint_properties_offsets\":{"
+        << "\"endpointId\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, endpointId)
+        << ",\"ipVersion\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, ipVersion)
+        << ",\"localV4Address\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, localV4Address)
+        << ",\"localV6Address\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, localV6Address)
+        << ",\"remoteV4Address\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, remoteV4Address)
+        << ",\"remoteV6Address\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, remoteV6Address)
+        << ",\"ipProtocol\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, ipProtocol)
+        << ",\"localPort\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, localPort)
+        << ",\"remotePort\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, remotePort)
+        << ",\"localTokenModifiedId\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, localTokenModifiedId)
+        << ",\"mmSaId\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, mmSaId)
+        << ",\"qmSaId\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, qmSaId)
+        << ",\"ipsecStatus\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, ipsecStatus)
+        << ",\"flags\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, flags)
+        << ",\"appId\":" << offsetof(FWPS_ALE_ENDPOINT_PROPERTIES0, appId)
+        << "},\"byte_blob_size\":" << sizeof(FWP_BYTE_BLOB)
+        << ",\"byte_blob_offsets\":{\"size\":" << offsetof(FWP_BYTE_BLOB, size)
+        << ",\"data\":" << offsetof(FWP_BYTE_BLOB, data) << "}}";
+    return out.str();
+}
+
+std::string runtime_os() {
+    const auto module = GetModuleHandleW(L"ntdll.dll");
+    using Version = NTSTATUS (WINAPI*)(OSVERSIONINFOW*);
+    const auto version = module ? reinterpret_cast<Version>(GetProcAddress(module, "RtlGetVersion")) : nullptr;
+    OSVERSIONINFOW value{};
+    value.dwOSVersionInfoSize = sizeof(value);
+    if (!version || version(&value) != 0) return "{\"available\":false}";
+    return "{\"available\":true,\"major\":" + std::to_string(value.dwMajorVersion) +
+        ",\"minor\":" + std::to_string(value.dwMinorVersion) +
+        ",\"build\":" + std::to_string(value.dwBuildNumber) + "}";
 }
 
 class OutputLimit : public std::runtime_error {
@@ -299,11 +405,6 @@ class Probe {
                             const auto* native = entries[index];
                             if (!native) throw std::runtime_error("ALE null endpoint");
                             if (native->ipVersion != FWP_IP_VERSION_V4) continue;
-                            copied_bytes += native->appId.size;
-                            if (copied_bytes > 8 * 1024 * 1024) {
-                                truncated = true;
-                                throw std::runtime_error("ALE snapshot byte limit");
-                            }
                             ale::Endpoint endpoint;
                             endpoint.id = native->endpointId;
                             endpoint.local = native->localV4Address;
@@ -312,6 +413,17 @@ class Probe {
                             endpoint.remote_port = native->remotePort;
                             endpoint.protocol = native->ipProtocol;
                             endpoint.app_path = app_path(native->appId);
+                            endpoint.local_token_modified_id = native->localTokenModifiedId;
+                            endpoint.mm_sa_id = native->mmSaId;
+                            endpoint.qm_sa_id = native->qmSaId;
+                            endpoint.ipsec_status = native->ipsecStatus;
+                            endpoint.flags = native->flags;
+                            ale::copy_app_id(endpoint, native->appId.data, native->appId.size);
+                            if (!ale::snapshot_fits(copied_bytes, endpoint)) {
+                                truncated = true;
+                                throw std::runtime_error("ALE snapshot byte limit");
+                            }
+                            copied_bytes += ale::snapshot_bytes(endpoint);
                             snapshot.endpoints.push_back(std::move(endpoint));
                         }
                     } catch (...) {
@@ -369,6 +481,12 @@ class Probe {
                 << ",\"remote_ip\":" << json(ip(endpoint.remote)) << ",\"remote_port\":" << endpoint.remote_port
                 << ",\"raw_local_v4\":" << endpoint.local << ",\"raw_remote_v4\":" << endpoint.remote
                 << ",\"protocol\":" << unsigned(endpoint.protocol) << ",\"app_path\":" << json(endpoint.app_path)
+                << ",\"raw_local_token_modified_id\":" << endpoint.local_token_modified_id
+                << ",\"raw_mm_sa_id\":" << endpoint.mm_sa_id << ",\"raw_qm_sa_id\":" << endpoint.qm_sa_id
+                << ",\"raw_ipsec_status\":" << endpoint.ipsec_status << ",\"raw_flags\":" << endpoint.flags
+                << ",\"raw_app_id_size\":" << endpoint.app_id_size
+                << ",\"raw_app_id_hex\":" << json(endpoint.app_id_hex)
+                << ",\"raw_app_id_hex_truncated\":" << (endpoint.app_id_hex_truncated ? "true" : "false")
                 << ",\"query_start_qpc\":" << snapshot.began << ",\"observed_qpc\":" << snapshot.observed
                 << ",\"recv_qpc\":" << snapshot.observed << "}";
             out.write(record.str());
@@ -421,7 +539,10 @@ public:
                 timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002, TIMER_ALL_ACCESS);
                 out.write("{\"kind\":\"ready\",\"source\":\"ale_endpoint\",\"available\":true,\"qpc\":" +
                           std::to_string(qpc()) + ",\"qpc_frequency\":" + std::to_string(frequency) +
-                          ",\"protocol\":" + std::to_string(config.protocol) + "}");
+                          ",\"protocol\":" + std::to_string(config.protocol) +
+                          ",\"abi\":" + abi_metadata() + ",\"runtime_os\":" + runtime_os() +
+                          ",\"native_exports\":[\"FwpsAleEndpointCreateEnumHandle0\","
+                          "\"FwpsAleEndpointEnum0\",\"FwpsAleEndpointDestroyEnumHandle0\"]}");
                 const int64_t deadline = qpc() + frequency * config.seconds;
                 try {
                     while (qpc() < deadline && !errors) {

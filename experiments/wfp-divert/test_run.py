@@ -274,15 +274,26 @@ class InprocEngineTests(unittest.TestCase):
         self.assertEqual("async", command[command.index("--lookup-mode") + 1])
         self.assertEqual("off", command[command.index("--filter-cache") + 1])
 
+    def test_inproc_command_passes_destination_scope_and_narrow_window(self):
+        command = [str(x) for x in lab.inproc_command(
+            pathlib.Path("bin"), pathlib.Path("out"), self.manifest(), "\\device\\app-a.exe",
+            self.args(enum_scope="destination", window_before_ms=5))]
+        self.assertEqual("destination", command[command.index("--enum-scope") + 1])
+        self.assertEqual("5", command[command.index("--window-before-ms") + 1])
+
     def test_inproc_comparison_requires_the_requested_native_mode(self):
         summary = dict(engine="inproc", success=True, decided_proxy=0, quic_drops=0,
-                       lookup_mode="inline", filter_cache=True)
+                       lookup_mode="inline", filter_cache=True, enum_scope="legacy", window_before_ms=500)
         self.assertEqual("FAIL", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
                                                     expected_lookup_mode="async")[0])
         self.assertEqual("FAIL", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
                                                     expected_filter_cache=False)[0])
         self.assertEqual("PASS_RESTRICTED_CASE", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
                             expected_lookup_mode="inline", expected_filter_cache=True)[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
+                                                    expected_enum_scope="destination")[0])
+        self.assertEqual("FAIL", lab.inproc_evaluate(summary, "hold", "tcp", False, 0, 0,
+                                                    expected_window_before_ms=5)[0])
 
     def test_udp_and_quic_plans_exercise_both_apps_with_udp(self):
         for quic in [False, True]:
@@ -470,6 +481,90 @@ class AleEndpointProbeTests(unittest.TestCase):
         self.assertFalse(result["rows"][0]["observed_before_decision"])
 
 
+class AleNoDiversionControlTests(unittest.TestCase):
+    def fixture(self):
+        clients, native, ale = [], [], []
+        paths = {"a": "\\device\\app-a.exe", "b": "\\device\\app-b.exe"}
+        native.append(dict(kind="summary", wfp_api="poll", errors=0, queue_dropped=0, wfp_polls=3, wfp_poll_errors=0))
+        ale += [dict(kind="summary", source="ale_endpoint", available=True, success=True, errors=0, truncated=False),
+                dict(kind="ale_snapshot", snapshot_id=1, complete=True, query_start_qpc=150, observed_qpc=170)]
+        for app, port in [("a", 40000), ("b", 40001)]:
+            key = dict(local_ip="127.0.0.1", local_port=port, remote_ip="127.0.0.1", remote_port=9000, protocol=6)
+            attempt = dict(key, kind="client_attempt", nonce=app, attempt_qpc=100)
+            result = dict(key, kind="client", nonce=app, status="echo_ok", echo_qpc=120,
+                          hold_end_qpc=620, done_qpc=621, hold_open_ms=500)
+            clients.append(dict(app=app, protocol="tcp", nonce=app, attempts=[attempt], results=[result], returncode=0))
+            native.append(dict(key, kind="wfp", app_path=paths[app], layer_id=48, direction="outbound",
+                               complete=True, occurrence_qpc=110, recv_qpc=130))
+            ale.append(dict(key, kind="ale_endpoint", snapshot_id=1, endpoint_id=77, app_path="System",
+                            snapshot_complete=True, query_start_qpc=150, observed_qpc=170))
+        return clients, native, ale, paths
+
+    def report(self, clients, native, ale, paths):
+        return lab.ale_control_report(clients, native, ale, paths, 1000, native_exit=0, probe_exit=0)
+
+    def test_system_mismatch_with_original_native_reference_is_characterized(self):
+        result = self.report(*self.fixture())
+        self.assertEqual("CHARACTERIZED_ALE_APP_MISMATCH", result["status"])
+        self.assertFalse(result["routing_authority"])
+        self.assertFalse(result["packet_interception"])
+        self.assertEqual(2, result["native_reference_matches"])
+        self.assertEqual(2, result["endpoint_observed_clients"])
+        self.assertEqual(0, result["original_app_matches"])
+        self.assertTrue(result["shared_endpoint_ids"])
+        self.assertNotIn("generation", result["rows"][0])
+        self.assertNotIn("capture_qpc", result["rows"][0])
+
+    def test_correct_original_app_snapshot_is_only_live_endpoint_evidence(self):
+        clients, native, ale, paths = self.fixture()
+        for i, entry in enumerate(ale[2:]):
+            entry["app_path"] = paths[clients[i]["app"]]
+            entry["endpoint_id"] += i
+        result = self.report(clients, native, ale, paths)
+        self.assertEqual("OBSERVED_ALE_ORIGINAL_APP", result["status"])
+        self.assertFalse(result["routing_authority"])
+        self.assertEqual(2, result["original_app_matches"])
+
+    def test_missing_or_failed_native_reference_cannot_characterize_ale(self):
+        for change in ["missing", "wrong_app", "poll_error", "old_event"]:
+            clients, native, ale, paths = self.fixture()
+            if change == "missing":
+                native = native[:1]
+            elif change == "wrong_app":
+                native[1]["app_path"] = "System"
+            elif change == "poll_error":
+                native[0]["wfp_poll_errors"] = 1
+            else:
+                native[1]["occurrence_qpc"] = 10
+            self.assertEqual("INCONCLUSIVE_NO_NATIVE_REFERENCE", self.report(clients, native, ale, paths)["status"])
+
+    def test_query_must_complete_while_echoed_socket_is_alive(self):
+        for change in ["early", "late", "partial", "missing_summary"]:
+            clients, native, ale, paths = self.fixture()
+            if change == "early":
+                for entry in ale[1:]:
+                    entry["query_start_qpc"] = 110
+            elif change == "late":
+                for entry in ale[1:]:
+                    entry["observed_qpc"] = 700
+            elif change == "partial":
+                ale[1]["complete"] = False
+            else:
+                ale = ale[1:]
+            self.assertEqual("INCONCLUSIVE_ENDPOINT_CONTROL", self.report(clients, native, ale, paths)["status"])
+
+    def test_failed_echo_is_control_failure(self):
+        clients, native, ale, paths = self.fixture()
+        clients[0]["returncode"] = 1
+        self.assertEqual("FAIL_CONTROL_CLIENT", self.report(clients, native, ale, paths)["status"])
+
+    def test_id_repetition_across_queries_is_not_same_snapshot_sharing(self):
+        clients, native, ale, paths = self.fixture()
+        ale.append(dict(ale[1], snapshot_id=2))
+        ale[3]["snapshot_id"] = 2
+        self.assertEqual([], self.report(clients, native, ale, paths)["shared_endpoint_ids"])
+
+
 class InprocCleanupTests(unittest.TestCase):
     def test_cooperative_engine_exit_precedes_forced_termination(self):
         engine = mock.Mock(pid=1)
@@ -495,6 +590,129 @@ class InprocCleanupTests(unittest.TestCase):
         self.assertIn("--restore-state", restore.call_args.args[0])
         self.assertEqual([1], report["cleanup_forced_pids"])
         self.assertEqual(0, report["fallback_restore_exit_code"])
+
+
+class PublicSummaryTests(unittest.TestCase):
+    def test_scoped_benchmarks_and_live_controls_publish_only_aggregates(self):
+        token = "PRIVATE-PATH-192.0.2.8"
+        value = dict(status="CHARACTERIZED_ALE_APP_MISMATCH", engine="endpoint-control", benchmark_round=2,
+                     enum_scope="destination", window_before_ms=5, client_hold_ms=500,
+                     clients=[dict(returncode=0, nonce=token)],
+                     engine_summary=dict(lookup_mode="async", enum_scope="destination", selected_app=token,
+                         lookup_query_busy_ms=4.5, lookup_calls=2, success=True,
+                         enum_filter="type+protocol+remote_address+remote_port",
+                         enum_condition_shapes=[dict(mask=27, count=4, app_path=token)],
+                         lookup_create=dict(calls=2, total_ms=4.0, max_ms=3.0, path=token),
+                         added_latency_direct_ms=dict(count=3, p50=1.2, p95=2.5, max=3.0, recv_qpc=999)),
+                     endpoint_control=dict(status="CHARACTERIZED_ALE_APP_MISMATCH", routing_authority=False,
+                         native_reference_matches=1, endpoint_observed_clients=1, original_app_matches=0,
+                         system_app_clients=1, shared_endpoint_groups=1,
+                         shared_endpoint_ids=[dict(snapshot_id=77, endpoint_id=777)],
+                         rows=[dict(endpoint_app_paths=[token], endpoint_ids=[777], echo_qpc=999)],
+                         ale_summary=dict(queries=8, errors=0, success=True, query=dict(calls=8, total_ms=2.0))),
+                     ale_ready=dict(qpc=999, abi=dict(pointer_bits=64, architecture="x64",
+                         endpoint_properties_size=104, endpoint_properties_offsets=dict(appId=88, secret=token)),
+                         runtime_os=dict(available=True, major=10, minor=0, build=26100, private=token)))
+        result = lab.public_summary(value)
+        self.assertEqual("CHARACTERIZED_ALE_APP_MISMATCH", result["status"])
+        self.assertEqual("destination", result["enum_scope"])
+        self.assertEqual(2, result["benchmark_round"])
+        self.assertEqual(dict(total=1, success=1, failure=0), result["clients"])
+        self.assertEqual(4.0, result["engine_summary"]["lookup_create"]["total_ms"])
+        self.assertEqual(1, result["endpoint_control"]["system_app_clients"])
+        self.assertEqual(88, result["ale_ready"]["abi"]["endpoint_properties_offsets"]["appId"])
+        encoded = json.dumps(result)
+        for private in (token, '"rows"', '"endpoint_ids"', '"endpoint_id"', '"snapshot_id"', '"qpc"', '"recv_qpc"'):
+            self.assertNotIn(private, encoded)
+        self.assertEqual(result, lab.public_summary(result))
+        shadow = lab.public_summary(dict(status="INCONCLUSIVE_ALE_ENDPOINT_PROBE",
+            ale_probe=dict(status="INCONCLUSIVE_ALE_ENDPOINT_PROBE", routing_authority=False,
+                observed_while_held=0, native_summary=dict(source="ale_endpoint", queries=5,
+                    complete_snapshots=5, errors=0, success=True))))
+        self.assertEqual(shadow, lab.public_summary(shadow))
+
+    def test_new_metric_fields_reject_strings_nonfinite_values_and_unknown_enums(self):
+        result = lab.public_summary(dict(status="FAIL_ENDPOINT_CONTROL", engine="PRIVATE",
+            enum_scope="PRIVATE", benchmark_round="PRIVATE", engine_summary=dict(enum_filter="PRIVATE",
+                lookup_calls="PRIVATE", lookup_query_busy_ms=float("inf"),
+                lookup_create=dict(total_ms=float("nan"))),
+            endpoint_control=dict(native_reference_matches="PRIVATE", rows=[dict(app_path="PRIVATE")]),
+            ale_ready=dict(abi=dict(architecture="PRIVATE", pointer_bits="PRIVATE"))))
+        encoded = json.dumps(result)
+        self.assertNotIn("PRIVATE", encoded)
+        self.assertNotIn("NaN", encoded)
+        self.assertNotIn("Infinity", encoded)
+        self.assertEqual("FAIL_ENDPOINT_CONTROL", result["status"])
+
+    def test_recursive_projection_excludes_raw_telemetry(self):
+        token = "PRIVATE-TOKEN-192.0.2.44-C:\\private\\owner.exe"
+        value = dict(status="FAIL", source="security5156", mode="redirect", protocol="tcp",
+                     scenario="baseline", topology="single-host-local", selected_path=token,
+                     external_target=token, error=token, anchor_filetime=1234567890123,
+                     cleanup_forced_pids=[1234], clients=[dict(app=token, pid=1234, exit_code=0),
+                                                        dict(app=token, exit_code=1)],
+                     timing=dict(matched_client_tuples=2, rows=[dict(app_path=token, recv_qpc=123)],
+                                 anchor_uncertainty_ms=.01,
+                                 notification_minus_capture_ms=dict(count=2, min=-1, max=2, p50=0, p95=2, raw_xml=token)),
+                     native_summary=dict(recv_qpc=123, wfp_count=2, errors=0, raw_xml=token),
+                     diagnostic_events=[dict(event_type=3, flags=32, app_path_matches=True,
+                                             bound_port_matches=False, raw_xml=token, path=token)])
+        result = lab.public_summary(value)
+        encoded = json.dumps(result)
+        self.assertNotIn(token, encoded)
+        for field in ["rows", "recv_qpc", "anchor_filetime", "cleanup_forced_pids", "raw_xml", "selected_path"]:
+            self.assertNotIn('"' + field + '"', encoded)
+        self.assertEqual(dict(total=2, success=1, failure=1), result["clients"])
+        self.assertEqual("inspect_local_records", result["reason"])
+        self.assertEqual(2, result["native_summary"]["wfp_count"])
+
+    def test_string_and_numeric_type_checks_prevent_side_channels(self):
+        token = "PRIVATE-PATH"
+        result = lab.public_summary(dict(status=token, source=token, purpose=token,
+                                         decisions=token, native_summary=dict(wfp_count=token),
+                                         timing=dict(anchor_uncertainty_ms=token,
+                                                     notification_minus_capture_ms=dict(min=token)),
+                                         diagnostic_events=[dict(flags=token, event_type=token,
+                                                                 app_path_matches=token)]))
+        self.assertNotIn(token, json.dumps(result))
+        self.assertEqual("UNKNOWN", result["status"])
+
+    def test_native_unconfirmed_and_positive_control_are_preserved_safely(self):
+        result = lab.public_summary(dict(status="NO_OWNERSHIP_CONFIRMATION", error="C:\\sensitive"))
+        self.assertEqual("native_source_unconfirmed", result["reason"])
+        positive = lab.public_summary(dict(status="PASS_BLOCKED_EVENT_CONTROL", client_exit=1,
+                                           purpose="blocked-flow positive control, never an allow ownership source",
+                                           matching_native_drops=2, native_summary=dict(wfp_drop_count=2)))
+        self.assertEqual(2, positive["matching_native_drops"])
+        self.assertEqual(1, positive["client_exit"])
+        self.assertEqual("PASS_BLOCKED_EVENT_CONTROL", positive["status"])
+
+    def test_native_inconclusive_statuses_remain_distinguishable(self):
+        for status in ("INCONCLUSIVE_NO_NATIVE_EVENTS", "INCONCLUSIVE_NO_USABLE_NATIVE_EVENTS"):
+            result = lab.public_summary(dict(status=status, error="PRIVATE"))
+            self.assertEqual(status, result["status"])
+            self.assertEqual(result, lab.public_summary(result))
+
+    def test_already_public_counts_and_numeric_event_types_survive_aggregation(self):
+        value = dict(status="PASS_RESTRICTED_CASE", clients=[dict(exit_code=0), dict(exit_code=1)],
+                     native_summary=dict(wfp_callback_count=3, wfp_type_counts={"3": 2, "6": 1, "PRIVATE": 99}))
+        public = lab.public_summary(value)
+        self.assertEqual(public, lab.public_summary(public))
+        self.assertEqual({"3": 2, "6": 1}, public["native_summary"]["wfp_type_counts"])
+        self.assertEqual(3, public["native_summary"]["wfp_callback_count"])
+
+    def test_directory_aggregation_does_not_publish_case_paths(self):
+        spec = importlib.util.spec_from_file_location("lab_summarize", pathlib.Path(__file__).with_name("summarize.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            case = root / "PRIVATE-PATH-192.0.2.7"
+            case.mkdir()
+            (case / "summary.json").write_text(json.dumps(dict(status="FAIL", error="PRIVATE-ERROR")))
+            result = module.aggregate(root)
+            self.assertEqual(1, result["case_count"])
+            self.assertNotIn("PRIVATE", json.dumps(result))
 
 
 class BridgeProtocolTests(unittest.TestCase):

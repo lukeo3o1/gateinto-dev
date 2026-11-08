@@ -21,6 +21,7 @@ std::string counts_json(const std::map<unsigned, unsigned long long>&);
 std::string error_line_json(const std::string&, const std::string&, unsigned long);
 std::string poll_missed_json(bool, unsigned long long, unsigned long long, bool, unsigned long long);
 std::string direction_label(unsigned long);
+std::string event_type_name(unsigned long);
 std::string allow_diagnostics_json(unsigned long, long, unsigned long, unsigned long);
 
 struct PollStats {
@@ -63,6 +64,10 @@ int self_test() {
     if (direction_label(0) != "outbound" || direction_label(1) != "inbound" ||
         direction_label(0x3900) != "unknown" || direction_label(0xffffffffUL) != "unknown")
         throw std::runtime_error("Only documented direction values are authoritative");
+    if (event_type_name(6) != "classify_allow" || event_type_name(3) != "classify_drop" ||
+        event_type_name(0) != "other" || event_type_name(14593) != "other" ||
+        event_type_name(0xffffffffUL) != "other")
+        throw std::runtime_error("Only documented event type values have ownership names");
     if (allow_diagnostics_json(0x3900, 7, 2, 4) !=
         "\"direction_raw\":14592,\"is_loopback_raw\":7,\"original_profile\":2,\"current_profile\":4")
         throw std::runtime_error("Allow diagnostics preserve raw values");
@@ -149,6 +154,10 @@ std::string counts_json(const std::map<unsigned, unsigned long long>& counts) {
 
 std::string direction_label(unsigned long raw) {
     return raw == 0 ? "outbound" : raw == 1 ? "inbound" : "unknown";
+}
+
+std::string event_type_name(unsigned long type) {
+    return type == 6 ? "classify_allow" : type == 3 ? "classify_drop" : "other";
 }
 
 std::string allow_diagnostics_json(unsigned long direction, long loopback,
@@ -270,6 +279,7 @@ std::string xml_value(const std::string& xml, const std::string& name) {
 #endif
 
 static_assert(FWP_DIRECTION_OUTBOUND == 0 && FWP_DIRECTION_INBOUND == 1);
+static_assert(FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW == 6 && FWPM_NET_EVENT_TYPE_CLASSIFY_DROP == 3);
 
 static std::string abi_json() {
     std::ostringstream s;
@@ -373,6 +383,8 @@ struct Output {
     std::atomic<unsigned long long> errors{0};
     std::atomic<unsigned long long> wfp_count{0};
     std::atomic<unsigned long long> wfp_raw_count{0};
+    std::atomic<unsigned long long> wfp_drop_count{0};
+    std::atomic<unsigned long long> wfp_other_count{0};
     unsigned long long subscription_start_qpc = 0, subscription_stop_qpc = 0;
     std::mutex type_mutex;
     std::map<unsigned, unsigned long long> wfp_type_counts;
@@ -475,7 +487,7 @@ static std::string wfp_line(const char* kind, const Event* event,
         FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET |
         FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET | FWPM_NET_EVENT_FLAG_APP_ID_SET |
         FWPM_NET_EVENT_FLAG_IP_VERSION_SET;
-    const auto* allow = event->classifyAllow;
+    const auto* allow = event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW ? event->classifyAllow : nullptr;
     const bool app_set = (flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && h.appId.data && h.appId.size;
     const auto path = app_set ? blob_path(h.appId) : std::string{};
     const auto local = (flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) ? address(h, true) : std::string{};
@@ -485,7 +497,8 @@ static std::string wfp_line(const char* kind, const Event* event,
     std::ostringstream s;
     s << "{\"kind\":" << json(kind) << ",\"recv_qpc\":" << received << ",\"receipt_filetime\":" << receipt_utc
       << ",\"event_filetime\":" << filetime(h.timeStamp) << ",\"flags\":" << flags
-      << ",\"event_type\":" << event->type << ",\"pid\":null,\"app_path\":" << json(path)
+      << ",\"event_type\":" << event->type << ",\"event_type_name\":" << json(event_type_name(event->type))
+      << ",\"pid\":null,\"app_path\":" << json(path)
       << ",\"event_struct_version\":" << (std::is_same<Event, FWPM_NET_EVENT5>::value ? 5 :
                                              std::is_same<Event, FWPM_NET_EVENT4>::value ? 4 : 3)
       << ",\"app_id_hex\":" << json(app_set ? blob_hex(h.appId) : std::string{})
@@ -519,9 +532,11 @@ static void CALLBACK net_event(void* context, const Event* event) noexcept {
         const auto sequence = out.wfp_raw_count.fetch_add(1) + 1;
         if (!event) return;
         out.count_type(static_cast<unsigned>(event->type));
-        if (event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) return;
-        ++out.wfp_count;
-        out.push(wfp_line("wfp", event, received, receipt_utc, sequence));
+        const bool allow_event = event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW;
+        if (allow_event) ++out.wfp_count;
+        else ++out.wfp_other_count;
+        if (event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) ++out.wfp_drop_count;
+        out.push(wfp_line(allow_event ? "wfp" : "wfp_other", event, received, receipt_utc, sequence));
     } catch (...) { out.error("net_event_callback", ERROR_INVALID_DATA); }
 }
 
@@ -674,6 +689,10 @@ struct Engine {
             ",\"receipt_filetime\":" + std::to_string(utc_now()) + ",\"qpc_frequency\":" + std::to_string(frequency.QuadPart) +
             ",\"old_collect\":" + std::to_string(old_collect) + ",\"old_keywords\":" + std::to_string(old_keywords) + ",\"wfp_api\":" + json(api) +
             ",\"collect_after\":" + std::to_string(collect_after) + ",\"keywords_after\":" + std::to_string(keywords_after) +
+            ",\"header_size\":" + std::to_string(sizeof(FWPM_NET_EVENT_HEADER3)) +
+            ",\"event_size\":" + std::to_string(sizeof(FWPM_NET_EVENT3)) +
+            ",\"event_type_offset\":" + std::to_string(offsetof(FWPM_NET_EVENT3, type)) +
+            ",\"event_union_offset\":" + std::to_string(offsetof(FWPM_NET_EVENT3, classifyAllow)) +
             ",\"wfp_abi\":" + abi_json() + "}");
     }
     void restore_from(const std::string& path) {
@@ -1004,6 +1023,9 @@ int main(int argc, char** argv) {
             ",\"wfp_api\":" + json(api) +
             ",\"wfp_count\":" + std::to_string(out.wfp_count.load()) +
             ",\"wfp_raw_count\":" + std::to_string(out.wfp_raw_count.load()) +
+            ",\"wfp_callback_count\":" + std::to_string(out.wfp_raw_count.load()) +
+            ",\"wfp_drop_count\":" + std::to_string(out.wfp_drop_count.load()) +
+            ",\"wfp_other_count\":" + std::to_string(out.wfp_other_count.load()) +
             ",\"wfp_type_counts\":" + out.type_counts() +
             ",\"wfp_enum_total\":" + std::to_string(out.enum_total) +
             ",\"wfp_enum_type_counts\":" + counts_json(out.enum_type_counts) +

@@ -22,6 +22,7 @@ SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
 | `run.py`, `test_run.py` | Correlate the selected native source, full device path and tuple; inject delayed/missing attribution; verify per-client evidence and final collector status. |
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
 | `client.cpp` | Built twice as app-a.exe and app-b.exe; echo nonces and original socket tuples provide test ground truth, never ownership authority. |
+| `positive_control.py` | A narrowly scoped blocked connection checks native drop-callback delivery. Drops are diagnostic only and cannot authorize proxying. |
 | `../../examples/wfp_lab.rs` | Controlled echo endpoints, TLS CONNECT upstream and actual Gateinto proxy with session credentials and forced Gateway routing. |
 | `build.ps1`, `ci.ps1` | Download official signed WinDivert, compile probes, back up/restore audit policy, run cases and retain evidence. |
 
@@ -65,8 +66,10 @@ and restoration after interruption.
 ## Interpretation
 
 The workflow tests TCP hold, both native attribution sources, a short injected
-delay, skipped attribution, attribution later than the deadline, UDP hold/direct,
-and TCP redirection including a skip-all negative control. PASS_RESTRICTED_CASE
+delay, skipped attribution, attribution later than the deadline, UDP multi-peer hold/direct,
+TCP redirection, SYN retransmission and a conservative tuple-reuse rejection. It
+also tests external TCP connect-only attribution and a temporary firewall-block
+positive control. The rule is removed in finally. PASS_RESTRICTED_CASE
 requires client echo success, native evidence for each expected confirmed flow,
 accepted packet decisions, no B proxy packets, correct bridge count and gateway
 CONNECT destination/count, successful collector exit, and no collector error or
@@ -114,8 +117,12 @@ records report structure sizes/offsets. Subscribe3/4 additionally emit diagnosti
 packet. The comparison cases use `--callback-drain-ms 1500` to retain callbacks
 after normal collection, which does not make a late callback meet a hold deadline.
 
-Evidence includes raw native/packet JSONL, decision/control logs, translation and
-bridge logs, gateway requests, target payload hex and client nonces/tuples. Driver
+Local evidence includes raw native/packet JSONL, decision/control logs, translation and
+bridge logs, gateway requests, target payload hex and client nonces/tuples. New
+Actions artifacts and console summaries retain only aggregate counts and relative
+latency statistics. Raw local files, XML, paths, PIDs, endpoints and per-flow
+timestamps are excluded from those uploads. Historical runs retain the artifacts
+they originally generated. Driver
 load failure is a failed environment probe, not an attribution result. A failed
 redirect with successful hold is a redirection failure, not proof native WFP
 attribution is impossible.
@@ -127,7 +134,10 @@ identity or desktop Windows 10/11. Gateinto is embedded in the fixture process;
 its outgoing target traffic is attributed to that process and must remain direct.
 Packet capture of the gateway's own TLS endpoint is outside the target filter.
 
-The NAT layout and alias reservation are candidates requiring Windows execution.
+The loopback NAT layout and alias reservation passed the limited Windows TCP case
+in [run 42278267576](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42278267576).
+Three selected-app connections reached the gateway and three other-app connections
+stayed direct. Outbound injection was required for the local-to-local path.
 Holding a tuple is not a socket-identity oracle: the correlator accepts only fresh
 unique test sockets within a bounded timestamp window. Native events have no
 packet-correlatable generation cookie. Same tuples are never recycled during a
@@ -137,11 +147,14 @@ This deliberately avoids claiming production-safe tuple reuse or reclamation.
 Active translated sessions must finish before stopping the collector.
 
 UDP currently supports hold and unchanged reinjection **only**. It cannot proxy
-UDP through Gateinto. Split poll-mode CI covers two destinations on one UDP socket,
-SYN retransmission and conservative rejection of deliberate TCP tuple reuse.
-The in-process cases use fresh tuples and one UDP destination. Queue stress, safe
-tuple reclamation, late historic-event replay against real reused sockets, IPv6,
-fragmentation, external target routing and desktop Windows remain pending.
+UDP through Gateinto. Split-engine cases capture both fixture ports and test one
+socket against both. Security 5156 missed some second-peer controls at a 1 s hold;
+2 s passed the twelve-tuple hold/direct case. SYN retransmission passed; full-tuple
+reuse was rejected but disrupted B, reported CHARACTERIZED_REUSE_REJECTION rather
+than a connectivity pass. In-process cases use fresh tuples and one UDP destination.
+External TCP connect-only attribution does not validate transparent external relay.
+Queue stress, historic replay against real reused sockets, safe tuple reclamation,
+IPv6, fragmentation, external controlled routing and desktop Windows remain pending.
 
 Local model/helper and fixture tests are separate from Windows runtime results.
 See [the review](../../docs/windows-per-app-feasibility.md) and
@@ -158,16 +171,27 @@ until the nearest pending-flow deadline or retry, and a high-resolution waitable
 timer is used for the native collector's own timing elsewhere.
 
 When a new flow's first packet is held, the engine enumerates stored net events
-on demand with an `FWPM_NET_EVENT_ENUM_TEMPLATE0` filtered to net event type
-`CLASSIFY_ALLOW`, the IP protocol, the pending local ports (attempted as repeated
-`FWPM_CONDITION_IP_LOCAL_PORT` conditions, batched across flows pending at the
-same moment) and a tight `[capture − window, now]` time window. If a condition
-key is rejected at runtime the filter falls back to protocol-only, then type-only,
-then time-window-only, and the filter actually used is reported in the summary as
-`enum_filter`; `enum_filter_fallback` records preserve the rejected level and error.
-Lookups retry with a 0, 1, 2, 4, 8 ms backoff until the hold deadline. Enumeration
-errors, incomplete enumeration and cleanup failures discard the result and fail
-the case, with `lookup_errors` and `bfe_errors` in the summary.
+on demand with `FWPM_NET_EVENT_ENUM_TEMPLATE0` over a bounded
+`[capture − window, now]` time window. `--enum-scope legacy` retains the measured
+baseline: CLASSIFY_ALLOW, protocol and attempted repeated local-port conditions,
+then protocol-only, type-only and time-only fallbacks. Repeated condition keys
+are invalid under the documented API contract; they do not form an OR filter.
+
+`--enum-scope destination` emits every condition key once. It includes event type,
+protocol, remote address/port shared by all pending subjects of that protocol, and
+local port only when shared. Unsupported conditions are removed in stages until
+a broader supported filter is reached; exact software tuple/app/time validation
+still applies. Destination cache entries distinguish condition masks and exact
+cardinality; legacy entries retain the original single/multiple-port grouping.
+The cache never stores ownership answers. `enum_scope`, `enum_filter`,
+`enum_condition_shapes` and `enum_filter_fallback` expose what was actually used.
+
+The new comparisons use `--window-before-ms 5` against the existing 500 ms baseline;
+`--window-after-ms` remains 50. These are experiment settings, not a proven clock
+or delivery bound. Lookups retry with a 0, 1, 2, 4, 8 ms backoff until the hold
+deadline. Enumeration errors, incomplete enumeration and cleanup failures discard
+the result and fail the case, with `lookup_errors` and `bfe_errors` in the summary.
+Scoped-filter and tighter-window Windows performance results are **pending**.
 
 An ownership-based decision requires the match in the portable, unit-tested
 `inproc::match_generation` to accept an event: exact tuple,
@@ -249,3 +273,28 @@ The first shadow runs completed without native errors but returned System for
 controlled original-app tuples; all four shadow cases correctly stayed inconclusive.
 See [the low-latency research](../../docs/windows-per-app-low-latency.md) for the
 design, official API references, qualification limits and comparison criteria.
+
+## Live endpoint control (`--engine endpoint-control`)
+
+This separate TCP/UDP control runs before any WinDivert case. The harness starts
+the controlled fixture, native stored-event polling and the ALE sampler; it does
+not launch `packets.exe` or `inproc.exe`. Both apps complete an echo and keep each
+fresh socket open with `--client-hold-ms 500`, forwarded to the client as
+`--hold-open-ms 500`. TCP does not send FIN before that live hold ends. Client
+`echo_qpc` records actual echo completion; `hold_end_qpc` records the hold boundary,
+so the artificial delay is distinguishable from echo latency.
+
+Each client needs fresh native stored-event evidence with its exact original app
+and tuple. A complete matching ALE snapshot must begin after `echo_qpc` and finish
+before `hold_end_qpc`. Missing or incomplete native/ALE evidence stays inconclusive.
+`OBSERVED_ALE_ORIGINAL_APP` records an original-app match;
+`CHARACTERIZED_ALE_APP_MISMATCH` records a clean source comparison that disagrees.
+Neither outcome authorizes packet routing or proves first-packet admission.
+
+The sampler records official SDK `sizeof`/`offsetof`, pointer width/architecture,
+OS version and resolved API names. It deep-copies token/IPsec/flag values and an
+app-ID hex prefix capped at 128 bytes with explicit size/truncation fields. Added
+copies count toward the snapshot byte budget. These diagnostics remain local;
+published summaries expose aggregate observations only. The earlier System and
+repeated-endpoint observations are unresolved, and Windows results for this
+no-interception control are **pending**.

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -54,13 +55,88 @@ public:
     void stop() { phase = Phase::Stopped; }
 };
 
+enum class EnumScope { Legacy, Destination };
+
+enum ConditionMask : uint32_t {
+    EventTypeCondition = 1u << 0,
+    ProtocolCondition = 1u << 1,
+    LocalPortCondition = 1u << 2,
+    RemoteAddressCondition = 1u << 3,
+    RemotePortCondition = 1u << 4,
+};
+
+struct QueryTuple {
+    uint32_t remote_address;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint8_t protocol;
+};
+
+struct DestinationShape {
+    uint8_t protocol = 0;
+    bool has_subjects = false;
+    std::optional<uint32_t> remote_address;
+    std::optional<uint16_t> remote_port;
+    std::optional<uint16_t> local_port;
+};
+
+DestinationShape destination_shape(const std::vector<QueryTuple>& subjects, uint8_t protocol) {
+    DestinationShape result;
+    result.protocol = protocol;
+    for (const auto& subject : subjects) {
+        if (subject.protocol != protocol) continue;
+        if (!result.has_subjects) {
+            result.has_subjects = true;
+            result.remote_address = subject.remote_address;
+            result.remote_port = subject.remote_port;
+            result.local_port = subject.local_port;
+        } else {
+            if (result.remote_address && *result.remote_address != subject.remote_address) result.remote_address.reset();
+            if (result.remote_port && *result.remote_port != subject.remote_port) result.remote_port.reset();
+            if (result.local_port && *result.local_port != subject.local_port) result.local_port.reset();
+        }
+    }
+    return result;
+}
+
+std::vector<uint32_t> condition_keys(uint32_t mask) {
+    std::vector<uint32_t> result;
+    for (uint32_t key : {EventTypeCondition, ProtocolCondition, RemoteAddressCondition,
+                         RemotePortCondition, LocalPortCondition})
+        if (mask & key) result.push_back(key);
+    return result;
+}
+
+std::vector<uint32_t> destination_profiles(const DestinationShape& shape) {
+    if (!shape.has_subjects) return {};
+    uint32_t mask = EventTypeCondition | ProtocolCondition;
+    if (shape.remote_address) mask |= RemoteAddressCondition;
+    if (shape.remote_port) mask |= RemotePortCondition;
+    if (shape.local_port) mask |= LocalPortCondition;
+    std::vector<uint32_t> result{mask};
+    for (uint32_t key : {LocalPortCondition, RemotePortCondition, RemoteAddressCondition,
+                         ProtocolCondition, EventTypeCondition}) {
+        if (!(mask & key)) continue;
+        mask &= ~key;
+        result.push_back(mask);
+    }
+    return result;
+}
+
 struct FilterPattern {
     uint8_t protocol;
     int level;
     bool multiple_ports;
+    EnumScope scope = EnumScope::Legacy;
+    uint32_t condition_mask = 0;
+    size_t condition_count = 0;
     bool operator<(const FilterPattern& other) const {
+        if (scope != other.scope) return scope < other.scope;
         if (protocol != other.protocol) return protocol < other.protocol;
         if (level != other.level) return level < other.level;
+        if (condition_mask != other.condition_mask) return condition_mask < other.condition_mask;
+        if (scope == EnumScope::Destination && condition_count != other.condition_count)
+            return condition_count < other.condition_count;
         return multiple_ports < other.multiple_ports;
     }
 };
@@ -299,6 +375,112 @@ int inproc_self_test() {
     assert(!capabilities.skip(single));
     assert(!capabilities.reject(multi, 0x8032002Au));
 
+    const std::vector<QueryTuple> destinations{
+        {0xCB007101u, 40000, 443, 6}, {0xCB007101u, 40001, 443, 6},
+        {0xCB007102u, 41000, 8443, 17}};
+    const auto common = destination_shape(destinations, 6);
+    assert(common.has_subjects && common.protocol == 6);
+    assert(common.remote_address && *common.remote_address == 0xCB007101u);
+    assert(common.remote_port && *common.remote_port == 443);
+    assert(!common.local_port);
+    const auto common_profiles = destination_profiles(common);
+    assert(common_profiles.front() == (EventTypeCondition | ProtocolCondition |
+        RemoteAddressCondition | RemotePortCondition));
+    assert(common_profiles.back() == 0);
+    for (size_t i = 1; i < common_profiles.size(); ++i) {
+        assert((common_profiles[i] & common_profiles[i - 1]) == common_profiles[i]);
+        assert(common_profiles[i] != common_profiles[i - 1]);
+    }
+    for (uint32_t mask : common_profiles) {
+        const auto keys = condition_keys(mask);
+        assert(std::set<uint32_t>(keys.begin(), keys.end()).size() == keys.size());
+        for (const auto& subject : destinations) {
+            if (subject.protocol != common.protocol) continue;
+            assert(!(mask & ProtocolCondition) || subject.protocol == common.protocol);
+            assert(!(mask & RemoteAddressCondition) || subject.remote_address == *common.remote_address);
+            assert(!(mask & RemotePortCondition) || subject.remote_port == *common.remote_port);
+            assert(!(mask & LocalPortCondition) || subject.local_port == *common.local_port);
+        }
+    }
+    const auto singleton = destination_shape({destinations.front()}, 6);
+    assert(singleton.local_port && *singleton.local_port == 40000);
+    assert(destination_profiles(singleton).front() == (EventTypeCondition | ProtocolCondition |
+        RemoteAddressCondition | RemotePortCondition | LocalPortCondition));
+    assert(destination_profiles(destination_shape({}, 6)).empty());
+    assert(destination_profiles(destination_shape(destinations, 1)).empty());
+    const auto different_address = destination_shape({destinations.front(),
+        {0xCB007102u, 40001, 443, 6}}, 6);
+    assert(!different_address.remote_address && different_address.remote_port && !different_address.local_port);
+    assert(destination_profiles(different_address).front() ==
+        (EventTypeCondition | ProtocolCondition | RemotePortCondition));
+    const auto different_port = destination_shape({destinations.front(),
+        {0xCB007101u, 40001, 8443, 6}}, 6);
+    assert(different_port.remote_address && !different_port.remote_port && !different_port.local_port);
+    assert(destination_profiles(different_port).front() ==
+        (EventTypeCondition | ProtocolCondition | RemoteAddressCondition));
+    const auto different_destination = destination_shape({destinations.front(),
+        {0xCB007102u, 40001, 8443, 6}}, 6);
+    assert(!different_destination.remote_address && !different_destination.remote_port && !different_destination.local_port);
+    assert(destination_profiles(different_destination).front() == (EventTypeCondition | ProtocolCondition));
+    const std::vector<std::vector<QueryTuple>> coverage_cases{
+        destinations,
+        {destinations.front(), {0xCB007102u, 40001, 443, 6}, destinations.front()},
+        {destinations.front(), {0xCB007101u, 40001, 8443, 6}, destinations.front()},
+        {destinations.front(), {0xCB007102u, 40001, 8443, 6}, destinations.front()},
+        {destinations.front(), {0xCB007102u, 40000, 8443, 6}},
+        {destinations.front(), destinations.front()}};
+    for (const auto& subjects : coverage_cases) {
+        for (uint8_t protocol : {uint8_t(6), uint8_t(17)}) {
+            const auto shape = destination_shape(subjects, protocol);
+            const auto profiles = destination_profiles(shape);
+            for (uint32_t mask : profiles) {
+                const auto keys = condition_keys(mask);
+                assert(std::set<uint32_t>(keys.begin(), keys.end()).size() == keys.size());
+                for (const auto& subject : subjects) {
+                    if (subject.protocol != protocol) continue;
+                    assert(!(mask & ProtocolCondition) || shape.protocol == subject.protocol);
+                    assert(!(mask & RemoteAddressCondition) ||
+                        (shape.remote_address && *shape.remote_address == subject.remote_address));
+                    assert(!(mask & RemotePortCondition) ||
+                        (shape.remote_port && *shape.remote_port == subject.remote_port));
+                    assert(!(mask & LocalPortCondition) ||
+                        (shape.local_port && *shape.local_port == subject.local_port));
+                }
+            }
+        }
+    }
+
+    FilterCapabilityCache isolated;
+    const FilterPattern legacy_shape{6, 2, false, EnumScope::Legacy,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 3};
+    const FilterPattern destination_local{6, 2, false, EnumScope::Destination,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 3};
+    const FilterPattern destination_remote{6, 2, false, EnumScope::Destination,
+        EventTypeCondition | ProtocolCondition | RemotePortCondition, 3};
+    const FilterPattern destination_multiple{6, 2, false, EnumScope::Destination,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 4};
+    assert(isolated.reject(legacy_shape, 0x8032002Au));
+    assert(!isolated.skip(destination_local));
+    assert(isolated.reject(destination_local, 0x80320002u));
+    assert(!isolated.skip(destination_remote));
+    assert(!isolated.skip(destination_multiple));
+    for (uint32_t error : {5u, 1722u, 87u, 0x80320035u}) {
+        assert(!isolated.reject(destination_remote, error));
+        assert(!isolated.skip(destination_remote));
+    }
+    FilterCapabilityCache coarse_legacy;
+    const FilterPattern legacy_two_ports{6, 2, true, EnumScope::Legacy,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 4};
+    const FilterPattern legacy_three_ports{6, 2, true, EnumScope::Legacy,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 5};
+    assert(coarse_legacy.reject(legacy_two_ports, 0x8032002Au));
+    assert(coarse_legacy.skip(legacy_three_ports));
+    assert(!coarse_legacy.skip(legacy_shape));
+    assert(!coarse_legacy.skip(destination_local));
+    assert(!coarse_legacy.skip(destination_multiple));
+    assert(coarse_legacy.reject(destination_local, 0x8032002Au));
+    assert(!coarse_legacy.skip(destination_multiple));
+
     assert(copy_budget_allows(0, 65536));
     assert(!copy_budget_allows(0, 65537));
     assert(copy_budget_allows(8 * 1024 * 1024 - 65536, 65536));
@@ -315,6 +497,20 @@ int inproc_self_test() {
     assert(match_generation({event_a(capture - 6'000'000)}, capture, config).outcome == MatchOutcome::NoEvent);
     assert(match_generation({event_a(capture + 600'000)}, capture, config).outcome == MatchOutcome::NoEvent);
     assert(match_generation({event_a(capture + 400'000)}, capture, config).outcome == MatchOutcome::Matched);
+
+    MatchConfig narrow = config;
+    narrow.window_before = 5 * 10000;
+    assert(match_generation({event_a(capture - 50'000)}, capture, narrow).outcome == MatchOutcome::Matched);
+    assert(match_generation({event_a(capture - 50'001)}, capture, narrow).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture - 5'000'000)}, capture, config).outcome == MatchOutcome::Matched);
+    assert(match_generation({event_a(capture - 5'000'001)}, capture, config).outcome == MatchOutcome::NoEvent);
+    const std::vector<EventRef> fresh_and_stale{event_a(capture - 49'999),
+        event_a(capture - 50'001, 48, "\\device\\lab\\app-b.exe")};
+    assert(match_generation(fresh_and_stale, capture, config).outcome == MatchOutcome::Ambiguous);
+    assert(match_generation(fresh_and_stale, capture, narrow).outcome == MatchOutcome::Matched);
+    assert(match_generation({fresh_and_stale.back()}, capture, narrow).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture + 500'000)}, capture, narrow).outcome == MatchOutcome::Matched);
+    assert(match_generation({event_a(capture + 500'001)}, capture, narrow).outcome == MatchOutcome::NoEvent);
 
     auto two_apps = match_generation(
         {event_a(capture - 1000), event_a(capture - 2000, 48, "\\device\\lab\\app-b.exe")}, capture, config);
@@ -378,7 +574,6 @@ int main() { return inproc_self_test(); }
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <sstream>
 #include <thread>
 #include <tuple>
@@ -547,6 +742,7 @@ struct Options {
     std::string state_out;
     std::string mode = "hold";
     std::string lookup_mode = "inline";
+    std::string enum_scope = "legacy";
     bool filter_cache = true;
     uint16_t port = 0;
     uint16_t udp_port = 0;
@@ -581,6 +777,7 @@ Options options(int argc, char** argv) {
         else if (key == "--listener-port") result.listener_port = static_cast<uint16_t>(number(value, 1, 65535));
         else if (key == "--mode") result.mode = value;
         else if (key == "--lookup-mode") result.lookup_mode = value;
+        else if (key == "--enum-scope") result.enum_scope = value;
         else if (key == "--filter-cache") {
             if (value != "on" && value != "off") throw std::runtime_error("filter-cache must be on or off");
             result.filter_cache = value == "on";
@@ -605,6 +802,8 @@ Options options(int argc, char** argv) {
         throw std::runtime_error("mode must be hold or redirect");
     if (result.lookup_mode != "inline" && result.lookup_mode != "async")
         throw std::runtime_error("lookup-mode must be inline or async");
+    if (result.enum_scope != "legacy" && result.enum_scope != "destination")
+        throw std::runtime_error("enum-scope must be legacy or destination");
     if (result.mode == "redirect" && !result.listener_port)
         throw std::runtime_error("redirect mode requires --listener-port");
     if (result.listener_port == result.port)
@@ -696,6 +895,7 @@ struct PhaseMetric {
 
 struct QueryStats {
     std::set<std::string> filters;
+    std::set<std::pair<uint32_t, size_t>> condition_shapes;
     unsigned calls = 0;
     unsigned errors = 0;
     std::vector<double> durations_ms;
@@ -964,9 +1164,10 @@ class Engine {
     }
 
     bool enumerate(uint8_t protocol, const std::vector<uint16_t>& ports,
-                   uint64_t window_start, QueryResult& result) {
+                   const inproc::DestinationShape& destination, uint64_t window_start, QueryResult& result) {
         auto& stats = result.stats;
         if (!session) { lookup_error(stats, "lookup_session", ERROR_INVALID_HANDLE); return false; }
+        const bool destination_scope = config.enum_scope == "destination";
         std::vector<FWPM_FILTER_CONDITION0> conditions;
         FWPM_FILTER_CONDITION0 type_condition{};
         type_condition.fieldKey = FWPM_CONDITION_NET_EVENT_TYPE;
@@ -978,22 +1179,87 @@ class Engine {
         protocol_condition.matchType = FWP_MATCH_EQUAL;
         protocol_condition.conditionValue.type = FWP_UINT8;
         protocol_condition.conditionValue.uint8 = protocol;
+        FWPM_FILTER_CONDITION0 remote_address_condition{};
+        remote_address_condition.fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
+        remote_address_condition.matchType = FWP_MATCH_EQUAL;
+        remote_address_condition.conditionValue.type = FWP_UINT32;
+        remote_address_condition.conditionValue.uint32 = destination.remote_address.value_or(0);
+        FWPM_FILTER_CONDITION0 remote_port_condition{};
+        remote_port_condition.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+        remote_port_condition.matchType = FWP_MATCH_EQUAL;
+        remote_port_condition.conditionValue.type = FWP_UINT16;
+        remote_port_condition.conditionValue.uint16 = destination.remote_port.value_or(0);
         std::vector<FWPM_FILTER_CONDITION0> port_conditions;
-        for (uint16_t port : ports) {
-            FWPM_FILTER_CONDITION0 condition{};
-            condition.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
-            condition.matchType = FWP_MATCH_EQUAL;
-            condition.conditionValue.type = FWP_UINT16;
-            condition.conditionValue.uint16 = port;
-            port_conditions.push_back(condition);
+        if (!destination_scope) {
+            for (uint16_t port : ports) {
+                FWPM_FILTER_CONDITION0 condition{};
+                condition.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+                condition.matchType = FWP_MATCH_EQUAL;
+                condition.conditionValue.type = FWP_UINT16;
+                condition.conditionValue.uint16 = port;
+                port_conditions.push_back(condition);
+            }
         }
 
-        auto build = [&](int level) {
+        auto build = [&](int level, uint32_t mask) {
             conditions.clear();
-            if (level >= 0) conditions.push_back(type_condition);
-            if (level >= 1) conditions.push_back(protocol_condition);
-            if (level >= 2) for (const auto& c : port_conditions) conditions.push_back(c);
+            if (!destination_scope) {
+                if (level >= 0) conditions.push_back(type_condition);
+                if (level >= 1) conditions.push_back(protocol_condition);
+                if (level >= 2) for (const auto& c : port_conditions) conditions.push_back(c);
+                return;
+            }
+            for (uint32_t key : inproc::condition_keys(mask)) {
+                switch (key) {
+                case inproc::EventTypeCondition: conditions.push_back(type_condition); break;
+                case inproc::ProtocolCondition: conditions.push_back(protocol_condition); break;
+                case inproc::RemoteAddressCondition: conditions.push_back(remote_address_condition); break;
+                case inproc::RemotePortCondition: conditions.push_back(remote_port_condition); break;
+                case inproc::LocalPortCondition:
+                    FWPM_FILTER_CONDITION0 condition{};
+                    condition.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+                    condition.matchType = FWP_MATCH_EQUAL;
+                    condition.conditionValue.type = FWP_UINT16;
+                    condition.conditionValue.uint16 = destination.local_port.value();
+                    conditions.push_back(condition);
+                    break;
+                }
+            }
         };
+
+        auto name = [&](int level, uint32_t mask) {
+            if (!destination_scope)
+                return std::string(level >= 2 ? "type+protocol+local_port" : level == 1 ? "type+protocol" :
+                    level == 0 ? "type" : "time_window_only");
+            std::string result;
+            for (uint32_t key : inproc::condition_keys(mask)) {
+                if (!result.empty()) result += "+";
+                switch (key) {
+                case inproc::EventTypeCondition: result += "type"; break;
+                case inproc::ProtocolCondition: result += "protocol"; break;
+                case inproc::RemoteAddressCondition: result += "remote_address"; break;
+                case inproc::RemotePortCondition: result += "remote_port"; break;
+                case inproc::LocalPortCondition: result += "local_port"; break;
+                }
+            }
+            return result.empty() ? std::string("time_window_only") : result;
+        };
+
+        std::vector<std::pair<int, uint32_t>> profiles;
+        if (destination_scope) {
+            const auto masks = inproc::destination_profiles(destination);
+            for (size_t i = 0; i < masks.size(); ++i)
+                profiles.emplace_back(static_cast<int>(masks.size() - i) - 2, masks[i]);
+        } else {
+            for (int level = port_conditions.empty() ? 1 : 2; level >= -1; --level) {
+                uint32_t mask = 0;
+                if (level >= 0) mask |= inproc::EventTypeCondition;
+                if (level >= 1) mask |= inproc::ProtocolCondition;
+                if (level >= 2) mask |= inproc::LocalPortCondition;
+                profiles.emplace_back(level, mask);
+            }
+        }
+        if (profiles.empty()) { lookup_error(stats, "lookup_empty_subjects", ERROR_INVALID_DATA); return false; }
 
         FWPM_NET_EVENT_ENUM_TEMPLATE0 range{};
         range.startTime = to_filetime(window_start);
@@ -1004,39 +1270,44 @@ class Engine {
             HANDLE handle = nullptr;
             ~EnumGuard() { if (handle) FwpmNetEventDestroyEnumHandle0(session, handle); }
         } guard{session};
-        int level = port_conditions.empty() ? 1 : 2;
         std::string chosen;
-        for (;;) {
-            const inproc::FilterPattern pattern{protocol, level, ports.size() > 1};
-            if (level >= 0 && filter_capabilities.skip(pattern)) {
+        for (const auto& profile : profiles) {
+            const int level = profile.first;
+            const uint32_t mask = profile.second;
+            build(level, mask);
+            const inproc::FilterPattern pattern{protocol, level, !destination_scope && ports.size() > 1,
+                destination_scope ? inproc::EnumScope::Destination : inproc::EnumScope::Legacy,
+                mask, conditions.size()};
+            if (mask && filter_capabilities.skip(pattern)) {
                 ++stats.cache_hits;
-                --level;
                 continue;
             }
-            if (config.filter_cache && level >= 0) ++stats.cache_misses;
-            build(level);
+            if (config.filter_cache && mask) ++stats.cache_misses;
             range.numFilterConditions = static_cast<UINT32>(conditions.size());
             range.filterCondition = conditions.empty() ? nullptr : conditions.data();
             const auto began = qpc();
             const auto created = FwpmNetEventCreateEnumHandle0(session, &range, &guard.handle);
             stats.create.add(elapsed_ms(began));
             if (!created) {
-                chosen = level >= 2 ? "type+protocol+local_port" : level == 1 ? "type+protocol" :
-                    level == 0 ? "type" : "time_window_only";
+                chosen = name(level, mask);
+                stats.condition_shapes.emplace(mask, conditions.size());
                 break;
             }
-            if (level < 0 || !inproc::FilterCapabilityCache::fallback_allowed(created)) {
+            if (!mask || !inproc::FilterCapabilityCache::fallback_allowed(created)) {
                 lookup_error(stats, "FwpmNetEventCreateEnumHandle0", created);
                 return false;
             }
             const bool learned = filter_capabilities.reject(pattern, created);
             if (learned) ++stats.cache_rejections;
             log.write("{\"kind\":\"enum_filter_fallback\",\"level\":" + std::to_string(level) +
+                      ",\"enum_scope\":" + json(config.enum_scope) +
                       ",\"protocol\":" + std::to_string(protocol) +
+                      ",\"condition_mask\":" + std::to_string(mask) +
+                      ",\"condition_count\":" + std::to_string(conditions.size()) +
+                      ",\"filter\":" + json(name(level, mask)) +
                       ",\"multiple_ports\":" + (ports.size() > 1 ? "true" : "false") +
                       ",\"cached\":" + (learned ? "true" : "false") +
                       ",\"code\":" + std::to_string(created) + "}");
-            --level;
         }
         stats.filters.insert(chosen);
 
@@ -1150,6 +1421,13 @@ class Engine {
         const DWORD cpu_before_error = cpu_before_valid ? ERROR_SUCCESS : GetLastError();
         bool complete = true;
         try {
+            std::vector<inproc::QueryTuple> subjects;
+            if (config.enum_scope == "destination") {
+                subjects.reserve(result.request.subjects.size());
+                for (const auto& subject : result.request.subjects)
+                    subjects.push_back({ntohl(subject.tuple.remote), subject.tuple.local_port,
+                        subject.tuple.remote_port, subject.tuple.protocol});
+            }
             for (uint8_t protocol : {uint8_t(6), uint8_t(17)}) {
                 std::vector<uint16_t> ports;
                 uint64_t window_start = utc_now();
@@ -1162,7 +1440,8 @@ class Engine {
                 window_start -= static_cast<uint64_t>(config.window_before_ms) * 10000;
                 const int64_t query_began = qpc();
                 ++result.stats.calls;
-                complete = enumerate(protocol, inproc::pending_ports(ports), window_start, result);
+                complete = enumerate(protocol, inproc::pending_ports(ports),
+                    inproc::destination_shape(subjects, protocol), window_start, result);
                 result.stats.durations_ms.push_back(elapsed_ms(query_began));
                 if (!complete) break;
             }
@@ -1208,6 +1487,7 @@ class Engine {
         lookup.cpu_samples += stats.cpu_samples;
         lookup.cpu_errors += stats.cpu_errors;
         if (stats.cpu_errors) lookup.cpu_error_code = stats.cpu_error_code;
+        lookup.condition_shapes.insert(stats.condition_shapes.begin(), stats.condition_shapes.end());
         for (const auto& filter : stats.filters) {
             if (!lookup.filters.insert(filter).second) continue;
             if (!lookup.filter.empty()) lookup.filter += "|";
@@ -1578,6 +1858,7 @@ public:
                   ",\"anchor_qpc\":" + std::to_string(anchor_qpc) +
                   ",\"anchor_filetime\":" + std::to_string(anchor_filetime) +
                   ",\"mode\":" + json(config.mode) + ",\"lookup_mode\":" + json(config.lookup_mode) +
+                  ",\"enum_scope\":" + json(config.enum_scope) +
                   ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
                   ",\"hold_ms\":" + std::to_string(config.hold_ms) + "}");
 
@@ -1662,6 +1943,13 @@ public:
             return out.str();
         };
         const double runtime_ms = elapsed_ms(engine_started_qpc);
+        std::ostringstream shapes;
+        shapes << "[";
+        for (const auto& shape : lookup.condition_shapes) {
+            if (shape != *lookup.condition_shapes.begin()) shapes << ",";
+            shapes << "{\"mask\":" << shape.first << ",\"count\":" << shape.second << "}";
+        }
+        shapes << "]";
         std::ostringstream out;
         out << "{\"engine\":\"inproc\",\"mode\":" << json(config.mode)
             << ",\"topology\":\"single-host-local\""
@@ -1671,6 +1959,7 @@ public:
             << ",\"lookup_errors\":" << lookup.errors
             << ",\"lookup_worker_error\":" << (lookup_worker_error ? "true" : "false")
             << ",\"lookup_mode\":" << json(config.lookup_mode)
+            << ",\"enum_scope\":" << json(config.enum_scope)
             << ",\"filter_cache\":" << (config.filter_cache ? "true" : "false")
             << ",\"lookup_query_count\":" << lookup.queries
             << ",\"lookup_query_completed\":" << lookup.completed
@@ -1710,6 +1999,7 @@ public:
             << ",\"quic_drops\":" << quic_drops
             << ",\"nonselected_client_disrupted\":" << (reuse_disrupted ? "true" : "false")
             << ",\"enum_filter\":" << json(lookup.filter.empty() ? "none" : lookup.filter)
+            << ",\"enum_condition_shapes\":" << shapes.str()
             << ",\"window_before_ms\":" << config.window_before_ms
             << ",\"window_after_ms\":" << config.window_after_ms
             << ",\"send_rst\":" << (config.send_rst ? "true" : "false")
@@ -1719,6 +2009,8 @@ public:
         summary_file.flush();
         log.write("{\"kind\":\"summary\",\"enum_filter\":" + json(lookup.filter.empty() ? "none" : lookup.filter) +
                   ",\"lookup_mode\":" + json(config.lookup_mode) +
+                  ",\"enum_scope\":" + json(config.enum_scope) +
+                  ",\"enum_condition_shapes\":" + shapes.str() +
                   ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
                   ",\"lookup_calls\":" + std::to_string(lookup.calls) +
                   ",\"decided_proxy\":" + std::to_string(decided_proxy) +

@@ -1,6 +1,31 @@
+#include <stdexcept>
+#include <string>
+
 namespace client {
 bool reset_observed(int received, int error) {
     return received == -1 && error == 10054;
+}
+
+struct EchoPolicy {
+    unsigned hold_ms = 0;
+    bool shutdown_after_send = false;
+};
+
+EchoPolicy echo_policy(const std::string& value, bool udp, bool connect_only,
+                       bool expect_reset, bool reset_close) {
+    EchoPolicy result;
+    if (value.empty()) throw std::runtime_error("hold-open-ms requires an integer from 0 to 5000");
+    for (const unsigned char digit : value) {
+        if (digit < '0' || digit > '9' || result.hold_ms > (5000u - (digit - '0')) / 10)
+            throw std::runtime_error("hold-open-ms requires an integer from 0 to 5000");
+        result.hold_ms = result.hold_ms * 10 + digit - '0';
+    }
+    if (connect_only && udp) throw std::runtime_error("connect-only requires TCP");
+    if (expect_reset && (udp || connect_only)) throw std::runtime_error("expect-reset requires TCP echo");
+    if (result.hold_ms && (connect_only || expect_reset))
+        throw std::runtime_error("hold-open-ms requires an echo without expect-reset");
+    result.shutdown_after_send = !udp && !connect_only && !expect_reset && !reset_close && !result.hold_ms;
+    return result;
 }
 }
 
@@ -14,7 +39,30 @@ int main() {
     assert(!client::reset_observed(-1, 10060));
     assert(!client::reset_observed(-1, 10053));
     assert(!client::reset_observed(1, 10054));
-    std::cout << "client reset-result self-tests passed\n";
+    assert(client::echo_policy("0", false, false, false, false).shutdown_after_send);
+    assert(!client::echo_policy("0", true, false, false, false).shutdown_after_send);
+    assert(!client::echo_policy("0", false, false, true, false).shutdown_after_send);
+    assert(!client::echo_policy("0", false, false, false, true).shutdown_after_send);
+    for (const bool udp : {false, true}) {
+        const auto policy = client::echo_policy("500", udp, false, false, false);
+        assert(policy.hold_ms == 500 && !policy.shutdown_after_send);
+        assert(client::echo_policy("5000", udp, false, false, false).hold_ms == 5000);
+    }
+    const auto rejected = [](const std::string& value, bool udp = false,
+                             bool connect_only = false, bool expect_reset = false) {
+        try { client::echo_policy(value, udp, connect_only, expect_reset, false); }
+        catch (const std::exception&) { return true; }
+        return false;
+    };
+    for (const auto* value : {"", "-1", "+1", "1x", " 1", "5001", "99999999999999999999"})
+        assert(rejected(value));
+    assert(rejected("1", false, true));
+    assert(rejected("1", false, false, true));
+    assert(rejected("0", true, true));
+    assert(rejected("0", true, false, true));
+    assert(rejected("0", false, true, true));
+    assert(client::echo_policy("0", false, true, false, false).hold_ms == 0);
+    std::cout << "client echo/reset policy self-tests passed\n";
 }
 #else
 #define WIN32_LEAN_AND_MEAN
@@ -26,8 +74,6 @@ int main() {
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -67,10 +113,10 @@ int main(int argc, char** argv) {
         const bool udp = args.at("--protocol") == "udp";
         const bool connect_only = args.count("--connect-only") && args.at("--connect-only") == "1";
         const bool expect_reset = args.count("--expect-reset") && args.at("--expect-reset") == "1";
-        if (connect_only && udp) throw std::runtime_error("connect-only requires TCP");
-        if (expect_reset && (udp || connect_only)) throw std::runtime_error("expect-reset requires TCP echo");
         const auto close_mode = args.count("--close-mode") ? args.at("--close-mode") : "fin";
         if (close_mode != "fin" && close_mode != "reset") throw std::runtime_error("invalid close mode");
+        const auto policy = client::echo_policy(args.count("--hold-open-ms") ? args.at("--hold-open-ms") : "0",
+                                                udp, connect_only, expect_reset, close_mode == "reset");
         if (!udp && args.at("--protocol") != "tcp") throw std::runtime_error("invalid protocol");
         if (nonce.empty() || nonce.size() > 32768 ||
             nonce.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != std::string::npos)
@@ -136,7 +182,7 @@ int main(int argc, char** argv) {
                     if (n <= 0) throw std::runtime_error("send failed");
                     sent += n;
                 }
-                if (close_mode == "fin" && !expect_reset) shutdown(socket.value, SD_SEND);
+                if (policy.shutdown_after_send) shutdown(socket.value, SD_SEND);
             }
             std::string reply;
             do {
@@ -152,6 +198,9 @@ int main(int argc, char** argv) {
                 reply.append(buffer, n);
             } while (!udp && reply.size() < nonce.size());
             if (reply != nonce) throw std::runtime_error("echo differs");
+            const auto echo_completed = qpc();
+            if (policy.hold_ms) Sleep(policy.hold_ms);
+            const auto hold_completed = policy.hold_ms ? qpc() : echo_completed;
             const char* status = "echo_ok";
             if (expect_reset) {
                 char byte = 0;
@@ -175,6 +224,8 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("InetNtop failed");
             std::cout << "{\"kind\":\"client\",\"pid\":" << GetCurrentProcessId()
                       << ",\"start_qpc\":" << started << ",\"done_qpc\":" << qpc()
+                      << ",\"echo_qpc\":" << echo_completed << ",\"hold_end_qpc\":" << hold_completed
+                      << ",\"hold_open_ms\":" << policy.hold_ms
                       << ",\"local_ip\":\"" << local_ip << "\""
                       << ",\"local_port\":" << ntohs(bound.sin_port)
                       << ",\"remote_ip\":\"" << ip << "\",\"remote_port\":" << port

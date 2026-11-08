@@ -65,8 +65,27 @@ jobs:
         with:
           name: wfp-divert-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/wfp-divert-results/**
-            !${{ runner.temp }}/wfp-divert-results/**/private-manifest.json
+            ${{ runner.temp }}/wfp-divert-results/aggregate-evidence.json
+            ${{ runner.temp }}/wfp-divert-results/ci-summary.json
+            ${{ runner.temp }}/wfp-divert-results/environment.json
             ${{ runner.temp }}/wfp-divert-bin/driver-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  native-control:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - run: experiments/wfp-divert/build.ps1
+      - run: experiments/wfp-divert/drop-control.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wfp-native-control-${{ github.run_id }}
+          path: ${{ runner.temp }}/wfp-native-control/summary.json
           if-no-files-found: warn
           retention-days: 14

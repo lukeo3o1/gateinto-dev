@@ -40,6 +40,14 @@ try {
   if ($LASTEXITCODE) { throw 'Native collector helper tests failed' }
   python -m unittest discover -s $PSScriptRoot -p 'test_*.py' -v
   if ($LASTEXITCODE) { throw 'Attribution model tests failed' }
+  foreach ($protocol in @('tcp', 'udp')) {
+    $name = "ale-no-divert-$protocol"
+    Write-Host "Running $name"
+    python "$PSScriptRoot\run.py" --bin $Bin --fixture $Fixture --private-dir $privateDir `
+      --out (Join-Path $OutDir $name) --engine endpoint-control --mode hold --protocol $protocol `
+      --client-hold-ms 500 --seconds 35
+    if ($LASTEXITCODE) { $failures.Add($name) }
+  }
   $cases = @(
     @{ name='hold-wfp-tcp'; source='wfp'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
     @{ name='hold-security-tcp'; source='security5156'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
@@ -103,30 +111,18 @@ try {
         $arguments += @('--external-target', $external.IPAddressToString, '--external-port', 443, '--iterations', 1)
       } catch {
         $failures.Add($case.name + '-dns')
-        Write-Host "External connect-only probe unavailable: $_"
+        Write-Host 'External connect-only probe unavailable; inspect local records'
         continue
       }
     }
     python @arguments
     if ($LASTEXITCODE) { $failures.Add($case.name) }
-    $caseDir = Join-Path $OutDir $case.name
-    foreach ($file in @('native.stdout.txt', 'packet.stdout.txt', 'restore.stdout.txt')) {
-      $logPath = Join-Path $caseDir $file
-      if (Test-Path $logPath) { Get-Content $logPath -Tail 12 }
-    }
-    $bridgeLog = Join-Path $caseDir 'bridge.jsonl'
-    if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
-    $nativeLog = Join-Path $caseDir 'native.jsonl'
-    if (Test-Path $nativeLog) {
-      Get-Content $nativeLog | Where-Object { $_ -notmatch '"kind":"wfp_enum' -and $_ -match 'app-a.exe|app-b.exe|"kind":"error"|"kind":"wfp_poll_error"|"kind":"ready"|"kind":"summary"' } |
-        Select-Object -First 30 | ForEach-Object { Write-Host "NATIVE $($case.name) $_" }
-      Get-Content $nativeLog | Where-Object { $_ -match '"kind":"wfp_enum(5)?(_error|_summary)?"' } |
-        Select-Object -First 100 | ForEach-Object { Write-Host "WFPENUM $($case.name) $_" }
-    }
-    $packetLog = Join-Path $caseDir 'packets.jsonl'
-    if (Test-Path $packetLog) {
-      Get-Content $packetLog | Select-Object -First 30 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
-    }
+  }
+  try {
+    & "$PSScriptRoot\drop-control.ps1" -Bin $Bin -OutDir (Join-Path $OutDir 'native-drop-control')
+  } catch {
+    $failures.Add('native-drop-control')
+    Write-Host 'Native drop callback control failed; inspect local records'
   }
   $inprocCases = @(
     @{ name='hold-inproc-tcp'; mode='hold'; protocol='tcp' },
@@ -145,8 +141,28 @@ try {
     @{ name='concurrency-inproc-async'; mode='redirect'; protocol='tcp'; concurrency=50; lookup='async' },
     @{ name='leakcheck-inproc-async'; mode='redirect'; protocol='tcp'; hold=100; delay=250; rst=$true; leak=$true; lookup='async' },
     @{ name='quic-inproc-async'; mode='redirect'; protocol='udp'; quic=$true; lookup='async' },
-    @{ name='ale-probe-inproc-tcp'; mode='hold'; protocol='tcp'; lookup='async'; ale=$true },
-    @{ name='ale-probe-inproc-udp'; mode='hold'; protocol='udp'; lookup='async'; ale=$true }
+    @{ name='ale-probe-inproc-tcp'; mode='hold'; protocol='tcp'; lookup='async'; ale=$true; clienthold=500 },
+    @{ name='ale-probe-inproc-udp'; mode='hold'; protocol='udp'; lookup='async'; ale=$true; clienthold=500 }
+  )
+  $snapshotProfiles = @(
+    @{ profile='baseline'; scope='legacy'; window=500 },
+    @{ profile='narrow'; scope='legacy'; window=5 },
+    @{ profile='destination'; scope='destination'; window=500 },
+    @{ profile='combined'; scope='destination'; window=5 }
+  )
+  foreach ($round in @(1, 2)) {
+    $order = @($snapshotProfiles)
+    if ($round -eq 2) { [array]::Reverse($order) }
+    foreach ($snapshotProfile in $order) {
+      $inprocCases += @{ name="snapshot-$($snapshotProfile.profile)-r$round"; mode='redirect'; protocol='tcp';
+        concurrency=50; lookup='async'; scope=$snapshotProfile.scope; window=$snapshotProfile.window; round=$round }
+    }
+  }
+  $inprocCases += @(
+    @{ name='scoped-inproc-udp'; mode='hold'; protocol='udp'; lookup='async'; scope='destination'; window=5 },
+    @{ name='scoped-leakcheck'; mode='redirect'; protocol='tcp'; lookup='async'; scope='destination'; window=5;
+       hold=100; delay=250; rst=$true; leak=$true },
+    @{ name='scoped-quic'; mode='redirect'; protocol='udp'; lookup='async'; scope='destination'; window=5; quic=$true }
   )
   foreach ($case in $inprocCases) {
     Write-Host "Running $($case.name)"
@@ -162,26 +178,12 @@ try {
     if ($case.ContainsKey('lookup')) { $arguments += @('--lookup-mode', $case.lookup) }
     if ($case.ContainsKey('cache')) { $arguments += @('--filter-cache', $case.cache) }
     if ($case.ContainsKey('ale')) { $arguments += '--ale-probe' }
+    if ($case.ContainsKey('scope')) { $arguments += @('--enum-scope', $case.scope) }
+    if ($case.ContainsKey('window')) { $arguments += @('--window-before-ms', $case.window) }
+    if ($case.ContainsKey('round')) { $arguments += @('--benchmark-round', $case.round) }
+    if ($case.ContainsKey('clienthold')) { $arguments += @('--client-hold-ms', $case.clienthold) }
     python @arguments
     if ($LASTEXITCODE) { $failures.Add($case.name) }
-    $caseDir = Join-Path $OutDir $case.name
-    foreach ($file in @('inproc.stdout.txt')) {
-      $logPath = Join-Path $caseDir $file
-      if (Test-Path $logPath) { Get-Content $logPath -Tail 12 }
-    }
-    $engineSummary = Join-Path $caseDir 'engine-summary.json'
-    if (Test-Path $engineSummary) { Get-Content $engineSummary | ForEach-Object { Write-Host "ENGINE $($case.name) $_" } }
-    $aleLog = Join-Path $caseDir 'ale-endpoints.jsonl'
-    if (Test-Path $aleLog) {
-      Get-Content $aleLog | Select-Object -Last 20 | ForEach-Object { Write-Host "ALE $($case.name) $_" }
-    }
-    $packetLog = Join-Path $caseDir 'packets.jsonl'
-    if (Test-Path $packetLog) {
-      Get-Content $packetLog | Where-Object { $_ -match '"kind":"(ready|ownership|enum_filter_fallback|decision|translation|rst|leaked|error|summary|complete)"' } |
-        Select-Object -First 256 | ForEach-Object { Write-Host "PACKET $($case.name) $_" }
-    }
-    $bridgeLog = Join-Path $caseDir 'bridge.jsonl'
-    if (Test-Path $bridgeLog) { Get-Content $bridgeLog -Tail 20 | ForEach-Object { Write-Host "BRIDGE $($case.name) $_" } }
   }
 } finally {
   & auditpol /restore "/file:$audit"
@@ -189,7 +191,10 @@ try {
   Get-ChildItem $OutDir -Recurse -Filter 'private-manifest.json' | Remove-Item -Force
   @{ failed_cases = @($failures); windows_desktop = 'NOT RUN'; remote_topology = 'NOT RUN';
      udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN';
-     inproc_engine = 'RUN (hold, redirect, repeats, leak-check, concurrency stress, QUIC drop)' } |
+     inproc_engine = 'RUN (hold, redirect, leak-check, QUIC, paired snapshot profiles)';
+     ale_control = 'RUN (post-echo live sockets before packet interception)' }  |
     ConvertTo-Json | Set-Content (Join-Path $OutDir 'ci-summary.json')
+  python "$PSScriptRoot\summarize.py" --root $OutDir --out (Join-Path $OutDir 'aggregate-evidence.json')
+  if ($LASTEXITCODE) { $failures.Add('aggregate-evidence') }
 }
 if ($failures.Count) { throw "PoC cases failed: $($failures -join ', ')" }
