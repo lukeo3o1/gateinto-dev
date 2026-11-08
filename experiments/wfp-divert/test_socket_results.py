@@ -7,6 +7,10 @@ import socket_results
 
 
 class SocketResultsTests(unittest.TestCase):
+    def test_broad_socket_controls_are_in_the_fixed_case_list(self):
+        self.assertIn("tcp-control", socket_results.CASE_NAMES)
+        self.assertIn("udp-control", socket_results.CASE_NAMES)
+
     def test_only_fixed_cases_and_projected_counts_are_published(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -21,7 +25,7 @@ class SocketResultsTests(unittest.TestCase):
             private.mkdir()
             (private / "public-summary.json").write_text('{"secret":"PRIVATE-TOKEN"}')
             report = socket_results.aggregate(root)
-            self.assertEqual(6, report["available_cases"])
+            self.assertEqual(len(socket_results.CASE_NAMES), report["available_cases"])
             self.assertEqual(set(socket_results.CASE_NAMES), {c["case"] for c in report["cases"]})
             encoded = json.dumps(report)
             for private in ("PRIVATE-TOKEN", '"pid"', '"endpoint_id"', '"recv_qpc"', '"rows"'):
@@ -36,7 +40,7 @@ class SocketResultsTests(unittest.TestCase):
             result = socket_results.aggregate(root)
             self.assertEqual(0, result["available_cases"])
             self.assertEqual(1, result["unreadable_cases"])
-            self.assertEqual(5, result["missing_cases"])
+            self.assertEqual(len(socket_results.CASE_NAMES) - 1, result["missing_cases"])
             self.assertNotIn("PRIVATE-TOKEN", json.dumps(result))
 
 

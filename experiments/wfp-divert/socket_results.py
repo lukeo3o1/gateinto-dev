@@ -3,7 +3,7 @@ import json
 import pathlib
 
 
-CASE_NAMES = ("tcp-live", "udp-live", "tcp-short", "udp-short", "tcp-burst", "udp-burst")
+CASE_NAMES = ("tcp-control", "udp-control", "tcp-live", "udp-live", "tcp-short", "udp-short", "tcp-burst", "udp-burst")
 
 
 def aggregate(root):

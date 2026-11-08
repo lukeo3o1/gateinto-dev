@@ -18,6 +18,7 @@ struct TimeBounds {
 };
 
 enum class CreationGuard { Compatible, Uncertain, Newer };
+enum class SocketFilter { Scoped, Connect };
 
 std::optional<uint32_t> mapped_ipv4(const std::array<uint32_t, 4>&);
 uint32_t wire_ipv4(const unsigned char*);
@@ -25,6 +26,30 @@ bool connect_eligible(unsigned, bool, const Tuple&, uint32_t, uint16_t, uint8_t)
 TimeBounds event_time_bounds(int64_t, int64_t, int64_t, int64_t, int64_t);
 CreationGuard creation_guard(int64_t, TimeBounds);
 std::string json(const std::string&);
+SocketFilter parse_socket_filter(const std::string&);
+std::string socket_filter_expression(SocketFilter, const std::string&, uint16_t, uint8_t);
+bool socket_record_allowed(SocketFilter, bool);
+
+SocketFilter parse_socket_filter(const std::string& value) {
+    if (value == "scoped") return SocketFilter::Scoped;
+    if (value == "connect") return SocketFilter::Connect;
+    throw std::runtime_error("Socket filter must be scoped or connect");
+}
+
+const char* socket_filter_name(SocketFilter profile) {
+    return profile == SocketFilter::Scoped ? "scoped" : "connect";
+}
+
+std::string socket_filter_expression(SocketFilter profile, const std::string& target,
+                                      uint16_t port, uint8_t protocol) {
+    if (profile == SocketFilter::Connect) return "event == CONNECT";
+    return "protocol == " + std::to_string(protocol) + " and remoteAddr == " + target +
+        " and remotePort == " + std::to_string(port);
+}
+
+bool socket_record_allowed(SocketFilter profile, bool eligible) {
+    return profile == SocketFilter::Scoped || eligible;
+}
 
 std::optional<uint32_t> mapped_ipv4(const std::array<uint32_t, 4>& address) {
     if (address[1] != 0x0000FFFFu || address[2] || address[3]) return {};
@@ -98,6 +123,21 @@ std::string json(const std::string& value) {
 }
 
 int self_test() {
+    if (parse_socket_filter("scoped") != SocketFilter::Scoped ||
+        parse_socket_filter("connect") != SocketFilter::Connect)
+        throw std::runtime_error("Exact socket filter profiles");
+    for (const char* invalid : {"", "true", "CONNECT", "all", "scope"}) {
+        bool rejected = false;
+        try { parse_socket_filter(invalid); } catch (const std::runtime_error&) { rejected = true; }
+        if (!rejected) throw std::runtime_error("Unknown socket filter profile");
+    }
+    if (socket_filter_expression(SocketFilter::Scoped, "203.0.113.9", 443, 6) !=
+            "protocol == 6 and remoteAddr == 203.0.113.9 and remotePort == 443" ||
+        socket_filter_expression(SocketFilter::Connect, "203.0.113.9", 443, 6) != "event == CONNECT")
+        throw std::runtime_error("SOCKET scoped profile omits packet-only ip predicate");
+    if (!socket_record_allowed(SocketFilter::Scoped, false) ||
+        !socket_record_allowed(SocketFilter::Connect, true) || socket_record_allowed(SocketFilter::Connect, false))
+        throw std::runtime_error("Broad unrelated events never become identity records");
     const auto mapped = mapped_ipv4({0xCB007109u, 0x0000FFFFu, 0, 0});
     if (!mapped || *mapped != 0xCB007109u) throw std::runtime_error("Mapped IPv4 host order");
     if (mapped_ipv4({0xCB007109u, 0, 0, 0}) || mapped_ipv4({0xCB007109u, 0xFFFFu, 1, 0}))
@@ -172,6 +212,7 @@ static uint64_t filetime(FILETIME value) {
 
 struct Options {
     std::string target, output, stop_file, protocol_name;
+    SocketFilter socket_filter = SocketFilter::Scoped;
     uint32_t target_address = 0;
     uint16_t port = 0;
     uint8_t protocol = 0;
@@ -193,6 +234,7 @@ static Options options(int argc, char** argv) {
         if (key == "--target") result.target = value;
         else if (key == "--port") result.port = static_cast<uint16_t>(number(value, 1, 65535));
         else if (key == "--protocol") result.protocol_name = value;
+        else if (key == "--socket-filter") result.socket_filter = parse_socket_filter(value);
         else if (key == "--out") result.output = value;
         else if (key == "--stop-file") result.stop_file = value;
         else if (key == "--seconds") result.seconds = number(value, 1, 3600);
@@ -383,6 +425,23 @@ static int windows_self_test() {
     const UINT32 mapped[]{0xCB007109u, 0x0000FFFFu, 0, 0};
     if (socket_address(mapped) != "203.0.113.9" || ipv4_address(mapped[0]) != "203.0.113.9")
         throw std::runtime_error("WinDivert DLL address normalization");
+    WINDIVERT_ADDRESS address{};
+    address.Layer = WINDIVERT_LAYER_SOCKET;
+    address.Event = WINDIVERT_EVENT_SOCKET_CONNECT;
+    address.Socket.Protocol = IPPROTO_TCP;
+    address.Socket.LocalAddr[0] = 0xC0000202u;
+    address.Socket.LocalAddr[1] = 0x0000FFFFu;
+    address.Socket.RemoteAddr[0] = mapped[0];
+    address.Socket.RemoteAddr[1] = mapped[1];
+    address.Socket.LocalPort = 40001;
+    address.Socket.RemotePort = 443;
+    const auto scope = socket_filter_expression(SocketFilter::Scoped, "203.0.113.9", 443, IPPROTO_TCP);
+    const auto connect = socket_filter_expression(SocketFilter::Connect, "203.0.113.9", 443, IPPROTO_TCP);
+    if (!WinDivertHelperEvalFilter(scope.c_str(), nullptr, 0, &address) ||
+        !WinDivertHelperEvalFilter(connect.c_str(), nullptr, 0, &address))
+        throw std::runtime_error("WinDivert DLL socket filters match documented tuple fields");
+    if (WinDivertHelperEvalFilter(("ip and " + scope).c_str(), nullptr, 0, &address) || GetLastError() != ERROR_SUCCESS)
+        throw std::runtime_error("WinDivert 2.2.2 SOCKET ip predicate requires a packet header");
     return 0;
 }
 
@@ -395,6 +454,9 @@ class Probe {
     std::atomic<bool> socket_done{true}, network_done{true};
     std::atomic<unsigned> started{0};
     std::atomic<uint64_t> errors{0}, socket_received{0}, socket_relevant{0};
+    std::atomic<uint64_t> socket_protocol_matches{0}, socket_ipv4_matches{0}, socket_ipv4_mapped_matches{0};
+    std::atomic<uint64_t> socket_remote_address_matches{0}, socket_remote_port_matches{0}, socket_scope_matches{0};
+    std::atomic<uint64_t> socket_unrelated_discarded{0};
     std::atomic<uint64_t> network_received{0}, network_relevant{0}, lookup_failures{0};
     int64_t frequency = 0;
     bool stopped = false;
@@ -436,9 +498,20 @@ class Probe {
             const auto local = mapped_ipv4({socket.LocalAddr[0], socket.LocalAddr[1], socket.LocalAddr[2], socket.LocalAddr[3]});
             const auto remote = mapped_ipv4({socket.RemoteAddr[0], socket.RemoteAddr[1], socket.RemoteAddr[2], socket.RemoteAddr[3]});
             const Tuple tuple{local.value_or(0), remote.value_or(0), socket.LocalPort, socket.RemotePort, socket.Protocol};
+            const bool ipv4_match = !address.IPv6;
+            const bool protocol_match = socket.Protocol == config.protocol;
+            const bool address_match = remote && *remote == config.target_address;
+            const bool port_match = socket.RemotePort == config.port;
+            if (ipv4_match) ++socket_ipv4_matches;
+            if (local && remote) ++socket_ipv4_mapped_matches;
+            if (protocol_match) ++socket_protocol_matches;
+            if (address_match) ++socket_remote_address_matches;
+            if (port_match) ++socket_remote_port_matches;
+            if (ipv4_match && protocol_match && address_match && port_match) ++socket_scope_matches;
             const bool relevant = connect_eligible(address.Event, address.IPv6 != 0, tuple,
                 config.target_address, config.port, config.protocol);
             if (relevant) ++socket_relevant;
+            if (!socket_record_allowed(config.socket_filter, relevant)) { ++socket_unrelated_discarded; continue; }
             const auto identity = process_identity(socket.ProcessId, address.Timestamp, frequency);
             const auto app_ready = qpc();
             if (!identity.valid) ++lookup_failures;
@@ -546,12 +619,12 @@ public:
             LARGE_INTEGER value{};
             if (!QueryPerformanceFrequency(&value) || value.QuadPart <= 0) throw std::runtime_error("QPC frequency");
             frequency = value.QuadPart;
-            const std::string scope = "ip and protocol == " + std::to_string(config.protocol) +
-                " and remoteAddr == " + config.target + " and remotePort == " + std::to_string(config.port);
-            const std::string network_filter = "outbound and " + scope +
+            const auto scope = socket_filter_expression(SocketFilter::Scoped, config.target, config.port, config.protocol);
+            const auto socket_filter = socket_filter_expression(config.socket_filter, config.target, config.port, config.protocol);
+            const std::string network_filter = "outbound and ip and " + scope +
                 (config.protocol == IPPROTO_TCP ? " and tcp.Syn and !tcp.Ack" : " and udp");
             const UINT64 flags = WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY;
-            socket_handle = WinDivertOpen(scope.c_str(), WINDIVERT_LAYER_SOCKET, 0, flags);
+            socket_handle = WinDivertOpen(socket_filter.c_str(), WINDIVERT_LAYER_SOCKET, 0, flags);
             if (socket_handle == INVALID_HANDLE_VALUE) { error("WinDivertOpen_socket", GetLastError()); throw std::runtime_error("Socket open"); }
             network_handle = WinDivertOpen(network_filter.c_str(), WINDIVERT_LAYER_NETWORK, 0, flags);
             if (network_handle == INVALID_HANDLE_VALUE) { error("WinDivertOpen_network", GetLastError()); throw std::runtime_error("Network open"); }
@@ -573,6 +646,7 @@ public:
             output.push("{\"kind\":\"ready\",\"source\":\"socket_probe\",\"qpc_frequency\":" + std::to_string(frequency) +
                 ",\"recv_qpc\":" + std::to_string(qpc()) + ",\"socket_ready\":true,\"network_ready\":true"
                 ",\"capture_only\":true,\"routing_authority\":false,\"driver_queue_loss_known\":false"
+                ",\"socket_filter\":" + json(socket_filter_name(config.socket_filter)) +
                 ",\"time_mapping\":\"per_lookup_qpc_filetime_bracket\",\"socket_outbound_authority\":\"connect_event\"}");
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.seconds);
             while (!errors && !output.failed() && std::chrono::steady_clock::now() < deadline) {
@@ -586,10 +660,18 @@ public:
         std::ostringstream summary;
         summary << "{\"kind\":\"summary\",\"source\":\"socket_probe\",\"success\":" << (success ? "true" : "false")
             << ",\"capture_only\":true,\"routing_authority\":false,\"driver_queue_loss_known\":false"
+            << ",\"socket_filter\":" << json(socket_filter_name(config.socket_filter))
             << ",\"errors\":" << errors.load() << ",\"queue_dropped\":" << output.queue_dropped.load()
             << ",\"budget_dropped\":" << output.budget_dropped.load() << ",\"output_errors\":" << output.output_errors.load()
             << ",\"truncated\":" << (output.truncated ? "true" : "false")
             << ",\"socket_received\":" << socket_received.load() << ",\"socket_relevant\":" << socket_relevant.load()
+            << ",\"socket_protocol_matches\":" << socket_protocol_matches.load()
+            << ",\"socket_ipv4_matches\":" << socket_ipv4_matches.load()
+            << ",\"socket_ipv4_mapped_matches\":" << socket_ipv4_mapped_matches.load()
+            << ",\"socket_remote_address_matches\":" << socket_remote_address_matches.load()
+            << ",\"socket_remote_port_matches\":" << socket_remote_port_matches.load()
+            << ",\"socket_scope_matches\":" << socket_scope_matches.load()
+            << ",\"socket_unrelated_discarded\":" << socket_unrelated_discarded.load()
             << ",\"network_received\":" << network_received.load() << ",\"network_relevant\":" << network_relevant.load()
             << ",\"lookup_failures\":" << lookup_failures.load() << ",\"records_written\":" << output.records_written.load() << "}";
         const bool written = output.summary(summary.str());

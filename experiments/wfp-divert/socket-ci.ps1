@@ -33,6 +33,8 @@ if ($LASTEXITCODE) { throw 'Socket observation helper tests failed' }
 & "$Bin\socket-events.exe" --self-test
 if ($LASTEXITCODE) { throw 'Native socket and address-format helper tests failed' }
 $cases = @(
+  @{ name='tcp-control'; protocol='tcp'; iterations=3; concurrency=0; hold=500; filter='connect' },
+  @{ name='udp-control'; protocol='udp'; iterations=3; concurrency=0; hold=500; filter='connect' },
   @{ name='tcp-live'; protocol='tcp'; iterations=3; concurrency=0; hold=500 },
   @{ name='udp-live'; protocol='udp'; iterations=3; concurrency=0; hold=500 },
   @{ name='tcp-short'; protocol='tcp'; iterations=20; concurrency=0; hold=0 },
@@ -44,9 +46,11 @@ $failures = [System.Collections.Generic.List[string]]::new()
 try {
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
+    $socketFilter = $case.ContainsKey('filter') ? $case.filter : 'scoped'
     python "$PSScriptRoot\socket_probe.py" --bin $Bin --fixture $Fixture --private-dir $privateDir `
       --out (Join-Path $OutDir $case.name) --protocol $case.protocol --iterations $case.iterations `
-      --concurrency $case.concurrency --client-hold-ms $case.hold --seconds 35 --drain-ms 1000
+      --concurrency $case.concurrency --client-hold-ms $case.hold --seconds 35 --drain-ms 1000 `
+      --socket-filter $socketFilter
     if ($LASTEXITCODE) { $failures.Add($case.name) }
   }
 } finally {

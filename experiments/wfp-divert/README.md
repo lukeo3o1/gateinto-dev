@@ -338,13 +338,26 @@ together, so it does not establish that WinDivert caused the earlier anomaly.
 
 The separate `socket-observation` workflow job runs on Server 2022 and 2025.
 `socket-events.exe` opens SOCKET and NETWORK with SNIFF and RECV_ONLY before
-the clients start. Controlled TCP/UDP cases compare six live clients held open
+the clients start. Two broad CONNECT-only controls verify event delivery before
+six target-scoped TCP/UDP cases compare six live clients held open
 for 500 ms, forty short sequential clients and fifty fresh concurrent clients.
 Each case starts distinct app-a/app-b processes and an independent native WFP
 stored-event collector. No selected-app redirection or packet admission is tested.
 Clients explicitly bind an IPv4 loopback endpoint before connect/sendto so the
 attempted tuple is known. Auto-bound sockets, external adapters and IPv6 are not
 covered by this experiment.
+The harness retains child-process handles for independent creation-time ground
+truth. Short-process image-path availability therefore does not cover immediate
+process-object reclamation or worst-case PID reuse.
+
+SOCKET scopes use protocol and remote address/port, followed by exact software
+validation. The NETWORK scope additionally uses `ip`. WinDivert 2.2.2's shared
+filter evaluator implements `ip` as the presence of a parsed packet header;
+that header is absent for SOCKET metadata. Using that predicate on SOCKET
+suppressed all events in the initial run. The Windows DLL self-test checks the
+historical false predicate and the corrected scoped/broad predicates before
+traffic tests. Broad observations discard unrelated event details before
+process lookup or record output.
 
 The report separates the SOCKET event's kernel QPC, userspace receipt and
 completion of the PID-to-image-path query. Each is compared with the first

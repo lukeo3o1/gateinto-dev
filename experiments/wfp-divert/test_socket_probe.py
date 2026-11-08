@@ -39,11 +39,11 @@ class SocketObservationTests(unittest.TestCase):
                                    errors=0, queue_dropped=0, wfp_poll_errors=0,
                                    wfp_enum_errors=0, wfp_enum_truncated=False)
 
-    def evaluate(self, clients=None, events=None, native=None):
+    def evaluate(self, clients=None, events=None, native=None, expected_socket_filter=None):
         return probe.evaluate_probe(clients or [self.client],
             [self.ready, *(events if events is not None else [self.socket, self.packet]), self.socket_summary],
             (native if native is not None else [self.native]) + [self.native_summary],
-            self.paths, 1000, 10_000_000, 1000, 2)
+            self.paths, 1000, 10_000_000, 1000, 2, expected_socket_filter=expected_socket_filter)
 
     def test_exact_pid_tuple_and_independent_native_reference_pass(self):
         result = self.evaluate()
@@ -204,6 +204,59 @@ class SocketObservationTests(unittest.TestCase):
         manifest = dict(target_port=41000, udp_ports=[42000, 42001])
         self.assertEqual(41000, probe.fixture_port(manifest, "tcp"))
         self.assertEqual(42000, probe.fixture_port(manifest, "udp"))
+
+    def test_socket_filter_profile_is_forwarded_to_native_collector(self):
+        manifest = dict(target_ip="127.0.0.1", target_port=41000, udp_ports=[42000, 42001])
+        for profile in ["scoped", "connect"]:
+            command = [str(value) for value in probe.socket_command(
+                pathlib.Path("bin"), pathlib.Path("out"), manifest, "udp", 35, profile)]
+            self.assertEqual(profile, command[command.index("--socket-filter") + 1])
+            self.assertEqual("42000", command[command.index("--port") + 1])
+            self.assertEqual("udp", command[command.index("--protocol") + 1])
+        default = [str(value) for value in probe.socket_command(
+            pathlib.Path("bin"), pathlib.Path("out"), manifest, "tcp", 35)]
+        self.assertEqual("scoped", default[default.index("--socket-filter") + 1])
+
+    def test_public_projection_preserves_only_fixed_socket_filter_profiles(self):
+        for profile in ["scoped", "connect"]:
+            summary = probe.socket_public_summary(dict(status="NOT_COMPLETED", socket_filter=profile))
+            self.assertEqual(profile, summary["socket_filter"])
+            self.assertEqual(summary, probe.socket_public_summary(summary))
+        self.assertNotIn("socket_filter", probe.socket_public_summary(dict(socket_filter="PRIVATE-PATH")))
+
+    def test_zero_received_socket_events_has_a_fixed_public_reason(self):
+        self.socket_summary["socket_received"] = 0
+        result = self.evaluate(events=[self.packet])
+        self.assertEqual("INCONCLUSIVE_SOCKET_PROBE", result["status"])
+        self.assertEqual("no_socket_events", result["reason"])
+        self.assertEqual("no_socket_events", probe.socket_public_summary(result)["reason"])
+
+    def test_broad_control_projection_keeps_only_fixed_numeric_predicate_counts(self):
+        keys = ("socket_protocol_matches", "socket_ipv4_matches", "socket_ipv4_mapped_matches",
+                "socket_remote_address_matches", "socket_remote_port_matches", "socket_scope_matches",
+                "socket_unrelated_discarded")
+        summary = dict(socket_summary={key: 3 for key in keys})
+        summary["socket_summary"].update(remote_port=42000, app_path="PRIVATE-PATH", unknown_predicate=123)
+        result = probe.socket_public_summary(summary)
+        self.assertEqual({key: 3 for key in keys}, result["socket_summary"])
+
+    def test_requested_filter_requires_matching_ready_and_final_profile(self):
+        self.ready["socket_filter"] = self.socket_summary["socket_filter"] = "scoped"
+        self.assertEqual("PASS_SOCKET_OBSERVATION", self.evaluate(expected_socket_filter="scoped")["status"])
+        for record in [self.ready, self.socket_summary]:
+            for reported in [None, "connect", "PRIVATE-PATH"]:
+                with self.subTest(record=record["kind"], reported=reported):
+                    if reported is None:
+                        record.pop("socket_filter", None)
+                    else:
+                        record["socket_filter"] = reported
+                    result = self.evaluate(expected_socket_filter="scoped")
+                    self.assertEqual("FAIL_SOCKET_PROBE", result["status"])
+                    self.assertEqual("filter_profile_mismatch", result["reason"])
+                    self.assertEqual("filter_profile_mismatch", probe.socket_public_summary(result)["reason"])
+                    record["socket_filter"] = "scoped"
+        self.ready["socket_filter"] = self.socket_summary["socket_filter"] = "connect"
+        self.assertEqual("PASS_SOCKET_OBSERVATION", self.evaluate(expected_socket_filter="connect")["status"])
 
 
 if __name__ == "__main__":

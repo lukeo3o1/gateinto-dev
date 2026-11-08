@@ -18,7 +18,8 @@ STATUSES = ("NOT_COMPLETED", "PASS_SOCKET_OBSERVATION", "INCONCLUSIVE_SOCKET_PRO
 REASONS = ("complete_fresh_pid_and_native_reference", "client_evidence_invalid", "clock_invalid",
            "socket_collector_unclean", "native_reference_unclean", "native_reference_missing",
            "fresh_tuple_ambiguous", "socket_identity_conflict", "socket_or_packet_missing",
-           "event_timing_invalid", "cleanup_failed", "runtime_failure", "probe_unavailable")
+           "event_timing_invalid", "cleanup_failed", "runtime_failure", "probe_unavailable", "no_socket_events",
+           "filter_profile_mismatch")
 COUNT_KEYS = ("client_total", "client_success", "fresh_tuples", "native_reference_matches",
               "native_reference_missing", "native_reference_conflicts", "socket_connect_pid_matches",
               "socket_connect_missing", "socket_pid_mismatch_clients", "socket_identity_ambiguous_clients",
@@ -27,7 +28,10 @@ COUNT_KEYS = ("client_total", "client_success", "fresh_tuples", "native_referenc
               "app_path_mismatch_clients", "app_process_reused_clients", "expected_creation_missing_clients",
               "observed_creation_missing_clients", "process_generation_verified_clients", "invalid_timing_clients")
 SOCKET_COUNTS = ("errors", "queue_dropped", "output_errors", "socket_received", "socket_relevant",
-                 "network_received", "network_relevant", "lookup_failures", "records_written")
+                 "network_received", "network_relevant", "lookup_failures", "records_written",
+                 "socket_protocol_matches", "socket_ipv4_matches", "socket_ipv4_mapped_matches",
+                 "socket_remote_address_matches", "socket_remote_port_matches", "socket_scope_matches",
+                 "socket_unrelated_discarded")
 NATIVE_COUNTS = ("errors", "queue_dropped", "wfp_count", "wfp_polls", "wfp_poll_errors", "wfp_enum_errors")
 TIMING_BASES = ("socket_event", "socket_recv", "socket_app_ready")
 TIMING_REFERENCES = ("network_capture", "network_recv")
@@ -45,6 +49,7 @@ def socket_public_summary(summary):
                   packet_interception=False, driver_queue_loss_known=False, driver_queue_loss_observable=False,
                   network_reference="first_observed_initial_syn_or_udp")
     for key, choices in (("protocol", ("tcp", "udp")),
+                         ("socket_filter", ("scoped", "connect")),
                          ("mode", ("short_sequential", "held_sequential", "short_burst", "held_burst")),
                          ("reason", REASONS)):
         if summary.get(key) in choices:
@@ -95,6 +100,23 @@ def fixture_port(manifest, protocol):
     return port
 
 
+def socket_command(bin_dir, out_dir, manifest, protocol, seconds, socket_filter="scoped"):
+    if socket_filter not in ("scoped", "connect"):
+        raise ValueError("invalid socket filter profile")
+    return [bin_dir / "socket-events.exe", "--target", manifest["target_ip"],
+            "--port", fixture_port(manifest, protocol), "--protocol", protocol,
+            "--socket-filter", socket_filter, "--out", (out_dir / "socket.jsonl").resolve(),
+            "--stop-file", (out_dir / "socket.stop").resolve(), "--seconds", seconds]
+
+
+def socket_filter_matches(record, expected):
+    return expected in ("scoped", "connect") and isinstance(record, dict) and record.get("socket_filter") == expected
+
+
+class FilterProfileMismatch(RuntimeError):
+    pass
+
+
 def normalized_path(value):
     if not isinstance(value, str):
         return ""
@@ -134,7 +156,8 @@ def distribution(values):
 
 
 def evaluate_probe(clients, socket_records, native_records, app_paths, frequency,
-                   anchor_filetime, anchor_qpc, clock_uncertainty, native_exit=0, probe_exit=0):
+                   anchor_filetime, anchor_qpc, clock_uncertainty, native_exit=0, probe_exit=0,
+                   expected_socket_filter=None):
     result = dict(status="INCONCLUSIVE_SOCKET_PROBE", reason="socket_or_packet_missing",
                   routing_authority=False, capture_only=True, packet_interception=False,
                   driver_queue_loss_known=False, driver_queue_loss_observable=False,
@@ -163,6 +186,10 @@ def evaluate_probe(clients, socket_records, native_records, app_paths, frequency
     ready = [r for r in socket_records if r.get("kind") == "ready" and r.get("source") == "socket_probe"]
     socket_summary = summaries[0] if len(summaries) == 1 else None
     result["socket_summary"] = socket_summary
+    if expected_socket_filter is not None and (len(ready) != 1
+            or not socket_filter_matches(ready[0], expected_socket_filter)
+            or not socket_filter_matches(socket_summary, expected_socket_filter)):
+        return finish("FAIL_SOCKET_PROBE", "filter_profile_mismatch")
     if (probe_exit != 0 or not socket_summary or socket_summary.get("success") is not True
             or any(socket_summary.get(key) != 0 for key in ("errors", "queue_dropped", "output_errors"))
             or socket_summary.get("truncated") is not False
@@ -320,6 +347,8 @@ def evaluate_probe(clients, socket_records, native_records, app_paths, frequency
         return finish("INCONCLUSIVE_SOCKET_PROBE", "socket_identity_conflict")
     if counts["native_reference_missing"]:
         return finish("INCONCLUSIVE_SOCKET_PROBE", "native_reference_missing")
+    if counts["socket_connect_missing"] and socket_summary.get("socket_received") == 0:
+        return finish("INCONCLUSIVE_SOCKET_PROBE", "no_socket_events")
     if counts["socket_connect_missing"] or counts["network_missing"]:
         return finish("INCONCLUSIVE_SOCKET_PROBE", "socket_or_packet_missing")
     return finish("PASS_SOCKET_OBSERVATION", "complete_fresh_pid_and_native_reference")
@@ -397,7 +426,8 @@ def run_probe(args):
     native = socket = fixture = None
     cleanup = None
     mode = ("held" if args.client_hold_ms else "short") + ("_burst" if args.concurrency else "_sequential")
-    summary = dict(status="NOT_COMPLETED", protocol=args.protocol, mode=mode, iterations=args.iterations,
+    summary = dict(status="NOT_COMPLETED", protocol=args.protocol, socket_filter=args.socket_filter,
+                   mode=mode, iterations=args.iterations,
                    concurrency=args.concurrency, client_hold_ms=args.client_hold_ms, drain_ms=args.drain_ms,
                    capture_only=True, routing_authority=False, packet_interception=False,
                    driver_queue_loss_known=False, driver_queue_loss_observable=False)
@@ -446,10 +476,11 @@ def run_probe(args):
         native = start(lab.native_command(args.bin, args.out, args.seconds + 30, "poll"), "native")
         summary["native_ready"] = ready(native, args.out / "native.jsonl")
         port = fixture_port(manifest, args.protocol)
-        socket = start([args.bin / "socket-events.exe", "--target", manifest["target_ip"], "--port", port,
-                        "--protocol", args.protocol, "--out", (args.out / "socket.jsonl").resolve(),
-                        "--stop-file", (args.out / "socket.stop").resolve(), "--seconds", args.seconds + 30], "socket")
+        socket = start(socket_command(args.bin, args.out, manifest, args.protocol,
+                                      args.seconds + 30, args.socket_filter), "socket")
         summary["socket_ready"] = ready(socket, args.out / "socket.jsonl", "socket_probe")
+        if not socket_filter_matches(summary["socket_ready"], args.socket_filter):
+            raise FilterProfileMismatch()
         frequency, anchor_filetime, anchor_qpc, uncertainty = lab.windows_clock()
         summary.update(qpc_frequency=frequency, anchor_filetime=anchor_filetime,
                        anchor_qpc=anchor_qpc, clock_uncertainty_ticks=uncertainty)
@@ -497,9 +528,11 @@ def run_probe(args):
         summary["clients"] = evidence
         summary.update(evaluate_probe(evidence, json_records(args.out / "socket.jsonl"),
             json_records(args.out / "native.jsonl"), paths, frequency, anchor_filetime,
-            anchor_qpc, uncertainty, native.returncode, socket.returncode))
+            anchor_qpc, uncertainty, native.returncode, socket.returncode, expected_socket_filter=args.socket_filter))
     except Exception as error:
-        summary.update(status="FAIL_SOCKET_PROBE", reason="runtime_failure", error=str(error))
+        summary.update(status="FAIL_SOCKET_PROBE",
+                       reason="filter_profile_mismatch" if isinstance(error, FilterProfileMismatch) else "runtime_failure",
+                       error=str(error))
     finally:
         for client in clients:
             if client["process"].poll() is None:
@@ -538,6 +571,7 @@ def main():
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--private-dir", type=pathlib.Path)
     parser.add_argument("--protocol", choices=("tcp", "udp"), required=True)
+    parser.add_argument("--socket-filter", choices=("scoped", "connect"), default="scoped")
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--concurrency", type=int, default=0)
     parser.add_argument("--client-hold-ms", type=int, choices=(0, 500), default=0)
@@ -558,7 +592,7 @@ def main():
         return run_probe(args)
     except Exception:
         print(json.dumps(socket_public_summary(dict(status="FAIL_SOCKET_PROBE", reason="runtime_failure",
-                                                    protocol=args.protocol))))
+                                                    protocol=args.protocol, socket_filter=args.socket_filter))))
         return 1
 
 
