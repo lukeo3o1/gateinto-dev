@@ -17,6 +17,9 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($Build, [ref]$n
 $functions = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
 foreach ($function in $functions) { . ([scriptblock]::Create($function.Extent.Text)) }
 
+# The stubs below shadow this module's cmdlets, so autoloading would never load HttpResponseException.
+Import-Module Microsoft.PowerShell.Utility
+$null = [Microsoft.PowerShell.Commands.HttpResponseException]
 $script:steps = @($env:WFP_PLAN -split ',')
 $script:calls = 0
 $script:sleeps = [System.Collections.Generic.List[int]]::new()
