@@ -1,8 +1,17 @@
 # Lower-latency native WFP ownership research
 
-Updated: 2026-11-08. Experiment: PR #95; latest measured source `7398bf4`.
+Updated: 2026-11-08. Experiment: PR #95; latest measured source `2dd799e`.
 
-The latest [Windows comparisons](evidence/wfp-divert-run-42468677635.md) show fewer
+The latest [SOCKET observation run](evidence/wfp-socket-run-42497668177.md) passed
+eight cases per OS on Server 2022/2025. All 408 controlled clients had matching
+SOCKET PID, usable image path, verified creation time, independent native WFP
+reference, observed packet and echo. In short sequential cases, image identity
+was ready about 0.09–0.12 ms after the first observed packet capture at p50.
+Only 21 of 408 identities were ready before capture, so a routing design still
+needs buffering. Controlled buffered routing is the next experiment; this run
+tested observation only.
+
+Earlier [stored-event comparisons](evidence/wfp-divert-run-42468677635.md) show fewer
 returned rows with destination filtering, but no repeatable latency improvement.
 Attempt 1 passed all 27 non-shadow in-process cases per OS on Server 2022/2025,
 including eight scoped-snapshot cases. The completed Server 2022 rerun also passed
@@ -35,6 +44,47 @@ reconstruct to p50 about 25.7–33.1 ms. See the
 That run does not demonstrate an in-process speedup. It also shows a structural
 problem: a single worker waited for BFE enumeration while already-decided packets
 and other pending-flow deadlines waited behind it.
+
+## Measured WinDivert SOCKET observation
+
+[Run 42497668177](evidence/wfp-socket-run-42497668177.md), source `2dd799e`, used
+separate SOCKET and NETWORK SNIFF/RECV_ONLY handles, with native stored-event
+polling as an independent reference. Two broad CONNECT controls and six scoped
+TCP/UDP cases covered 500 ms live holds, short sequential clients and 50-process
+bursts. All eight cases passed on each OS: 204 clients per OS, 408 total, with
+no missing/mismatched identities, ambiguity or reported collector errors.
+
+Short sequential cases each used 40 fresh clients. These p50 values compare
+userspace image-identity readiness and native poll receipt with the same first
+observed NETWORK capture, in milliseconds:
+
+| OS | Transport | Image identity ready − capture | Native poll receipt − capture |
+| --- | --- | --- | --- |
+| Server 2022 | TCP | 0.0919 | 21.4347 |
+| Server 2022 | UDP | 0.1011 | 20.8902 |
+| Server 2025 | TCP | 0.0989 | 27.8970 |
+| Server 2025 | UDP | 0.1204 | 27.4197 |
+
+These are observation-time differences, not API-call durations or end-to-end
+routing latency. Kernel event time, userspace receipt and image readiness remain
+separate. Image readiness preceded capture for only 21/408 clients: 12 Server
+2022 TCP-burst clients and nine Server 2025 TCP-burst clients. The source is a
+promising event-driven alternative for the next controlled routing experiment;
+no packet admission, blocking, reinjection or proxy routing was tested here.
+
+The [initial run 42496744881](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42496744881)
+had 384 successful echo/native/packet matches but no SOCKET observations. Its
+SOCKET filter incorrectly included `ip`, which the pinned WinDivert 2.2.2 DLL
+evaluates from a parsed packet header absent at SOCKET. A Windows DLL self-test
+reproduced that false predicate and accepted the corrected scoped and broad
+CONNECT predicates; the corrected run then delivered all controlled events.
+
+Clients explicitly bound IPv4 loopback tuples and the harness retained child
+process handles for creation-time ground truth. This does not qualify auto-bind,
+immediate process-object reclamation, arbitrary PID/tuple reuse, external routing,
+IPv6, desktop Windows or sustained load. Driver queue loss is not observable.
+The native WFP Subscribe2/3/4 findings remain unchanged, and SOCKET currently has
+no routing authority in this experiment.
 
 ## Measured scoped snapshots
 
@@ -80,6 +130,7 @@ failed its dependency download with HTTP 504 and produced no traffic result.
 | Destination scope | `--enum-scope destination` emits unique, ANDed condition keys for values shared by pending subjects; broader fallbacks retain exact software validation. | Compare with legacy scope at both 500 ms and experimental 5 ms pre-capture windows. Two reversed-order rounds have executed; sustained-load and clock qualification remain open. |
 | ALE endpoint shadow | Query native live endpoint properties while packets are held; report full tuple, appId and endpointId without using them for routing. | Export availability, correct app paths/tuples, complete query intervals before release, per-phase cost and UDP coverage. |
 | Live ALE control | `--engine endpoint-control --client-hold-ms 500` compares post-echo live sockets with native stored-event references before any packet interception. | Correct original-app observations in established TCP/UDP sockets do not prove held-first-packet availability. |
+| SOCKET observation | SNIFF/RECV_ONLY SOCKET CONNECT metadata plus generation-checked image queries, compared with an independent NETWORK observer and native WFP reference. | All controlled cases passed; userspace identity usually followed capture. Buffered routing and production lifecycle coverage remain untested. |
 
 The capability cache stores rejected query patterns, never ownership answers.
 Fresh net-event enumerators remain necessary: Microsoft's
@@ -201,11 +252,12 @@ released before attribution, and a later reset cannot undo transmitted bytes.
 Dropping all unknown traffic would affect other apps. Faster observation alone
 does not prove either zero leakage or universal noninterference.
 
-Local helper checks and the Server 2022/2025 comparisons have executed. The latest
-[retained report](evidence/wfp-divert-run-42468677635.md) separates both completed
+Local helper checks and the Server 2022/2025 comparisons have executed. The
+[snapshot report](evidence/wfp-divert-run-42468677635.md) separates both completed
 Server 2022 attempts from the Server 2025 rerun's infrastructure failure.
-Standard CI and the model job passed;
-the Windows experiment remains red for subscription cases, short-hold Security
+The [SOCKET report](evidence/wfp-socket-run-42497668177.md) records both successful
+observation jobs. Standard CI and the model job passed. The remaining Windows
+experiment jobs stay red for subscription cases, short-hold Security
 UDP, unrecognized native-drop callbacks and first-packet ALE shadows. Fresh
 snapshot creation remains the main measured query cost. No CPU saving, safe
 production reuse or general first-packet delivery bound has been established.

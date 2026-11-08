@@ -370,4 +370,28 @@ Kernel queue loss has no exposed WinDivert counter. Complete controlled-client
 coverage and clean userspace handling are checked, without inventing a zero-loss
 statistic. All raw PID, endpoint, path, tuple and absolute clock records stay in
 restricted local files. Public results include only fixed case names, statuses,
-counts and relative latency distributions. Runtime results are pending.
+counts and relative latency distributions.
+
+[Run 42497668177](../../docs/evidence/wfp-socket-run-42497668177.md), source
+`2dd799e`, passed both SOCKET jobs: eight cases and 204 clients per OS, 408 total.
+Every client had a correct PID/full-tuple match, usable image path, verified
+creation time, independent native WFP reference, first observed NETWORK packet
+and successful echo. Missing/mismatched identities, ambiguities and reported
+collector errors were zero. The initial
+[run 42496744881](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42496744881)
+retains the `ip`-filter failure evidence described above; the corrected DLL-tested
+filters delivered all controlled events.
+
+For the 40-client short sequential cases, image-ready−capture p50 was
+0.0919/0.1011 ms for TCP/UDP on Server 2022 and 0.0989/0.1204 ms on Server 2025.
+Native poll receipt−capture p50 in those same cases was 21.4347/20.8902 ms and
+27.8970/27.4197 ms respectively. These are time differences from the first
+observed capture, not API-call durations or end-to-end routing latency. Only
+21/408 image identities were ready before capture, all in the TCP burst cases.
+Buffering and routing still need a separate controlled experiment; this run
+tested no packet blocking, injection, admission or proxy routing.
+
+Standard repository CI, the model job, 98 Python checks, cross-compilation and
+the actual Windows DLL helper tests passed. Other PoC Windows/native-control
+jobs remain red for the previously unqualified alternatives. The original
+Subscribe2/3/4 findings and the production qualification limits remain unchanged.

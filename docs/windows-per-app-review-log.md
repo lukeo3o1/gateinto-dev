@@ -298,3 +298,53 @@ native-control rerun also failed download before traffic. Historical evidence
 links remain intact. New Git evidence and uploads contain aggregate counts and
 relative latency statistics only; raw paths, process/endpoint identities, tuples
 and absolute timestamps remain in restricted local evidence.
+
+## Executed WinDivert SOCKET observation
+
+Inspected the corrected [run 42497668177](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42497668177),
+source `2dd799ecd9c0ecd256c429999a4e8273f7d33f76`. Downloaded aggregate artifacts
+matched the parsed job-log summaries. The
+[evidence report](evidence/wfp-socket-run-42497668177.md) retains the case results,
+paired relative timing distributions and the earlier filter failure.
+
+| OS | Job | Outcome |
+| --- | --- | --- |
+| Server 2022, build 20348 | 128783417462 | SOCKET job success; all eight cases pass, 204/204 clients matched. |
+| Server 2025, build 26100 | 128783417147 | SOCKET job success; all eight cases pass, 204/204 clients matched. |
+
+Each OS ran two broad CONNECT-only controls, then six scoped TCP/UDP cases with
+500 ms live holds, short sequential clients and 50-process bursts. All 408
+clients had correct SOCKET PID/full-tuple matches, usable image paths, verified
+process creation times, independent native WFP references, observed packets and
+echoes. There were no missing/mismatched identities, ambiguities or reported
+collector errors. Driver queue loss is not observable and is not reported as zero.
+
+The first [run 42496744881](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42496744881),
+source `c8f3241`, had 384 successful client/native/packet matches but no SOCKET
+records. The probe incorrectly used the packet-header `ip` predicate at SOCKET.
+The pinned WinDivert 2.2.2 DLL helper test reproduced the false historical
+predicate and accepted the corrected scoped and broad CONNECT predicates before
+the successful traffic tests. This resolves that run's missing events as a probe
+filter bug.
+
+In the 40-client short sequential cases, image-ready−first-observed-capture p50
+was 0.0919/0.1011 ms for TCP/UDP on Server 2022 and 0.0989/0.1204 ms on Server
+2025. Native poll receipt−capture p50 for those same cases was 21.4347/20.8902 ms
+and 27.8970/27.4197 ms. These are relative observation times, not image-query
+call durations or end-to-end routing latency. Image identity was ready before
+capture for only 21/408 clients: 12 Server 2022 TCP-burst clients and nine Server
+2025 TCP-burst clients. A controlled routing experiment still needs buffering.
+
+The probe used SNIFF/RECV_ONLY without blocking, injection or routing. Clients
+explicitly bound IPv4 loopback tuples, and retained child handles supplied
+creation-time ground truth. Auto-bind, immediate process-object reclamation,
+arbitrary PID/tuple reuse, IPv6, external routing, desktop Windows and sustained
+load remain unqualified. Native WFP Subscribe2/3/4 results remain unchanged.
+
+All 98 Python checks, native cross-compilation, actual Windows DLL helper tests
+and the model job passed. Standard repository
+[CI run 42497668204](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42497668204)
+completed successfully. Other PoC Windows/native-control jobs remain red for
+previously unqualified alternatives. New source evidence and uploads retain
+aggregate counts and relative timing only; raw identities, endpoints and clocks
+remain in restricted local evidence.
