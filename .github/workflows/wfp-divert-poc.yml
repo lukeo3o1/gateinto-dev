@@ -33,6 +33,8 @@ jobs:
           /tmp/inproc-test
           g++ -std=c++17 -Wall -Wextra -DWFP_CLIENT_STATE_TEST experiments/wfp-divert/client.cpp -o /tmp/client-state-test
           /tmp/client-state-test
+          g++ -std=c++17 -Wall -Wextra -Werror experiments/wfp-divert/socket-events.cpp -o /tmp/socket-events-test
+          /tmp/socket-events-test
 
   windows:
     strategy:
@@ -68,6 +70,40 @@ jobs:
             ${{ runner.temp }}/wfp-divert-results/aggregate-evidence.json
             ${{ runner.temp }}/wfp-divert-results/ci-summary.json
             ${{ runner.temp }}/wfp-divert-results/environment.json
+            ${{ runner.temp }}/wfp-divert-bin/driver-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  socket-observation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: windows-release
+          save-if: false
+      - run: cargo build --release --locked --example wfp_lab
+      - run: experiments/wfp-divert/build.ps1
+      - run: experiments/wfp-divert/socket-ci.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wfp-socket-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/wfp-socket-results/aggregate-evidence.json
+            ${{ runner.temp }}/wfp-socket-results/ci-summary.json
+            ${{ runner.temp }}/wfp-socket-results/environment.json
             ${{ runner.temp }}/wfp-divert-bin/driver-manifest.json
           if-no-files-found: warn
           retention-days: 14

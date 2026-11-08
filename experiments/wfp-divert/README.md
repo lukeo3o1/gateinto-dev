@@ -9,7 +9,9 @@ The hypothesis is that holding packets at NETWORK gives native WFP notifications
 time to identify the application before the packet is released or translated.
 This is a testable hypothesis, not a conclusion that notifications must arrive in
 time. Native callbacks and Security 5156 are tested independently. WinDivert
-SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
+SOCKET/FLOW, IP Helper owner tables and PID polling are not routing attribution
+sources in the original experiments. A separate SOCKET observation experiment
+below measures coverage and timing without changing packet routing.
 
 ## Components
 
@@ -23,6 +25,9 @@ SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
 | `client.cpp` | Built twice as app-a.exe and app-b.exe; echo nonces and original socket tuples provide test ground truth, never ownership authority. |
 | `positive_control.py` | A narrowly scoped blocked connection checks native drop-callback delivery. Drops are diagnostic only and cannot authorize proxying. |
+| `socket-events.cpp` | Concurrent WinDivert SOCKET and NETWORK sniffing, with event/capture, receipt and process-path readiness clocks. No blocking or injection. |
+| `socket_probe.py`, `test_socket_probe.py` | Compare fresh client attempts, SOCKET PID/path observations, first observed packets and independent native WFP references. |
+| `socket-ci.ps1`, `socket_results.py` | Run six controlled observation cases on each Windows version and publish only projected aggregate results. |
 | `../../examples/wfp_lab.rs` | Controlled echo endpoints, TLS CONNECT upstream and actual Gateinto proxy with session credentials and forced Gateway routing. |
 | `build.ps1`, `ci.ps1` | Download official signed WinDivert, compile probes, back up/restore audit policy, run cases and retain evidence. |
 
@@ -328,3 +333,28 @@ These established-socket costs do not measure first-packet admission latency.
 Both first-packet shadow cases per OS remained inconclusive with zero qualifying
 observations while held. The live control changes lifecycle and interception
 together, so it does not establish that WinDivert caused the earlier anomaly.
+
+## WinDivert SOCKET observation
+
+The separate `socket-observation` workflow job runs on Server 2022 and 2025.
+`socket-events.exe` opens SOCKET and NETWORK with SNIFF and RECV_ONLY before
+the clients start. Controlled TCP/UDP cases compare six live clients held open
+for 500 ms, forty short sequential clients and fifty fresh concurrent clients.
+Each case starts distinct app-a/app-b processes and an independent native WFP
+stored-event collector. No selected-app redirection or packet admission is tested.
+Clients explicitly bind an IPv4 loopback endpoint before connect/sendto so the
+attempted tuple is known. Auto-bound sockets, external adapters and IPv6 are not
+covered by this experiment.
+
+The report separates the SOCKET event's kernel QPC, userspace receipt and
+completion of the PID-to-image-path query. Each is compared with the first
+observed NETWORK capture and receipt. An earlier kernel timestamp alone cannot
+establish that userspace knew the app before its first packet. Process creation
+and event timing must exclude an identity queried after PID reuse. Fast-closing
+processes can leave a correct SOCKET PID but no available image path.
+
+Kernel queue loss has no exposed WinDivert counter. Complete controlled-client
+coverage and clean userspace handling are checked, without inventing a zero-loss
+statistic. All raw PID, endpoint, path, tuple and absolute clock records stay in
+restricted local files. Public results include only fixed case names, statuses,
+counts and relative latency distributions. Runtime results are pending.
