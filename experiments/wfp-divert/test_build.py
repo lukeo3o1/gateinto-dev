@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -9,14 +10,14 @@ import unittest
 BUILD = pathlib.Path(__file__).with_name("build.ps1")
 PWSH = shutil.which("pwsh")
 HARNESS = r"""
-param([string] $Build, [string] $Plan)
+param([string] $Build)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Build, [ref]$null, [ref]$null)
 $functions = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
 foreach ($function in $functions) { . ([scriptblock]::Create($function.Extent.Text)) }
 
-$script:plan = @($Plan -split ',')
+$script:steps = @($env:WFP_PLAN -split ',')
 $script:calls = 0
 $script:sleeps = [System.Collections.Generic.List[int]]::new()
 $script:logs = [System.Collections.Generic.List[string]]::new()
@@ -24,11 +25,11 @@ $script:requests = [System.Collections.Generic.List[string]]::new()
 function Invoke-WebRequest {
   $script:calls++
   $script:requests.Add("$args")
-  $step = $script:plan[$script:calls - 1]
+  $step = $script:steps[$script:calls - 1]
   $message = "attempt $($script:calls) $step"
   switch -Regex ($step) {
     '^ok$' { return }
-    '^\d+$' { throw [Microsoft.PowerShell.Commands.HttpResponseException]::new($message, [System.Net.Http.HttpResponseMessage]::new([int]$step)) }
+    '^\d+$' { throw [Microsoft.PowerShell.Commands.HttpResponseException]::new($message, [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode][int]$step)) }
     '^timeout$' { throw [System.TimeoutException]::new($message) }
     '^network$' { throw [System.Net.Http.HttpRequestException]::new($message, [System.Net.Sockets.SocketException]::new(10054)) }
     '^canceled$' { throw [System.Threading.Tasks.TaskCanceledException]::new($message) }
@@ -57,8 +58,8 @@ class DownloadRetryTests(unittest.TestCase):
             harness = pathlib.Path(directory, "harness.ps1")
             harness.write_text(HARNESS)
             output = subprocess.run(
-                [PWSH, "-NoProfile", "-NonInteractive", "-File", str(harness), "-Build", str(BUILD), "-Plan", ",".join(steps)],
-                check=True, capture_output=True, text=True, timeout=60,
+                [PWSH, "-NoProfile", "-NonInteractive", "-File", str(harness), "-Build", str(BUILD)],
+                env=dict(os.environ, WFP_PLAN=",".join(steps)), check=True, capture_output=True, text=True, timeout=60,
             ).stdout
         return json.loads(output)
 
