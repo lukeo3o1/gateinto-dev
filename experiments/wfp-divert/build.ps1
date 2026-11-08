@@ -2,10 +2,41 @@ param([string] $OutDir = "$env:RUNNER_TEMP\wfp-divert-bin")
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Test-TransientWebError([System.Exception] $Exception) {
+  $response = $Exception.PSObject.Properties['Response']
+  if ($response -and $response.Value) {
+    $status = [int]$response.Value.StatusCode
+    return $status -ge 500 -or $status -eq 429
+  }
+  for ($inner = $Exception; $inner; $inner = $inner.InnerException) {
+    if ($inner -is [System.Net.Http.HttpRequestException] -or $inner -is [System.Net.WebException] -or
+        $inner -is [System.TimeoutException] -or $inner -is [System.OperationCanceledException] -or
+        $inner -is [System.IO.IOException] -or $inner -is [System.Net.Sockets.SocketException]) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Invoke-DownloadWithRetry([string] $Uri, [string] $OutFile) {
+  $attempts = 5
+  for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+    try {
+      Invoke-WebRequest $Uri -OutFile $OutFile
+      return
+    } catch {
+      if ($attempt -eq $attempts -or -not (Test-TransientWebError $_.Exception)) { throw }
+      $delay = 1 -shl $attempt
+      Write-Host "Download of $Uri failed on attempt $attempt/${attempts}: $($_.Exception.Message). Retrying in $delay s."
+      Start-Sleep -Seconds $delay
+    }
+  }
+}
+
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
 $archive = Join-Path $OutDir 'WinDivert-2.2.2-A.zip'
-Invoke-WebRequest 'https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip' -OutFile $archive
+Invoke-DownloadWithRetry 'https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip' $archive
 Expand-Archive $archive -DestinationPath $OutDir -Force
 $sdk = Join-Path $OutDir 'WinDivert-2.2.2-A'
 $driver = Join-Path $sdk 'x64\WinDivert64.sys'
