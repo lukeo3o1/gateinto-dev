@@ -19,14 +19,15 @@ function Test-TransientWebError([System.Exception] $Exception) {
 }
 
 function Invoke-DownloadWithRetry([string] $Uri, [string] $OutFile) {
-  $attempts = 5
+  $delays = 5, 10, 20, 30, 45, 60
+  $attempts = $delays.Count + 1
   for ($attempt = 1; $attempt -le $attempts; $attempt++) {
     try {
-      Invoke-WebRequest $Uri -OutFile $OutFile
+      Invoke-WebRequest $Uri -OutFile $OutFile -TimeoutSec 30
       return
     } catch {
       if ($attempt -eq $attempts -or -not (Test-TransientWebError $_.Exception)) { throw }
-      $delay = 1 -shl $attempt
+      $delay = $delays[$attempt - 1]
       Write-Host "Download of $Uri failed on attempt $attempt/${attempts}: $($_.Exception.Message). Retrying in $delay s."
       Start-Sleep -Seconds $delay
     }

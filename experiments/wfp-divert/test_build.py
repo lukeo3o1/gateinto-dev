@@ -20,8 +20,10 @@ $script:plan = @($Plan -split ',')
 $script:calls = 0
 $script:sleeps = [System.Collections.Generic.List[int]]::new()
 $script:logs = [System.Collections.Generic.List[string]]::new()
+$script:requests = [System.Collections.Generic.List[string]]::new()
 function Invoke-WebRequest {
   $script:calls++
+  $script:requests.Add("$args")
   $step = $script:plan[$script:calls - 1]
   $message = "attempt $($script:calls) $step"
   switch -Regex ($step) {
@@ -38,7 +40,7 @@ function Write-Host { $script:logs.Add("$args") }
 
 $result = 'ok'
 try { Invoke-DownloadWithRetry 'https://example.invalid/a.zip' 'a.zip' } catch { $result = "error: $($_.Exception.Message)" }
-@{ calls = $script:calls; sleeps = @($script:sleeps); logs = @($script:logs); result = $result } | ConvertTo-Json -Compress
+@{ calls = $script:calls; sleeps = @($script:sleeps); logs = @($script:logs); requests = @($script:requests); result = $result } | ConvertTo-Json -Compress
 """
 
 
@@ -61,17 +63,23 @@ class DownloadRetryTests(unittest.TestCase):
         return json.loads(output)
 
     def test_transient_failures_retry_with_backoff_and_log(self):
-        result = self.run_plan("504", "429", "timeout", "network", "ok")
+        result = self.run_plan("504", "429", "timeout", "network", "canceled", "502", "ok")
         self.assertEqual("ok", result["result"])
-        self.assertEqual(5, result["calls"])
-        self.assertEqual([2, 4, 8, 16], result["sleeps"])
-        self.assertEqual(4, len(result["logs"]))
+        self.assertEqual(7, result["calls"])
+        self.assertEqual([5, 10, 20, 30, 45, 60], result["sleeps"])
+        self.assertEqual(6, len(result["logs"]))
         self.assertIn("attempt 1 504", result["logs"][0])
+
+    def test_each_attempt_has_a_timeout(self):
+        result = self.run_plan("504", "ok")
+        self.assertEqual(2, len(result["requests"]))
+        for request in result["requests"]:
+            self.assertIn("-TimeoutSec 30", request)
 
     def test_canceled_request_is_transient(self):
         result = self.run_plan("canceled", "ok")
         self.assertEqual("ok", result["result"])
-        self.assertEqual([2], result["sleeps"])
+        self.assertEqual([5], result["sleeps"])
 
     def test_non_transient_failures_fail_immediately(self):
         for step in ["404", "403", "other"]:
@@ -82,11 +90,11 @@ class DownloadRetryTests(unittest.TestCase):
             self.assertEqual([], result["logs"])
 
     def test_exhausted_attempts_throw_last_error(self):
-        result = self.run_plan("503", "503", "503", "503", "503", "ok")
-        self.assertEqual("error: attempt 5 503", result["result"])
-        self.assertEqual(5, result["calls"])
-        self.assertEqual([2, 4, 8, 16], result["sleeps"])
-        self.assertEqual(4, len(result["logs"]))
+        result = self.run_plan(*["503"] * 7, "ok")
+        self.assertEqual("error: attempt 7 503", result["result"])
+        self.assertEqual(7, result["calls"])
+        self.assertEqual([5, 10, 20, 30, 45, 60], result["sleeps"])
+        self.assertEqual(6, len(result["logs"]))
 
 
 if __name__ == "__main__":
