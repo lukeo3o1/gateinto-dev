@@ -1,18 +1,29 @@
 # Lower-latency native WFP ownership research
 
-Date: 2026-11-07. Experiment baseline: PR #95, head `e3336bd`.
+Updated: 2026-11-08. Experiment: PR #95; latest measured source `7398bf4`.
 
-The latest [Windows comparison](evidence/wfp-divert-run-42356168781.md) supports
-asynchronous stored-event lookup for reducing already-decided packet stalls:
-50-client decided-direct p95 fell from 17.3 to 2.7 ms on Server 2022 and from
-32.9 to 12.0 ms on Server 2025. First-decision latency did not consistently improve.
-All 16 non-shadow in-process cases passed on each OS, including real UDP, QUIC
-controls and observed resets. ALE endpoint shadow observations returned System
-rather than the original app and remain unsuitable as implemented. The existing
-TCP feasibility conclusion stays restricted to the runs in
-[the evidence review](windows-per-app-feasibility.md).
+The latest [Windows comparisons](evidence/wfp-divert-run-42468677635.md) show fewer
+returned rows with destination filtering, but no repeatable latency improvement.
+Attempt 1 passed all 27 non-shadow in-process cases per OS on Server 2022/2025,
+including eight scoped-snapshot cases. The completed Server 2022 rerun also passed
+all eight snapshot cases, yet destination first-decision latency regressed sharply.
+Fresh snapshot creation remains both dominant and variable. Keep destination/500
+ms and destination/5 ms optional experiments; retain the legacy/500 ms default.
+
+Separate post-echo ALE controls found the original application for all six TCP
+and all six UDP clients per OS. Held-first-packet shadow cases still had zero
+qualifying observations. Neither established-socket query speed nor this control
+qualifies ALE for admission decisions. The existing TCP feasibility conclusion
+stays restricted to the runs in [the evidence review](windows-per-app-feasibility.md).
 
 ## What is established
+
+The earlier [asynchronous comparison](evidence/wfp-divert-run-42356168781.md)
+reduced 50-client decided-direct p95 from 17.3 to 2.7 ms on Server 2022 and from
+32.9 to 12.0 ms on Server 2025. First-decision latency did not consistently improve;
+all 16 non-shadow in-process cases passed per OS. Its ALE shadow observations
+returned System rather than the original app. Those findings remain specific to
+that revision and topology.
 
 The split poll implementation measured about 7.1–9.5 ms mean elapsed enumeration
 cost. In-process lookup included roughly 14–20 ms calls in the inspected run.
@@ -25,6 +36,40 @@ That run does not demonstrate an in-process speedup. It also shows a structural
 problem: a single worker waited for BFE enumeration while already-decided packets
 and other pending-flow deadlines waited behind it.
 
+## Measured scoped snapshots
+
+Run 42468677635 attempt 1 compared four async/cache-on profiles in two rounds,
+reversing profile order in the second round. Each used 50 TCP redirect clients;
+all eight cases passed per OS with the existing ownership, echo and CONNECT checks.
+Attempt 2 repeated the Server 2022 matrix. First-packet decision p95, in milliseconds:
+
+| Scope | Pre-capture window | Server 2022, attempt 1 rounds 1 / 2 | Server 2025, attempt 1 rounds 1 / 2 | Server 2022, attempt 2 rounds 1 / 2 |
+| --- | --- | --- | --- | --- |
+| Legacy | 500 ms | 41.68 / 57.64 | 52.88 / 52.92 | 38.23 / 48.32 |
+| Legacy | 5 ms | 34.49 / 35.34 | 44.33 / 42.01 | 32.45 / 29.95 |
+| Destination | 500 ms | 35.06 / 37.68 | 42.33 / 42.49 | 102.88 / 30.49 |
+| Destination | 5 ms | 34.73 / 33.40 | 40.15 / 46.58 | 134.67 / 441.61 |
+
+In attempt 1, destination/5 ms returned 91–96% fewer stored-event rows than the corresponding
+legacy/500 ms cases. Creation still consumed about 97% of combined-profile phase
+elapsed time, averaging 13.5–16.9 ms per create call. Filtering removes decoding
+work but does not remove the fresh-snapshot requirement. Improvements did not cover
+every packet tail: Server 2022 round 1 decided-direct p95 rose from 4.25 to 5.00 ms.
+These are two same-host rounds, without a total-system CPU or production claim.
+
+The completed Server 2022 rerun changed the performance conclusion. Legacy/500 ms
+first-decision p95 was 38.23/48.32 ms; destination/500 ms reached 102.88 ms in round
+1, while destination/5 ms reached 134.67/441.61 ms across its rounds. One create
+call took 235.11 ms, and create time occupied 549.79 ms of 550.92 ms query busy
+time in the combined second round. Returned rows were again lower, by 96–99%
+for the combined profile, and all eight snapshot cases passed their functional
+checks. Reducing returned rows does not control this RPC tail.
+
+Neither destination profile is established as faster or more reliable. Keep both
+optional and retain legacy/500 ms as the implemented default. A 5 ms window also
+needs clock, load and event-availability qualification. Attempt 2 on Server 2025
+failed its dependency download with HTTP 504 and produced no traffic result.
+
 ## Implemented comparisons
 
 | Variant | Implementation and intended benefit | Evidence boundary |
@@ -32,7 +77,9 @@ and other pending-flow deadlines waited behind it.
 | Inline, cache off | `--lookup-mode inline --filter-cache off`; freshly enumerate on the packet worker, preserving the corrected decision clock. | Baseline call counts, phase cost, held/direct/proxy latency. |
 | Inline, cache on | Skip only previously rejected filter capability patterns within the same collector, separating protocol and single/multiple local-port conditions. | Rejection codes, cache hits and actual reduction in create calls. Generic INVALID_PARAMETER is deliberately not cached. |
 | Async, cache on | One lookup thread and at most one queued/running/completed request; packet worker can forward decided packets and expire holds while lookup runs. Exact-tuple indexing avoids rescanning every returned event for every flow. | Compare latency tails and caller CPU with the same TCP/UDP, 50-client, delayed-evidence, QUIC and reset cases. Handoff can add first-decision latency. |
+| Destination scope | `--enum-scope destination` emits unique, ANDed condition keys for values shared by pending subjects; broader fallbacks retain exact software validation. | Compare with legacy scope at both 500 ms and experimental 5 ms pre-capture windows. Two reversed-order rounds have executed; sustained-load and clock qualification remain open. |
 | ALE endpoint shadow | Query native live endpoint properties while packets are held; report full tuple, appId and endpointId without using them for routing. | Export availability, correct app paths/tuples, complete query intervals before release, per-phase cost and UDP coverage. |
+| Live ALE control | `--engine endpoint-control --client-hold-ms 500` compares post-echo live sockets with native stored-event references before any packet interception. | Correct original-app observations in established TCP/UDP sockets do not prove held-first-packet availability. |
 
 The capability cache stores rejected query patterns, never ownership answers.
 Fresh net-event enumerators remain necessary: Microsoft's
@@ -75,6 +122,26 @@ packet decision. Ambiguity, missing data, API failure or observations only after
 release produce `INCONCLUSIVE_ALE_ENDPOINT_PROBE`. Routing still uses net events;
 the report explicitly says `routing_authority: false`.
 
+The separate live control runs before any WinDivert case and launches neither
+packet engine. Both apps echo and keep fresh sockets open for 500 ms, with the
+complete ALE query confined to the post-echo interval. In run 42468677635 attempt
+1, each TCP/UDP case on each OS had six clean native references and six exact
+original-app ALE matches, with no System app or shared-endpoint groups. Both
+Server 2022 controls repeated that result in attempt 2.
+
+| Established-socket ALE mean query time | TCP | UDP |
+| --- | --- | --- |
+| Server 2022, attempt 1 | 1.12 ms | 1.57 ms |
+| Server 2025, attempt 1 | 1.67 ms | 2.34 ms |
+| Server 2022, attempt 2 | 1.95 ms | 1.96 ms |
+
+These are complete query costs, not first-packet admission latency. The two
+held-first-packet shadow cases per OS remained inconclusive, with zero qualifying
+observations while held. The live control changes both socket lifecycle and
+interception, so it does not establish that WinDivert caused the earlier anomaly.
+Copied raw endpoint diagnostics remain local. Published layout sizes and offsets
+are compiler metadata; no guessed identity normalization is used.
+
 Endpoint properties provide no event timestamp, direction or packet-visible
 endpoint ID. Complete enumeration is not a documented atomic snapshot, and an
 endpoint ID alone cannot bind a held packet to a socket generation. TCP availability
@@ -107,8 +174,10 @@ There is no documented knob here that establishes a low-latency delivery bound.
 ## Measurements and acceptance
 
 The workflow compares Windows Server 2022 and 2025 independently. Neither is
-desktop Windows 10/11. Separate artifacts preserve case status, source evidence,
-request IDs, original capture/decision QPC and complete native metrics.
+desktop Windows 10/11. New Actions artifacts and Git evidence contain aggregate
+case counts, status and relative latency statistics only. Request identities,
+raw paths/tuples and original capture/decision QPC remain in restricted local
+evidence. Historical artifacts retain what their original runs published.
 
 Evaluate each OS and case separately:
 
@@ -132,9 +201,11 @@ released before attribution, and a later reset cannot undo transmitted bytes.
 Dropping all unknown traffic would affect other apps. Faster observation alone
 does not prove either zero leakage or universal noninterference.
 
-Local Python/portable-model tests, Windows object compilation and the Server
-2022/2025 comparison have executed. The [retained report](evidence/wfp-divert-run-42356168781.md)
-separates passing runtime cases, inconclusive alternatives and remaining limits.
-Fresh snapshot creation accounted for about 82–90% of elapsed query work in the
-cache-on concurrency cases. This narrows the next optimization target, while the
-cache comparison alone does not establish a CPU or first-packet latency gain.
+Local helper checks and the Server 2022/2025 comparisons have executed. The latest
+[retained report](evidence/wfp-divert-run-42468677635.md) separates both completed
+Server 2022 attempts from the Server 2025 rerun's infrastructure failure.
+Standard CI and the model job passed;
+the Windows experiment remains red for subscription cases, short-hold Security
+UDP, unrecognized native-drop callbacks and first-packet ALE shadows. Fresh
+snapshot creation remains the main measured query cost. No CPU saving, safe
+production reuse or general first-packet delivery bound has been established.

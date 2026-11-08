@@ -1,6 +1,6 @@
 # Windows per-app review execution record
 
-Initial review: 2026-11-06; Windows evidence incorporated 2026-11-07. Source baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`.
+Initial review: 2026-11-06; Windows evidence updated 2026-11-08. Source baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`.
 
 This records the initial source review and the subsequent Windows Actions measurements. The initial NOT RUN block is historical and is superseded by the measured results below.
 
@@ -246,10 +246,55 @@ and evidence boundaries are retained in
 This extends the restricted runtime evidence; it does not qualify desktop
 Windows, external routing, sustained load, safe reuse or UDP forwarding.
 
-## Scoped lookup and live endpoint controls: Windows results pending
+## Executed scoped lookup and live endpoint controls
 
-The implemented follow-up adds `--enum-scope destination` alongside the legacy snapshot filter. Distinct native enum conditions are ANDed; the destination profile emits each condition key once, filters only values shared by pending subjects, and broadens explicitly on documented unsupported-condition errors. A 5 ms pre-capture window is compared with the existing 500 ms window using the same authority/deadline checks. No new speedup is asserted before Windows measurements.
+Inspected [run 42468677635](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42468677635),
+source `7398bf4577174570cc6c15a09a3c32f72e2f25c9`, with attempt-1 checkout merge
+`e3bd9e498ac8c4bcab262a73a12e79ea1c3a95cb`. Retained aggregate case summaries from
+completed job logs and compared them with downloaded artifacts. The
+[evidence report](evidence/wfp-divert-run-42468677635.md) records both completed
+Server 2022 attempts, the Server 2025 attempt-1 matrix and rerun download failures.
 
-`--engine endpoint-control` runs TCP and UDP controls before any WinDivert case. Both test apps echo and keep their sockets open for 500 ms; native stored-event polling supplies the original-app reference, while complete ALE queries must fit wholly inside the post-echo live interval. Neither the packet capture program nor the in-process engine is launched. Official SDK layout metadata and bounded copied raw fields help investigate the prior System/repeated-endpoint observations without guessing identity semantics. Results remain pending.
+| Attempt | OS | Job | Runtime evidence |
+| --- | --- | --- | --- |
+| 1 | Server 2022, build 20348 | 128694060927 | 71 cases; 27/27 non-shadow in-process cases, all eight snapshot cases and two live ALE controls pass. Eleven split poll cases reach expected statuses. |
+| 1 | Server 2025, build 26100 | 128694061145 | Same passing counts and qualification limits as Server 2022. |
+| 2 | Server 2022, build 20348 | 128694940212 | All 71 cases execute and all eight snapshot cases pass; destination-query latency regresses despite reduced returned rows. Both live ALE controls again match all six original apps. |
+| 2 | Server 2025 | Dependency download failure | HTTP 504 before traffic; no attribution or performance result. |
 
-Historical Actions and evidence links above remain intact. New uploads and Git evidence continue to contain aggregate counts and relative latency statistics only; raw paths, process/endpoint identities, tuples and absolute timestamps stay in restricted local evidence.
+The destination profile emits unique, ANDed condition keys for values shared by
+pending subjects. Four async/cache-on profiles compare legacy/destination scope
+with 500/5 ms pre-capture windows, in two rounds with reversed order. Attempt 1
+destination/5 ms first-decision p95 was 34.73/33.40 ms versus legacy/500 ms at
+41.68/57.64 ms on Server 2022; Server 2025 measured 40.15/46.58 versus 52.88/52.92
+ms. Returned rows fell 91–96%, but creation still consumed about 97% of combined
+phase elapsed time, averaging 13.5–16.9 ms per create call. Packet tails were not
+universally better: Server 2022 round 1 decided-direct p95 rose 4.25 to 5.00 ms.
+
+The completed Server 2022 rerun reverses the speedup conclusion. Legacy/500 ms
+first-decision p95 was 38.23/48.32 ms; destination/500 ms measured 102.88/30.49 ms,
+and destination/5 ms measured 134.67/441.61 ms. Combined-profile rows were again
+lower, but one create took 235.11 ms. In its second round, creation occupied
+549.79 ms of 550.92 ms query busy time. Passing functional checks and returning
+fewer rows do not establish faster or more reliable admission. Both destination
+variants remain optional experiments; retain the legacy/500 ms default. No CPU
+or production conclusion is justified.
+
+`--engine endpoint-control` runs before any WinDivert case with 500 ms post-echo
+live socket holds. Each TCP/UDP control had six exact original-app ALE matches
+and six native stored-event references, with no System app or shared-endpoint
+groups. Server 2022 repeated this in attempt 2. Mean complete query time in
+attempt 1 was 1.12/1.57 ms for TCP/UDP on Server 2022 and 1.67/2.34 ms on Server
+2025; the rerun measured 1.95/1.96 ms. These are established-socket query costs,
+not admission latency. First-packet ALE shadows still had zero qualifying
+observations while held and remained inconclusive. Lifecycle and interception
+both change between the controls, so they do not establish the cause of the
+earlier System/repeated-endpoint anomaly.
+
+Standard repository CI and the model job passed. Completed Windows experiment
+matrices remain red for subscription comparisons, short-hold Security UDP,
+unrecognized native-drop callbacks and first-packet ALE shadows. The separate
+native-control rerun also failed download before traffic. Historical evidence
+links remain intact. New Git evidence and uploads contain aggregate counts and
+relative latency statistics only; raw paths, process/endpoint identities, tuples
+and absolute timestamps remain in restricted local evidence.

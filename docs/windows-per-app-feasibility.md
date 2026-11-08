@@ -1,8 +1,8 @@
 # Windows per-app transparent proxy feasibility review
 
-Initial review: 2026-11-06; updated with Windows measurements on 2026-11-07. Source review baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`. Runtime evidence identifies its own tested PoC SHA below.
+Initial review: 2026-11-06; updated with Windows measurements on 2026-11-08. Source review baseline: `ec5f13dbfdf1a43dc91174d29bc6510add7dfca9`. Runtime evidence identifies its own tested PoC SHA below.
 
-Updated 2026-11-07 with Windows runtime evidence from GitHub Actions runs 42280670136, 42282264784, 42340194216, 42348888370, 42356168781 and 42394400675 of the PoC at `experiments/wfp-divert`. See [Measured Windows evidence](#measured-windows-evidence) for exact runs and limits.
+Updated with Windows runtime evidence from GitHub Actions runs 42280670136, 42282264784, 42340194216, 42348888370, 42356168781, 42394400675 and completed attempts of 42468677635 of the PoC at `experiments/wfp-divert`. See [Measured Windows evidence](#measured-windows-evidence) for exact runs and limits.
 
 ## Verdict and evidence boundary
 
@@ -19,7 +19,7 @@ The review workspace is Linux x86_64 (kernel `6.18.57`), without a supplied Wind
 
 ## Measured Windows evidence
 
-Earlier runs used `windows-2022` (OS build 20348); run 42356168781 also used Server 2025 (build 26100). All use one host, IPv4, controlled loopback endpoints, test EXEs A/B and the official signed WinDivert driver. `external-*` cases connect to `api.github.com:443` for connection/attribution only, with no payload, echo or proxy validation. Every PoC Windows job concluded failure because subscription comparisons fail; the 1000 ms Security UDP and later ALE shadow cases also do not pass. The statements below are per case.
+Earlier runs used `windows-2022` (OS build 20348); runs 42356168781 and 42468677635 also used Server 2025 (build 26100). Packet cases use one host, IPv4, controlled loopback endpoints, test EXEs A/B and the official signed WinDivert driver. The latest live ALE controls run before packet interception. `external-*` cases connect to `api.github.com:443` for connection/attribution only, with no payload, echo or proxy validation. Completed PoC Windows matrices remain red because subscription comparisons fail; short-hold Security UDP, native-drop recognition and first-packet ALE shadows also fail or stay inconclusive. The statements below are per case.
 
 | Run (head) | Measured | Consequence |
 | --- | --- | --- |
@@ -28,6 +28,7 @@ Earlier runs used `windows-2022` (OS build 20348); run 42356168781 also used Ser
 | [42340194216](evidence/wfp-divert-run-42340194216.md) (`edba304`) | Poll mode on a high-resolution waitable timer (5 ms wait), enumeration filtered to CLASSIFY_ALLOW, 300 ms overlap. 11/11 poll cases reached their pass status: hold tcp, udp, delayed, too-late and missing; redirect through the real Gateinto proxy and CONNECT fixture; external connect; SYN retransmit; tuple reuse (CHARACTERIZED_REUSE_REJECTION); repeats of hold tcp and redirect. | First-packet hold with polled native ownership works for this restricted topology. |
 | [42348888370](evidence/wfp-divert-run-42348888370.md) (`e3336bd`) | All 11 split poll cases again reached expected statuses. Seven in-process cases reported PASS, but decision latency omitted blocking enumeration time, UDP launched TCP clients, and leakcheck had zero timeouts/leaks/RSTs. QUIC failed before readiness. Reconstructing complete small-case decision logs gives p50 about 25.7–33.1 ms for TCP hold/redirect, rather than the reported 10.4–11.9 ms. | In-process TCP redirection is promising, but a speedup, real UDP/QUIC coverage and live connection termination are not established. The later run below validates the repaired paths. |
 | [42356168781](evidence/wfp-divert-run-42356168781.md) (`804e004`) | Server 2022 and 2025: 16/16 non-shadow in-process cases pass per OS, including real UDP/QUIC controls and client-observed reset after deliberate late ownership. All 11 split poll cases per OS reach expected statuses. In 50-client cases async reduces decided-direct p95 from 17.3 to 2.7 ms and 32.9 to 12.0 ms respectively. Snapshot creation accounts for about 82–90% of cache-on concurrency query elapsed time. Subscribe2/3 deliver no callbacks; Subscribe4 remains about 1 s late. ALE shadow tuples report System and fail original-app matching. | Prefer async lookup to isolate already-decided traffic from synchronous BFE work. A universal first-packet speedup, CPU saving and replacement ownership source are not established. |
+| [42468677635, attempts 1 and 2](evidence/wfp-divert-run-42468677635.md) (`7398bf4`, checkout merge `e3bd9e4`) | Attempt 1 on Server 2022/2025: 27/27 non-shadow in-process cases pass per OS, including all eight snapshot cases; 11 split poll cases reach expected statuses. Destination/5 ms returns 91–96% fewer rows and improves first-decision p95 in these initial rounds, but the completed Server 2022 rerun develops large create/decision tails despite all profiles passing. Live TCP/UDP ALE controls match all six original apps and native references; first-packet shadows remain inconclusive. The Server 2025 rerun fails download before traffic. | Keep both destination scopes/windows experimental and retain the legacy default. Row reduction is repeatable; faster or more reliable admission is not established. Established ALE identity does not qualify first-packet admission or establish the cause of the earlier anomaly. |
 
 Run 42340194216 poll-mode measurements:
 
@@ -59,9 +60,11 @@ The local target, adapter, Gateinto and gateway fixture share one Windows host. 
 
 The corrected loopback injection uses outbound direction for translated local-to-local packets and restores direction according to the original flow. Earlier inbound injection timed out; that was a PoC packet-path bug, not evidence that buffering cannot work. Full local raw records are available separately from the redacted Git summaries.
 
-### Scoped lookup and live endpoint follow-up: Windows results pending
+### Scoped lookup and live endpoint results
 
-The implemented follow-up compares destination-filtered native snapshots with the legacy filter and a 5 ms pre-capture event window. It separately samples established TCP/UDP sockets during a 500 ms post-echo hold, before any WinDivert case, against exact original-app stored-event evidence. This isolates the earlier System/repeated-endpoint anomaly from packet interception. The sampler reports official SDK ABI layout and bounded raw diagnostic fields without becoming ownership authority. These changes establish neither a speedup nor a resolved endpoint identity; see [the experiment](../experiments/wfp-divert/README.md).
+In [attempt 1 of run 42468677635](evidence/wfp-divert-run-42468677635.md), destination/5 ms first-decision p95 was 34.73/33.40 ms across the two Server 2022 rounds, versus legacy/500 ms at 41.68/57.64 ms; Server 2025 measured 40.15/46.58 versus 52.88/52.92 ms. Creation still dominated query work, and packet tails did not improve universally. The completed Server 2022 rerun reversed the first-decision result: destination/5 ms reached 134.67/441.61 ms versus legacy/500 ms at 38.23/48.32 ms; destination/500 ms also reached 102.88 ms in round 1. A create call reached 235.11 ms. All eight snapshot cases passed functional checks. Keep both destination variants optional experiments and retain legacy/500 ms as the default; no CPU, production or repeatable speedup claim is established. See [the full profile comparison](windows-per-app-low-latency.md).
+
+Separate live ALE controls sampled established TCP/UDP sockets during a 500 ms post-echo hold before any WinDivert case. Each case had six correct original-app ALE matches and six native stored-event references, with no System app or shared-endpoint groups; both Server 2022 controls repeated this in attempt 2. Complete mean query cost in attempt 1 was 1.12/1.57 ms for TCP/UDP on Server 2022 and 1.67/2.34 ms on Server 2025; the Server 2022 rerun measured 1.95/1.96 ms. These are established-socket query costs, not admission latency. First-packet shadows still had zero qualifying observations while held. Both lifecycle and interception differ between controls, so the earlier anomaly cannot be attributed to WinDivert from this comparison.
 
 ## Existing source
 
@@ -102,7 +105,7 @@ The official UWP troubleshooting example proves the allow mechanism exists, not 
 ALE AUTH_CONNECT classifies TCP connect attempts and first UDP sends to each unique remote address/port. That is a kernel authorization point, before a normally permitted packet continues. It does **not** synchronously deliver the user callback first [8]. FLOW_ESTABLISHED for TCP occurs after the handshake and therefore cannot be a SYN ownership gate.
 
 The PoC logs distinct times: WFP occurrence FILETIME, WFP callback-entry QPC, evidence-consumption/decision-ready QPC, WinDivert capture `addr.Timestamp` (QPC clock), and `WinDivertRecv` return QPC [13]. For 5156 it also logs TimeCreated and callback-entry QPC. Compare receive QPC values for notification order, and decision-ready QPC against capture QPC for decision availability. The tested runs use one tightly bracketed UTC/QPC anchor; reported bracket widths were microseconds, but wall-clock steps during a run are not monitored. Cross-clock occurrence estimates are consequently approximate. Receipt/capture comparisons use QPC directly. TimeCreated is not an exact classifyFn execution measurement.
- With polling, receipt is when a poll observed the event and includes polling latency. These restricted-run measurements are not delivery bounds. Raw clocks stay in local evidence; published summaries contain aggregate relative latency.
+With polling, receipt is when a poll observed the event and includes polling latency. These restricted-run measurements are not delivery bounds. Raw clocks stay in local evidence; published summaries contain aggregate relative latency.
 
 State-machine requirements (the PoC implements the fresh-flow subset and retains maps until process exit):
 
@@ -198,7 +201,7 @@ The follow-up PoC implements a subset of these harness requirements, described i
 
 ### Test matrix and pass evidence
 
-Status after the runs in [Measured Windows evidence](#measured-windows-evidence). PARTIAL means a bounded subset on the identified Server 2022/2025 runners; it does not satisfy the full row's pass condition. The scoped lookup and no-divert endpoint follow-up has no new Windows result yet.
+Status after the runs in [Measured Windows evidence](#measured-windows-evidence), including both completed Server 2022 attempts of the scoped lookup/live ALE comparison. PARTIAL means a bounded subset on the identified Server 2022/2025 runners; it does not satisfy the full row's pass condition.
 
 | ID | Status |
 | --- | --- |
@@ -236,7 +239,7 @@ Status after the runs in [Measured Windows evidence](#measured-windows-evidence)
 
 For R1, additionally make R:r reachable from the gateway while denying a direct A-to-R path at the controlled network, without suppressing the local ALE allow event. Record both network paths and disable mixed routing. This distinguishes true upstream use from a direct-route false positive. Do not treat an authorization block before packet capture as a successful redirection test.
 
-Required artifacts per run: `manifest.json`, native-WFP JSONL, raw 5156 XML and callback JSONL, NETWORK packet trace/PCAP plus metadata, optional control-only SOCKET/FLOW JSONL, decision/map transitions, adapter accept/CONNECT logs (credentials redacted), Gateinto debug output, gateway CONNECT log, target/client nonce and hash logs. Include emitted/observed/missing/repeated counts separately for each source and transport. The trace record must include run ID, record sequence, source, occurrence time, receipt QPC, consumption QPC, full tuple, app blob/path, nullable PID, layer/filter/reauth, generation, action and reason. A zero wrong-app count over a finite run is evidence for that run, not a universal guarantee.
+Required restricted local evidence per run: `manifest.json`, native-WFP JSONL, raw 5156 XML and callback JSONL, NETWORK packet trace/PCAP plus metadata, optional control-only SOCKET/FLOW JSONL, decision/map transitions, adapter accept/CONNECT logs (credentials redacted), Gateinto debug output, gateway CONNECT log, target/client nonce and hash logs. Include emitted/observed/missing/repeated counts separately for each source and transport. Local trace records retain run ID, record sequence, source, occurrence time, receipt QPC, consumption QPC, full tuple, app blob/path, nullable PID, layer/filter/reauth, generation, action and reason. New Git evidence and Actions uploads contain aggregate counts and relative latency statistics only. A zero wrong-app count over a finite run is evidence for that run, not a universal guarantee.
 
 After testing export Security evidence before restoring audit settings:
 

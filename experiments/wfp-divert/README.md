@@ -191,7 +191,8 @@ The new comparisons use `--window-before-ms 5` against the existing 500 ms basel
 or delivery bound. Lookups retry with a 0, 1, 2, 4, 8 ms backoff until the hold
 deadline. Enumeration errors, incomplete enumeration and cleanup failures discard
 the result and fail the case, with `lookup_errors` and `bfe_errors` in the summary.
-Scoped-filter and tighter-window Windows performance results are **pending**.
+The completed comparisons below retain legacy/500 ms as the default; both
+destination/500 ms and destination/5 ms remain optional experiments.
 
 An ownership-based decision requires the match in the portable, unit-tested
 `inproc::match_generation` to accept an event: exact tuple,
@@ -274,6 +275,26 @@ controlled original-app tuples; all four shadow cases correctly stayed inconclus
 See [the low-latency research](../../docs/windows-per-app-low-latency.md) for the
 design, official API references, qualification limits and comparison criteria.
 
+### Executed snapshot comparisons
+
+[Run 42468677635](../../docs/evidence/wfp-divert-run-42468677635.md), source
+`7398bf4` with checkout merge `e3bd9e4`, completed attempt 1 on Server 2022/2025
+and attempt 2 on Server 2022. Attempt 1 passed all 27 non-shadow in-process cases
+per OS, including eight paired snapshot cases, and all 11 split poll cases
+reached expected statuses. The Server 2022 rerun passed all eight snapshot cases too.
+
+Destination/5 ms returned fewer rows and improved first-decision p95 in the
+initial rounds. The rerun instead reached 134.67/441.61 ms versus legacy/500 ms
+at 38.23/48.32 ms; destination/500 ms also reached 102.88 ms in round 1. Snapshot
+creation produced a 235.11 ms call and dominated query work. Row reduction is
+repeatable, but neither destination profile is established as faster or more
+reliable. Retain the legacy default; no CPU or production guarantee follows.
+
+Standard CI and the model job passed. Completed Windows experiment jobs remain
+red for subscription cases, short-hold Security UDP, native-drop recognition and
+first-packet ALE shadows. The Server 2025 attempt-2 dependency download failed
+with HTTP 504 before traffic; that failure provides no performance measurement.
+
 ## Live endpoint control (`--engine endpoint-control`)
 
 This separate TCP/UDP control runs before any WinDivert case. The harness starts
@@ -294,7 +315,16 @@ Neither outcome authorizes packet routing or proves first-packet admission.
 The sampler records official SDK `sizeof`/`offsetof`, pointer width/architecture,
 OS version and resolved API names. It deep-copies token/IPsec/flag values and an
 app-ID hex prefix capped at 128 bytes with explicit size/truncation fields. Added
-copies count toward the snapshot byte budget. These diagnostics remain local;
-published summaries expose aggregate observations only. The earlier System and
-repeated-endpoint observations are unresolved, and Windows results for this
-no-interception control are **pending**.
+copies count toward the snapshot byte budget. Raw endpoint diagnostics remain
+local; published summaries contain counts, relative timings and compiler layout
+metadata.
+
+In run 42468677635 attempt 1, both TCP/UDP controls on both operating systems
+matched all six original apps and native references, with no System app or shared
+endpoint groups. Server 2022 repeated both controls successfully in attempt 2.
+Mean complete query costs were 1.12/1.57 ms for TCP/UDP on Server 2022 and
+1.67/2.34 ms on Server 2025 in attempt 1; the rerun measured 1.95/1.96 ms.
+These established-socket costs do not measure first-packet admission latency.
+Both first-packet shadow cases per OS remained inconclusive with zero qualifying
+observations while held. The live control changes lifecycle and interception
+together, so it does not establish that WinDivert caused the earlier anomaly.
