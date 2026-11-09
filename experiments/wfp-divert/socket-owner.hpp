@@ -1,7 +1,10 @@
 #pragma once
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -9,6 +12,20 @@
 #include <tuple>
 
 namespace socket_owner {
+
+template <class Mutex>
+class RevisionWake {
+    Mutex& mutex;
+    std::condition_variable& wake;
+    std::atomic<uint64_t> version{0};
+public:
+    RevisionWake(Mutex& guard, std::condition_variable& event) : mutex(guard), wake(event) {}
+    uint64_t revision() const { return version.load(); }
+    void changed() {
+        { std::lock_guard<Mutex> lock(mutex); ++version; }
+        wake.notify_one();
+    }
+};
 
 struct Tuple {
     uint32_t local = 0, remote = 0;

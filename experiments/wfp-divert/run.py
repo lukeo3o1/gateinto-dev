@@ -23,11 +23,14 @@ VALIDATION_STAGES = ("startup", "clients", "collectors", "client_evidence", "cli
 REFERENCE_MISSING_CAUSES = ("collector_unclean", "invalid_clock", "invalid_client", "no_polled_tuple",
                             "no_original_app", "incomplete_original_app", "wrong_direction", "wrong_layer",
                             "invalid_event_time", "before_attempt", "after_capture", "outside_window",
-                            "fresh_app_conflict")
+                            "fresh_app_conflict", "missing_pre_send_decision", "ambiguous_packet_generation",
+                            "after_pre_send_decision")
 REFERENCE_POLL_INTERVAL_MS = 100
+REFERENCE_AUDIT_BOUNDARY = "attempt_to_first_pre_reinjection_decision"
 REFERENCE_DIAGNOSTIC_COUNTS = ("original_app_outbound_layer48_clients", "engine_event_clients",
                               "engine_event_seen_in_poll_clients", "engine_event_missing_from_poll_clients",
-                              "engine_event_seen_in_final_enum_clients", "fresh_final_enum_only_clients")
+                              "engine_event_seen_in_final_enum_clients", "fresh_final_enum_only_clients",
+                              "pre_send_boundary_clients", "original_app_after_capture_before_pre_send_clients")
 SOCKET_DIAGNOSTIC_LABELS = dict(
     connect_changes=("new", "exact_duplicate", "timestamp_changed", "pid_changed", "endpoint_changed", "tuple_changed", "invalid"),
     identity_failures=("process_open_access_denied", "process_open_other", "process_times", "creation_guard", "image_name", "utf8"),
@@ -195,6 +198,8 @@ def public_summary(summary):
             if isinstance(value.get("native_summary"), dict):
                 projected["native_summary"] = public_summary(dict(native_summary=value["native_summary"]))["native_summary"]
             if name == "native_reference_audit":
+                if value.get("audit_boundary") == REFERENCE_AUDIT_BOUNDARY:
+                    projected["audit_boundary"] = REFERENCE_AUDIT_BOUNDARY
                 for key, fields in (("missing_causes", REFERENCE_MISSING_CAUSES),
                                     ("diagnostic_counts", REFERENCE_DIAGNOSTIC_COUNTS)):
                     if isinstance(value.get(key), dict):
@@ -206,6 +211,11 @@ def public_summary(summary):
                         if isinstance(timing.get(key), dict):
                             projected["missing_reference_timing"][key] = numeric_fields(
                                 timing[key], ("count", "min", "p50", "p95", "max"))
+                timing = value.get("reference_timing")
+                if isinstance(timing, dict):
+                    projected["reference_timing"] = {key: numeric_fields(timing[key], ("count", "min", "p50", "p95", "max"))
+                        for key in ("original_minus_capture_ms", "original_minus_pre_send_ms", "pre_send_minus_capture_ms")
+                        if isinstance(timing.get(key), dict)}
             result[name] = projected
     if isinstance(summary.get("native_reference_cleanup"), dict):
         cleanup = summary["native_reference_cleanup"]
@@ -625,7 +635,7 @@ def client_latency_summary(clients, frequency):
     return result
 
 
-def reference_diagnostics(key, expected, began, captured, native_records, packet_records, clock, missing, conflict):
+def reference_diagnostics(key, expected, began, captured, pre_send, native_records, packet_records, clock, missing, conflict):
     frequency, anchor_filetime, anchor_qpc, uncertainty = clock
     polled = [r for r in native_records if r.get("kind") == "wfp" and tuple_key(r) == key]
     original = [r for r in polled if normalized_path(r.get("app_path", "")) == expected]
@@ -641,7 +651,7 @@ def reference_diagnostics(key, expected, began, captured, native_records, packet
     def occurred(event):
         return anchor_qpc * 10_000_000 + (event["event_filetime"] - anchor_filetime) * frequency
 
-    lower, upper = (began - uncertainty) * 10_000_000, (captured + uncertainty) * 10_000_000
+    lower, upper = (began - uncertainty) * 10_000_000, (pre_send + uncertainty) * 10_000_000
     owners = {r["event_filetime"] for r in packet_records if r.get("kind") == "ownership" and tuple_key(r) == key
               and r.get("capture_qpc") == captured and r.get("ownership_source", "wfp") == "wfp"
               and normalized_path(r.get("app_path", "")) == expected and positive_integer(r.get("event_filetime"))}
@@ -651,7 +661,9 @@ def reference_diagnostics(key, expected, began, captured, native_records, packet
         engine_event_missing_from_poll_clients=bool(owners) and not seen_poll,
         engine_event_seen_in_final_enum_clients=bool(owners.intersection(r["event_filetime"] for r in final)),
         fresh_final_enum_only_clients=missing and not any(lower <= occurred(r) <= upper for r in qualified)
-            and any(lower <= occurred(r) <= upper for r in final))
+            and any(lower <= occurred(r) <= upper for r in final), pre_send_boundary_clients=1,
+        original_app_after_capture_before_pre_send_clients=any(
+            lower <= occurred(r) <= upper and occurred(r) > (captured + uncertainty) * 10_000_000 for r in qualified))
     cause = None
     if missing:
         cause = ("no_polled_tuple" if not polled else "no_original_app" if not original
@@ -659,7 +671,7 @@ def reference_diagnostics(key, expected, began, captured, native_records, packet
                  else "wrong_direction" if not outbound else "wrong_layer" if not layer
                  else "invalid_event_time" if not qualified
                  else "before_attempt" if all(occurred(r) < lower for r in qualified)
-                 else "after_capture" if all(occurred(r) > upper for r in qualified) else "outside_window")
+                 else "after_pre_send_decision" if all(occurred(r) > upper for r in qualified) else "outside_window")
     timing = None
     if missing and qualified:
         nearest = min(qualified, key=lambda r: abs(occurred(r) - captured * 10_000_000))
@@ -671,9 +683,29 @@ def reference_diagnostics(key, expected, began, captured, native_records, packet
     return cause, counts, timing
 
 
+def reference_pre_send_boundary(packet_records, key):
+    owners = [r for r in packet_records if r.get("kind") == "ownership" and tuple_key(r) == key]
+    decisions = [r for r in packet_records if r.get("kind") == "decision" and tuple_key(r) == key]
+    if not owners or not decisions:
+        return None, "missing_pre_send_decision"
+    if any(not positive_integer(r.get("generation")) or not positive_integer(r.get("capture_qpc")) for r in owners):
+        return None, "ambiguous_packet_generation"
+    identities = {(r["generation"], r["capture_qpc"]) for r in owners}
+    if len(identities) != 1:
+        return None, "ambiguous_packet_generation"
+    generation, captured = next(iter(identities))
+    if any((r.get("generation"), r.get("capture_qpc")) != (generation, captured) for r in decisions):
+        return None, "ambiguous_packet_generation"
+    forward = [r for r in decisions if r.get("action") in ("proxy", "direct") and r.get("reason") != "leak_reset"]
+    if not forward or any(not positive_integer(r.get("qpc")) or r["qpc"] < captured for r in forward):
+        return None, "missing_pre_send_decision"
+    return (generation, captured, min(r["qpc"] for r in forward)), None
+
+
 def native_reference_audit(clients, packet_records, native_records, app_paths, clock, returncode):
     report = dict(success=False, client_total=len(clients), matched_clients=0, missing_clients=0,
                   conflicting_clients=0, poll_interval_ms=REFERENCE_POLL_INTERVAL_MS, drain_ms=1100, rows=[],
+                  audit_boundary=REFERENCE_AUDIT_BOUNDARY,
                   missing_causes={key: 0 for key in REFERENCE_MISSING_CAUSES},
                   diagnostic_counts={key: 0 for key in REFERENCE_DIAGNOSTIC_COUNTS})
     summaries = [r for r in native_records if r.get("kind") == "summary"]
@@ -697,19 +729,28 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
         return report
     seen = set()
     timing = []
+    matched_timing = []
     for client in clients:
         attempts = [r for r in client.get("attempts", []) if r.get("kind") == "client_attempt"
                     and r.get("nonce") == client.get("nonce")]
         key = tuple_key(attempts[0]) if len(attempts) == 1 else None
-        captures = [r.get("capture_qpc") for r in packet_records if r.get("kind") == "decision"
-                    and tuple_key(r) == key and positive_integer(r.get("capture_qpc"))]
-        if (not key or key in seen or not captures or not positive_integer(client.get("pid"))
+        if (not key or key in seen or not positive_integer(client.get("pid"))
                 or attempts[0].get("pid") != client["pid"] or not positive_integer(attempts[0].get("attempt_qpc"))):
             report["missing_clients"] += 1
             report["missing_causes"]["invalid_client"] += 1
             continue
         seen.add(key)
-        began, captured = attempts[0]["attempt_qpc"], min(captures)
+        boundary, cause = reference_pre_send_boundary(packet_records, key)
+        if boundary is None:
+            report["missing_clients"] += 1
+            report["missing_causes"][cause] += 1
+            continue
+        generation, captured, pre_send = boundary
+        began = attempts[0]["attempt_qpc"]
+        if began > captured:
+            report["missing_clients"] += 1
+            report["missing_causes"]["invalid_client"] += 1
+            continue
         expected = normalized_path(app_paths[client["app"]])
         matches, conflict = [], False
         for event in native_records:
@@ -718,7 +759,7 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
                     or not positive_integer(event.get("event_filetime")) or not event.get("app_path")):
                 continue
             occurred = anchor_qpc * 10_000_000 + (event["event_filetime"] - anchor_filetime) * frequency
-            if not (began - uncertainty) * 10_000_000 <= occurred <= (captured + uncertainty) * 10_000_000:
+            if not (began - uncertainty) * 10_000_000 <= occurred <= (pre_send + uncertainty) * 10_000_000:
                 continue
             if normalized_path(event["app_path"]) == expected:
                 matches.append(event)
@@ -727,7 +768,7 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
         report["matched_clients"] += bool(matches) and not conflict
         report["missing_clients"] += not matches or conflict
         report["conflicting_clients"] += conflict
-        cause, counts, delta = reference_diagnostics(key, expected, began, captured, native_records,
+        cause, counts, delta = reference_diagnostics(key, expected, began, captured, pre_send, native_records,
             packet_records, clock, not matches or conflict, conflict)
         if cause:
             report["missing_causes"][cause] += 1
@@ -735,8 +776,17 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
             report["diagnostic_counts"][count_name] += int(value)
         if delta:
             timing.append(delta)
+        if matches and not conflict:
+            nearest = min(matches, key=lambda r: abs(anchor_qpc * 10_000_000 +
+                (r["event_filetime"] - anchor_filetime) * frequency - captured * 10_000_000))
+            ticks = anchor_qpc * 10_000_000 + (nearest["event_filetime"] - anchor_filetime) * frequency
+            offsets = ((ticks - captured * 10_000_000) / (frequency * 10_000),
+                       (ticks - pre_send * 10_000_000) / (frequency * 10_000), (pre_send - captured) * 1000 / frequency)
+            if all(abs(value) <= 600_000 for value in offsets):
+                matched_timing.append(offsets)
         report["rows"].append(dict(app=client["app"], tuple=list(key), matched=bool(matches) and not conflict,
-                                   attempt_qpc=began, capture_qpc=captured, references=matches))
+                                   attempt_qpc=began, capture_qpc=captured, generation=generation,
+                                   pre_send_decision_qpc=pre_send, references=matches))
     def distribution(values):
         values = sorted(values)
         if not values:
@@ -747,6 +797,10 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
     report["missing_reference_timing"] = dict(anchor_uncertainty_ms=uncertainty * 1000 / frequency,
         nearest_original_minus_capture_ms=distribution(value[0] for value in timing),
         nearest_original_minus_attempt_ms=distribution(value[1] for value in timing))
+    report["reference_timing"] = dict(
+        original_minus_capture_ms=distribution(value[0] for value in matched_timing),
+        original_minus_pre_send_ms=distribution(value[1] for value in matched_timing),
+        pre_send_minus_capture_ms=distribution(value[2] for value in matched_timing))
     report["success"] = bool(clients) and report["matched_clients"] == len(clients)
     return report
 

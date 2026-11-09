@@ -413,6 +413,10 @@ proxy and echo its nonce; the other app must echo directly. A separate native
 WFP collector audits each original client identity after routing, with the same
 100 ms poll interval and the same 1100 ms shutdown drain for both ownership sources. Missing
 independent references fail validation rather than borrowing the routing proof.
+The reference event must fall between the client attempt and its first exact
+generation's normal routing decision, which is logged before reinjection.
+This is a pre-reinjection audit; SOCKET admission separately requires its
+kernel CONNECT event no later than first packet capture.
 
 SOCKET routing opens its metadata receiver before NETWORK capture, resolves the
 process image on a separate worker, and buffers an undecided first packet until
@@ -457,3 +461,10 @@ This conservative policy also rejects a SYN retransmission after quarantine;
 it does not qualify ordinary lossy-network retransmission behavior.
 This candidate requires a new Windows comparison with complete independent
 references; production reuse remains unqualified.
+
+The [first pinned-owner comparison](../../docs/evidence/wfp-socket-routing-run-42674843682.md)
+passed all four SOCKET bursts and both delayed-identity controls, while three
+short cases failed and one passing short case had a slow tail. Its remaining
+check-and-wait notification race is repaired by publishing revisions under the
+same mutex used for the packet worker's wait. No periodic polling workaround is
+used. A new end-to-end comparison must validate that repair.

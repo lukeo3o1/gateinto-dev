@@ -153,7 +153,58 @@ class SocketRoutingTests(unittest.TestCase):
         self.assertTrue(report["success"])
         self.assertEqual(2, report["matched_clients"])
 
-    def test_reference_missing_wrong_path_or_post_capture_reinjection_cannot_confirm(self):
+    def test_native_event_after_capture_but_before_first_forward_decision_is_valid(self):
+        records = self.native_records()
+        records[0]["event_filetime"] = records[1]["event_filetime"] = 11_130_000
+        report = lab.native_reference_audit(self.clients, self.records, records, self.paths, self.clock, 0)
+        self.assertTrue(report["success"])
+        self.assertEqual("attempt_to_first_pre_reinjection_decision", report["audit_boundary"])
+        public = lab.public_summary(dict(status="PASS_RESTRICTED_CASE", native_reference_audit=report))
+        self.assertEqual(report["audit_boundary"], public["native_reference_audit"]["audit_boundary"])
+        self.assertEqual(3, public["native_reference_audit"]["reference_timing"]["original_minus_capture_ms"]["p50"])
+        self.assertEqual(-7, public["native_reference_audit"]["reference_timing"]["original_minus_pre_send_ms"]["p50"])
+        self.assertEqual(public, lab.public_summary(public))
+        self.records[0]["socket_event_qpc"] = 1111
+        with self.assertRaises(RuntimeError):
+            self.validate()
+
+    def test_audit_cannot_use_a_later_decision_drop_or_echo_to_accept_post_send_time(self):
+        records = self.native_records()
+        records[0]["event_filetime"] = 11_300_000
+        packet_records = [*self.records, dict(self.records[1], qpc=1400),
+                          dict(self.records[1], action="drop", reason="leak_reset", qpc=1500)]
+        report = lab.native_reference_audit(self.clients, packet_records, records, self.paths, self.clock, 0)
+        self.assertFalse(report["success"])
+        self.assertEqual(1, report["missing_causes"]["after_pre_send_decision"])
+
+    def test_audit_requires_an_unambiguous_generation_matched_forward_decision(self):
+        for changes in [dict(action="drop", reason="leak_reset"), dict(action="direct", reason="leak_reset"),
+                        dict(qpc=0), dict(qpc=1109), dict(generation=1111), dict(capture_qpc=1111)]:
+            with self.subTest(changes=changes):
+                packet_records = copy.deepcopy(self.records)
+                packet_records[1].update(changes)
+                report = lab.native_reference_audit(self.clients, packet_records, self.native_records(), self.paths, self.clock, 0)
+                self.assertFalse(report["success"])
+                self.assertEqual(1, report["missing_clients"])
+        packet_records = [r for r in self.records if r is not self.records[1]]
+        report = lab.native_reference_audit(self.clients, packet_records, self.native_records(), self.paths, self.clock, 0)
+        self.assertFalse(report["success"])
+        packet_records = [*self.records, dict(self.records[1], generation=1111, capture_qpc=1111, qpc=2000)]
+        self.assertFalse(lab.native_reference_audit(self.clients, packet_records, self.native_records(), self.paths, self.clock, 0)["success"])
+
+    def test_timeout_direct_is_a_pre_injection_boundary_for_the_fault_control(self):
+        packet_records = copy.deepcopy(self.records)
+        packet_records[1].update(action="direct", reason="timeout", qpc=1200)
+        native = self.native_records()
+        native[0]["event_filetime"] = 11_900_000
+        report = lab.native_reference_audit(self.clients, packet_records, native, self.paths, self.clock, 0)
+        self.assertTrue(report["success"])
+
+    def test_audit_boundary_label_rejects_arbitrary_public_metadata(self):
+        public = lab.public_summary(dict(status="FAIL", native_reference_audit=dict(audit_boundary="PRIVATE-PATH")))
+        self.assertNotIn("audit_boundary", public["native_reference_audit"])
+
+    def test_reference_missing_wrong_path_or_post_decision_reinjection_cannot_confirm(self):
         for changes in [dict(app_path="System"), dict(event_filetime=11_500_000),
                         dict(layer_id=49), dict(complete=False)]:
             with self.subTest(changes=changes):
@@ -186,7 +237,7 @@ class SocketRoutingTests(unittest.TestCase):
 
     def test_missing_reference_cause_bins_preserve_the_strict_window(self):
         for changes, cause in [(dict(layer_id=49), "wrong_layer"), (dict(app_path="System"), "no_original_app"),
-                               (dict(event_filetime=11_500_000), "after_capture"),
+                               (dict(event_filetime=11_500_000), "after_pre_send_decision"),
                                (dict(event_filetime=10_900_000), "before_attempt")]:
             with self.subTest(cause=cause):
                 records = self.native_records()

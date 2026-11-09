@@ -280,7 +280,9 @@ Distribution distribution(std::vector<double> values) {
 
 #if !defined(_WIN32) || defined(INPROC_TEST)
 #include <cassert>
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 static inproc::EventRef event_a(int64_t when, uint32_t layer = 48,
                                  const std::string& app = "\\device\\lab\\app-a.exe") {
@@ -296,6 +298,36 @@ static inproc::EventRef event_a(int64_t when, uint32_t layer = 48,
 
 int inproc_self_test() {
     using namespace inproc;
+    {
+        struct ObservedMutex {
+            std::mutex native, observation;
+            std::condition_variable observed;
+            bool attempted = false, finished = false;
+            void lock() {
+                { std::lock_guard<std::mutex> lock(observation); attempted = true; }
+                observed.notify_one();
+                native.lock();
+            }
+            void unlock() { native.unlock(); }
+        } guard;
+        std::condition_variable wake;
+        socket_owner::RevisionWake<ObservedMutex> signal(guard, wake);
+        std::unique_lock<std::mutex> waiter(guard.native);
+        assert(signal.revision() == 0);
+        std::thread publisher([&] {
+            signal.changed();
+            { std::lock_guard<std::mutex> lock(guard.observation); guard.finished = true; }
+            guard.observed.notify_one();
+        });
+        {
+            std::unique_lock<std::mutex> observed(guard.observation);
+            assert(guard.observed.wait_for(observed, std::chrono::seconds(2), [&] { return guard.attempted || guard.finished; }));
+            assert(!guard.finished);
+            assert(signal.revision() == 0);
+        }
+        assert(wake.wait_for(waiter, std::chrono::seconds(2), [&] { return signal.revision() != 0; }));
+        publisher.join();
+    }
     {
         using namespace socket_owner;
         const socket_owner::Tuple key{0xC0000202u, 0xCB007109u, 40001, 443, 6};
@@ -1073,7 +1105,7 @@ Options options(int argc, char** argv) {
 class SocketSource {
     using Mutex = std::recursive_mutex;
     Log& log;
-    std::condition_variable& packet_wake;
+    socket_owner::RevisionWake<std::mutex> packet_signal;
     int64_t frequency;
     HANDLE handle = INVALID_HANDLE_VALUE;
     std::thread receiver, resolver;
@@ -1084,9 +1116,7 @@ class SocketSource {
     std::map<std::string, uint64_t> connect_changes, post_capture_connect, identity_failures, close_context;
     bool resolver_stopping = false, stopped = false;
     std::atomic<bool> stopping{false}, abort_receive{false}, receiver_done{true}, receiver_started{false};
-    std::atomic<uint64_t> version{0};
-
-    void changed() { ++version; packet_wake.notify_one(); }
+    void changed() { packet_signal.changed(); }
     void fail(const char* operation, DWORD code) {
         const auto ordinal = source_errors.fetch_add(1);
         { std::lock_guard<Mutex> lock(mutex); history.poison(); }
@@ -1247,13 +1277,14 @@ public:
     std::atomic<bool> drained{false};
     bool clean_shutdown = false;
     std::vector<double> event_to_recv_ms, event_to_identity_ready_ms, identity_lookup_ms;
-    SocketSource(Log& output, std::condition_variable& wake, int64_t ticks) : log(output), packet_wake(wake), frequency(ticks) {}
+    SocketSource(Log& output, std::condition_variable& wake, std::mutex& packet_mutex, int64_t ticks)
+        : log(output), packet_signal(packet_mutex, wake), frequency(ticks) {}
     bool failed() const { return source_errors || log.failed(); }
     void network_failure(const char* operation, DWORD code, bool overflow = false) {
         if (overflow) ++queue_overflow;
         fail(operation, code);
     }
-    uint64_t revision() const { return version.load(); }
+    uint64_t revision() const { return packet_signal.revision(); }
     size_t size() { std::lock_guard<Mutex> lock(mutex); return history.size(); }
     template <class Operation>
     void synchronized(Operation operation) {
@@ -1559,7 +1590,7 @@ class Engine {
     }
 
     bool send(Packet& packet, const char* reason) {
-        if (socket_source && (socket_source->failed() || fatal_send)) { fatal_send = true; return false; }
+        if (socket_source && (socket_source->failed() || fatal_send || receive_error)) { fatal_send = true; return false; }
         UINT sent = 0;
         bool success = WinDivertSend(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                     &sent, &packet.address) != 0;
@@ -2509,16 +2540,18 @@ class Engine {
             }
             packet.received = qpc();
             packet.bytes.resize(length);
+            bool overflow = false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (socket_source && (input.size() >= MAX_FLOWS || packet.bytes.size() > MAX_BYTES - input_bytes)) {
                     receive_error = ERROR_MORE_DATA;
-                    socket_source->network_failure("socket_network_handoff_limit", ERROR_MORE_DATA, true);
+                    overflow = true;
                 } else {
                     if (socket_source) input_bytes += packet.bytes.size();
                     input.push_back(std::move(packet));
                 }
             }
+            if (overflow) socket_source->network_failure("socket_network_handoff_limit", ERROR_MORE_DATA, true);
             wake.notify_one();
         }
         network_receiver_done = true;
@@ -2568,7 +2601,7 @@ public:
             if (FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &session))
                 throw std::runtime_error("FwpmEngineOpen0 lookup session");
         } else {
-            socket_source = std::make_unique<SocketSource>(log, wake, frequency);
+            socket_source = std::make_unique<SocketSource>(log, wake, mutex, frequency);
             socket_source->start(config.target, config.port);
         }
 
