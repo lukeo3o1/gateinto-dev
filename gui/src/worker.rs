@@ -21,6 +21,7 @@ use crate::i18n::{Note, Text};
 use crate::log::Journal;
 use crate::settings::Agent;
 use crate::start::Starting;
+use crate::verification::{self, Check, Reply};
 
 pub const POLL: Duration = Duration::from_secs(2);
 const LOG_PAGES: usize = 16;
@@ -36,6 +37,9 @@ pub enum Command {
     Probe,
     Watch(bool),
     Credentials(u64, u64),
+    Verification(u64, u64),
+    Unverify,
+    Dismiss(u64, u64),
     Link(LaunchRequest),
     Answer(u64, Answer),
 }
@@ -50,6 +54,7 @@ impl Command {
     fn request(&self) -> Result<Request, String> {
         Ok(match self {
             Command::Close(id) => Request::Close(SessionId::from(*id)),
+            Command::Dismiss(id, serial) => Request::Dismiss(SessionId::from(*id), *serial),
             Command::Stop => Request::Stop,
             Command::Launch(name) => Request::Launch(
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
@@ -66,6 +71,9 @@ impl Command {
             }
             Command::Credentials(..) => {
                 return Err("credentials are revealed apart from commands".to_owned());
+            }
+            Command::Verification(..) | Command::Unverify => {
+                return Err("verifications are shown apart from commands".to_owned());
             }
             Command::Link(_) | Command::Answer(..) => {
                 return Err("links are settled apart from commands".to_owned());
@@ -96,10 +104,17 @@ pub struct Update {
     pub config: Config,
 }
 
+#[derive(Debug)]
+pub enum Secret {
+    Credentials(Reveal),
+    Verification(Check),
+}
+
 #[derive(Debug, Default)]
 pub struct Mail {
     pub update: Option<Update>,
     pub reveal: Option<Reveal>,
+    pub verification: Option<Check>,
     pub prompt: Option<Prompt>,
 }
 
@@ -124,7 +139,10 @@ impl Mailbox {
             return false;
         }
         let m = &self.mail;
-        let empty = m.update.is_none() && m.reveal.is_none() && m.prompt.is_none();
+        let empty = m.update.is_none()
+            && m.reveal.is_none()
+            && m.verification.is_none()
+            && m.prompt.is_none();
         put(&mut self.mail);
         empty
     }
@@ -133,8 +151,11 @@ impl Mailbox {
         self.deliver(|mail| mail.update = Some(update))
     }
 
-    pub fn put_reveal(&mut self, reveal: Reveal) -> bool {
-        self.deliver(|mail| mail.reveal = Some(reveal))
+    pub fn put_secret(&mut self, secret: Secret) -> bool {
+        self.deliver(|mail| match secret {
+            Secret::Credentials(reveal) => mail.reveal = Some(reveal),
+            Secret::Verification(check) => mail.verification = Some(check),
+        })
     }
 
     pub fn put_prompt(&mut self, prompt: Prompt) -> bool {
@@ -319,13 +340,30 @@ where
     (state, config, loaded)
 }
 
+async fn recheck<F, R>(
+    checking: Option<(u64, u64)>,
+    send: &F,
+    reveal: &mut impl FnMut(Secret),
+) -> Option<(u64, u64)>
+where
+    F: Fn(Request) -> R,
+    R: Future<Output = Result<Response, RequestError>>,
+{
+    let (id, ticket) = checking?;
+    let reply = send(Request::Verification(SessionId::from(id))).await;
+    let check = verification::check(id, ticket, reply);
+    let settled = matches!(check.reply, Reply::Settled);
+    reveal(Secret::Verification(check));
+    (!settled).then_some((id, ticket))
+}
+
 pub async fn serve<F, R>(
     commands: UnboundedReceiver<Command>,
     send: F,
     load: impl FnMut(&Config) -> Loaded,
     probe: impl FnMut(&Config) -> Probe,
     deliver: impl FnMut(Update),
-    reveal: impl FnMut(Reveal),
+    reveal: impl FnMut(Secret),
     prompt: impl Fn(Prompt),
 ) where
     F: Fn(Request) -> R,
@@ -357,7 +395,7 @@ pub async fn serve_with<F, R, S>(
     mut load: impl FnMut(&Config) -> Loaded,
     mut probe: impl FnMut(&Config) -> Probe,
     mut deliver: impl FnMut(Update),
-    mut reveal: impl FnMut(Reveal),
+    mut reveal: impl FnMut(Secret),
     prompt: impl Fn(Prompt),
 ) where
     F: Fn(Request) -> R,
@@ -374,11 +412,15 @@ pub async fn serve_with<F, R, S>(
     let mut linking: Option<Linking<'_>> = None;
     let mut starting: Option<Pin<Box<S>>> = None;
     let mut unstarted: Option<Note> = None;
+    let mut checking: Option<(u64, u64)> = None;
     let mut polled = poll(&send, &mut load, watching, &mut journal).await;
     let mut next_poll = tokio::time::Instant::now() + POLL;
     loop {
         if tokio::time::Instant::now() >= next_poll {
             polled = poll(&send, &mut load, watching, &mut journal).await;
+            if matches!(polled.0, AgentState::Running(_)) {
+                checking = recheck(checking, &send, &mut reveal).await;
+            }
             unlisted = 0;
             next_poll = tokio::time::Instant::now() + POLL;
         }
@@ -439,7 +481,15 @@ pub async fn serve_with<F, R, S>(
                     }
                     Command::Credentials(id, ticket) => {
                         let reply = send(Request::Credentials(SessionId::from(id))).await;
-                        reveal(credentials::reveal(id, ticket, reply));
+                        reveal(Secret::Credentials(credentials::reveal(id, ticket, reply)));
+                        continue;
+                    }
+                    Command::Verification(id, ticket) => {
+                        checking = recheck(Some((id, ticket)), &send, &mut reveal).await;
+                        continue;
+                    }
+                    Command::Unverify => {
+                        checking = None;
                         continue;
                     }
                     Command::Answer(ticket, answer) => {
@@ -466,8 +516,13 @@ pub async fn serve_with<F, R, S>(
                         }
                         continue;
                     }
-                    Command::Close(_) | Command::Stop | Command::Launch(_) | Command::Terminal(_) => {}
+                    Command::Close(_)
+                    | Command::Dismiss(..)
+                    | Command::Stop
+                    | Command::Launch(_)
+                    | Command::Terminal(_) => {}
                 }
+                checking = checking.filter(|(id, _)| !verification::ends(&command, *id));
                 let terminal = matches!(command, Command::Terminal(_));
                 let (note, ok) = run(command, &send).await;
                 failure = note;
@@ -548,7 +603,7 @@ mod tests {
         panic!("probed the device without being asked")
     }
 
-    fn unrevealed(_: Reveal) {
+    fn unrevealed(_: Secret) {
         panic!("revealed credentials without being asked")
     }
 
@@ -587,7 +642,10 @@ mod tests {
             loaded,
             unprobed,
             |u| updates.borrow_mut().push(u),
-            |r| reveals.borrow_mut().push(r),
+            |r| match r {
+                Secret::Credentials(r) => reveals.borrow_mut().push(r),
+                Secret::Verification(_) => panic!("checked a verification without being asked"),
+            },
             unprompted,
         );
         assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
@@ -612,6 +670,166 @@ mod tests {
             ("gateinto", PASSWORD)
         );
         assert!(updates.borrow().iter().all(|u| *u == polled(None)));
+    }
+
+    fn verifier(
+        log: &RefCell<Vec<Request>>,
+        pending: bool,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Verification(_) if pending => {
+                    let verification = gateinto::proxy::Verification {
+                        serial: 7,
+                        origin: "https://verify.example.test".to_owned().into(),
+                        auth_uri: "https://verify.example.test/device".to_owned().into(),
+                        user_code: "WDJB-MJHT".to_owned().into(),
+                        expires_in: 600,
+                        targets: Vec::new(),
+                        more_targets: 0,
+                        suppressed: 0,
+                    };
+                    Response::Ok(ipc::verification_lines(
+                        &"office".parse().unwrap(),
+                        &verification,
+                    ))
+                }
+                Request::Verification(_) => Response::Error("nothing is pending".to_owned()),
+                _ => Response::Ok(Vec::new()),
+            }))
+        }
+    }
+
+    async fn verify(
+        commands: &[Command],
+        send: impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>>,
+    ) -> Vec<Check> {
+        let (tx, rx) = unbounded_channel();
+        for command in commands {
+            tx.send(command.clone()).unwrap();
+        }
+        let checks = RefCell::new(Vec::new());
+        let run = serve(
+            rx,
+            send,
+            loaded,
+            unprobed,
+            |_| {},
+            |r| match r {
+                Secret::Verification(check) => checks.borrow_mut().push(check),
+                Secret::Credentials(_) => panic!("revealed credentials without being asked"),
+            },
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(4_500), run).await.is_err());
+        checks.into_inner()
+    }
+
+    fn verification(id: u64) -> Request {
+        Request::Verification(SessionId::from(id))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_open_verification_is_re_checked_once_per_poll_with_its_ticket() {
+        let log = RefCell::new(Vec::new());
+        let checks = verify(&[Command::Verification(3, 5)], verifier(&log, true)).await;
+        assert_eq!(
+            *log.borrow(),
+            [
+                Request::List,
+                Request::Config,
+                verification(3),
+                Request::List,
+                Request::Config,
+                verification(3),
+                Request::List,
+                Request::Config,
+                verification(3),
+            ]
+        );
+        assert_eq!(checks.len(), 3);
+        assert!(checks.iter().all(|check| (check.id, check.ticket) == (3, 5)
+            && matches!(&check.reply, Reply::Pending(_, pending) if pending.serial == 7)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn re_checks_stop_when_nothing_is_pending_or_the_dialog_ends() {
+        for commands in [
+            vec![Command::Verification(3, 5), Command::Unverify],
+            vec![Command::Verification(3, 5), Command::Stop],
+            vec![Command::Verification(3, 5), Command::Close(3)],
+            vec![Command::Verification(3, 5), Command::Dismiss(3, 7)],
+        ] {
+            let log = RefCell::new(Vec::new());
+            verify(&commands, verifier(&log, true)).await;
+            let checked = log
+                .borrow()
+                .iter()
+                .filter(|request| matches!(request, Request::Verification(_)))
+                .count();
+            assert_eq!(checked, 1, "{commands:?}");
+        }
+        let log = RefCell::new(Vec::new());
+        verify(
+            &[Command::Verification(3, 5), Command::Close(4)],
+            verifier(&log, true),
+        )
+        .await;
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|r| **r == verification(3))
+                .count(),
+            3
+        );
+        let log = RefCell::new(Vec::new());
+        let checks = verify(&[Command::Verification(3, 5)], verifier(&log, false)).await;
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|r| **r == verification(3))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            checks[..],
+            [Check {
+                reply: Reply::Settled,
+                ..
+            }]
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dismissing_sends_the_remembered_serial() {
+        let log = RefCell::new(Vec::new());
+        verify(&[Command::Dismiss(3, 7)], verifier(&log, true)).await;
+        assert!(
+            log.borrow()
+                .contains(&Request::Dismiss(SessionId::from(3), 7))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_re_check_is_sent_while_the_agent_is_not_running() {
+        let log = RefCell::new(Vec::new());
+        let send = |request: Request| {
+            log.borrow_mut().push(request);
+            std::future::ready(Err(RequestError::NotRunning))
+        };
+        let checks = verify(&[Command::Verification(3, 5)], send).await;
+        assert_eq!(
+            *log.borrow(),
+            [Request::List, verification(3), Request::List, Request::List]
+        );
+        assert!(matches!(
+            checks[..],
+            [Check {
+                reply: Reply::Unreached,
+                ..
+            }]
+        ));
     }
 
     fn probe(n: u32) -> Probe {
@@ -1316,33 +1534,34 @@ mod tests {
     fn a_closed_mailbox_drops_what_it_holds_and_what_arrives() {
         let mut mailbox = Mailbox::default();
         mailbox.put(polled(None));
-        mailbox.put_reveal(revealed(3));
+        mailbox.put_secret(revealed(3));
         mailbox.put_prompt(Prompt::Ask(1, proposed()));
         mailbox.close();
         assert!(!mailbox.put(polled(None)));
-        assert!(!mailbox.put_reveal(revealed(4)));
+        assert!(!mailbox.put_secret(revealed(4)));
         assert!(!mailbox.put_prompt(Prompt::Ask(2, proposed())));
         let mail = mailbox.take_all();
         assert_eq!(mail.update, None);
         assert!(mail.reveal.is_none());
+        assert!(mail.verification.is_none());
         assert_eq!(mail.prompt, None);
     }
 
-    fn revealed(id: u64) -> Reveal {
-        Reveal {
+    fn revealed(id: u64) -> Secret {
+        Secret::Credentials(Reveal {
             id,
             ticket: 1,
             listen: None,
             credentials: SessionCredentials::parse("gateinto", PASSWORD).map(Issued::Agent),
-        }
+        })
     }
 
     #[test]
     fn a_mailbox_keeps_the_latest_of_each_kind_and_shares_one_notice() {
         let mut mailbox = Mailbox::default();
-        assert!(mailbox.put_reveal(revealed(3)));
+        assert!(mailbox.put_secret(revealed(3)));
         assert!(!mailbox.put(polled(None)));
-        assert!(!mailbox.put_reveal(revealed(4)));
+        assert!(!mailbox.put_secret(revealed(4)));
         assert!(!mailbox.put_prompt(Prompt::Ask(1, proposed())));
         assert!(!mailbox.put_prompt(Prompt::Dismiss(1)));
 
@@ -1350,6 +1569,25 @@ mod tests {
         assert_eq!(mail.update, Some(polled(None)));
         assert_eq!(mail.reveal.map(|reveal| reveal.id), Some(4));
         assert_eq!(mail.prompt, Some(Prompt::Dismiss(1)));
+    }
+
+    #[test]
+    fn a_verification_check_shares_the_notice_and_keeps_its_own_slot() {
+        let mut mailbox = Mailbox::default();
+        let checked = |ticket| {
+            Secret::Verification(verification::check(
+                3,
+                ticket,
+                Err(RequestError::NotRunning),
+            ))
+        };
+        assert!(mailbox.put_secret(checked(1)));
+        assert!(!mailbox.put_secret(revealed(4)));
+        assert!(!mailbox.put_secret(checked(2)));
+        let mail = mailbox.take_all();
+        assert_eq!(mail.verification.map(|check| check.ticket), Some(2));
+        assert_eq!(mail.reveal.map(|reveal| reveal.id), Some(4));
+        assert!(mailbox.put_secret(checked(3)));
     }
 
     #[test]
@@ -1363,7 +1601,7 @@ mod tests {
         let mail = mailbox.take_all();
         assert_eq!(mail.prompt, Some(Prompt::Ask(1, proposed())));
         assert_eq!(mail.update, Some(polled(None)));
-        assert!(mailbox.put_reveal(revealed(3)));
+        assert!(mailbox.put_secret(revealed(3)));
     }
 
     #[test]

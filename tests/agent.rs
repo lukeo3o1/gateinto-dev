@@ -16,6 +16,9 @@ use gateinto::agent::{
 use gateinto::browser::ProfileDir;
 use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
+use gateinto::identity::certificates::SelfSignedCertificates;
+use gateinto::identity::client_cert::ClientCertificate;
+use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::ipc::{
     self, BindError, ConfigSource, ConfirmToken, Endpoint, LogPage, Request, RequestError,
     Response, Server, SessionAuth, SessionInfo, SessionKind, SessionRoute,
@@ -26,6 +29,8 @@ use gateinto::proxy::Config;
 use gateinto::sessions::SessionId;
 use gateinto::uri::LaunchRequest;
 use launch_support::*;
+use rcgen::{KeyPair, PublicKeyData};
+use rustls::pki_types::UnixTime;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt;
@@ -141,10 +146,41 @@ impl TestAgent {
     }
 
     async fn start_with(limits: AgentLimits, browser: Option<PathBuf>) -> Self {
-        let dir = temp_dir("agent");
         let ca = TestCa::new();
         let upstream = UpstreamProxy::start(ca.server_config(PROXY_NAME), Behavior::Tunnel).await;
-        let proxy: Config = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
+        let proxy = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
+        Self::serving(limits, browser, upstream, proxy)
+    }
+
+    async fn challenging(code: &'static str) -> Self {
+        Self::challenged(Behavior::Challenge(code)).await
+    }
+
+    async fn challenged(behavior: Behavior) -> Self {
+        let key = KeyPair::generate().unwrap();
+        let ca = TestCa::new();
+        let upstream = UpstreamProxy::start(
+            ca.server_config_trusting_client_spki(PROXY_NAME, key.subject_public_key_info()),
+            behavior,
+        )
+        .await;
+        let mut proxy = agent_config(upstream.addr, ca.roots(), PROXY_NAME);
+        let certificates =
+            SelfSignedCertificates::new(software_signer(&key), UnixTime::now()).unwrap();
+        proxy.client_certificate = Some(ClientCertificate::SelfSigned {
+            certificates: Arc::new(certificates),
+            required: true,
+        });
+        Self::serving(limits(), Some(fake_browser()), upstream, proxy)
+    }
+
+    fn serving(
+        limits: AgentLimits,
+        browser: Option<PathBuf>,
+        upstream: UpstreamProxy,
+        proxy: Config,
+    ) -> Self {
+        let dir = temp_dir("agent");
         let plans = BTreeMap::from([
             (
                 "main".parse().unwrap(),
@@ -531,6 +567,7 @@ async fn the_session_list_is_one_json_object_per_session_without_secrets() {
         tunnels: 0,
         browser: None,
         shell: None,
+        verification: false,
     };
     assert_eq!(listed, expected);
     let list = agent.list().await;
@@ -558,6 +595,119 @@ async fn the_session_list_is_one_json_object_per_session_without_secrets() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_tunnel_is_shown_on_request_until_it_is_dismissed() {
+    let agent = TestAgent::challenging(CHALLENGE_CODES[0]).await;
+    let (lines, browser) = agent.launched("main").await;
+    let id: SessionId = field(&lines, "session").parse().unwrap();
+    assert!(!agent.listed(&lines).await.verification);
+
+    let (_, response) = send(
+        browser.proxy(),
+        &connect_with("example.test:443", Some(&session_auth(&lines))),
+    )
+    .await;
+    assert_eq!(response.status, 502, "{}", response.head);
+    assert!(
+        !response
+            .head
+            .to_ascii_lowercase()
+            .contains("proxy-authenticate"),
+        "{}",
+        response.head
+    );
+
+    assert!(agent.listed(&lines).await.verification);
+    let presented = agent._upstream.client_certificates();
+    let fingerprint = sha256_fingerprint(&presented.last().unwrap()[0]);
+    let list = agent.list().await;
+    for secret in [CHALLENGE_CODES[0], CHALLENGE_URI, fingerprint.as_str()] {
+        assert!(list.iter().all(|line| !line.contains(secret)), "{list:?}");
+    }
+    let Response::Ok(shown) = agent.send(Request::Verification(id)).await else {
+        panic!("the verification was not shown");
+    };
+    let expires_in: u64 = field(&shown, "expires_in").parse().unwrap();
+    assert!((290..=300).contains(&expires_in), "{shown:?}");
+    assert_eq!(
+        shown,
+        [
+            "challenge: 1".to_owned(),
+            "gateway: main".to_owned(),
+            "origin: https://verify.test".to_owned(),
+            format!("auth_uri: {CHALLENGE_URI}{fingerprint}"),
+            format!("user_code: {}", CHALLENGE_CODES[0]),
+            format!("expires_in: {expires_in}"),
+            "target: example.test:443".to_owned(),
+            "more_targets: 0".to_owned(),
+            "suppressed: 0".to_owned(),
+        ]
+    );
+
+    assert_eq!(
+        agent.send(Request::Dismiss(id, 2)).await,
+        Response::Ok(Vec::new())
+    );
+    assert!(agent.listed(&lines).await.verification);
+    assert_eq!(
+        agent.send(Request::Dismiss(id, 1)).await,
+        Response::Ok(Vec::new())
+    );
+    assert!(!agent.listed(&lines).await.verification);
+    assert_eq!(
+        agent.send(Request::Verification(id)).await,
+        Response::Error(format!("session {id} has no pending verification"))
+    );
+    let unknown: SessionId = "999".parse().unwrap();
+    for request in [Request::Verification(unknown), Request::Dismiss(unknown, 1)] {
+        assert_eq!(
+            agent.send(request).await,
+            Response::Error("no session 999".to_owned())
+        );
+    }
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_challenge_naming_another_sessions_certificate_is_not_offered() {
+    let agent = TestAgent::challenged(Behavior::ChallengeNamingFirst(CHALLENGE_CODES[0])).await;
+    let (owner, owner_browser) = agent.launched("main").await;
+    let (other, other_browser) = agent.launched("main").await;
+    let refused = async |browser: &FakeBrowser, lines: &[String]| {
+        let (_, response) = send(
+            browser.proxy(),
+            &connect_with("example.test:443", Some(&session_auth(lines))),
+        )
+        .await;
+        assert_eq!(response.status, 502, "{}", response.head);
+    };
+
+    refused(&owner_browser, &owner).await;
+    refused(&other_browser, &other).await;
+    let presented = agent._upstream.client_certificates();
+    assert_eq!(presented.len(), 2);
+    assert_ne!(presented[0][0], presented[1][0]);
+
+    assert!(agent.listed(&owner).await.verification);
+    assert!(!agent.listed(&other).await.verification);
+    let other_id: SessionId = field(&other, "session").parse().unwrap();
+    assert_eq!(
+        agent.send(Request::Verification(other_id)).await,
+        Response::Error(format!("session {other_id} has no pending verification"))
+    );
+    let owner_id: SessionId = field(&owner, "session").parse().unwrap();
+    let Response::Ok(shown) = agent.send(Request::Verification(owner_id)).await else {
+        panic!("the verification was not shown");
+    };
+    assert_eq!(
+        field(&shown, "auth_uri"),
+        format!("{CHALLENGE_URI}{}", sha256_fingerprint(&presented[0][0]))
+    );
+    assert_eq!(field(&shown, "target"), "example.test:443");
+    assert_eq!(field(&shown, "suppressed"), "0");
     agent.stop().await;
 }
 

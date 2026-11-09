@@ -1,0 +1,3 @@
+Gateinto auth_uri="https://[2001:0DB8:0:0:0:0:0:0001]:8443/?cert_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", user_code="WDJB-MJHT", expires_in="300"
+https://[2001:db8:0::1]:8443
+https://[::FFFF:C000:0201]

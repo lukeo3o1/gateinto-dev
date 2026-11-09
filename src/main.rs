@@ -34,7 +34,7 @@ use gateinto::logbook::Logbook;
 use gateinto::prompt;
 use gateinto::proxy::{Config, Limits, LocalAuth, SessionCredentials, Upstream};
 use gateinto::registration;
-use gateinto::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
+use gateinto::sessions::{Session, SessionConfig, SessionId, SessionKind, SessionManager};
 use gateinto::tls::{self, TlsMode};
 use gateinto::uri::LaunchRequest;
 use rustls::pki_types::{ServerName, UnixTime};
@@ -42,16 +42,12 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
+use zeroize::Zeroizing;
 
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
-const VERSION: &str = match option_env!("GATEINTO_BUILD_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
-
 #[derive(Parser)]
-#[command(version = VERSION, about)]
+#[command(version = gateinto::VERSION, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -169,6 +165,12 @@ enum SessionCommand {
     /// Show the proxy credentials of a session of the running agent again, in a dialog on an
     /// interactive Windows desktop or otherwise on the terminal; never on standard output
     Credentials {
+        /// Session id as shown by `gateinto session list`
+        id: SessionId,
+    },
+    /// Show the pending verification of a session of the running agent on the terminal; never on
+    /// standard output and never in a browser
+    Verification {
         /// Session id as shown by `gateinto session list`
         id: SessionId,
     },
@@ -540,6 +542,7 @@ async fn run() -> ExitCode {
         Command::Session(SessionCommand::Terminal(args)) => terminal_session(args).await,
         Command::Session(SessionCommand::List { json }) => session_list(json).await,
         Command::Session(SessionCommand::Credentials { id }) => session_credentials(id).await,
+        Command::Session(SessionCommand::Verification { id }) => session_verification(id).await,
         Command::Session(SessionCommand::Close { id }) => agent_request(Request::Close(id)).await,
         Command::Agent(args) if args.detach => agent_detach(args.config.config.as_deref()).await,
         Command::Agent(args) => agent(args.config).await,
@@ -734,6 +737,7 @@ fn proxy_config(settings: &Settings) -> Result<Config> {
             ..Limits::default()
         },
         os_user_job: None,
+        verification_origins: settings.gateway.verification_origins.clone(),
     })
 }
 
@@ -765,9 +769,19 @@ async fn browser_session(args: BrowserSessionArgs) -> Result {
         session.credentials().cloned(),
         shutdown,
     );
-    let result = shown.await;
+    let result = announcing(session, shown).await;
     sessions.close_all().await;
     result
+}
+
+async fn announcing<T>(session: &Session, work: impl Future<Output = T>) -> T {
+    let announce = session.verifications().for_each_new(|verification| {
+        prompt::announce_verification(session.gateway(), verification)
+    });
+    tokio::select! {
+        output = work => output,
+        never = announce => match never {},
+    }
 }
 
 fn terminal_request(args: &TerminalSessionArgs) -> Option<Request> {
@@ -838,7 +852,12 @@ async fn console_terminal(args: TerminalSessionArgs) -> Result {
             proxy,
         })
         .await?;
-    let status = run_terminal(&sessions, id, &shell, route, &job, &mut events).await;
+    let session = sessions.session(id).expect("the session just started");
+    let status = announcing(
+        session,
+        run_terminal(&sessions, id, &shell, route, &job, &mut events),
+    )
+    .await;
     sessions.close_all().await;
     let status = status?;
     let _ = std::io::stdout().flush();
@@ -1312,6 +1331,35 @@ async fn session_credentials(id: SessionId) -> Result {
     Ok(show_credentials(Some(id), listen, credentials).await?)
 }
 
+fn agent_verification_answer(response: Response) -> Result<Vec<String>, String> {
+    match response {
+        Response::Ok(lines) => Ok(lines),
+        Response::Error(error) if error == ipc::INVALID_REQUEST => {
+            Err("the agent is too old for verification; restart it".to_owned())
+        }
+        Response::Error(error) => Err(error),
+    }
+}
+
+async fn session_verification(id: SessionId) -> Result {
+    let endpoint = Endpoint::for_current_user()?;
+    let lines = Zeroizing::new(agent_verification_answer(
+        ipc::send(&endpoint, &Request::Verification(id)).await?,
+    )?);
+    let (gateway, verification) = ipc::verification_from_lines(&lines)
+        .ok_or("the agent did not return the session verification")?;
+    match prompt::show_verification(&gateway, &verification) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "the verification for session {id} was not shown: standard error is not a terminal"
+        )
+        .into()),
+        Err(error) => {
+            Err(format!("the verification for session {id} was not shown: {error}").into())
+        }
+    }
+}
+
 async fn session_list(json: bool) -> Result {
     let endpoint = Endpoint::for_current_user()?;
     let lines = match ipc::send(&endpoint, &Request::List).await? {
@@ -1321,7 +1369,19 @@ async fn session_list(json: bool) -> Result {
     for line in session_list_lines(&lines, json, gateinto::clock::unix_now())? {
         println!("{line}");
     }
+    for note in session_list_notes(&lines, json)? {
+        eprintln!("{note}");
+    }
     Ok(())
+}
+
+fn session_list_notes(lines: &[String], json: bool) -> Result<Vec<String>, String> {
+    if json {
+        return Ok(Vec::new());
+    }
+    Ok(gateinto::session_table::verification_notes(
+        &listed_sessions(lines)?,
+    ))
 }
 
 fn session_list_lines(lines: &[String], json: bool, now: u64) -> Result<Vec<String>, String> {
@@ -1749,6 +1809,17 @@ mod tests {
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;
 
     #[test]
+    fn only_the_session_table_is_followed_by_verification_notes() {
+        let waiting = NEWER_SESSION.replace(r#""id":3,"#, r#""id":3,"verification":true,"#);
+        let lines = [NEWER_SESSION.replace(r#""id":3,"#, r#""id":1,"#), waiting];
+        assert_eq!(
+            session_list_notes(&lines, false).unwrap(),
+            ["session 3 needs verification; run `gateinto session verification 3` to show it"]
+        );
+        assert!(session_list_notes(&lines, true).unwrap().is_empty());
+    }
+
+    #[test]
     fn the_json_session_list_passes_the_agent_lines_through_verbatim() {
         let lines = [NEWER_SESSION.to_owned(), String::new()];
         assert_eq!(
@@ -1781,10 +1852,17 @@ mod tests {
         let Command::Session(SessionCommand::Browser(args)) = cli.command else {
             unreachable!()
         };
-        let settings = args.upstream.settings(|_| {}).unwrap();
+        let mut settings = args.upstream.settings(|_| {}).unwrap();
         assert_eq!(
             proxy_config(&settings).unwrap().local_auth,
             LocalAuth::SESSION_CREDENTIALS
+        );
+        assert_eq!(proxy_config(&settings).unwrap().verification_origins, None);
+        let origins = vec!["https://verify.example.test".parse().unwrap()];
+        settings.gateway.verification_origins = Some(origins.clone());
+        assert_eq!(
+            proxy_config(&settings).unwrap().verification_origins,
+            Some(origins)
         );
     }
 
@@ -1936,6 +2014,25 @@ args = ["-l"]
                 .collect();
             assert!(terminal_args(&flags).is_err(), "{flags:?}");
         }
+    }
+
+    #[test]
+    fn an_agent_too_old_for_verification_is_named() {
+        assert_eq!(
+            agent_verification_answer(Response::Error("invalid request".to_owned())),
+            Err("the agent is too old for verification; restart it".to_owned())
+        );
+        assert_eq!(
+            agent_verification_answer(Response::Error(
+                "session 7 has no pending verification".to_owned()
+            )),
+            Err("session 7 has no pending verification".to_owned())
+        );
+        let lines = vec!["challenge: 1".to_owned()];
+        assert_eq!(
+            agent_verification_answer(Response::Ok(lines.clone())),
+            Ok(lines)
+        );
     }
 
     #[test]

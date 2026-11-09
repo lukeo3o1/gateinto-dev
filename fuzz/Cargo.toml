@@ -47,3 +47,10 @@ path = "fuzz_targets/x509.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "proxy-authenticate"
+path = "fuzz_targets/proxy-authenticate.rs"
+test = false
+doc = false
+bench = false

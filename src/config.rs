@@ -14,7 +14,7 @@ use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
 use crate::link::LinkedGateway;
-use crate::proxy::Route;
+use crate::proxy::{Route, VerificationOrigin};
 use crate::tls::TlsMode;
 
 pub const FILE_NAME: &str = "gateinto.toml";
@@ -330,6 +330,21 @@ pub struct GatewaySection {
     pub portal_url: Option<PortalUrl>,
     pub route: Option<Route>,
     pub display_name: Option<DisplayName>,
+    #[serde(default, deserialize_with = "verification_origins")]
+    pub verification_origins: Option<Vec<VerificationOrigin>>,
+}
+
+fn verification_origins<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<VerificationOrigin>>, D::Error> {
+    let origins = Vec::<VerificationOrigin>::deserialize(deserializer)?;
+    if origins.is_empty() {
+        return Err(de::Error::custom(
+            "verification_origins must list at least one origin; remove the key to accept any \
+             origin",
+        ));
+    }
+    Ok(Some(origins))
 }
 
 impl GatewaySection {
@@ -353,6 +368,7 @@ impl GatewaySection {
             portal_url: overrides.portal_url.or(self.portal_url),
             route: overrides.route.or(self.route),
             display_name: overrides.display_name.or(self.display_name),
+            verification_origins: overrides.verification_origins.or(self.verification_origins),
         }
     }
 }
@@ -459,6 +475,7 @@ pub struct GatewayProfile {
     pub self_signed_client_cert: bool,
     pub portal_url: Option<PortalUrl>,
     pub route: Route,
+    pub verification_origins: Option<Vec<VerificationOrigin>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,6 +688,7 @@ impl ConfigFile {
             self_signed_client_cert,
             portal_url: section.portal_url,
             route,
+            verification_origins: section.verification_origins,
         })
     }
 
@@ -920,6 +938,7 @@ port = 443
                             .unwrap()
                     ),
                     route: Route::Mixed,
+                    verification_origins: None,
                 },
                 device_key: DeviceKeySettings {
                     name: "gateinto-other".parse().unwrap(),
@@ -1275,6 +1294,93 @@ port = 443
         assert!(error.contains("gateway \"main\""), "{error}");
         assert!(error.contains("portal_url"), "{error}");
         assert!(error.contains("https"), "{error}");
+    }
+
+    #[test]
+    fn verification_origins_are_normalized_when_the_configuration_loads() {
+        let text = format!(
+            "{MINIMAL}verification_origins = [\"https://Verify.Example.TEST:443\", \
+             \"https://login.example.test:8443\"]\n"
+        );
+        let file = ConfigFile::parse(&text).unwrap();
+        let section = &file.gateways.0[&name("main")];
+        let origins: Vec<&str> = section
+            .verification_origins
+            .iter()
+            .flatten()
+            .map(VerificationOrigin::as_str)
+            .collect();
+        assert_eq!(
+            origins,
+            [
+                "https://verify.example.test",
+                "https://login.example.test:8443"
+            ]
+        );
+        let unset = ConfigFile::parse(MINIMAL).unwrap();
+        assert_eq!(unset.gateways.0[&name("main")].verification_origins, None);
+    }
+
+    #[test]
+    fn the_gateway_profile_carries_the_verification_origins() {
+        let text = format!("{MINIMAL}verification_origins = [\"https://verify.example.test\"]\n");
+        let profile = settings(&text).unwrap().gateway;
+        assert_eq!(
+            profile.verification_origins,
+            Some(vec!["https://verify.example.test".parse().unwrap()])
+        );
+        assert_eq!(
+            settings(MINIMAL).unwrap().gateway.verification_origins,
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_verification_origins_are_refused_naming_the_gateway() {
+        for entry in [
+            "https://verify.example.test/",
+            "https://verify.example.test/path",
+            "https://verify.example.test.",
+            "https://*.example.test",
+            "https://user@verify.example.test",
+            "http://verify.example.test",
+        ] {
+            let text = format!("{MINIMAL}verification_origins = [\"{entry}\"]\n");
+            let error = ConfigFile::parse(&text).unwrap_err().to_string();
+            assert!(error.contains("gateway \"main\""), "{entry}: {error}");
+            assert!(error.contains("verification_origins"), "{entry}: {error}");
+        }
+        let error = ConfigFile::parse(&format!(
+            "{MINIMAL}verification_origins = \"https://verify.example.test\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+    }
+
+    #[test]
+    fn an_empty_verification_origin_list_is_refused() {
+        let text = format!("{MINIMAL}verification_origins = []\n");
+        let error = ConfigFile::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("gateway \"main\""), "{error}");
+        assert!(
+            error.contains("verification_origins must list at least one origin"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn linked_gateways_carry_no_verification_origins() {
+        let linked = LinkedGateway {
+            name: name("linked"),
+            display_name: None,
+            address: "proxy.linked.test".parse().unwrap(),
+            portal_url: None,
+            approved_at: None,
+            route: Route::Gateway,
+        };
+        let file = ConfigFile::default().with_linked(&[linked]);
+        assert_eq!(file.gateways.0[&name("linked")].verification_origins, None);
     }
 
     #[test]

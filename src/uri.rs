@@ -537,6 +537,7 @@ mod tests {
             "profile=a&portal_url=https%3A%2F%2Fevil.example",
             "profile=a&host=evil.example",
             "profile=a&ca_file=evil.pem",
+            "profile=a&verification_origins=https%3A%2F%2Fevil.example",
             "profile=a&password=secret",
             "profile=a=b",
             "profile==a",

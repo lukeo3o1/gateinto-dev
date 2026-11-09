@@ -1,8 +1,11 @@
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 
+use zeroize::Zeroizing;
+
+use crate::config::GatewayName;
 use crate::link::Ask;
-use crate::proxy::SessionCredentials;
+use crate::proxy::{SessionCredentials, Verification};
 use crate::sessions::SessionId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +149,123 @@ pub fn show_credentials(notice: &CredentialsNotice) -> bool {
         let mut stderr = io::stderr();
         stderr.is_terminal() && writeln!(stderr, "{text}").is_ok()
     })
+}
+
+const VERIFICATION_TEXT_OVERHEAD: usize = 256;
+const VERIFICATION_TARGET_OVERHEAD: usize = 16;
+
+pub fn verification_text(gateway: &GatewayName, verification: &Verification) -> Zeroizing<String> {
+    let gateway = gateway.to_string();
+    let targets: usize = verification
+        .targets
+        .iter()
+        .map(|target| target.len() + VERIFICATION_TARGET_OVERHEAD)
+        .sum();
+    let mut text = Zeroizing::new(String::with_capacity(
+        VERIFICATION_TEXT_OVERHEAD
+            + gateway.len()
+            + targets
+            + verification.origin.len()
+            + verification.auth_uri.len()
+            + verification.user_code.len(),
+    ));
+    text.push_str("verification required for gateway ");
+    push_printable(&mut text, &gateway);
+    for target in &verification.targets {
+        text.push_str("\n  target: ");
+        push_printable(&mut text, target);
+    }
+    if verification.more_targets > 0 {
+        text.push_str(&format!("\n  more targets: {}", verification.more_targets));
+    }
+    text.push_str("\n  verify at: ");
+    push_printable(&mut text, &verification.origin);
+    text.push_str("\n  link: ");
+    push_printable(&mut text, &verification.auth_uri);
+    text.push_str("\n  pairing code: ");
+    push_printable(&mut text, &verification.user_code);
+    text.push_str(&format!(
+        "\n  expires in: {} s\nComplete verification, then retry the connection.",
+        verification.expires_in
+    ));
+    text
+}
+
+fn push_printable(text: &mut String, value: &str) {
+    text.extend(value.bytes().map(|byte| {
+        if (0x20..=0x7e).contains(&byte) {
+            char::from(byte)
+        } else {
+            '?'
+        }
+    }));
+}
+
+pub fn unshown_verification_text(gateway: &GatewayName) -> String {
+    format!(
+        "verification required for gateway {gateway}; not shown because standard error is not a \
+         terminal"
+    )
+}
+
+pub fn show_verification(gateway: &GatewayName, verification: &Verification) -> io::Result<bool> {
+    use std::io::IsTerminal;
+
+    let text = verification_text(gateway, verification);
+    if let Some(shown) = show_in_test_file(&text) {
+        return shown.map(|()| true);
+    }
+    let mut stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    show_on_terminal(&text, terminal, &mut stderr)
+}
+
+pub fn announce_verification(gateway: &GatewayName, verification: &Verification) {
+    use std::io::IsTerminal;
+
+    let mut stderr = io::stderr();
+    let terminal = stderr.is_terminal();
+    announce_on(gateway, verification, terminal, &mut stderr);
+}
+
+fn announce_on(
+    gateway: &GatewayName,
+    verification: &Verification,
+    terminal: bool,
+    output: &mut impl Write,
+) {
+    let text = verification_text(gateway, verification);
+    let shown = match show_in_test_file(&text) {
+        Some(shown) => shown.is_ok(),
+        None => matches!(show_on_terminal(&text, terminal, output), Ok(true)),
+    };
+    if !shown {
+        let _ = writeln!(output, "{}", unshown_verification_text(gateway));
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn show_in_test_file(text: &str) -> Option<io::Result<()>> {
+    let path = std::env::var_os("GATEINTO_TEST_VERIFICATION_FILE")?;
+    Some(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut output| writeln!(output, "{text}")),
+    )
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn show_in_test_file(_text: &str) -> Option<io::Result<()>> {
+    None
+}
+
+fn show_on_terminal(text: &str, terminal: bool, output: &mut impl Write) -> io::Result<bool> {
+    if terminal {
+        writeln!(output, "{text}")?;
+    }
+    Ok(terminal)
 }
 
 fn show_on(
@@ -479,6 +599,111 @@ mod tests {
         }));
         assert!(show_on("text", None::<fn(&str) -> bool>, |_: &str| true));
         assert!(!show_on("text", None::<fn(&str) -> bool>, |_: &str| false));
+    }
+
+    fn verification(targets: &[&str], more_targets: u64) -> Verification {
+        Verification {
+            serial: 3,
+            origin: Zeroizing::new("https://verify.example.test".to_owned()),
+            auth_uri: Zeroizing::new(
+                "https://verify.example.test/device?x=1&cert_sha256=ab".to_owned(),
+            ),
+            user_code: Zeroizing::new("WDJB-MJHT".to_owned()),
+            expires_in: 300,
+            targets: targets.iter().map(|target| (*target).to_owned()).collect(),
+            more_targets,
+            suppressed: 2,
+        }
+    }
+
+    fn office() -> GatewayName {
+        "office".parse().unwrap()
+    }
+
+    #[test]
+    fn the_verification_names_gateway_target_origin_link_code_and_expiry() {
+        let text = verification_text(&office(), &verification(&["example.com:443"], 0));
+        assert_eq!(
+            *text,
+            "verification required for gateway office\n\
+             \x20 target: example.com:443\n\
+             \x20 verify at: https://verify.example.test\n\
+             \x20 link: https://verify.example.test/device?x=1&cert_sha256=ab\n\
+             \x20 pairing code: WDJB-MJHT\n\
+             \x20 expires in: 300 s\n\
+             Complete verification, then retry the connection."
+        );
+    }
+
+    #[test]
+    fn the_verification_lists_every_target_and_counts_the_rest() {
+        let text = verification_text(&office(), &verification(&["a.test:443", "b.test:8443"], 4));
+        assert!(
+            text.contains(
+                "\n  target: a.test:443\n  target: b.test:8443\n  more targets: 4\n  verify at: "
+            ),
+            "{}",
+            *text
+        );
+    }
+
+    #[test]
+    fn the_verification_replaces_every_byte_a_terminal_could_interpret() {
+        let mut hostile = verification(&["\x1b[2Jé.test:443"], 0);
+        hostile.user_code = Zeroizing::new("WDJB\x07MJHT\x7f".to_owned());
+        hostile.origin = Zeroizing::new("https://v\r\n.test\t".to_owned());
+        let text = verification_text(&office(), &hostile);
+        assert!(text.contains("  target: ?[2J??.test:443\n"), "{}", *text);
+        assert!(text.contains("  pairing code: WDJB?MJHT?\n"), "{}", *text);
+        assert!(
+            text.contains("  verify at: https://v??.test?\n"),
+            "{}",
+            *text
+        );
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 7, "{}", *text);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.bytes().all(|byte| (0x20..=0x7e).contains(&byte))),
+            "{}",
+            *text
+        );
+    }
+
+    #[test]
+    fn an_unshown_verification_names_only_the_gateway() {
+        assert_eq!(
+            unshown_verification_text(&office()),
+            "verification required for gateway office; not shown because standard error is not \
+             a terminal"
+        );
+    }
+
+    #[test]
+    fn an_announcement_off_a_terminal_is_only_the_fixed_line() {
+        let pending = verification(&["example.com:443"], 0);
+        let mut output = Vec::new();
+        announce_on(&office(), &pending, false, &mut output);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("{}\n", unshown_verification_text(&office()))
+        );
+        let mut output = Vec::new();
+        announce_on(&office(), &pending, true, &mut output);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("{}\n", *verification_text(&office(), &pending))
+        );
+    }
+
+    #[test]
+    fn a_verification_reaches_only_a_terminal() {
+        let mut output = Vec::new();
+        assert!(!show_on_terminal("secret", false, &mut output).unwrap());
+        assert!(output.is_empty());
+        assert!(show_on_terminal("secret", true, &mut output).unwrap());
+        assert_eq!(output, b"secret\n");
     }
 
     #[test]

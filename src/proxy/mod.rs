@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use aws_lc_rs::rand::SystemRandom;
 use rustls::RootCertStore;
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -17,15 +17,19 @@ use tokio::time::{timeout, timeout_at};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tracing::{Instrument, debug, info, info_span, warn};
+use zeroize::Zeroizing;
 
 use crate::http::{
-    Authority, DEFAULT_MAX_HEADER_BYTES, ParseError, ParseResult, parse_connect_request,
+    Authority, DEFAULT_MAX_HEADER_BYTES, ParseError, ParseResult, TunnelResponse,
+    parse_connect_request,
 };
 use crate::identity::certificates::ExpiredCertificate;
 use crate::identity::client_cert::ClientCertificate;
+use crate::identity::encoding::sha256_fingerprint;
 use crate::job::Job;
 use crate::tls::{self, NegotiationError, TlsMode};
 
+mod challenge;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -36,9 +40,13 @@ mod pool;
 mod relay;
 mod routing;
 mod session_credentials;
+mod verifications;
 
+pub use challenge::VerificationOrigin;
 pub use local_auth::LocalAuth;
 pub use routing::Route;
+use verifications::Refusal;
+pub use verifications::{PendingVerifications, Verification, Verifications};
 
 use local_auth::Authenticator;
 pub use session_credentials::{FailureLimit, SessionCredentials};
@@ -121,6 +129,7 @@ pub struct Config {
     pub client_certificate: Option<ClientCertificate>,
     pub limits: Limits,
     pub os_user_job: Option<Arc<Job>>,
+    pub verification_origins: Option<Vec<VerificationOrigin>>,
 }
 
 #[derive(Debug)]
@@ -228,14 +237,27 @@ pub(crate) async fn request_tunnel<T>(
     max_header_bytes: usize,
     parse: fn(&[u8], usize) -> ParseResult<T>,
 ) -> Result<(T, Vec<u8>), UpstreamError> {
-    let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
-    tls.write_all(request.as_bytes())
+    tls.write_all(connect_request(target).as_bytes())
         .await
         .map_err(UpstreamError::Request)?;
     tls.flush().await.map_err(UpstreamError::Request)?;
     read_head(tls, max_header_bytes, parse)
         .await
         .map_err(UpstreamError::Head)
+}
+
+fn connect_request(target: &Authority) -> String {
+    format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nUser-Agent: {}\r\n\
+         Gateinto-Auth-Version: {AUTH_VERSION}\r\n\r\n",
+        user_agent()
+    )
+}
+
+const AUTH_VERSION: &str = "1";
+
+fn user_agent() -> String {
+    format!("Gateinto/{}", crate::VERSION)
 }
 
 struct Shared {
@@ -247,11 +269,21 @@ struct Shared {
     tunnels: Arc<Semaphore>,
     rejects: Arc<Semaphore>,
     open_tunnels: OpenTunnels,
+    verifications: Verifications,
+    verification_origins: Option<Vec<VerificationOrigin>>,
 }
 
 impl Proxy {
     pub async fn bind(config: Config) -> Result<Self, Error> {
-        Self::bind_inner(config, Arc::new(rustls::time_provider::DefaultTimeProvider)).await
+        Self::bind_sharing(config, PendingVerifications::default()).await
+    }
+
+    pub(crate) async fn bind_sharing(
+        config: Config,
+        pending: PendingVerifications,
+    ) -> Result<Self, Error> {
+        let time_provider = Arc::new(rustls::time_provider::DefaultTimeProvider);
+        Self::bind_inner(config, time_provider, pending).await
     }
 
     #[cfg(feature = "test-hooks")]
@@ -259,12 +291,13 @@ impl Proxy {
         config: Config,
         time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
     ) -> Result<Self, Error> {
-        Self::bind_inner(config, time_provider).await
+        Self::bind_inner(config, time_provider, PendingVerifications::default()).await
     }
 
     async fn bind_inner(
         config: Config,
         time_provider: Arc<dyn rustls::time_provider::TimeProvider>,
+        pending: PendingVerifications,
     ) -> Result<Self, Error> {
         if !config.listen.ip().is_loopback() {
             return Err(Error::NonLoopbackListen(config.listen));
@@ -272,6 +305,7 @@ impl Proxy {
         if config.limits.max_tunnels > MAX_TUNNELS as usize {
             return Err(Error::TunnelLimit(config.limits.max_tunnels));
         }
+        let verifications = Verifications::new(config.client_certificate.clone(), pending);
         let endpoint = Endpoint::new(
             config.upstream,
             config.tls_mode,
@@ -314,6 +348,8 @@ impl Proxy {
             tunnels,
             rejects,
             open_tunnels: OpenTunnels::default(),
+            verifications,
+            verification_origins: config.verification_origins,
         };
         Ok(Self {
             listener,
@@ -338,6 +374,10 @@ impl Proxy {
 
     pub fn open_tunnels(&self) -> OpenTunnels {
         self.shared.open_tunnels.clone()
+    }
+
+    pub fn verifications(&self) -> Verifications {
+        self.shared.verifications.clone()
     }
 
     pub async fn run(self) {
@@ -441,7 +481,12 @@ impl Shared {
             }
             Ok(Err(error)) => {
                 warn!(%target, %error, "upstream refused tunnel");
-                return reject(client, error.local_status(), limits.reject_linger).await;
+                let status = error.local_status();
+                if let UpstreamError::Challenge(refusal) = error {
+                    let offer = self.verifications.offer(*refusal, &target);
+                    debug!(?offer, "verification challenge stored");
+                }
+                return reject(client, status, limits.reject_linger).await;
             }
             Ok(Ok(opened)) => opened,
         };
@@ -483,7 +528,10 @@ impl Shared {
             return Ok((Box::new(stream), Vec::new()));
         }
         debug!(route = "gateway", "selected tunnel route");
-        self.pool.open(&self.endpoint, target, &self.limits).await
+        let origins = self.verification_origins.as_deref();
+        self.pool
+            .open(&self.endpoint, target, &self.limits, origins)
+            .await
     }
 }
 
@@ -545,14 +593,13 @@ async fn read_head<S, T>(
 where
     S: AsyncRead + Unpin,
 {
-    let mut buf = Vec::new();
-    let mut chunk = [0; 4096];
+    let mut chunk = Zeroizing::new([0; 4096]);
+    let mut buf = Zeroizing::new(Vec::with_capacity(max_header_bytes + chunk.len()));
     loop {
         if let Some(parsed) = parse(&buf, max_header_bytes).map_err(HeadError::Parse)? {
-            buf.drain(..parsed.head_len);
-            return Ok((parsed.value, buf));
+            return Ok((parsed.value, buf[parsed.head_len..].to_vec()));
         }
-        match stream.read(&mut chunk).await.map_err(HeadError::Io)? {
+        match stream.read(&mut chunk[..]).await.map_err(HeadError::Io)? {
             0 => return Err(HeadError::Closed),
             n => buf.extend_from_slice(&chunk[..n]),
         }
@@ -568,7 +615,34 @@ pub(crate) enum UpstreamError {
     Request(io::Error),
     Head(HeadError),
     Status(u16),
+    Challenge(Box<Refusal>),
     Http2(::h2::Error),
+}
+
+fn refused(
+    response: TunnelResponse,
+    sent: Option<CertificateDer<'static>>,
+    origins: Option<&[VerificationOrigin]>,
+) -> UpstreamError {
+    if response.status != 407 {
+        return UpstreamError::Status(response.status);
+    }
+    let Some(sent) = sent else {
+        debug!("verification challenge ignored without a sent client certificate");
+        return UpstreamError::Status(407);
+    };
+    let fingerprint = sha256_fingerprint(&sent);
+    let values: Vec<&[u8]> = response.proxy_authenticate().collect();
+    match challenge::parse(&values, &fingerprint, origins) {
+        Ok(challenge) => UpstreamError::Challenge(Box::new(Refusal {
+            fingerprint,
+            challenge,
+        })),
+        Err(reason) => {
+            debug!(?reason, "verification challenge ignored");
+            UpstreamError::Status(407)
+        }
+    }
 }
 
 impl UpstreamError {
@@ -592,6 +666,7 @@ impl fmt::Display for UpstreamError {
             Self::Request(error) => write!(f, "sending CONNECT failed: {error}"),
             Self::Head(error) => write!(f, "invalid CONNECT response: {error}"),
             Self::Status(status) => write!(f, "CONNECT answered with status {status}"),
+            Self::Challenge(_) => write!(f, "gateway asks for interactive verification"),
             Self::Http2(error) => write!(f, "HTTP/2 CONNECT failed: {error}"),
         }
     }
@@ -680,6 +755,20 @@ mod tests {
     use super::os_user::{Denial, Owners};
     use super::*;
 
+    #[test]
+    fn connect_request_sends_the_user_agent_and_auth_version_after_the_host() {
+        let target: Authority = "example.com:443".parse().unwrap();
+
+        assert_eq!(
+            connect_request(&target),
+            format!(
+                "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                 User-Agent: Gateinto/{}\r\nGateinto-Auth-Version: 1\r\n\r\n",
+                crate::VERSION
+            )
+        );
+    }
+
     async fn closed_port() -> SocketAddr {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         listener.local_addr().unwrap()
@@ -705,6 +794,7 @@ mod tests {
                 ..Limits::default()
             },
             os_user_job: None,
+            verification_origins: None,
         }
     }
 
@@ -832,6 +922,87 @@ mod tests {
         let (response, _) = exchange(proxy, CONNECT).await;
         assert!(response.starts_with("HTTP/1.1 408 "), "{response}");
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    fn tunnel_response(status: u16, values: &[&str]) -> TunnelResponse {
+        TunnelResponse::new(
+            status,
+            values
+                .iter()
+                .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
+                .collect(),
+        )
+    }
+
+    fn challenge_value(fingerprint: &str) -> String {
+        format!(
+            "Gateinto auth_uri=\"https://verify.test/device?cert_sha256={fingerprint}\", \
+             user_code=WDJB-MJHT, expires_in=300"
+        )
+    }
+
+    #[test]
+    fn a_valid_challenge_for_the_sent_certificate_refuses_with_it() {
+        let sent = CertificateDer::from(vec![1, 2, 3]);
+        let fingerprint = sha256_fingerprint(&sent);
+        let response = tunnel_response(407, &["Basic realm=x", &challenge_value(&fingerprint)]);
+        let UpstreamError::Challenge(refusal) = refused(response, Some(sent), None) else {
+            panic!("a valid challenge is kept");
+        };
+        assert_eq!(refusal.fingerprint, fingerprint);
+        assert_eq!(refusal.challenge.user_code(), "WDJB-MJHT");
+    }
+
+    #[test]
+    fn a_challenge_without_a_sent_certificate_or_binding_is_a_plain_status() {
+        let sent = CertificateDer::from(vec![1, 2, 3]);
+        let fingerprint = sha256_fingerprint(&sent);
+        let other = sha256_fingerprint(&[4, 5, 6]);
+        let origins = ["https://elsewhere.test".parse().unwrap()];
+        for (response, sent, origins) in [
+            (
+                tunnel_response(407, &[&challenge_value(&fingerprint)]),
+                None,
+                None,
+            ),
+            (
+                tunnel_response(407, &[&challenge_value(&other)]),
+                Some(sent.clone()),
+                None,
+            ),
+            (
+                tunnel_response(407, &[&challenge_value(&fingerprint)]),
+                Some(sent.clone()),
+                Some(&origins[..]),
+            ),
+            (tunnel_response(407, &[]), Some(sent.clone()), None),
+            (tunnel_response(502, &[]), Some(sent.clone()), None),
+        ] {
+            let status = response.status;
+            let error = refused(response, sent, origins);
+            assert!(
+                matches!(error, UpstreamError::Status(s) if s == status),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_challenge_answers_bad_gateway_with_a_fixed_text() {
+        let sent = CertificateDer::from(vec![1, 2, 3]);
+        let fingerprint = sha256_fingerprint(&sent);
+        let response = tunnel_response(407, &[&challenge_value(&fingerprint)]);
+        let error = refused(response, Some(sent), None);
+        assert!(error.local_status().response().starts_with("HTTP/1.1 502 "));
+        assert_eq!(
+            error.to_string(),
+            "gateway asks for interactive verification"
+        );
+        let debug = format!("{error:?}");
+        assert!(
+            !debug.contains("WDJB") && !debug.contains(&fingerprint),
+            "{debug}"
+        );
     }
 
     #[test]

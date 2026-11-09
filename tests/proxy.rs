@@ -67,12 +67,7 @@ async fn relays_binary_data_in_both_directions() {
 
     assert_eq!(received.len(), sent.len());
     assert!(received == sent);
-    assert_eq!(
-        setup.upstream.requests(),
-        vec![format!(
-            "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n"
-        )]
-    );
+    assert_eq!(setup.upstream.requests(), vec![gateway_connect(target)]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

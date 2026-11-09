@@ -66,6 +66,8 @@ pub struct SessionInfo {
     pub browser: Option<BrowserKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verification: bool,
 }
 
 impl SessionInfo {
@@ -202,6 +204,7 @@ mod tests {
             tunnels: 2,
             browser,
             shell: None,
+            verification: false,
         }
     }
 
@@ -284,6 +287,23 @@ mod tests {
         assert_eq!(SessionInfo::parse_list(&[line]).unwrap(), [terminal]);
         let line = info(Some(BrowserKind::Chrome)).to_line();
         assert!(!line.contains("shell"), "{line}");
+    }
+
+    #[test]
+    fn a_pending_verification_is_flagged_and_its_absence_is_omitted() {
+        let line = info(None).to_line();
+        assert!(!line.contains("verification"), "{line}");
+        assert!(!SessionInfo::parse_list(&[line]).unwrap()[0].verification);
+        let flagged = SessionInfo {
+            verification: true,
+            ..info(None)
+        };
+        let line = flagged.to_line();
+        assert!(
+            line.ends_with(r#""tunnels":2,"verification":true}"#),
+            "{line}"
+        );
+        assert_eq!(SessionInfo::parse_list(&[line]).unwrap(), [flagged]);
     }
 
     #[test]

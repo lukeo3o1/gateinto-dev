@@ -1,0 +1,1 @@
+Gateinto auth_uri="https://127.0.0.1/a%20b/?cert%5Fsha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&k&v=a=b", user_code="WDJB-MJHT", expires_in="300"

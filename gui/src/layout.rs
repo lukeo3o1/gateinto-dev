@@ -1,3 +1,5 @@
+use zeroize::DefaultIsZeroes;
+
 use crate::nav::Page;
 use crate::scale::Scale;
 
@@ -8,6 +10,8 @@ pub struct Rect {
     pub w: i32,
     pub h: i32,
 }
+
+impl DefaultIsZeroes for Rect {}
 
 impl Rect {
     pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {

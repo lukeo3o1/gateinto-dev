@@ -12,9 +12,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio_rustls::client::TlsStream;
+use zeroize::Zeroizing;
 
 use super::UpstreamError;
-use crate::http::Authority;
+use crate::http::{Authority, TunnelResponse};
 
 pub(crate) struct Driver(JoinHandle<()>);
 
@@ -201,12 +202,7 @@ pub(crate) fn request(
     liveness: &Liveness,
     target: &Authority,
 ) -> Result<Pending, UpstreamError> {
-    let request = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .version(http::Version::HTTP_2)
-        .uri(target.to_string())
-        .body(())
-        .expect("a validated CONNECT authority is a valid URI");
+    let request = connect_request(target);
     let tracked = Tracked::new(&liveness.0);
     let (response, send) = sender
         .send_request(request, false)
@@ -218,13 +214,34 @@ pub(crate) fn request(
     })
 }
 
+fn connect_request(target: &Authority) -> http::Request<()> {
+    http::Request::builder()
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .uri(target.to_string())
+        .header(http::header::USER_AGENT, super::user_agent())
+        .header("gateinto-auth-version", super::AUTH_VERSION)
+        .body(())
+        .expect("a validated CONNECT authority and token header values form a valid request")
+}
+
 impl Pending {
-    pub(crate) async fn response(mut self) -> Result<(u16, Stream), UpstreamError> {
+    pub(crate) async fn response(mut self) -> Result<(TunnelResponse, Stream), UpstreamError> {
         let response = (&mut self.response).await.map_err(UpstreamError::Http2)?;
         self.tracked.0.answered();
         let status = response.status().as_u16();
+        let proxy_authenticate = if status == 407 {
+            response
+                .headers()
+                .get_all(http::header::PROXY_AUTHENTICATE)
+                .iter()
+                .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok((
-            status,
+            TunnelResponse::new(status, proxy_authenticate),
             Stream {
                 send: self
                     .send
@@ -341,6 +358,32 @@ pub(crate) async fn ready(sender: &mut h2::client::SendRequest<Bytes>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_request_has_the_authority_and_lowercase_gateinto_fields_only() {
+        let target: Authority = "[::1]:443".parse().unwrap();
+
+        let request = connect_request(&target);
+
+        assert_eq!(request.method(), http::Method::CONNECT);
+        assert_eq!(request.version(), http::Version::HTTP_2);
+        assert_eq!(request.uri(), "[::1]:443");
+        let fields: Vec<_> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (
+                    "user-agent",
+                    format!("Gateinto/{}", crate::VERSION).as_str()
+                ),
+                ("gateinto-auth-version", "1"),
+            ]
+        );
+    }
 
     #[test]
     fn connection_window_covers_every_stream_window_up_to_the_protocol_maximum() {

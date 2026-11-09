@@ -12,6 +12,7 @@ use crate::gateways;
 use crate::hit::Zone;
 use crate::icons::{self, Icon};
 use crate::layout::Rect;
+use crate::verification;
 
 pub const NO_GATEWAYS: Text = Text::NoGateways;
 pub const PORTAL_FAILED: Text = Text::PortalFailed;
@@ -28,6 +29,7 @@ pub enum Choice {
     Portal(u64),
     Details(u64),
     Credentials(u64),
+    Verification(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +63,11 @@ pub fn picker(listing: &Result<Known, String>) -> Vec<Entry> {
 }
 
 pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> Vec<Entry> {
+    let verification = verification::offers(state, id).then(|| Entry {
+        icon: icons::INFO,
+        label: Text::ShowVerification.into(),
+        choice: Some(Choice::Verification(id)),
+    });
     let credentials = credentials::offers(state, id).then(|| Entry {
         icon: icons::LOCK,
         label: Text::ShowCredentials.into(),
@@ -76,8 +83,9 @@ pub fn session(listing: &Result<Known, String>, state: &AgentState, id: u64) -> 
         label: Text::GatewayDetails.into(),
         choice: Some(Choice::Details(id)),
     };
-    credentials
+    verification
         .into_iter()
+        .chain(credentials)
         .chain(portal)
         .chain([details])
         .collect()
@@ -243,6 +251,7 @@ mod tests {
             tunnels: 0,
             browser: None,
             shell: None,
+            verification: false,
         }
     }
 
@@ -340,6 +349,30 @@ mod tests {
             choice: Some(Choice::Credentials(5)),
         };
         assert_eq!(session(&listing, &state, 5), [show, details(5)]);
+        assert_eq!(session(&listing, &state, 4), [details(4)]);
+    }
+
+    #[test]
+    fn only_sessions_awaiting_verification_offer_to_show_it_first() {
+        let mut flagged = session_info(5, "lab");
+        flagged.verification = true;
+        flagged.auth = SessionAuth::Password;
+        let state = AgentState::Running(vec![session_info(4, "lab"), flagged]);
+        let listing = known(vec![gateway("lab", "lab.example.com")]);
+        let show = Entry {
+            icon: icons::INFO,
+            label: "Show verification".into(),
+            choice: Some(Choice::Verification(5)),
+        };
+        let credentials = Entry {
+            icon: icons::LOCK,
+            label: "Show credentials".into(),
+            choice: Some(Choice::Credentials(5)),
+        };
+        assert_eq!(
+            session(&listing, &state, 5),
+            [show, credentials, details(5)]
+        );
         assert_eq!(session(&listing, &state, 4), [details(4)]);
     }
 

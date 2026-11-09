@@ -563,6 +563,7 @@ mod tests {
             client_certificate: None,
             limits: proxy::Limits::default(),
             os_user_job: None,
+            verification_origins: None,
         }
     }
 
