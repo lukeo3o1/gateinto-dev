@@ -348,3 +348,70 @@ completed successfully. Other PoC Windows/native-control jobs remain red for
 previously unqualified alternatives. New source evidence and uploads retain
 aggregate counts and relative timing only; raw identities, endpoints and clocks
 remain in restricted local evidence.
+
+## Executed SOCKET TCP routing comparison
+
+The separately requested routing experiment is opt-in; native WFP remains the
+default. Retained reports cover
+[initial failures](evidence/wfp-socket-routing-run-42613174975.md),
+[Server 2022 conflict diagnostics and partial infrastructure failures](evidence/wfp-socket-routing-run-42672188645.md),
+[pinned ownership with remaining short failures](evidence/wfp-socket-routing-run-42674843682.md),
+and the [wakeup-synchronized comparison](evidence/wfp-socket-routing-run-42678849531.md).
+Each artifact's fixed-case summaries exactly match its projected console
+aggregate. No failed stage is overwritten or treated as a valid speed result.
+
+Final measured source `c1ea56e7561c78b4e348d790f1894cf1cff00231`, Actions merge
+`31cf48c50ea5f30d7a3baf1e2976e989eabf4636`, run 42678849531:
+
+| OS | Routing job | Outcome |
+| --- | --- | --- |
+| Server 2022 | 129367578763 | Success, nine cases pass |
+| Server 2025 | 129367578984 | Eight pass; one burst fails independent native audit |
+
+All 732 clients complete expected responses. All four SOCKET short cases pass
+with 160/160 echoes and exact process/path/creation/generation/deadline/native
+checks. Selected short attempt-to-echo p50 is 23.41–32.35 ms versus WFP
+42.93–57.42 ms; other-app direct p50 is 0.87–1.37 versus 12.58–16.10 ms. These are
+per-case ranges, not pooled percentiles, and include attempt logging and actual
+proxy work. First-packet buffering remains necessary.
+
+The passing Server 2025 burst round 2 is slower for selected traffic with SOCKET
+(p50/p95 146.7643/173.0354 ms versus 143.6290/168.0692). The failed round 1 echoes
+all fifty clients and has correct SOCKET attestations, but four client tuples
+also have different-app native candidates within the audit window. Its identity
+ambiguity remains unresolved, later gateway checks are not reached, and its
+timings are excluded from qualified comparisons. Aggregates do not identify the
+other app or prove reinjection/staleness as the cause.
+
+Implementation and independent review found two measured defects: later System
+metadata during own injection conflicted with the original owner, and a revision
+notification could be lost between predicate check and wait. Original ownership
+is now pinned and later unbound endpoints quarantined without a PID whitelist;
+guard/send/success ordering is serialized. A deterministic red-first regression
+verifies publication under the Engine's wait mutex. The four short cases now
+have identity-ready-to-apply maxima 0.0467–0.0730 ms, versus prior near-one-second
+tails. Known loss and original endpoint conflicts remain strict.
+
+The independent reference uses the same 100 ms poll and 1100 ms drain for both
+sources, and a first-normal-decision pre-reinjection upper bound. That boundary
+is source-specific audit validation, not a claim that native stored-event time
+must precede packet capture. SOCKET's own kernel-before-capture proof remains
+strict. Historical capture-boundary failures remain in their original reports.
+
+Both delayed controls verify six selected timeout-direct leaks and six checked
+resets in total; the six other-app clients echo without reset. Late identity
+never changes direct to proxy. This is an explicit leak tradeoff.
+
+Local validation passes 132 Python tests with actual PowerShell and loopback
+checks, portable `-Werror` helpers, deterministic notification/SYN/loss tests,
+Windows x64 COFF compilation and separate reviewer signoff. Both actual MSVC
+builds, DLL helpers, model and observation jobs pass. Standard CI 42678848871
+passes all eight jobs, including installers and WOW64. The broad PoC remains red
+for its older unqualified cases and the newly retained audit conflict.
+
+The quarantine policy conservatively rejects initial SYN retransmissions, even
+the same sequence number. Missing lifecycle events, ordinary lossy networks,
+general reuse, desktop Windows, external routing and sustained load remain
+unqualified. Fresh IPv4 loopback clients and retained process handles limit the
+samples. Kernel queue loss is unobservable; routing-query count zero is not a
+total CPU saving. The default is unchanged and no production guarantee is made.

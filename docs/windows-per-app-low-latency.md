@@ -1,15 +1,21 @@
-# Lower-latency native WFP ownership research
+# Lower-latency Windows application ownership research
 
-Updated: 2026-11-08. Experiment: PR #95; latest measured source `2dd799e`.
+Updated: 2026-11-09. Experiment: PR #95; latest measured source `c1ea56e`.
 
-The latest [SOCKET observation run](evidence/wfp-socket-run-42497668177.md) passed
-eight cases per OS on Server 2022/2025. All 408 controlled clients had matching
-SOCKET PID, usable image path, verified creation time, independent native WFP
-reference, observed packet and echo. In short sequential cases, image identity
-was ready about 0.09–0.12 ms after the first observed packet capture at p50.
-Only 21 of 408 identities were ready before capture, so a routing design still
-needs buffering. Controlled buffered routing is the next experiment; this run
-tested observation only.
+The latest [actual routing comparison](evidence/wfp-socket-routing-run-42678849531.md)
+completes all 732 expected client responses on Server 2022/2025. Seventeen of
+eighteen cases pass: one SOCKET burst remains failed for four conflicting native
+application references. All four SOCKET short cases pass, with selected-app
+attempt-to-echo p50 of 23.41–32.35 ms versus 42.93–57.42 ms for WFP. This is
+application latency through the real proxy, not an observation offset.
+
+Keep WFP as the default. A passing Server 2025 burst is slightly slower for
+selected traffic with SOCKET, the independent audit conflict is unresolved, and
+the conservative quarantine policy rejects retransmitted initial SYNs. Ordinary
+loss/reuse behavior remains unqualified. The earlier
+[observation-only run](evidence/wfp-socket-run-42497668177.md) established fast
+identity readiness but did not itself qualify routing; first-packet buffering
+is still required.
 
 Earlier [stored-event comparisons](evidence/wfp-divert-run-42468677635.md) show fewer
 returned rows with destination filtering, but no repeatable latency improvement.
@@ -83,8 +89,61 @@ Clients explicitly bound IPv4 loopback tuples and the harness retained child
 process handles for creation-time ground truth. This does not qualify auto-bind,
 immediate process-object reclamation, arbitrary PID/tuple reuse, external routing,
 IPv6, desktop Windows or sustained load. Driver queue loss is not observable.
-The native WFP Subscribe2/3/4 findings remain unchanged, and SOCKET currently has
-no routing authority in this experiment.
+The native WFP Subscribe2/3/4 findings remain unchanged. This observation run
+used no SOCKET routing authority; later opt-in TCP routing is evaluated
+separately below.
+
+## Measured SOCKET TCP routing
+
+[Run 42678849531](evidence/wfp-socket-routing-run-42678849531.md), source
+`c1ea56e`, compares the default async/cache-on WFP source and opt-in SOCKET in two
+balanced rounds per OS. Each short case has forty sequential clients; each
+burst synchronizes fifty already-bound clients. Independent native WFP auditing
+uses the same 100 ms interval and 1100 ms drain for both sources. The audit checks
+the original app before the first normal routing decision/reinjection; SOCKET's
+own kernel event must separately precede packet capture.
+
+Passing short cases, WFP / SOCKET attempt-to-echo milliseconds:
+
+| OS / round | Selected p50 | Selected p95 | Direct p50 | Direct p95 |
+| --- | --- | --- | --- | --- |
+| 2022 / 1 | 57.4168 / 26.1028 | 139.3655 / 38.3779 | 12.5764 / 0.8930 | 78.6986 / 1.0796 |
+| 2022 / 2 | 48.5204 / 25.0134 | 134.7347 / 38.8287 | 16.1023 / 0.8675 | 83.9237 / 1.0000 |
+| 2025 / 1 | 42.9262 / 32.3464 | 58.7536 / 40.3279 | 12.6868 / 1.2807 | 14.3782 / 1.4680 |
+| 2025 / 2 | 44.2453 / 23.4123 | 58.2128 / 38.2215 | 13.4206 / 1.3701 | 15.9060 / 1.6536 |
+
+These client clocks exclude process launch and barrier waiting, but include
+local attempt-record flush, TCP and proxy/fixture work. No percentile pooling is
+used. Source decision distributions also include fixture flows, so they must not
+be read as one observation per original client.
+
+The passing Server 2025 burst round 2 is a counterexample to uniform speedup:
+selected p50/p95 becomes 146.7643/173.0354 ms with SOCKET versus
+143.6290/168.0692 ms with WFP, while direct improves. Server 2025 burst round 1
+echoes all fifty clients and matches all SOCKET process attestations, but four
+tuples have additional different-app native candidates in the audit window.
+That case stays failed and is excluded from qualified timing comparisons. The
+aggregate cannot identify those other applications or their provenance.
+
+The implementation first failed on
+[all SOCKET routing cases](evidence/wfp-socket-routing-run-42613174975.md).
+[Diagnostics](evidence/wfp-socket-routing-run-42672188645.md) established later
+System CONNECT metadata during own successful injection. Pinning the earlier
+owner and quarantining later, previously unbound endpoints repaired the burst
+path without a PID whitelist. A
+[following run](evidence/wfp-socket-routing-run-42674843682.md) still had short
+failures and roughly one-second identity-ready-to-apply tails. The deterministic
+lost-notification repair now publishes under the consumer's wait mutex; current
+short maxima are 0.0467–0.0730 ms for that offset, without periodic polling.
+All failed runs and the slow passing short case remain evidence.
+
+Both delayed-identity controls verify timeout-direct, six selected late leaks
+and six client-observed resets in total. Reset cannot undo those bytes or turn
+an already direct flow into proxy. Query count zero excludes only native WFP
+routing snapshot work; reference collection and process-image queries still cost
+work. No total-system CPU reduction, kernel-loss bound or production guarantee
+is established. Standard CI, model and observation jobs pass; the broader PoC
+is red, including the unresolved new audit case.
 
 ## Measured scoped snapshots
 
@@ -255,9 +314,12 @@ does not prove either zero leakage or universal noninterference.
 Local helper checks and the Server 2022/2025 comparisons have executed. The
 [snapshot report](evidence/wfp-divert-run-42468677635.md) separates both completed
 Server 2022 attempts from the Server 2025 rerun's infrastructure failure.
-The [SOCKET report](evidence/wfp-socket-run-42497668177.md) records both successful
-observation jobs. Standard CI and the model job passed. The remaining Windows
-experiment jobs stay red for subscription cases, short-hold Security
+The [SOCKET observation report](evidence/wfp-socket-run-42497668177.md) records
+both successful observation jobs; the
+[routing report](evidence/wfp-socket-routing-run-42678849531.md) retains seventeen
+passing cases and one unresolved native audit conflict. Standard CI and the
+model job passed. The remaining Windows experiment jobs stay red for that audit,
+subscription cases, short-hold Security
 UDP, unrecognized native-drop callbacks and first-packet ALE shadows. Fresh
 snapshot creation remains the main measured query cost. No CPU saving, safe
 production reuse or general first-packet delivery bound has been established.

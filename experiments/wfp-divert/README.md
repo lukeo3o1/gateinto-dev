@@ -459,12 +459,23 @@ receipts, known original endpoints, same-endpoint changes, original closures,
 new initial SYNs after quarantine and detected loss remain strict failures.
 This conservative policy also rejects a SYN retransmission after quarantine;
 it does not qualify ordinary lossy-network retransmission behavior.
-This candidate requires a new Windows comparison with complete independent
-references; production reuse remains unqualified.
+This policy remains opt-in; production reuse remains unqualified.
 
 The [first pinned-owner comparison](../../docs/evidence/wfp-socket-routing-run-42674843682.md)
 passed all four SOCKET bursts and both delayed-identity controls, while three
 short cases failed and one passing short case had a slow tail. Its remaining
 check-and-wait notification race is repaired by publishing revisions under the
 same mutex used for the packet worker's wait. No periodic polling workaround is
-used. A new end-to-end comparison must validate that repair.
+used. The following comparison tests that repair while retaining failed audits.
+
+[Run 42678849531](../../docs/evidence/wfp-socket-routing-run-42678849531.md),
+source `c1ea56e`, completes all 732 expected client responses and passes seventeen
+of eighteen cases. All four SOCKET short cases pass (160 clients), with selected
+attempt-to-echo p50 23.41–32.35 ms versus WFP 42.93–57.42 ms. Short identity-ready
+to apply maxima are 0.0467–0.0730 ms, without the former one-second stall.
+
+Server 2025 burst round 1 remains failed for four client tuples with conflicting
+native application candidates; its later gateway validation is not reached.
+Another passing selected burst is slightly slower with SOCKET. Keep these
+negative results, the retransmission restriction and the WFP default. Full
+case results, per-round latency and artifact/console checks are in the report.
