@@ -314,10 +314,30 @@ int inproc_self_test() {
         identity.ready = 1002;
         identity.path = "\\device\\lab\\app-a.exe";
         History history;
+        assert(history.classify(connect) == ConnectChange::New);
         assert(history.apply(connect));
+        assert(history.classify(connect) == ConnectChange::ExactDuplicate);
+        auto changed = connect;
+        ++changed.occurred;
+        assert(history.classify(changed) == ConnectChange::Timestamp);
+        changed = connect; ++changed.pid;
+        assert(history.classify(changed) == ConnectChange::Process);
+        changed = connect; ++changed.endpoint;
+        assert(history.classify(changed) == ConnectChange::Endpoint);
+        changed = connect; ++changed.tuple.remote_port;
+        assert(history.classify(changed) == ConnectChange::Tuple);
         assert(history.match(key, generation, generation, 50).verdict == Verdict::Missing);
         assert(history.apply(identity));
         assert(history.match(key, generation, generation, 50).verdict == Verdict::Matched);
+        history.injected(key, generation, 1005, 1006);
+        changed = connect;
+        ++changed.endpoint; ++changed.pid;
+        changed.parent = connect.endpoint;
+        changed.occurred = 1007; changed.received = 1008;
+        const auto context = history.context(changed);
+        assert(context.bound && context.after_capture && context.injection_known);
+        assert(!context.same_endpoint && !context.same_pid && context.parent_matches);
+        assert(context.after_injection_start && context.after_injection_success && context.received_after_injection);
         auto wrong = key;
         ++wrong.remote_port;
         assert(history.match(wrong, generation, generation, 50).verdict == Verdict::Missing);
@@ -388,6 +408,9 @@ int inproc_self_test() {
         assert(closed_first.forwarding(key, generation, 50, 1010, true, 50).verdict == Verdict::Closed);
         history.poison();
         assert(history.forwarding(key, generation, 50, 1010, true, 50).verdict == Verdict::Poisoned);
+        assert(socket_owner::wakeup(251, 250, 2100) == 2100);
+        assert(socket_owner::wakeup(249, 250, 2100) == 250);
+        assert(socket_owner::wakeup(100, 0, 2100) == 2100);
         History pid_changed;
         assert(pid_changed.apply(connect) && pid_changed.apply(identity));
         reused = identity;
@@ -938,6 +961,7 @@ class SocketSource {
     std::condition_variable_any identity_wake;
     std::deque<socket_owner::Event> pending;
     socket_owner::History history;
+    std::map<std::string, uint64_t> connect_changes, post_capture_connect, identity_failures, close_context;
     bool resolver_stopping = false, stopped = false;
     std::atomic<bool> stopping{false}, abort_receive{false}, receiver_done{true}, receiver_started{false};
     std::atomic<uint64_t> version{0};
@@ -955,6 +979,21 @@ class SocketSource {
         if (address[1] != 0xFFFF || address[2] || address[3]) return {};
         return htonl(address[0]);
     }
+    static const char* change_name(socket_owner::ConnectChange change) {
+        switch (change) {
+        case socket_owner::ConnectChange::New: return "new";
+        case socket_owner::ConnectChange::ExactDuplicate: return "exact_duplicate";
+        case socket_owner::ConnectChange::Timestamp: return "timestamp_changed";
+        case socket_owner::ConnectChange::Process: return "pid_changed";
+        case socket_owner::ConnectChange::Endpoint: return "endpoint_changed";
+        case socket_owner::ConnectChange::Tuple: return "tuple_changed";
+        default: return "invalid";
+        }
+    }
+    void identity_failure(const char* stage) {
+        std::lock_guard<Mutex> lock(mutex);
+        ++identity_failures[stage];
+    }
     socket_owner::Event identity(socket_owner::Event event) {
         event.kind = socket_owner::Kind::Identity;
         const auto before = qpc();
@@ -964,20 +1003,24 @@ class SocketSource {
             HANDLE handle;
             ~Process() { if (handle) CloseHandle(handle); }
         } process{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, event.pid)};
-        if (!process.handle) return event;
+        if (!process.handle) {
+            identity_failure(GetLastError() == ERROR_ACCESS_DENIED ? "process_open_access_denied" : "process_open_other");
+            return event;
+        }
         FILETIME created{}, exited{}, kernel{}, user{};
-        if (!GetProcessTimes(process.handle, &created, &exited, &kernel, &user)) return event;
+        if (!GetProcessTimes(process.handle, &created, &exited, &kernel, &user)) { identity_failure("process_times"); return event; }
         event.creation = filetime(created);
         event.creation_guard_valid = socket_owner::creation_precedes(event.creation, event.occurred, before, after, utc, frequency);
+        if (!event.creation_guard_valid) identity_failure("creation_guard");
         std::vector<wchar_t> path(32768);
         DWORD length = static_cast<DWORD>(path.size());
-        if (!QueryFullProcessImageNameW(process.handle, PROCESS_NAME_NATIVE, path.data(), &length)) return event;
+        if (!QueryFullProcessImageNameW(process.handle, PROCESS_NAME_NATIVE, path.data(), &length)) { identity_failure("image_name"); return event; }
         const auto count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), static_cast<int>(length),
             nullptr, 0, nullptr, nullptr);
-        if (count <= 0) return event;
+        if (count <= 0) { identity_failure("utf8"); return event; }
         event.path.resize(static_cast<size_t>(count));
         if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), static_cast<int>(length),
-            event.path.data(), count, nullptr, nullptr) != count) { event.path.clear(); return event; }
+            event.path.data(), count, nullptr, nullptr) != count) { identity_failure("utf8"); event.path.clear(); return event; }
         event.path = lower(std::move(event.path));
         return event;
     }
@@ -1013,6 +1056,13 @@ class SocketSource {
             {
                 std::lock_guard<Mutex> lock(mutex);
                 event_to_recv_ms.push_back(static_cast<double>(event.received - event.occurred) * 1000 / frequency);
+                if (event.kind == socket_owner::Kind::Connect) ++connect_changes[change_name(history.classify(event))];
+                else {
+                    const auto relation = history.close_relation(event.endpoint);
+                    ++close_context[relation == socket_owner::CloseRelation::Unknown ? "unknown_endpoint" :
+                        relation == socket_owner::CloseRelation::Original ? "original_endpoint" : "other_known_endpoint"];
+                    if (!event.tuple.remote || !event.tuple.remote_port) ++close_context["remote_unspecified"];
+                }
                 if (!history.apply(event)) { ++history_overflow; fail("socket_history_limit", ERROR_MORE_DATA); }
                 else if (event.kind == socket_owner::Kind::Connect) {
                     if (pending.size() >= 1024) { ++queue_overflow; fail("socket_identity_queue_limit", ERROR_MORE_DATA); }
@@ -1041,6 +1091,19 @@ class SocketSource {
                 std::lock_guard<Mutex> lock(mutex);
                 identity_lookup_ms.push_back(static_cast<double>(event.ready - began) * 1000 / frequency);
                 event_to_identity_ready_ms.push_back(static_cast<double>(event.ready - event.occurred) * 1000 / frequency);
+                const auto context = history.context(event);
+                if (context.bound && context.after_capture) {
+                    ++post_capture_connect["total"];
+                    ++post_capture_connect[context.same_endpoint ? "same_endpoint" : "different_endpoint"];
+                    ++post_capture_connect[context.same_pid ? "same_pid" : "different_pid"];
+                    ++post_capture_connect[!event.parent ? "parent_missing" : context.parent_matches ? "parent_matches" : "parent_other"];
+                    ++post_capture_connect[event.pid == 4 ? "system_process" : "other_process"];
+                    ++post_capture_connect[event.creation_guard_valid && !event.path.empty() ? "identity_available" : "identity_unavailable"];
+                    ++post_capture_connect[context.injection_known ? "injection_known" : "injection_unknown"];
+                    if (context.after_injection_start) ++post_capture_connect["event_after_injection_start"];
+                    if (context.after_injection_success) ++post_capture_connect["event_after_injection_success"];
+                    if (context.received_after_injection) ++post_capture_connect["receive_after_injection_success"];
+                }
                 if (!history.apply(event)) { ++history_overflow; fail("socket_identity_history_limit", ERROR_MORE_DATA); }
             }
             changed();
@@ -1060,6 +1123,23 @@ public:
     }
     uint64_t revision() const { return version.load(); }
     size_t size() { std::lock_guard<Mutex> lock(mutex); return history.size(); }
+    void injected(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t started, int64_t succeeded) {
+        std::lock_guard<Mutex> lock(mutex);
+        history.injected(tuple, tag, started, succeeded);
+    }
+    std::string diagnostics() {
+        std::lock_guard<Mutex> lock(mutex);
+        auto counts = [](const auto& values) {
+            std::string result = "{";
+            for (const auto& item : values) {
+                if (result.size() > 1) result += ",";
+                result += json(item.first) + ":" + std::to_string(item.second);
+            }
+            return result + "}";
+        };
+        return "{\"connect_changes\":" + counts(connect_changes) + ",\"post_capture_connect\":" + counts(post_capture_connect) +
+            ",\"identity_failures\":" + counts(identity_failures) + ",\"close_context\":" + counts(close_context) + "}";
+    }
     template <class Callback>
     socket_owner::Verdict visit(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback, Callback callback, bool historical = false) {
         std::lock_guard<Mutex> lock(mutex);
@@ -1085,7 +1165,8 @@ public:
         if (history.failed()) { ++history_overflow; fail("socket_reuse_history_limit", ERROR_MORE_DATA); }
     }
     void start(const std::string& target, uint16_t port) {
-        const auto filter = "protocol == 6 and remoteAddr == " + target + " and remotePort == " + std::to_string(port);
+        const auto filter = "protocol == 6 and (event == CLOSE or (event == CONNECT and remoteAddr == " +
+            target + " and remotePort == " + std::to_string(port) + "))";
         handle = WinDivertOpen(filter.c_str(), WINDIVERT_LAYER_SOCKET, 0, WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY);
         if (handle == INVALID_HANDLE_VALUE) { fail("socket_open", GetLastError()); throw std::runtime_error("Socket source open"); }
         if (!WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_LENGTH, 4096) ||
@@ -1293,6 +1374,7 @@ class Engine {
     uint64_t socket_revision_seen = 0;
     uint64_t socket_matches = 0, socket_rejected = 0, socket_ambiguous = 0, socket_closed = 0;
     uint64_t socket_missing = 0, socket_reuse_rejected = 0;
+    std::map<std::string, uint64_t> socket_forward_guard_verdicts, socket_reverse_guard_verdicts;
     std::vector<double> socket_identity_ready_to_apply_ms;
 
     std::atomic<bool> stopping{false};
@@ -1393,17 +1475,20 @@ class Engine {
         return true;
     }
 
-    bool socket_forward_allowed(const Tuple& tuple, const Flow& flow, const Packet& packet, const Parsed& parsed) {
+    bool socket_forward_allowed(const Tuple& tuple, const Flow& flow, const Packet& packet, const Parsed& parsed, bool reverse = false) {
         if (!socket_source) return true;
-        if (flow.action == "drop") return false;
-        if (!parsed.tcp || !parsed.ip_header) return false;
+        auto& counts = reverse ? socket_reverse_guard_verdicts : socket_forward_guard_verdicts;
+        if (flow.action == "drop") { ++counts["drop_state"]; return false; }
+        if (!parsed.tcp || !parsed.ip_header) { ++counts["malformed"]; return false; }
         const auto headers = static_cast<size_t>(parsed.ip_header->HdrLength + parsed.tcp->HdrLength) * 4;
         const auto length = ntohs(parsed.ip_header->Length);
-        if (length < headers || length > packet.bytes.size()) return false;
+        if (length < headers || length > packet.bytes.size()) { ++counts["malformed"]; return false; }
         const auto teardown = socket_owner::teardown_only(parsed.tcp->Syn, parsed.tcp->Ack, parsed.tcp->Fin,
             parsed.tcp->Rst, length - headers);
         const auto verdict = socket_source->forwarding({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
             {flow.generation, flow.capture_qpc}, frequency * config.window_before_ms / 1000, packet.address.Timestamp, teardown);
+        static const char* labels[] = {"missing", "matched", "closed", "ambiguous", "stale", "invalid", "poisoned"};
+        ++counts[labels[static_cast<unsigned>(verdict)]];
         return socket_owner::forwarding_allowed(flow.action == "proxy", verdict);
     }
 
@@ -1423,7 +1508,12 @@ class Engine {
             WinDivertHelperCalcChecksums(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                         &packet.address, 0);
         }
-        if (send(packet, "forward")) record_added(held, flow.action, packet.address.Timestamp);
+        const auto injection_started = qpc();
+        if (send(packet, "forward")) {
+            if (socket_source) socket_source->injected({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+                {flow.generation, flow.capture_qpc}, injection_started, qpc());
+            record_added(held, flow.action, packet.address.Timestamp);
+        }
     }
 
     void flush(Flow& flow, const Tuple& tuple) {
@@ -1442,7 +1532,7 @@ class Engine {
         auto flow_it = flows.find(original);
         if (flow_it == flows.end() || parsed.tuple.local != original.local) return false;
         Flow& flow = *flow_it->second;
-        if (!socket_forward_allowed(original, flow, packet, parsed)) {
+        if (!socket_forward_allowed(original, flow, packet, parsed, true)) {
             log_decision(original, flow, "drop", "socket_reverse_authority_invalidated");
             return true;
         }
@@ -2018,6 +2108,9 @@ class Engine {
             if (verdict == socket_owner::Verdict::Ambiguous) ++socket_ambiguous;
             if (verdict == socket_owner::Verdict::Closed) ++socket_closed;
             if (flow.action == "pending") decide(tuple, flow, "direct", "socket_unattributed");
+            flow.next_retry_qpc = 0;
+            leak_watch.erase(std::remove_if(leak_watch.begin(), leak_watch.end(),
+                [&](const auto& entry) { return entry.first == tuple; }), leak_watch.end());
         }
         socket_revision_seen = revision;
     }
@@ -2213,20 +2306,21 @@ class Engine {
 
     int64_t next_deadline() const {
         int64_t soonest = 0;
+        const auto now = qpc();
         const auto consider = [&soonest](int64_t candidate) {
             if (candidate && (soonest == 0 || candidate < soonest)) soonest = candidate;
         };
         for (const auto& entry : flows) {
             const Flow& flow = *entry.second;
             if (flow.action != "pending") continue;
-            if (socket_source) consider(flow.next_retry_qpc ? (std::min)(flow.next_retry_qpc, flow.deadline_qpc) : flow.deadline_qpc);
+            if (socket_source) consider(socket_owner::wakeup(now, flow.next_retry_qpc, flow.deadline_qpc));
             else consider(inproc::lookup_wakeup(query_handoff.busy(), flow.next_retry_qpc, flow.deadline_qpc));
         }
         for (const auto& watch : leak_watch) {
             if (socket_source) {
                 const auto found = flows.find(watch.first);
                 const auto ready = found == flows.end() ? 0 : found->second->next_retry_qpc;
-                consider(ready ? (std::min)(ready, watch.second) : watch.second);
+                consider(socket_owner::wakeup(now, ready, watch.second));
             } else consider(inproc::lookup_wakeup(query_handoff.busy(), next_leak_check_qpc, watch.second));
         }
         return soonest;
@@ -2447,6 +2541,14 @@ public:
                 << ",\"max_ms\":" << metric.max_ms << "}";
             return out.str();
         };
+        auto counts = [](const auto& values) {
+            std::string result = "{";
+            for (const auto& item : values) {
+                if (result.size() > 1) result += ",";
+                result += json(item.first) + ":" + std::to_string(item.second);
+            }
+            return result + "}";
+        };
         const double runtime_ms = elapsed_ms(engine_started_qpc);
         std::ostringstream shapes;
         shapes << "[";
@@ -2524,6 +2626,9 @@ public:
                 << ",\"socket_ambiguous\":" << socket_ambiguous << ",\"socket_closed\":" << socket_closed
                 << ",\"socket_missing\":" << socket_missing << ",\"socket_reuse_rejected\":" << socket_reuse_rejected
                 << ",\"socket_history_entries\":" << socket_source->size()
+                << ",\"socket_diagnostics\":" << socket_source->diagnostics()
+                << ",\"socket_forward_guard_verdicts\":" << counts(socket_forward_guard_verdicts)
+                << ",\"socket_reverse_guard_verdicts\":" << counts(socket_reverse_guard_verdicts)
                 << ",\"socket_clean_shutdown\":" << (socket_source->clean_shutdown ? "true" : "false")
                 << ",\"driver_queue_loss_known\":false"
                 << ",\"socket_event_to_recv_ms\":" << dist(socket_source->event_to_recv_ms)

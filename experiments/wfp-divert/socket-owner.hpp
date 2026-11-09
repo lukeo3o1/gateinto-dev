@@ -28,6 +28,12 @@ struct Tag {
 
 enum class Kind { Connect, Close, Identity };
 enum class Verdict { Missing, Matched, Closed, Ambiguous, Stale, Invalid, Poisoned };
+enum class ConnectChange { New, ExactDuplicate, Timestamp, Process, Endpoint, Tuple, Invalid };
+enum class CloseRelation { Unknown, Original, OtherKnown };
+
+inline int64_t wakeup(int64_t now, int64_t retry, int64_t deadline) {
+    return retry > now && retry < deadline ? retry : deadline;
+}
 
 inline bool forwarding_allowed(bool proxy, Verdict verdict) {
     return verdict == Verdict::Matched || (!proxy && verdict == Verdict::Missing);
@@ -52,6 +58,11 @@ struct Match {
     Event event;
 };
 
+struct ConnectContext {
+    bool bound = false, after_capture = false, same_endpoint = false, same_pid = false, parent_matches = false;
+    bool injection_known = false, after_injection_start = false, after_injection_success = false, received_after_injection = false;
+};
+
 inline bool route_allowed(bool pending, Tag requested, Tag current, int64_t now, int64_t deadline, Verdict verdict) {
     return pending && requested == current && now < deadline && verdict == Verdict::Matched;
 }
@@ -61,6 +72,7 @@ class History {
         Event connect, identity;
         bool connected = false, resolved = false, closed = false, conflict = false, admitted = false;
         int64_t closed_qpc = 0;
+        int64_t injection_started = 0, injection_succeeded = 0;
         std::optional<Tag> bound;
     };
     std::map<Tuple, Entry> entries;
@@ -71,6 +83,10 @@ class History {
 public:
     explicit History(size_t limit = 4096, size_t byte_limit = 8 * 1024 * 1024) : capacity(limit), byte_capacity(byte_limit) {}
     bool apply(const Event&);
+    ConnectChange classify(const Event&) const;
+    CloseRelation close_relation(uint64_t endpoint) const;
+    ConnectContext context(const Event&) const;
+    void injected(const Tuple&, Tag, int64_t started, int64_t succeeded);
     Match match(const Tuple&, Tag, Tag, int64_t, bool historical = false);
     Match forwarding(const Tuple&, Tag, int64_t, int64_t packet_qpc, bool teardown, int64_t grace);
     void invalidate(const Tuple&);
@@ -78,6 +94,50 @@ public:
     bool failed() const { return poisoned; }
     size_t size() const { return entries.size(); }
 };
+
+inline ConnectChange History::classify(const Event& event) const {
+    if (!event.endpoint || !event.pid) return ConnectChange::Invalid;
+    const auto known = endpoints.find(event.endpoint);
+    if (known != endpoints.end() && !(known->second == event.tuple)) return ConnectChange::Tuple;
+    const auto found = entries.find(event.tuple);
+    if (found == entries.end() || !found->second.connected) return ConnectChange::New;
+    const auto& first = found->second.connect;
+    if (first.endpoint != event.endpoint) return ConnectChange::Endpoint;
+    if (first.pid != event.pid) return ConnectChange::Process;
+    if (first.occurred != event.occurred) return ConnectChange::Timestamp;
+    return ConnectChange::ExactDuplicate;
+}
+
+inline CloseRelation History::close_relation(uint64_t endpoint) const {
+    const auto known = endpoints.find(endpoint);
+    if (known == endpoints.end()) return CloseRelation::Unknown;
+    return entries.at(known->second).connect.endpoint == endpoint ? CloseRelation::Original : CloseRelation::OtherKnown;
+}
+
+inline ConnectContext History::context(const Event& event) const {
+    ConnectContext result;
+    const auto found = entries.find(event.tuple);
+    if (found == entries.end()) return result;
+    const auto& entry = found->second;
+    if (!entry.bound) return result;
+    result.bound = true;
+    result.after_capture = event.occurred > entry.bound->capture;
+    result.same_endpoint = entry.connect.endpoint == event.endpoint;
+    result.same_pid = entry.connect.pid == event.pid;
+    result.parent_matches = entry.connect.endpoint == event.parent;
+    result.injection_known = entry.injection_succeeded != 0;
+    result.after_injection_start = entry.injection_started && event.occurred >= entry.injection_started;
+    result.after_injection_success = entry.injection_succeeded && event.occurred >= entry.injection_succeeded;
+    result.received_after_injection = entry.injection_succeeded && event.received >= entry.injection_succeeded;
+    return result;
+}
+
+inline void History::injected(const Tuple& tuple, Tag tag, int64_t started, int64_t succeeded) {
+    auto found = entries.find(tuple);
+    if (found == entries.end() || !found->second.bound || !(*found->second.bound == tag)) return;
+    auto& entry = found->second;
+    if (!entry.injection_succeeded) { entry.injection_started = started; entry.injection_succeeded = succeeded; }
+}
 
 inline bool History::apply(const Event& event) {
     if (poisoned) return false;

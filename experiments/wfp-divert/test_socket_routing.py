@@ -184,6 +184,63 @@ class SocketRoutingTests(unittest.TestCase):
                 self.assertFalse(report["success"])
                 self.assertEqual(2, report["missing_clients"])
 
+    def test_missing_reference_cause_bins_preserve_the_strict_window(self):
+        for changes, cause in [(dict(layer_id=49), "wrong_layer"), (dict(app_path="System"), "no_original_app"),
+                               (dict(event_filetime=11_500_000), "after_capture"),
+                               (dict(event_filetime=10_900_000), "before_attempt")]:
+            with self.subTest(cause=cause):
+                records = self.native_records()
+                records[0].update(changes)
+                report = lab.native_reference_audit(self.clients, self.records, records, self.paths, self.clock, 0)
+                self.assertFalse(report["success"])
+                self.assertEqual(1, report["missing_causes"][cause])
+                self.assertEqual(report["missing_clients"], sum(report["missing_causes"].values()))
+
+    def test_final_enumeration_can_diagnose_poll_loss_but_cannot_replace_the_reference(self):
+        packet_records = copy.deepcopy(self.records)
+        packet_records[0].update(ownership_source="wfp", event_filetime=11_070_000)
+        records = self.native_records()
+        final = dict(records[0], kind="wfp_enum")
+        records[0]["layer_id"] = 49
+        report = lab.native_reference_audit(self.clients, packet_records, [final, *records], self.paths, self.clock, 0)
+        self.assertFalse(report["success"])
+        self.assertEqual(1, report["matched_clients"])
+        self.assertEqual(1, report["diagnostic_counts"]["engine_event_missing_from_poll_clients"])
+        self.assertEqual(1, report["diagnostic_counts"]["engine_event_seen_in_final_enum_clients"])
+        self.assertEqual(1, report["diagnostic_counts"]["fresh_final_enum_only_clients"])
+
+    def test_reference_diagnostics_publish_relative_boundaries_and_fixed_counts_only(self):
+        records = self.native_records()
+        records[0]["event_filetime"] = 11_500_000
+        report = lab.native_reference_audit(self.clients, self.records, records, self.paths, self.clock, 0)
+        report["missing_causes"]["PRIVATE-PATH"] = 987654321
+        report["diagnostic_counts"]["pid"] = 987654321
+        public = lab.public_summary(dict(status="FAIL", native_reference_audit=report))
+        self.assertEqual(40, public["native_reference_audit"]["missing_reference_timing"]["nearest_original_minus_capture_ms"]["p50"])
+        self.assertEqual(50, public["native_reference_audit"]["missing_reference_timing"]["nearest_original_minus_attempt_ms"]["p50"])
+        self.assertEqual(public, lab.public_summary(public))
+        for private in ["PRIVATE-PATH", "987654321", '"rows"', '"event_filetime"', '"capture_qpc"']:
+            self.assertNotIn(private, json.dumps(public))
+
+    def test_socket_diagnostic_count_maps_have_closed_labels_and_no_raw_values(self):
+        public = lab.public_summary(dict(status="FAIL", engine_summary=dict(
+            socket_diagnostics=dict(connect_changes=dict(pid_changed=2, pid=987654321),
+                identity_failures=dict(creation_guard=1, image_name="PRIVATE-PATH"),
+                close_context=dict(original_endpoint=1, endpoint_id=987654321),
+                post_capture_connect=dict(total=3, parent_matches=1, app_path="PRIVATE-PATH")),
+            socket_forward_guard_verdicts=dict(matched=4, closed=-1, remote_port=40001),
+            socket_reverse_guard_verdicts=dict(stale=2, unknown="PRIVATE-PATH"))))
+        engine = public["engine_summary"]
+        self.assertEqual(dict(pid_changed=2), engine["socket_diagnostics"]["connect_changes"])
+        self.assertEqual(dict(creation_guard=1), engine["socket_diagnostics"]["identity_failures"])
+        self.assertEqual(dict(original_endpoint=1), engine["socket_diagnostics"]["close_context"])
+        self.assertEqual(dict(total=3, parent_matches=1), engine["socket_diagnostics"]["post_capture_connect"])
+        self.assertEqual(dict(matched=4), engine["socket_forward_guard_verdicts"])
+        self.assertEqual(dict(stale=2), engine["socket_reverse_guard_verdicts"])
+        self.assertEqual(public, lab.public_summary(public))
+        for private in ["PRIVATE-PATH", "987654321", "40001", '"pid"', '"app_path"']:
+            self.assertNotIn(private, json.dumps(public))
+
     def test_requested_source_is_checked_in_ready_and_final_summary(self):
         self.assertTrue(lab.inproc_ready_matches(dict(kind="ready", ownership_source="socket"), "socket"))
         self.assertFalse(lab.inproc_ready_matches(dict(kind="ready", ownership_source="wfp"), "socket"))

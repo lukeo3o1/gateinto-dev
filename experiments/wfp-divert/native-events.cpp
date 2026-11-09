@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #endif
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <set>
@@ -23,6 +24,15 @@ std::string poll_missed_json(bool, unsigned long long, unsigned long long, bool,
 std::string direction_label(unsigned long);
 std::string event_type_name(unsigned long);
 std::string allow_diagnostics_json(unsigned long, long, unsigned long, unsigned long);
+
+std::string allow_event_identity(const std::string& header, uint32_t flags, uint64_t filter,
+                                 uint32_t layer, uint32_t direction, uint32_t reauth, int32_t loopback,
+                                 uint32_t original_profile, uint32_t current_profile) {
+    return std::to_string(header.size()) + ':' + header + ":allow:" + std::to_string(flags) + ':' +
+        std::to_string(filter) + ':' + std::to_string(layer) + ':' + std::to_string(direction) + ':' +
+        std::to_string(reauth) + ':' + std::to_string(loopback) + ':' +
+        std::to_string(original_profile) + ':' + std::to_string(current_profile);
+}
 
 struct PollStats {
     unsigned long long started = 0, stopped = 0, polls = 0, productive = 0;
@@ -92,6 +102,22 @@ int self_test() {
     if (window.size() != 3) throw std::runtime_error("Poll capacity");
     window.finish(1600);
     if (window.begin() != 1500) throw std::runtime_error("Poll horizon is monotonic");
+    const std::string header = "identical event header";
+    std::set<std::string> allow_events{
+        allow_event_identity(header, 255, 10, 48, 0, 0, 0, 1, 1),
+        allow_event_identity(header, 254, 10, 48, 0, 0, 0, 1, 1),
+        allow_event_identity(header, 255, 11, 48, 0, 0, 0, 1, 1),
+        allow_event_identity(header, 255, 10, 49, 0, 0, 0, 1, 1),
+        allow_event_identity(header, 255, 10, 48, 1, 0, 0, 1, 1),
+        allow_event_identity(header, 255, 10, 48, 0, 1, 0, 1, 1),
+        allow_event_identity(header, 255, 10, 48, 0, 0, 1, 1, 1),
+        allow_event_identity(header, 255, 10, 48, 0, 0, 0, 2, 1),
+        allow_event_identity(header, 255, 10, 48, 0, 0, 0, 1, 2)};
+    if (allow_events.size() != 9) throw std::runtime_error("Distinct allow payloads retain distinct identities");
+    PollWindow same_timestamp(1000, 100, 16);
+    for (const auto& event : allow_events)
+        if (!same_timestamp.accept(1010, event) || same_timestamp.accept(1010, event))
+            throw std::runtime_error("Same timestamp preserves distinct layers and deduplicates exact allow events");
     PollStats idle;
     if (idle.json(1000) != "\"wfp_poll_thread_start_qpc\":null,\"wfp_poll_thread_stop_qpc\":null,\"wfp_polls\":0,"
         "\"wfp_polls_with_new_events\":0,\"wfp_poll_total_ms\":0.000000,\"wfp_poll_mean_ms\":null,\"wfp_poll_max_ms\":0.000000,"
@@ -756,7 +782,12 @@ struct Engine {
                 try {
                     const auto* entry = entries[i];
                     if (!entry || entry->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) continue;
-                    if (!window.accept(filetime(entry->header.timeStamp), identity(entry->header))) continue;
+                    const auto* allow = entry->classifyAllow;
+                    if (!allow) throw std::runtime_error("Missing classify-allow payload");
+                    const auto key = allow_event_identity(identity(entry->header), entry->header.flags,
+                        allow->filterId, allow->layerId, allow->msFwpDirection, allow->reauthReason,
+                        allow->isLoopback, allow->originalProfile, allow->currentProfile);
+                    if (!window.accept(filetime(entry->header.timeStamp), key)) continue;
                     ++out.wfp_count;
                     ++fresh;
                     out.push(wfp_line("wfp", entry, qpc(), utc_now()));

@@ -20,6 +20,22 @@ class NoOwnershipConfirmation(RuntimeError):
 VALIDATION_STAGES = ("startup", "clients", "collectors", "client_evidence", "client_attestation",
                      "client_latency", "native_reference", "gateway", "engine_complete",
                      "engine_evaluation", "ale_shadow", "cleanup", "complete")
+REFERENCE_MISSING_CAUSES = ("collector_unclean", "invalid_clock", "invalid_client", "no_polled_tuple",
+                            "no_original_app", "incomplete_original_app", "wrong_direction", "wrong_layer",
+                            "invalid_event_time", "before_attempt", "after_capture", "outside_window",
+                            "fresh_app_conflict")
+REFERENCE_DIAGNOSTIC_COUNTS = ("original_app_outbound_layer48_clients", "engine_event_clients",
+                              "engine_event_seen_in_poll_clients", "engine_event_missing_from_poll_clients",
+                              "engine_event_seen_in_final_enum_clients", "fresh_final_enum_only_clients")
+SOCKET_DIAGNOSTIC_LABELS = dict(
+    connect_changes=("new", "exact_duplicate", "timestamp_changed", "pid_changed", "endpoint_changed", "tuple_changed", "invalid"),
+    identity_failures=("process_open_access_denied", "process_open_other", "process_times", "creation_guard", "image_name", "utf8"),
+    close_context=("unknown_endpoint", "original_endpoint", "other_known_endpoint", "remote_unspecified"),
+    post_capture_connect=("total", "same_endpoint", "different_endpoint", "same_pid", "different_pid",
+        "parent_matches", "parent_other", "parent_missing", "system_process", "other_process",
+        "identity_available", "identity_unavailable", "injection_known", "injection_unknown",
+        "event_after_injection_start", "event_after_injection_success", "receive_after_injection_success"))
+SOCKET_GUARD_LABELS = ("missing", "matched", "closed", "ambiguous", "stale", "invalid", "poisoned", "malformed", "drop_state")
 
 
 def public_summary(summary):
@@ -73,7 +89,9 @@ def public_summary(summary):
         result["native_summary"] = numeric_fields(summary["native_summary"],
             ("wfp_count", "wfp_raw_count", "wfp_callback_count", "wfp_drop_count", "wfp_other_count",
              "security5156_count", "queue_dropped", "errors", "wfp_polls", "wfp_poll_errors",
-             "wfp_enum_errors", "wfp_enum_count", "wfp_enum5_count", "wfp_enum5_errors"), integers=True)
+             "wfp_enum_errors", "wfp_enum_count", "wfp_enum5_count", "wfp_enum5_errors",
+             "wfp_enum_total", "wfp_enum_emitted", "wfp_poll_missed", "wfp_poll_interval_ms",
+             "wfp_poll_overlap_ms"), integers=True)
         types = summary["native_summary"].get("wfp_type_counts")
         api = summary["native_summary"].get("wfp_api")
         if api in enums["wfp_api"]:
@@ -128,6 +146,17 @@ def public_summary(summary):
             if isinstance(engine.get(key), dict):
                 projected[key] = numeric_fields(engine[key], ("count", "min", "max", "p50", "p95"))
         projected.update(phases(engine, ("lookup_create", "lookup_enum", "lookup_destroy", "lookup_process")))
+        def count_map(value, labels):
+            return {key: count for key, count in numeric_fields(value, labels, integers=True).items()
+                    if 0 <= count <= 1_000_000_000}
+
+        if isinstance(engine.get("socket_diagnostics"), dict):
+            projected["socket_diagnostics"] = {key: count_map(engine["socket_diagnostics"][key], labels)
+                for key, labels in SOCKET_DIAGNOSTIC_LABELS.items()
+                if isinstance(engine["socket_diagnostics"].get(key), dict)}
+        for key in ("socket_forward_guard_verdicts", "socket_reverse_guard_verdicts"):
+            if isinstance(engine.get(key), dict):
+                projected[key] = count_map(engine[key], SOCKET_GUARD_LABELS)
         filters = engine.get("enum_filter")
         allowed_filters = {"none", "time_window_only", "type", "type+protocol", "type+protocol+local_port",
                            "type+protocol+remote_port", "type+protocol+remote_port+local_port",
@@ -162,6 +191,18 @@ def public_summary(summary):
             projected.update(booleans(value, ("success",)))
             if isinstance(value.get("native_summary"), dict):
                 projected["native_summary"] = public_summary(dict(native_summary=value["native_summary"]))["native_summary"]
+            if name == "native_reference_audit":
+                for key, fields in (("missing_causes", REFERENCE_MISSING_CAUSES),
+                                    ("diagnostic_counts", REFERENCE_DIAGNOSTIC_COUNTS)):
+                    if isinstance(value.get(key), dict):
+                        projected[key] = numeric_fields(value[key], fields, integers=True)
+                timing = value.get("missing_reference_timing")
+                if isinstance(timing, dict):
+                    projected["missing_reference_timing"] = numeric_fields(timing, ("anchor_uncertainty_ms",))
+                    for key in ("nearest_original_minus_capture_ms", "nearest_original_minus_attempt_ms"):
+                        if isinstance(timing.get(key), dict):
+                            projected["missing_reference_timing"][key] = numeric_fields(
+                                timing[key], ("count", "min", "p50", "p95", "max"))
             result[name] = projected
     if isinstance(summary.get("native_reference_cleanup"), dict):
         cleanup = summary["native_reference_cleanup"]
@@ -581,9 +622,57 @@ def client_latency_summary(clients, frequency):
     return result
 
 
+def reference_diagnostics(key, expected, began, captured, native_records, packet_records, clock, missing, conflict):
+    frequency, anchor_filetime, anchor_qpc, uncertainty = clock
+    polled = [r for r in native_records if r.get("kind") == "wfp" and tuple_key(r) == key]
+    original = [r for r in polled if normalized_path(r.get("app_path", "")) == expected]
+    complete = [r for r in original if r.get("complete") is True]
+    outbound = [r for r in complete if r.get("direction") == "outbound"]
+    layer = [r for r in outbound if r.get("layer_id") == 48]
+    qualified = [r for r in layer if positive_integer(r.get("event_filetime"))]
+    final = [r for r in native_records if r.get("kind") == "wfp_enum" and tuple_key(r) == key
+             and normalized_path(r.get("app_path", "")) == expected and r.get("complete") is True
+             and r.get("direction") == "outbound" and r.get("layer_id") == 48
+             and positive_integer(r.get("event_filetime"))]
+
+    def occurred(event):
+        return anchor_qpc * 10_000_000 + (event["event_filetime"] - anchor_filetime) * frequency
+
+    lower, upper = (began - uncertainty) * 10_000_000, (captured + uncertainty) * 10_000_000
+    owners = {r["event_filetime"] for r in packet_records if r.get("kind") == "ownership" and tuple_key(r) == key
+              and r.get("capture_qpc") == captured and r.get("ownership_source", "wfp") == "wfp"
+              and normalized_path(r.get("app_path", "")) == expected and positive_integer(r.get("event_filetime"))}
+    seen_poll = bool(owners.intersection(r["event_filetime"] for r in qualified))
+    counts = dict(original_app_outbound_layer48_clients=bool(qualified), engine_event_clients=bool(owners),
+        engine_event_seen_in_poll_clients=seen_poll,
+        engine_event_missing_from_poll_clients=bool(owners) and not seen_poll,
+        engine_event_seen_in_final_enum_clients=bool(owners.intersection(r["event_filetime"] for r in final)),
+        fresh_final_enum_only_clients=missing and not any(lower <= occurred(r) <= upper for r in qualified)
+            and any(lower <= occurred(r) <= upper for r in final))
+    cause = None
+    if missing:
+        cause = ("no_polled_tuple" if not polled else "no_original_app" if not original
+                 else "fresh_app_conflict" if conflict else "incomplete_original_app" if not complete
+                 else "wrong_direction" if not outbound else "wrong_layer" if not layer
+                 else "invalid_event_time" if not qualified
+                 else "before_attempt" if all(occurred(r) < lower for r in qualified)
+                 else "after_capture" if all(occurred(r) > upper for r in qualified) else "outside_window")
+    timing = None
+    if missing and qualified:
+        nearest = min(qualified, key=lambda r: abs(occurred(r) - captured * 10_000_000))
+        ticks = occurred(nearest)
+        capture_delta = (ticks - captured * 10_000_000) / (frequency * 10_000)
+        attempt_delta = (ticks - began * 10_000_000) / (frequency * 10_000)
+        if abs(capture_delta) <= 600_000 and abs(attempt_delta) <= 600_000:
+            timing = capture_delta, attempt_delta
+    return cause, counts, timing
+
+
 def native_reference_audit(clients, packet_records, native_records, app_paths, clock, returncode):
     report = dict(success=False, client_total=len(clients), matched_clients=0, missing_clients=0,
-                  conflicting_clients=0, poll_interval_ms=1000, drain_ms=1100, rows=[])
+                  conflicting_clients=0, poll_interval_ms=1000, drain_ms=1100, rows=[],
+                  missing_causes={key: 0 for key in REFERENCE_MISSING_CAUSES},
+                  diagnostic_counts={key: 0 for key in REFERENCE_DIAGNOSTIC_COUNTS})
     summaries = [r for r in native_records if r.get("kind") == "summary"]
     summary = summaries[0] if len(summaries) == 1 else None
     report["native_summary"] = summary
@@ -594,13 +683,16 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
             or summary.get("wfp_enum_truncated") is not False
             or any(r.get("kind") in ("error", "wfp_poll_error", "wfp_enum_error") for r in native_records)):
         report["missing_clients"] = len(clients)
+        report["missing_causes"]["collector_unclean"] = len(clients)
         return report
     frequency, anchor_filetime, anchor_qpc, uncertainty = clock
     if (not all(positive_integer(value) for value in (frequency, anchor_filetime, anchor_qpc))
             or type(uncertainty) is not int or uncertainty < 0):
         report["missing_clients"] = len(clients)
+        report["missing_causes"]["invalid_clock"] = len(clients)
         return report
     seen = set()
+    timing = []
     for client in clients:
         attempts = [r for r in client.get("attempts", []) if r.get("kind") == "client_attempt"
                     and r.get("nonce") == client.get("nonce")]
@@ -610,6 +702,7 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
         if (not key or key in seen or not captures or not positive_integer(client.get("pid"))
                 or attempts[0].get("pid") != client["pid"] or not positive_integer(attempts[0].get("attempt_qpc"))):
             report["missing_clients"] += 1
+            report["missing_causes"]["invalid_client"] += 1
             continue
         seen.add(key)
         began, captured = attempts[0]["attempt_qpc"], min(captures)
@@ -630,8 +723,26 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
         report["matched_clients"] += bool(matches) and not conflict
         report["missing_clients"] += not matches or conflict
         report["conflicting_clients"] += conflict
+        cause, counts, delta = reference_diagnostics(key, expected, began, captured, native_records,
+            packet_records, clock, not matches or conflict, conflict)
+        if cause:
+            report["missing_causes"][cause] += 1
+        for count_name, value in counts.items():
+            report["diagnostic_counts"][count_name] += int(value)
+        if delta:
+            timing.append(delta)
         report["rows"].append(dict(app=client["app"], tuple=list(key), matched=bool(matches) and not conflict,
                                    attempt_qpc=began, capture_qpc=captured, references=matches))
+    def distribution(values):
+        values = sorted(values)
+        if not values:
+            return dict(count=0)
+        return dict(count=len(values), min=values[0], p50=values[math.ceil(len(values) * .5) - 1],
+                    p95=values[math.ceil(len(values) * .95) - 1], max=values[-1])
+
+    report["missing_reference_timing"] = dict(anchor_uncertainty_ms=uncertainty * 1000 / frequency,
+        nearest_original_minus_capture_ms=distribution(value[0] for value in timing),
+        nearest_original_minus_attempt_ms=distribution(value[1] for value in timing))
     report["success"] = bool(clients) and report["matched_clients"] == len(clients)
     return report
 
