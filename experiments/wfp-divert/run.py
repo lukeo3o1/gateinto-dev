@@ -24,16 +24,17 @@ REFERENCE_MISSING_CAUSES = ("collector_unclean", "invalid_clock", "invalid_clien
                             "no_original_app", "incomplete_original_app", "wrong_direction", "wrong_layer",
                             "invalid_event_time", "before_attempt", "after_capture", "outside_window",
                             "fresh_app_conflict")
+REFERENCE_POLL_INTERVAL_MS = 100
 REFERENCE_DIAGNOSTIC_COUNTS = ("original_app_outbound_layer48_clients", "engine_event_clients",
                               "engine_event_seen_in_poll_clients", "engine_event_missing_from_poll_clients",
                               "engine_event_seen_in_final_enum_clients", "fresh_final_enum_only_clients")
 SOCKET_DIAGNOSTIC_LABELS = dict(
     connect_changes=("new", "exact_duplicate", "timestamp_changed", "pid_changed", "endpoint_changed", "tuple_changed", "invalid"),
     identity_failures=("process_open_access_denied", "process_open_other", "process_times", "creation_guard", "image_name", "utf8"),
-    close_context=("unknown_endpoint", "original_endpoint", "other_known_endpoint", "remote_unspecified"),
+    close_context=("unknown_endpoint", "original_endpoint", "other_known_endpoint", "remote_unspecified", "quarantined_endpoint"),
     post_capture_connect=("total", "same_endpoint", "different_endpoint", "same_pid", "different_pid",
         "parent_matches", "parent_other", "parent_missing", "system_process", "other_process",
-        "identity_available", "identity_unavailable", "injection_known", "injection_unknown",
+        "identity_available", "identity_unavailable", "identity_not_requested", "injection_known", "injection_unknown",
         "event_after_injection_start", "event_after_injection_success", "receive_after_injection_success"))
 SOCKET_GUARD_LABELS = ("missing", "matched", "closed", "ambiguous", "stale", "invalid", "poisoned", "malformed", "drop_state")
 
@@ -130,7 +131,9 @@ def public_summary(summary):
             "socket_received", "socket_connect_received", "socket_close_received", "socket_identity_ready",
             "socket_identity_missing", "socket_source_errors", "socket_queue_overflow", "socket_history_overflow",
             "socket_output_errors", "socket_matches", "socket_rejected", "socket_ambiguous", "socket_closed",
-            "socket_missing", "socket_reuse_rejected", "socket_history_entries"), integers=True)
+            "socket_missing", "socket_reuse_rejected", "socket_history_entries",
+            "socket_quarantined_connects", "socket_quarantined_pairs", "socket_quarantined_endpoints",
+            "socket_quarantined_syn_rejections", "socket_identity_skipped_quarantine"), integers=True)
         projected.update(numeric_fields(engine, ("lookup_query_busy_ms", "lookup_query_cpu_ms",
                                                   "lookup_runtime_ms", "lookup_busy_share")))
         projected.update(booleans(engine, ("lookup_worker_error", "filter_cache", "lookup_query_cpu_valid",
@@ -355,7 +358,7 @@ def native_command(bin_dir, out_dir, seconds, wfp_api, callback_drain_ms=0):
 
 
 def native_reference_command(bin_dir, out_dir, seconds):
-    return native_command(bin_dir, out_dir / "native-reference", seconds, "poll") + ["--poll-interval-ms", 1000]
+    return native_command(bin_dir, out_dir / "native-reference", seconds, "poll") + ["--poll-interval-ms", REFERENCE_POLL_INTERVAL_MS]
 
 
 def inproc_command(bin_dir, out_dir, manifest, selected_app, args):
@@ -670,7 +673,7 @@ def reference_diagnostics(key, expected, began, captured, native_records, packet
 
 def native_reference_audit(clients, packet_records, native_records, app_paths, clock, returncode):
     report = dict(success=False, client_total=len(clients), matched_clients=0, missing_clients=0,
-                  conflicting_clients=0, poll_interval_ms=1000, drain_ms=1100, rows=[],
+                  conflicting_clients=0, poll_interval_ms=REFERENCE_POLL_INTERVAL_MS, drain_ms=1100, rows=[],
                   missing_causes={key: 0 for key in REFERENCE_MISSING_CAUSES},
                   diagnostic_counts={key: 0 for key in REFERENCE_DIAGNOSTIC_COUNTS})
     summaries = [r for r in native_records if r.get("kind") == "summary"]
@@ -678,7 +681,8 @@ def native_reference_audit(clients, packet_records, native_records, app_paths, c
     report["native_summary"] = summary
     report["poll_interval_ms"] = summary.get("wfp_poll_interval_ms") if summary else None
     if (returncode != 0 or not summary or summary.get("wfp_api") != "poll" or not summary.get("wfp_polls")
-            or type(summary.get("wfp_poll_interval_ms")) is not int or summary["wfp_poll_interval_ms"] != 1000
+            or type(summary.get("wfp_poll_interval_ms")) is not int
+            or summary["wfp_poll_interval_ms"] != REFERENCE_POLL_INTERVAL_MS
             or any(summary.get(key) != 0 for key in ("errors", "queue_dropped", "wfp_poll_errors", "wfp_enum_errors"))
             or summary.get("wfp_enum_truncated") is not False
             or any(r.get("kind") in ("error", "wfp_poll_error", "wfp_enum_error") for r in native_records)):

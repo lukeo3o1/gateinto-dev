@@ -145,7 +145,7 @@ class SocketRoutingTests(unittest.TestCase):
                   for client in self.clients]
         return events + [dict(kind="summary", wfp_api="poll", wfp_polls=2, errors=0, queue_dropped=0,
                               wfp_poll_errors=0, wfp_enum_errors=0, wfp_enum_truncated=False,
-                              wfp_poll_interval_ms=1000)]
+                              wfp_poll_interval_ms=100)]
 
     def test_independent_native_reference_is_fresh_before_first_capture_and_can_arrive_later(self):
         report = lab.native_reference_audit(self.clients, self.records, self.native_records(),
@@ -168,12 +168,12 @@ class SocketRoutingTests(unittest.TestCase):
 
     def test_native_reference_command_has_independent_state_and_equal_poll_cost(self):
         command = [str(value) for value in lab.native_reference_command(pathlib.Path("bin"), pathlib.Path("out"), 35)]
-        self.assertEqual("1000", command[command.index("--poll-interval-ms") + 1])
+        self.assertEqual("100", command[command.index("--poll-interval-ms") + 1])
         for key in ["--out", "--state-out", "--stop-file"]:
             self.assertIn("native-reference", command[command.index(key) + 1])
 
     def test_reference_requires_the_collector_to_report_the_requested_poll_interval(self):
-        for reported in [None, 5, 999, "1000"]:
+        for reported in [None, 5, 99, 1000, "100"]:
             with self.subTest(reported=reported):
                 records = self.native_records()
                 if reported is None:
@@ -239,6 +239,22 @@ class SocketRoutingTests(unittest.TestCase):
         self.assertEqual(dict(stale=2), engine["socket_reverse_guard_verdicts"])
         self.assertEqual(public, lab.public_summary(public))
         for private in ["PRIVATE-PATH", "987654321", "40001", '"pid"', '"app_path"']:
+            self.assertNotIn(private, json.dumps(public))
+
+    def test_quarantine_projection_reports_counts_without_endpoint_records(self):
+        counters = {key: index for index, key in enumerate(("socket_quarantined_connects",
+            "socket_quarantined_pairs", "socket_quarantined_endpoints", "socket_quarantined_syn_rejections",
+            "socket_identity_skipped_quarantine"), 1)}
+        engine = dict(counters, quarantined_endpoint_ids=[987654321], quarantined_tuples=["PRIVATE-TUPLE"],
+                      socket_diagnostics=dict(close_context=dict(quarantined_endpoint=2, endpoint_id=987654321),
+                          post_capture_connect=dict(identity_not_requested=3, app_path="PRIVATE-PATH")))
+        public = lab.public_summary(dict(status="PASS_RESTRICTED_CASE", engine_summary=engine))
+        for key, count in counters.items():
+            self.assertEqual(count, public["engine_summary"][key])
+        self.assertEqual(2, public["engine_summary"]["socket_diagnostics"]["close_context"]["quarantined_endpoint"])
+        self.assertEqual(3, public["engine_summary"]["socket_diagnostics"]["post_capture_connect"]["identity_not_requested"])
+        self.assertEqual(public, lab.public_summary(public))
+        for private in ["PRIVATE", "987654321", '"endpoint_id"', '"quarantined_endpoint_ids"', '"quarantined_tuples"']:
             self.assertNotIn(private, json.dumps(public))
 
     def test_requested_source_is_checked_in_ready_and_final_summary(self):

@@ -25,7 +25,7 @@ if ($LASTEXITCODE) { throw 'Could not restrict private fixture directory ACL' }
   commit = $env:GITHUB_SHA
   topology = 'single-host IPv4 loopback'
   experiment = 'TCP hold and proxy redirect, WFP versus SOCKET ownership'
-  audit = 'Independent native WFP poll, 1000 ms interval, before engine startup'
+  audit = 'Independent native WFP poll, 100 ms interval, before engine startup'
   default_ownership_source = 'wfp'
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'environment.json')
 

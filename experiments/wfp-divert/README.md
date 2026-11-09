@@ -411,7 +411,7 @@ clients and a synchronized fifty-client burst. The second round reverses the
 profile order. Each selected-app client must traverse the real Gateinto CONNECT
 proxy and echo its nonce; the other app must echo directly. A separate native
 WFP collector audits each original client identity after routing, with the same
-1000 ms poll interval and shutdown drain for both ownership sources. Missing
+100 ms poll interval and the same 1100 ms shutdown drain for both ownership sources. Missing
 independent references fail validation rather than borrowing the routing proof.
 
 SOCKET routing opens its metadata receiver before NETWORK capture, resolves the
@@ -437,6 +437,23 @@ NETWORK packets expose no SOCKET endpoint cookie, and WinDivert exposes no
 kernel queue-loss counter; clean controlled runs cannot establish arbitrary
 tuple reuse safety or zero loss. The experiment qualifies only its fresh IPv4
 loopback tuples, retained child-process handles and finite Server samples.
-Public artifacts contain aggregate results only. Actual routed performance is
-pending the dedicated Windows jobs; the earlier observation offsets above are
-not routed application latency.
+Public artifacts contain aggregate results only. The
+[initial routing run](../../docs/evidence/wfp-socket-routing-run-42613174975.md)
+failed on both operating systems. The subsequent
+[Server 2022 diagnostic run](../../docs/evidence/wfp-socket-routing-run-42672188645.md)
+identified later System CONNECT metadata with different endpoints during this
+engine's successful packet injections. Neither run qualifies SOCKET routing
+speed. The observation offsets above are not routed application latency.
+
+The next candidate pins an already validated pre-capture identity to its TCP
+generation and quarantines a different, previously unbound endpoint only when
+its event occurs after capture and after the start of a known successful own
+forward injection. Validation, send and success recording are serialized before
+the receiver can apply that event. There is no process-ID whitelist, and the
+later event never supplies replacement ownership. Earlier-occurring late
+receipts, known original endpoints, same-endpoint changes, original closures,
+new initial SYNs after quarantine and detected loss remain strict failures.
+This conservative policy also rejects a SYN retransmission after quarantine;
+it does not qualify ordinary lossy-network retransmission behavior.
+This candidate requires a new Windows comparison with complete independent
+references; production reuse remains unqualified.

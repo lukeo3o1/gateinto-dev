@@ -29,7 +29,7 @@ struct Tag {
 enum class Kind { Connect, Close, Identity };
 enum class Verdict { Missing, Matched, Closed, Ambiguous, Stale, Invalid, Poisoned };
 enum class ConnectChange { New, ExactDuplicate, Timestamp, Process, Endpoint, Tuple, Invalid };
-enum class CloseRelation { Unknown, Original, OtherKnown };
+enum class CloseRelation { Unknown, Original, OtherKnown, Quarantined };
 
 inline int64_t wakeup(int64_t now, int64_t retry, int64_t deadline) {
     return retry > now && retry < deadline ? retry : deadline;
@@ -41,6 +41,10 @@ inline bool forwarding_allowed(bool proxy, Verdict verdict) {
 
 inline bool teardown_only(bool syn, bool ack, bool fin, bool rst, size_t payload) {
     return !syn && !payload && (ack || fin || rst);
+}
+
+inline bool initial_syn_rejected(bool quarantined, bool progress, bool saw_syn, bool same_sequence, bool unusable) {
+    return quarantined || progress || (saw_syn && !same_sequence) || unusable;
 }
 
 struct Event {
@@ -70,7 +74,7 @@ inline bool route_allowed(bool pending, Tag requested, Tag current, int64_t now,
 class History {
     struct Entry {
         Event connect, identity;
-        bool connected = false, resolved = false, closed = false, conflict = false, admitted = false;
+        bool connected = false, resolved = false, closed = false, conflict = false, admitted = false, quarantined = false;
         int64_t closed_qpc = 0;
         int64_t injection_started = 0, injection_succeeded = 0;
         std::optional<Tag> bound;
@@ -78,6 +82,9 @@ class History {
     std::map<Tuple, Entry> entries;
     std::map<uint64_t, Tuple> endpoints;
     std::map<uint64_t, int64_t> closed_endpoints;
+    std::set<std::pair<Tuple, uint64_t>> quarantine;
+    std::set<uint64_t> quarantine_endpoints;
+    uint64_t quarantine_count = 0;
     size_t capacity, byte_capacity, bytes = 0;
     bool poisoned = false;
 public:
@@ -88,11 +95,18 @@ public:
     ConnectContext context(const Event&) const;
     void injected(const Tuple&, Tag, int64_t started, int64_t succeeded);
     Match match(const Tuple&, Tag, Tag, int64_t, bool historical = false);
-    Match forwarding(const Tuple&, Tag, int64_t, int64_t packet_qpc, bool teardown, int64_t grace);
+    Match forwarding(const Tuple&, Tag, int64_t, int64_t packet_qpc, bool teardown, int64_t grace, bool initial_syn = false);
     void invalidate(const Tuple&);
     void poison() { poisoned = true; }
     bool failed() const { return poisoned; }
     size_t size() const { return entries.size(); }
+    uint64_t quarantined_count() const { return quarantine_count; }
+    size_t quarantined_pairs() const { return quarantine.size(); }
+    size_t quarantined_endpoints() const { return quarantine_endpoints.size(); }
+    bool reject_initial_syn(const Tuple& tuple) const {
+        const auto found = entries.find(tuple);
+        return found != entries.end() && found->second.quarantined;
+    }
 };
 
 inline ConnectChange History::classify(const Event& event) const {
@@ -110,7 +124,7 @@ inline ConnectChange History::classify(const Event& event) const {
 
 inline CloseRelation History::close_relation(uint64_t endpoint) const {
     const auto known = endpoints.find(endpoint);
-    if (known == endpoints.end()) return CloseRelation::Unknown;
+    if (known == endpoints.end()) return quarantine_endpoints.count(endpoint) ? CloseRelation::Quarantined : CloseRelation::Unknown;
     return entries.at(known->second).connect.endpoint == endpoint ? CloseRelation::Original : CloseRelation::OtherKnown;
 }
 
@@ -136,6 +150,7 @@ inline void History::injected(const Tuple& tuple, Tag tag, int64_t started, int6
     auto found = entries.find(tuple);
     if (found == entries.end() || !found->second.bound || !(*found->second.bound == tag)) return;
     auto& entry = found->second;
+    if (!entry.admitted || entry.closed || entry.conflict || started < tag.capture || succeeded < started) return;
     if (!entry.injection_succeeded) { entry.injection_started = started; entry.injection_succeeded = succeeded; }
 }
 
@@ -143,13 +158,16 @@ inline bool History::apply(const Event& event) {
     if (poisoned) return false;
     if (!event.endpoint) return true;
     if (event.kind == Kind::Close) {
+        if (quarantine_endpoints.count(event.endpoint) && !endpoints.count(event.endpoint)) return true;
         if (!closed_endpoints.count(event.endpoint) && closed_endpoints.size() >= capacity) { poison(); return false; }
         closed_endpoints.emplace(event.endpoint, event.occurred);
         const auto known = endpoints.find(event.endpoint);
         if (known != endpoints.end()) {
             auto& entry = entries.at(known->second);
-            entry.closed = true;
-            entry.closed_qpc = closed_endpoints.at(event.endpoint);
+            if (entry.connect.endpoint == event.endpoint) {
+                entry.closed = true;
+                entry.closed_qpc = closed_endpoints.at(event.endpoint);
+            }
         }
         return true;
     }
@@ -179,6 +197,24 @@ inline bool History::apply(const Event& event) {
     const auto known = endpoints.find(event.endpoint);
     if (known != endpoints.end() && !(known->second == event.tuple)) {
         entries.at(known->second).conflict = entry.conflict = true;
+        return true;
+    }
+    const bool later_connect = entry.connected && entry.resolved && entry.admitted && entry.bound &&
+        !entry.closed && !entry.conflict && entry.connect.endpoint != event.endpoint &&
+        entry.injection_started && entry.injection_succeeded >= entry.injection_started &&
+        event.occurred > entry.bound->capture && event.occurred > entry.injection_started &&
+        event.received >= event.occurred;
+    if (later_connect) {
+        const auto key = std::make_pair(event.tuple, event.endpoint);
+        if (!quarantine.count(key) && quarantine.size() >= capacity) { poison(); return false; }
+        quarantine.insert(key);
+        quarantine_endpoints.insert(event.endpoint);
+        entry.quarantined = true;
+        ++quarantine_count;
+        return true;
+    }
+    if (quarantine_endpoints.count(event.endpoint)) {
+        entry.conflict = true;
         return true;
     }
     if (known == endpoints.end()) {
@@ -222,9 +258,11 @@ inline Match History::match(const Tuple& tuple, Tag requested, Tag current, int6
     return {Verdict::Matched, identity};
 }
 
-inline Match History::forwarding(const Tuple& tuple, Tag tag, int64_t lookback, int64_t packet_qpc, bool teardown, int64_t grace) {
+inline Match History::forwarding(const Tuple& tuple, Tag tag, int64_t lookback, int64_t packet_qpc, bool teardown, int64_t grace,
+                                 bool initial_syn) {
     auto result = match(tuple, tag, tag, lookback, true);
     if (result.verdict != Verdict::Matched) return result;
+    if (initial_syn && reject_initial_syn(tuple)) return {Verdict::Ambiguous, {}};
     const auto& entry = entries.at(tuple);
     if (packet_qpc < tag.capture) return {Verdict::Stale, {}};
     if (entry.closed && (!entry.admitted || (packet_qpc > entry.closed_qpc &&
