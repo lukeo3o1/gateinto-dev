@@ -542,6 +542,8 @@ connection only when that process's token has the same user SID as its own
 object the browser was started in. The client sends no credentials, so any
 client works, whatever proxy authentication it supports. Outside Windows a
 configuration naming it fails to load.
+[design/linux-support.md](design/linux-support.md) proposes a Linux
+implementation.
 
 The browser is started in its job with `PROC_THREAD_ATTRIBUTE_JOB_LIST`
 (Windows 10 and later). Where that fails, the agent creates the browser
