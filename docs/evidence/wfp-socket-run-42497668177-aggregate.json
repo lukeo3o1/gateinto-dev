@@ -1,0 +1,4482 @@
+{
+  "schema_version": 1,
+  "scope": "Explicit-bound IPv4 loopback observation; retained child handles; no packet admission or routing test",
+  "runs": [
+    {
+      "phase": "initial",
+      "run_id": 42496744881,
+      "source_head": "c8f3241047005ff573b3905da409c4cdf3df6b34",
+      "operating_systems": {
+        "2022": {
+          "job_id": 128780608516,
+          "artifact_id": 13623613284,
+          "artifact_digest": "sha256:fada60a8d4dcdeda4425e1477d3f2d4acf5eaa3f34ad6e1aeb53dac0daa9cda8",
+          "environment": {
+            "os": "Microsoft Windows NT 10.0.20348.0",
+            "image_version": "20261101.353.1",
+            "observation": "WinDivert SOCKET and NETWORK SNIFF with native stored-event reference",
+            "routing_authority": false,
+            "image": "win22",
+            "topology": "single-host-local IPv4",
+            "commit": "b15fb41da975df3d2751d17181feea6bfb71582d"
+          },
+          "driver": {
+            "archive_sha256": "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15",
+            "driver_sha256": "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2",
+            "signature_status": "Valid",
+            "release": "v2.2.2"
+          },
+          "ci_summary": {
+            "qualification": "Controlled observation coverage and timing only; no packet admission or proxy routing tested",
+            "driver_queue_loss_observable": false,
+            "routing_authority": false,
+            "failed_cases": [
+              "tcp-live",
+              "udp-live",
+              "tcp-short",
+              "udp-short",
+              "tcp-burst",
+              "udp-burst"
+            ],
+            "capture_only": true
+          },
+          "observations": {
+            "schema_version": 1,
+            "available_cases": 6,
+            "missing_cases": 0,
+            "unreadable_cases": 0,
+            "cases": [
+              {
+                "case": "tcp-live",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "mode": "held_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 6,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 6,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 7,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 21,
+                    "wfp_polls": 484,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0056,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-live",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "mode": "held_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 6,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 6,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 7,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 28,
+                    "wfp_polls": 346,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0055,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-short",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "mode": "short_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 40,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 40,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 41,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 124,
+                    "wfp_polls": 86,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0052,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-short",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "mode": "short_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 40,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 40,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 41,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 121,
+                    "wfp_polls": 86,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0054,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-burst",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "mode": "short_burst",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 50,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 50,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 51,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 162,
+                    "wfp_polls": 68,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0055,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-burst",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "mode": "short_burst",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 50,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 50,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 51,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 150,
+                    "wfp_polls": 69,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0051,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "2025": {
+          "job_id": 128780608572,
+          "artifact_id": 13623826315,
+          "artifact_digest": "sha256:22884f2dffb0bcb4c7c7880cdb737fcfff3b38df7655a086d126f5b32c60a07b",
+          "environment": {
+            "image_version": "20261103.298.1",
+            "observation": "WinDivert SOCKET and NETWORK SNIFF with native stored-event reference",
+            "image": "win25-vs2026",
+            "topology": "single-host-local IPv4",
+            "routing_authority": false,
+            "os": "Microsoft Windows NT 10.0.26100.0",
+            "commit": "b15fb41da975df3d2751d17181feea6bfb71582d"
+          },
+          "driver": {
+            "driver_sha256": "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2",
+            "signature_status": "Valid",
+            "archive_sha256": "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15",
+            "release": "v2.2.2"
+          },
+          "ci_summary": {
+            "failed_cases": [
+              "tcp-live",
+              "udp-live",
+              "tcp-short",
+              "udp-short",
+              "tcp-burst",
+              "udp-burst"
+            ],
+            "driver_queue_loss_observable": false,
+            "qualification": "Controlled observation coverage and timing only; no packet admission or proxy routing tested",
+            "capture_only": true,
+            "routing_authority": false
+          },
+          "observations": {
+            "schema_version": 1,
+            "available_cases": 6,
+            "missing_cases": 0,
+            "unreadable_cases": 0,
+            "cases": [
+              {
+                "case": "tcp-live",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "mode": "held_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 6,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 6,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 7,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 21,
+                    "wfp_polls": 457,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.007,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-live",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "mode": "held_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 6,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 6,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 7,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 23,
+                    "wfp_polls": 246,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0069,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-short",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "mode": "short_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 40,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 40,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 41,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 123,
+                    "wfp_polls": 58,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0057,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-short",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "mode": "short_sequential",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 40,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 40,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 41,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 122,
+                    "wfp_polls": 65,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0049,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-burst",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "mode": "short_burst",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 50,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 50,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 51,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 151,
+                    "wfp_polls": 40,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0058,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-burst",
+                "summary": {
+                  "status": "INCONCLUSIVE_SOCKET_PROBE",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "mode": "short_burst",
+                  "reason": "socket_or_packet_missing",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 0,
+                    "socket_connect_missing": 50,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 0,
+                    "app_path_missing_clients": 50,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 0,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 0,
+                    "socket_relevant": 0,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 51,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 151,
+                    "wfp_polls": 63,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0048,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 0
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 0
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 0
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 0
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "phase": "corrected",
+      "run_id": 42497668177,
+      "source_head": "2dd799ecd9c0ecd256c429999a4e8273f7d33f76",
+      "operating_systems": {
+        "2022": {
+          "job_id": 128783417462,
+          "artifact_id": 13624032130,
+          "artifact_digest": "sha256:3b205020133159d6a323e76c537e4ae419d86fe69f2ebaf5f57862de6a943e58",
+          "environment": {
+            "image_version": "20261101.353.1",
+            "routing_authority": false,
+            "image": "win22",
+            "observation": "WinDivert SOCKET and NETWORK SNIFF with native stored-event reference",
+            "os": "Microsoft Windows NT 10.0.20348.0",
+            "commit": "22d85298b5508388fdcaece3606351fb9e2057eb",
+            "topology": "single-host-local IPv4"
+          },
+          "driver": {
+            "driver_sha256": "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2",
+            "release": "v2.2.2",
+            "archive_sha256": "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15",
+            "signature_status": "Valid"
+          },
+          "ci_summary": {
+            "capture_only": true,
+            "failed_cases": [],
+            "routing_authority": false,
+            "driver_queue_loss_observable": false,
+            "qualification": "Controlled observation coverage and timing only; no packet admission or proxy routing tested"
+          },
+          "observations": {
+            "schema_version": 1,
+            "available_cases": 8,
+            "missing_cases": 0,
+            "unreadable_cases": 0,
+            "cases": [
+              {
+                "case": "tcp-control",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "connect",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 11,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 13,
+                    "socket_protocol_matches": 11,
+                    "socket_ipv4_matches": 11,
+                    "socket_ipv4_mapped_matches": 11,
+                    "socket_remote_address_matches": 6,
+                    "socket_remote_port_matches": 6,
+                    "socket_scope_matches": 6,
+                    "socket_unrelated_discarded": 5,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 30,
+                    "wfp_polls": 559,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0093,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0792,
+                      "p50": -0.0696,
+                      "p95": -0.0568,
+                      "max": -0.0568
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1171,
+                      "p50": -0.1053,
+                      "p95": -0.0873,
+                      "max": -0.0873
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0388,
+                      "p50": -0.0287,
+                      "p95": -0.0157,
+                      "max": -0.0157
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0767,
+                      "p50": -0.0651,
+                      "p95": -0.0462,
+                      "max": -0.0462
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.0783,
+                      "p50": 0.0906,
+                      "p95": 0.1589,
+                      "max": 0.1589
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0419,
+                      "p50": 0.052,
+                      "p95": 0.1286,
+                      "max": 0.1286
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0367,
+                      "p50": 0.0409,
+                      "p95": 0.0453,
+                      "max": 0.0453
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.107,
+                      "p50": 0.1207,
+                      "p95": 0.1871,
+                      "max": 0.1871
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0568,
+                      "p50": -0.0395,
+                      "p95": -0.0317,
+                      "max": -0.0317
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 6.2328,
+                      "p50": 9.8939,
+                      "p95": 11.8078,
+                      "max": 11.8078
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-control",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "connect",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 6,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 13,
+                    "socket_protocol_matches": 6,
+                    "socket_ipv4_matches": 6,
+                    "socket_ipv4_mapped_matches": 6,
+                    "socket_remote_address_matches": 6,
+                    "socket_remote_port_matches": 6,
+                    "socket_scope_matches": 6,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 20,
+                    "wfp_polls": 404,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0061,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0659,
+                      "p50": -0.0622,
+                      "p95": -0.0541,
+                      "max": -0.0541
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1059,
+                      "p50": -0.0996,
+                      "p95": -0.0685,
+                      "max": -0.0685
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0221,
+                      "p50": -0.0201,
+                      "p95": -0.0126,
+                      "max": -0.0126
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0564,
+                      "p50": -0.0533,
+                      "p95": -0.0365,
+                      "max": -0.0365
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.104,
+                      "p50": 0.1194,
+                      "p95": 0.1383,
+                      "max": 0.1383
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0684,
+                      "p50": 0.0848,
+                      "p95": 0.1164,
+                      "max": 0.1164
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.032,
+                      "p50": 0.039,
+                      "p95": 0.0526,
+                      "max": 0.0526
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.1248,
+                      "p50": 0.1395,
+                      "p95": 0.1529,
+                      "max": 0.1529
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0321,
+                      "p50": -0.029,
+                      "p95": -0.0266,
+                      "max": -0.0266
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 8.0268,
+                      "p50": 11.4311,
+                      "p95": 22.1184,
+                      "max": 22.1184
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-live",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "scoped",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 12,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 19,
+                    "socket_protocol_matches": 12,
+                    "socket_ipv4_matches": 12,
+                    "socket_ipv4_mapped_matches": 12,
+                    "socket_remote_address_matches": 12,
+                    "socket_remote_port_matches": 12,
+                    "socket_scope_matches": 12,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 23,
+                    "wfp_polls": 313,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0064,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0694,
+                      "p50": -0.0552,
+                      "p95": -0.0528,
+                      "max": -0.0528
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1017,
+                      "p50": -0.0916,
+                      "p95": -0.0855,
+                      "max": -0.0855
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0359,
+                      "p50": -0.027,
+                      "p95": -0.025,
+                      "max": -0.025
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0682,
+                      "p50": -0.0583,
+                      "p95": -0.0577,
+                      "max": -0.0577
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.0633,
+                      "p50": 0.073,
+                      "p95": 0.1444,
+                      "max": 0.1444
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0257,
+                      "p50": 0.0403,
+                      "p95": 0.1121,
+                      "max": 0.1121
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0274,
+                      "p50": 0.0282,
+                      "p95": 0.0339,
+                      "max": 0.0339
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.0889,
+                      "p50": 0.098,
+                      "p95": 0.1803,
+                      "max": 0.1803
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0389,
+                      "p50": -0.0357,
+                      "p95": -0.0297,
+                      "max": -0.0297
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 10.9603,
+                      "p50": 14.2893,
+                      "p95": 24.3102,
+                      "max": 24.3102
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-live",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "scoped",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 6,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 13,
+                    "socket_protocol_matches": 6,
+                    "socket_ipv4_matches": 6,
+                    "socket_ipv4_mapped_matches": 6,
+                    "socket_remote_address_matches": 6,
+                    "socket_remote_port_matches": 6,
+                    "socket_scope_matches": 6,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 22,
+                    "wfp_polls": 279,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.006,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0623,
+                      "p50": -0.0527,
+                      "p95": -0.046,
+                      "max": -0.046
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0977,
+                      "p50": -0.0858,
+                      "p95": -0.0609,
+                      "max": -0.0609
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.018,
+                      "p50": -0.0155,
+                      "p95": -0.0114,
+                      "max": -0.0114
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0602,
+                      "p50": -0.0526,
+                      "p95": -0.0306,
+                      "max": -0.0306
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.1155,
+                      "p50": 0.1328,
+                      "p95": 0.1433,
+                      "max": 0.1433
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0784,
+                      "p50": 0.0953,
+                      "p95": 0.1284,
+                      "max": 0.1284
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0299,
+                      "p50": 0.0357,
+                      "p95": 0.0491,
+                      "max": 0.0491
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.131,
+                      "p50": 0.1508,
+                      "p95": 0.1594,
+                      "max": 0.1594
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0309,
+                      "p50": -0.028,
+                      "p95": -0.0225,
+                      "max": -0.0225
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 15.9325,
+                      "p50": 19.33,
+                      "p95": 29.0826,
+                      "max": 29.0826
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-short",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "scoped",
+                  "mode": "short_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 40,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 40,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 40,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 80,
+                    "socket_relevant": 40,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 121,
+                    "socket_protocol_matches": 80,
+                    "socket_ipv4_matches": 80,
+                    "socket_ipv4_mapped_matches": 80,
+                    "socket_remote_address_matches": 80,
+                    "socket_remote_port_matches": 80,
+                    "socket_scope_matches": 80,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 132,
+                    "wfp_polls": 93,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0097,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.076,
+                      "p50": -0.0538,
+                      "p95": -0.0412,
+                      "max": -0.0383
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.2203,
+                      "p50": -0.0833,
+                      "p95": -0.0673,
+                      "max": -0.0598
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0403,
+                      "p50": -0.0224,
+                      "p95": -0.0145,
+                      "max": 0.0017
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.1818,
+                      "p50": -0.0533,
+                      "p95": -0.0342,
+                      "max": -0.0273
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 0.072,
+                      "p50": 0.0919,
+                      "p95": 0.1196,
+                      "max": 0.124
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.0677,
+                      "p50": 0.0636,
+                      "p95": 0.0875,
+                      "max": 0.095
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 40,
+                      "min": 0.0239,
+                      "p50": 0.0298,
+                      "p95": 0.0447,
+                      "max": 0.052
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 40,
+                      "min": 0.0958,
+                      "p50": 0.1169,
+                      "p95": 0.1396,
+                      "max": 0.144
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0529,
+                      "p50": -0.0297,
+                      "p95": -0.021,
+                      "max": -0.018
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 12.3727,
+                      "p50": 21.4347,
+                      "p95": 31.752,
+                      "max": 33.8518
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 39,
+                      "eligible": 40,
+                      "fraction": 0.975
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 40,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 3,
+                      "eligible": 40,
+                      "fraction": 0.075
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-short",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "scoped",
+                  "mode": "short_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 40,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 40,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 40,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 40,
+                    "socket_relevant": 40,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 81,
+                    "socket_protocol_matches": 40,
+                    "socket_ipv4_matches": 40,
+                    "socket_ipv4_mapped_matches": 40,
+                    "socket_remote_address_matches": 40,
+                    "socket_remote_port_matches": 40,
+                    "socket_scope_matches": 40,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 120,
+                    "wfp_polls": 98,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0073,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0809,
+                      "p50": -0.0467,
+                      "p95": -0.0386,
+                      "max": -0.0358
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.2065,
+                      "p50": -0.0772,
+                      "p95": -0.0634,
+                      "max": -0.0588
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0493,
+                      "p50": -0.0164,
+                      "p95": -0.0113,
+                      "max": -0.0017
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.1623,
+                      "p50": -0.0477,
+                      "p95": -0.0315,
+                      "max": -0.0292
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 0.0573,
+                      "p50": 0.1011,
+                      "p95": 0.1201,
+                      "max": 0.1221
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.0277,
+                      "p50": 0.068,
+                      "p95": 0.0881,
+                      "max": 0.0952
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 40,
+                      "min": 0.0237,
+                      "p50": 0.0292,
+                      "p95": 0.0424,
+                      "max": 0.0442
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 40,
+                      "min": 0.0891,
+                      "p50": 0.1187,
+                      "p95": 0.1345,
+                      "max": 0.1401
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0383,
+                      "p50": -0.0225,
+                      "p95": -0.0201,
+                      "max": -0.0113
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 13.5027,
+                      "p50": 20.8902,
+                      "p95": 28.4572,
+                      "max": 30.933
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 40,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 2,
+                      "eligible": 40,
+                      "fraction": 0.05
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-burst",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "scoped",
+                  "mode": "short_burst",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 50,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 50,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 50,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 100,
+                    "socket_relevant": 50,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 151,
+                    "socket_protocol_matches": 100,
+                    "socket_ipv4_matches": 100,
+                    "socket_ipv4_mapped_matches": 100,
+                    "socket_remote_address_matches": 100,
+                    "socket_remote_port_matches": 100,
+                    "socket_scope_matches": 100,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 152,
+                    "wfp_polls": 79,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0071,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.3554,
+                      "p50": -0.0711,
+                      "p95": -0.0367,
+                      "max": -0.0305
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.4626,
+                      "p50": -0.1994,
+                      "p95": -0.0666,
+                      "max": -0.0611
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.3292,
+                      "p50": -0.0271,
+                      "p95": 0.1617,
+                      "max": 0.2703
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.4296,
+                      "p50": -0.1506,
+                      "p95": 0.0031,
+                      "max": 0.1575
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.1738,
+                      "p50": 0.0868,
+                      "p95": 0.2666,
+                      "max": 0.384
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.2838,
+                      "p50": -0.037,
+                      "p95": 0.1198,
+                      "max": 0.2712
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 50,
+                      "min": 0.0087,
+                      "p50": 0.0311,
+                      "p95": 0.208,
+                      "max": 0.3286
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 50,
+                      "min": 0.0883,
+                      "p50": 0.1131,
+                      "p95": 0.1493,
+                      "max": 0.1607
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.3379,
+                      "p50": -0.045,
+                      "p95": -0.0251,
+                      "max": -0.0139
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": 18.0582,
+                      "p50": 28.1502,
+                      "p95": 36.7738,
+                      "max": 38.5625
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 44,
+                      "eligible": 50,
+                      "fraction": 0.88
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 47,
+                      "eligible": 50,
+                      "fraction": 0.94
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 12,
+                      "eligible": 50,
+                      "fraction": 0.24
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 32,
+                      "eligible": 50,
+                      "fraction": 0.64
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-burst",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "scoped",
+                  "mode": "short_burst",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 50,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 50,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 50,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 50,
+                    "socket_relevant": 50,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 101,
+                    "socket_protocol_matches": 50,
+                    "socket_ipv4_matches": 50,
+                    "socket_ipv4_mapped_matches": 50,
+                    "socket_remote_address_matches": 50,
+                    "socket_remote_port_matches": 50,
+                    "socket_scope_matches": 50,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 151,
+                    "wfp_polls": 76,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0074,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.067,
+                      "p50": -0.0486,
+                      "p95": -0.0367,
+                      "max": -0.0322
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.1546,
+                      "p50": -0.0832,
+                      "p95": -0.0598,
+                      "max": -0.0472
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.037,
+                      "p50": -0.0133,
+                      "p95": 0.1179,
+                      "max": 0.1592
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.1349,
+                      "p50": -0.0458,
+                      "p95": 0.0892,
+                      "max": 0.1312
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": 0.0803,
+                      "p50": 0.1104,
+                      "p95": 0.2678,
+                      "max": 0.2962
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.0061,
+                      "p50": 0.0722,
+                      "p95": 0.2398,
+                      "max": 0.2693
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 50,
+                      "min": 0.0091,
+                      "p50": 0.0345,
+                      "p95": 0.166,
+                      "max": 0.206
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 50,
+                      "min": 0.099,
+                      "p50": 0.1169,
+                      "p95": 0.1708,
+                      "max": 0.3225
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.0348,
+                      "p50": -0.023,
+                      "p95": -0.0197,
+                      "max": -0.0115
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": 15.2141,
+                      "p50": 26.7106,
+                      "p95": 35.1434,
+                      "max": 36.9872
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 40,
+                      "eligible": 50,
+                      "fraction": 0.8
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 41,
+                      "eligible": 50,
+                      "fraction": 0.82
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 50,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 3,
+                      "eligible": 50,
+                      "fraction": 0.06
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "2025": {
+          "job_id": 128783417147,
+          "artifact_id": 13624570241,
+          "artifact_digest": "sha256:9b892420b8a9f092744fd9ff7f66c19ca73078c424f6a5148f108257b435fd80",
+          "environment": {
+            "image_version": "20261103.298.1",
+            "observation": "WinDivert SOCKET and NETWORK SNIFF with native stored-event reference",
+            "commit": "22d85298b5508388fdcaece3606351fb9e2057eb",
+            "topology": "single-host-local IPv4",
+            "os": "Microsoft Windows NT 10.0.26100.0",
+            "routing_authority": false,
+            "image": "win25-vs2026"
+          },
+          "driver": {
+            "release": "v2.2.2",
+            "driver_sha256": "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2",
+            "signature_status": "Valid",
+            "archive_sha256": "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15"
+          },
+          "ci_summary": {
+            "qualification": "Controlled observation coverage and timing only; no packet admission or proxy routing tested",
+            "capture_only": true,
+            "failed_cases": [],
+            "driver_queue_loss_observable": false,
+            "routing_authority": false
+          },
+          "observations": {
+            "schema_version": 1,
+            "available_cases": 8,
+            "missing_cases": 0,
+            "unreadable_cases": 0,
+            "cases": [
+              {
+                "case": "tcp-control",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "connect",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 6,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 13,
+                    "socket_protocol_matches": 6,
+                    "socket_ipv4_matches": 6,
+                    "socket_ipv4_mapped_matches": 6,
+                    "socket_remote_address_matches": 6,
+                    "socket_remote_port_matches": 6,
+                    "socket_scope_matches": 6,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 19,
+                    "wfp_polls": 507,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0103,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.1104,
+                      "p50": -0.1025,
+                      "p95": -0.0694,
+                      "max": -0.0694
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1565,
+                      "p50": -0.1428,
+                      "p95": -0.1031,
+                      "max": -0.1031
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0631,
+                      "p50": -0.0386,
+                      "p95": -0.0151,
+                      "max": -0.0151
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1012,
+                      "p50": -0.0809,
+                      "p95": -0.0612,
+                      "max": -0.0612
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.0739,
+                      "p50": 0.0992,
+                      "p95": 0.182,
+                      "max": 0.182
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0358,
+                      "p50": 0.0603,
+                      "p95": 0.1369,
+                      "max": 0.1369
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0388,
+                      "p50": 0.0397,
+                      "p95": 0.0953,
+                      "max": 0.0953
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.1143,
+                      "p50": 0.137,
+                      "p95": 0.2206,
+                      "max": 0.2206
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0612,
+                      "p50": -0.0427,
+                      "p95": -0.0141,
+                      "max": -0.0141
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 8.1593,
+                      "p50": 10.1391,
+                      "p95": 16.6777,
+                      "max": 16.6777
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-control",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "connect",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 6,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 13,
+                    "socket_protocol_matches": 6,
+                    "socket_ipv4_matches": 6,
+                    "socket_ipv4_mapped_matches": 6,
+                    "socket_remote_address_matches": 6,
+                    "socket_remote_port_matches": 6,
+                    "socket_scope_matches": 6,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 22,
+                    "wfp_polls": 344,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.009,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0863,
+                      "p50": -0.0705,
+                      "p95": -0.0576,
+                      "max": -0.0576
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1265,
+                      "p50": -0.109,
+                      "p95": -0.0847,
+                      "max": -0.0847
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0414,
+                      "p50": -0.024,
+                      "p95": -0.0215,
+                      "max": -0.0215
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0816,
+                      "p50": -0.0613,
+                      "p95": -0.0486,
+                      "max": -0.0486
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.0765,
+                      "p50": 0.1174,
+                      "p95": 0.1646,
+                      "max": 0.1646
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.037,
+                      "p50": 0.0903,
+                      "p95": 0.1277,
+                      "max": 0.1277
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0361,
+                      "p50": 0.0421,
+                      "p95": 0.049,
+                      "max": 0.049
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.11,
+                      "p50": 0.1464,
+                      "p95": 0.1877,
+                      "max": 0.1877
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0421,
+                      "p50": -0.0162,
+                      "p95": -0.0021,
+                      "max": -0.0021
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 8.0845,
+                      "p50": 16.3618,
+                      "p95": 21.8163,
+                      "max": 21.8163
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-live",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "scoped",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 12,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 19,
+                    "socket_protocol_matches": 12,
+                    "socket_ipv4_matches": 12,
+                    "socket_ipv4_mapped_matches": 12,
+                    "socket_remote_address_matches": 12,
+                    "socket_remote_port_matches": 12,
+                    "socket_scope_matches": 12,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 21,
+                    "wfp_polls": 255,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0096,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0938,
+                      "p50": -0.0729,
+                      "p95": -0.0617,
+                      "max": -0.0617
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1382,
+                      "p50": -0.1077,
+                      "p95": -0.1017,
+                      "max": -0.1017
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0628,
+                      "p50": -0.041,
+                      "p95": -0.0309,
+                      "max": -0.0309
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0965,
+                      "p50": -0.0776,
+                      "p95": -0.0711,
+                      "max": -0.0711
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.0639,
+                      "p50": 0.1019,
+                      "p95": 0.1485,
+                      "max": 0.1485
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0241,
+                      "p50": 0.0616,
+                      "p95": 0.1137,
+                      "max": 0.1137
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0301,
+                      "p50": 0.0308,
+                      "p95": 0.0419,
+                      "max": 0.0419
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.0956,
+                      "p50": 0.1341,
+                      "p95": 0.1913,
+                      "max": 0.1913
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0586,
+                      "p50": -0.0428,
+                      "p95": -0.0154,
+                      "max": -0.0154
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 18.8657,
+                      "p50": 19.8113,
+                      "p95": 30.778,
+                      "max": 30.778
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-live",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "scoped",
+                  "mode": "held_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 3,
+                  "concurrency": 0,
+                  "client_hold_ms": 500,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 6,
+                    "client_success": 6,
+                    "fresh_tuples": 6,
+                    "native_reference_matches": 6,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 6,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 6,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 6,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 6,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 6,
+                    "socket_relevant": 6,
+                    "network_received": 6,
+                    "network_relevant": 6,
+                    "lookup_failures": 0,
+                    "records_written": 13,
+                    "socket_protocol_matches": 6,
+                    "socket_ipv4_matches": 6,
+                    "socket_ipv4_mapped_matches": 6,
+                    "socket_remote_address_matches": 6,
+                    "socket_remote_port_matches": 6,
+                    "socket_scope_matches": 6,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 38,
+                    "wfp_polls": 218,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0091,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0817,
+                      "p50": -0.0707,
+                      "p95": -0.0644,
+                      "max": -0.0644
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.1204,
+                      "p50": -0.1051,
+                      "p95": -0.1022,
+                      "max": -0.1022
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0434,
+                      "p50": -0.0312,
+                      "p95": -0.0267,
+                      "max": -0.0267
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": -0.0821,
+                      "p50": -0.0645,
+                      "p95": -0.0621,
+                      "max": -0.0621
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 0.0722,
+                      "p50": 0.1116,
+                      "p95": 0.1523,
+                      "max": 0.1523
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 6,
+                      "min": 0.0334,
+                      "p50": 0.0764,
+                      "p95": 0.1151,
+                      "max": 0.1151
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 6,
+                      "min": 0.0359,
+                      "p50": 0.0383,
+                      "p95": 0.043,
+                      "max": 0.043
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 6,
+                      "min": 0.107,
+                      "p50": 0.1399,
+                      "p95": 0.1795,
+                      "max": 0.1795
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": -0.0408,
+                      "p50": -0.0319,
+                      "p95": -0.0181,
+                      "max": -0.0181
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 6,
+                      "min": 15.4163,
+                      "p50": 16.8019,
+                      "p95": 41.2953,
+                      "max": 41.2953
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 6,
+                      "eligible": 6,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 6,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-short",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "scoped",
+                  "mode": "short_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 40,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 40,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 40,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 80,
+                    "socket_relevant": 40,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 121,
+                    "socket_protocol_matches": 80,
+                    "socket_ipv4_matches": 80,
+                    "socket_ipv4_mapped_matches": 80,
+                    "socket_remote_address_matches": 80,
+                    "socket_remote_port_matches": 80,
+                    "socket_scope_matches": 80,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 121,
+                    "wfp_polls": 79,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0065,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.1618,
+                      "p50": -0.0584,
+                      "p95": -0.0539,
+                      "max": -0.0503
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.2169,
+                      "p50": -0.0908,
+                      "p95": -0.0838,
+                      "max": -0.0833
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.1206,
+                      "p50": -0.0271,
+                      "p95": -0.0198,
+                      "max": -0.0157
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.1772,
+                      "p50": -0.0579,
+                      "p95": -0.0531,
+                      "max": -0.0507
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 0.0732,
+                      "p50": 0.0989,
+                      "p95": 0.1376,
+                      "max": 0.1969
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.0442,
+                      "p50": 0.0614,
+                      "p95": 0.1044,
+                      "max": 0.1245
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 40,
+                      "min": 0.0277,
+                      "p50": 0.0316,
+                      "p95": 0.0399,
+                      "max": 0.0412
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 40,
+                      "min": 0.0987,
+                      "p50": 0.1283,
+                      "p95": 0.1814,
+                      "max": 0.2334
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.1212,
+                      "p50": -0.0295,
+                      "p95": -0.0244,
+                      "max": -0.0204
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 16.195,
+                      "p50": 27.897,
+                      "p95": 37.6099,
+                      "max": 44.4206
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 40,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 2,
+                      "eligible": 40,
+                      "fraction": 0.05
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-short",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "scoped",
+                  "mode": "short_sequential",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 20,
+                  "concurrency": 0,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 40,
+                    "client_success": 40,
+                    "fresh_tuples": 40,
+                    "native_reference_matches": 40,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 40,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 40,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 40,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 40,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 40,
+                    "socket_relevant": 40,
+                    "network_received": 40,
+                    "network_relevant": 40,
+                    "lookup_failures": 0,
+                    "records_written": 81,
+                    "socket_protocol_matches": 40,
+                    "socket_ipv4_matches": 40,
+                    "socket_ipv4_mapped_matches": 40,
+                    "socket_remote_address_matches": 40,
+                    "socket_remote_port_matches": 40,
+                    "socket_scope_matches": 40,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 123,
+                    "wfp_polls": 80,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0056,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0692,
+                      "p50": -0.0536,
+                      "p95": -0.05,
+                      "max": -0.0497
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.1703,
+                      "p50": -0.0874,
+                      "p95": -0.0815,
+                      "max": -0.0721
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0365,
+                      "p50": -0.0216,
+                      "p95": -0.0174,
+                      "max": -0.0097
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": -0.1327,
+                      "p50": -0.0547,
+                      "p95": -0.0424,
+                      "max": -0.0333
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 0.0951,
+                      "p50": 0.1204,
+                      "p95": 0.1574,
+                      "max": 0.168
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 40,
+                      "min": 0.0122,
+                      "p50": 0.0894,
+                      "p95": 0.1218,
+                      "max": 0.1357
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 40,
+                      "min": 0.0263,
+                      "p50": 0.0315,
+                      "p95": 0.0409,
+                      "max": 0.0441
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 40,
+                      "min": 0.1206,
+                      "p50": 0.1414,
+                      "p95": 0.1795,
+                      "max": 0.1916
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": -0.0373,
+                      "p50": -0.0231,
+                      "p95": -0.02,
+                      "max": -0.0134
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 40,
+                      "min": 17.2413,
+                      "p50": 27.4197,
+                      "p95": 37.0232,
+                      "max": 39.3618
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 40,
+                      "eligible": 40,
+                      "fraction": 1.0
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 40,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 0,
+                      "eligible": 40,
+                      "fraction": 0.0
+                    }
+                  }
+                }
+              },
+              {
+                "case": "tcp-burst",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "tcp",
+                  "socket_filter": "scoped",
+                  "mode": "short_burst",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 50,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 50,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 50,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 100,
+                    "socket_relevant": 50,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 151,
+                    "socket_protocol_matches": 100,
+                    "socket_ipv4_matches": 100,
+                    "socket_ipv4_mapped_matches": 100,
+                    "socket_remote_address_matches": 100,
+                    "socket_remote_port_matches": 100,
+                    "socket_scope_matches": 100,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 152,
+                    "wfp_polls": 58,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0058,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.3424,
+                      "p50": -0.0674,
+                      "p95": -0.0568,
+                      "max": -0.0544
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.4557,
+                      "p50": -0.1951,
+                      "p95": -0.0869,
+                      "max": -0.0852
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.2966,
+                      "p50": -0.0309,
+                      "p95": 0.016,
+                      "max": 0.1432
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.4196,
+                      "p50": -0.1534,
+                      "p95": -0.0285,
+                      "max": 0.1303
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.167,
+                      "p50": 0.0949,
+                      "p95": 0.1669,
+                      "max": 0.3136
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.2891,
+                      "p50": -0.0081,
+                      "p95": 0.1342,
+                      "max": 0.3007
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 50,
+                      "min": 0.0117,
+                      "p50": 0.0376,
+                      "p95": 0.0807,
+                      "max": 0.2276
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 50,
+                      "min": 0.1042,
+                      "p50": 0.1301,
+                      "p95": 0.1698,
+                      "max": 0.2119
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.3118,
+                      "p50": -0.0358,
+                      "p95": -0.0284,
+                      "max": -0.0273
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": 19.9704,
+                      "p50": 36.5862,
+                      "p95": 60.601,
+                      "max": 67.9451
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 46,
+                      "eligible": 50,
+                      "fraction": 0.92
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 48,
+                      "eligible": 50,
+                      "fraction": 0.96
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 9,
+                      "eligible": 50,
+                      "fraction": 0.18
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 25,
+                      "eligible": 50,
+                      "fraction": 0.5
+                    }
+                  }
+                }
+              },
+              {
+                "case": "udp-burst",
+                "summary": {
+                  "status": "PASS_SOCKET_OBSERVATION",
+                  "engine": "socket-observation",
+                  "capture_only": true,
+                  "routing_authority": false,
+                  "packet_interception": false,
+                  "driver_queue_loss_known": false,
+                  "driver_queue_loss_observable": false,
+                  "network_reference": "first_observed_initial_syn_or_udp",
+                  "protocol": "udp",
+                  "socket_filter": "scoped",
+                  "mode": "short_burst",
+                  "reason": "complete_fresh_pid_and_native_reference",
+                  "iterations": 1,
+                  "concurrency": 50,
+                  "client_hold_ms": 0,
+                  "drain_ms": 1000,
+                  "counts": {
+                    "client_total": 50,
+                    "client_success": 50,
+                    "fresh_tuples": 50,
+                    "native_reference_matches": 50,
+                    "native_reference_missing": 0,
+                    "native_reference_conflicts": 0,
+                    "socket_connect_pid_matches": 50,
+                    "socket_connect_missing": 0,
+                    "socket_pid_mismatch_clients": 0,
+                    "socket_identity_ambiguous_clients": 0,
+                    "socket_stale_events": 0,
+                    "socket_tuple_incomplete_events": 0,
+                    "network_first_matches": 50,
+                    "network_missing": 0,
+                    "app_path_usable_clients": 50,
+                    "app_path_missing_clients": 0,
+                    "app_path_mismatch_clients": 0,
+                    "app_process_reused_clients": 0,
+                    "expected_creation_missing_clients": 0,
+                    "observed_creation_missing_clients": 0,
+                    "process_generation_verified_clients": 50,
+                    "invalid_timing_clients": 0
+                  },
+                  "socket_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "output_errors": 0,
+                    "socket_received": 50,
+                    "socket_relevant": 50,
+                    "network_received": 50,
+                    "network_relevant": 50,
+                    "lookup_failures": 0,
+                    "records_written": 101,
+                    "socket_protocol_matches": 50,
+                    "socket_ipv4_matches": 50,
+                    "socket_ipv4_mapped_matches": 50,
+                    "socket_remote_address_matches": 50,
+                    "socket_remote_port_matches": 50,
+                    "socket_scope_matches": 50,
+                    "socket_unrelated_discarded": 0,
+                    "success": true,
+                    "truncated": false
+                  },
+                  "native_summary": {
+                    "errors": 0,
+                    "queue_dropped": 0,
+                    "wfp_count": 151,
+                    "wfp_polls": 63,
+                    "wfp_poll_errors": 0,
+                    "wfp_enum_errors": 0,
+                    "wfp_enum_truncated": false
+                  },
+                  "timing": {
+                    "anchor_uncertainty_ms": 0.0055,
+                    "socket_event_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.086,
+                      "p50": -0.0573,
+                      "p95": -0.0473,
+                      "max": -0.0437
+                    },
+                    "socket_event_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.232,
+                      "p50": -0.0907,
+                      "p95": -0.0735,
+                      "max": -0.0676
+                    },
+                    "socket_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.0596,
+                      "p50": -0.0152,
+                      "p95": 0.1637,
+                      "max": 0.1877
+                    },
+                    "socket_recv_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.2167,
+                      "p50": -0.0479,
+                      "p95": 0.1499,
+                      "max": 0.1559
+                    },
+                    "socket_app_ready_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": 0.085,
+                      "p50": 0.1481,
+                      "p95": 0.328,
+                      "max": 0.3552
+                    },
+                    "socket_app_ready_minus_network_recv_ms": {
+                      "count": 50,
+                      "min": -0.0721,
+                      "p50": 0.1032,
+                      "p95": 0.2962,
+                      "max": 0.3254
+                    },
+                    "socket_recv_minus_event_ms": {
+                      "count": 50,
+                      "min": 0.0123,
+                      "p50": 0.04,
+                      "p95": 0.2245,
+                      "max": 0.2545
+                    },
+                    "socket_app_ready_minus_recv_ms": {
+                      "count": 50,
+                      "min": 0.1132,
+                      "p50": 0.1408,
+                      "p95": 0.196,
+                      "max": 0.2507
+                    },
+                    "native_occurrence_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": -0.0405,
+                      "p50": -0.0274,
+                      "p95": -0.0221,
+                      "max": -0.0208
+                    },
+                    "native_recv_minus_network_capture_ms": {
+                      "count": 50,
+                      "min": 18.4359,
+                      "p50": 34.5579,
+                      "p95": 68.5014,
+                      "max": 76.6961
+                    },
+                    "socket_event_before_network_capture": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_event_before_network_recv": {
+                      "count": 50,
+                      "eligible": 50,
+                      "fraction": 1.0
+                    },
+                    "socket_recv_before_network_capture": {
+                      "count": 31,
+                      "eligible": 50,
+                      "fraction": 0.62
+                    },
+                    "socket_recv_before_network_recv": {
+                      "count": 33,
+                      "eligible": 50,
+                      "fraction": 0.66
+                    },
+                    "socket_app_ready_before_network_capture": {
+                      "count": 0,
+                      "eligible": 50,
+                      "fraction": 0.0
+                    },
+                    "socket_app_ready_before_network_recv": {
+                      "count": 2,
+                      "eligible": 50,
+                      "fraction": 0.04
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

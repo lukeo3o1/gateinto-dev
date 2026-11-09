@@ -40,6 +40,14 @@ try {
   if ($LASTEXITCODE) { throw 'Native collector helper tests failed' }
   python -m unittest discover -s $PSScriptRoot -p 'test_*.py' -v
   if ($LASTEXITCODE) { throw 'Attribution model tests failed' }
+  foreach ($protocol in @('tcp', 'udp')) {
+    $name = "ale-no-divert-$protocol"
+    Write-Host "Running $name"
+    python "$PSScriptRoot\run.py" --bin $Bin --fixture $Fixture --private-dir $privateDir `
+      --out (Join-Path $OutDir $name) --engine endpoint-control --mode hold --protocol $protocol `
+      --client-hold-ms 500 --seconds 35
+    if ($LASTEXITCODE) { $failures.Add($name) }
+  }
   $cases = @(
     @{ name='hold-wfp-tcp'; source='wfp'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
     @{ name='hold-security-tcp'; source='security5156'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
@@ -60,6 +68,27 @@ try {
     @{ name='external-wfp-tcp'; source='wfp'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true },
     @{ name='external-security-tcp'; source='security5156'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true }
   )
+  foreach ($api in @('subscribe4', 'poll')) {
+    $cases += @(
+      @{ name="hold-wfp-$api-tcp"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+      @{ name="hold-wfp-$api-udp"; source='wfp'; api=$api; mode='hold'; protocol='udp'; delay=0; hold=1000; skip=$false },
+      @{ name="hold-wfp-$api-delayed"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=100; hold=1000; skip=$false },
+      @{ name="hold-wfp-$api-too-late"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=1000; hold=250; skip=$false },
+      @{ name="hold-wfp-$api-missing"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=250; skip=$true },
+      @{ name="redirect-wfp-$api"; source='wfp'; api=$api; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+      @{ name="external-wfp-$api-tcp"; source='wfp'; api=$api; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false; external=$true }
+    )
+  }
+  $cases += @(
+    @{ name='retransmit-wfp-poll'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='retransmit' },
+    @{ name='reuse-wfp-poll'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false; scenario='reuse' },
+    @{ name='hold-wfp-poll-tcp-repeat'; source='wfp'; api='poll'; mode='hold'; protocol='tcp'; delay=0; hold=1000; skip=$false },
+    @{ name='redirect-wfp-poll-repeat'; source='wfp'; api='poll'; mode='redirect'; protocol='tcp'; delay=0; hold=1000; skip=$false }
+  )
+  foreach ($api in @('subscribe2', 'subscribe3', 'subscribe4')) {
+    $cases += @{ name="hold-wfp-$api-drain"; source='wfp'; api=$api; mode='hold'; protocol='tcp';
+                 delay=0; hold=2000; skip=$false; drain=1500 }
+  }
   foreach ($case in $cases) {
     Write-Host "Running $($case.name)"
     $arguments = @("$PSScriptRoot\run.py", '--bin', $Bin, '--fixture', $Fixture,
@@ -68,6 +97,8 @@ try {
       '--mode', $case.mode, '--protocol', $case.protocol,
       '--hold-ms', $case.hold, '--delay-ms', $case.delay, '--iterations', 3, '--seconds', 35)
     if ($case.skip) { $arguments += '--skip-all' }
+    if ($case.ContainsKey('api')) { $arguments += @('--wfp-api', $case.api) }
+    if ($case.ContainsKey('drain')) { $arguments += @('--callback-drain-ms', $case.drain) }
     if ($case.ContainsKey('scenario')) {
       $arguments += @('--scenario', $case.scenario)
       if ($case.scenario -eq 'reuse') { $arguments += @('--iterations', 1) }
@@ -80,7 +111,7 @@ try {
         $arguments += @('--external-target', $external.IPAddressToString, '--external-port', 443, '--iterations', 1)
       } catch {
         $failures.Add($case.name + '-dns')
-        Write-Host "External connect-only probe unavailable: $_"
+        Write-Host 'External connect-only probe unavailable; inspect local records'
         continue
       }
     }
@@ -91,14 +122,77 @@ try {
     & "$PSScriptRoot\drop-control.ps1" -Bin $Bin -OutDir (Join-Path $OutDir 'native-drop-control')
   } catch {
     $failures.Add('native-drop-control')
-    Write-Host "Native drop callback control failed: $_"
+    Write-Host 'Native drop callback control failed; inspect local records'
+  }
+  $inprocCases = @(
+    @{ name='hold-inproc-tcp'; mode='hold'; protocol='tcp' },
+    @{ name='hold-inproc-udp'; mode='hold'; protocol='udp' },
+    @{ name='redirect-inproc'; mode='redirect'; protocol='tcp' },
+    @{ name='hold-inproc-tcp-repeat'; mode='hold'; protocol='tcp' },
+    @{ name='redirect-inproc-repeat'; mode='redirect'; protocol='tcp' },
+    @{ name='leakcheck-inproc'; mode='redirect'; protocol='tcp'; hold=100; delay=250; rst=$true; leak=$true },
+    @{ name='concurrency-inproc'; mode='redirect'; protocol='tcp'; concurrency=50 },
+    @{ name='quic-inproc'; mode='redirect'; protocol='udp'; quic=$true },
+    @{ name='concurrency-inproc-cacheoff'; mode='redirect'; protocol='tcp'; concurrency=50; cache='off' },
+    @{ name='hold-inproc-async-tcp'; mode='hold'; protocol='tcp'; lookup='async' },
+    @{ name='hold-inproc-async-udp'; mode='hold'; protocol='udp'; lookup='async' },
+    @{ name='redirect-inproc-async'; mode='redirect'; protocol='tcp'; lookup='async' },
+    @{ name='redirect-inproc-async-repeat'; mode='redirect'; protocol='tcp'; lookup='async' },
+    @{ name='concurrency-inproc-async'; mode='redirect'; protocol='tcp'; concurrency=50; lookup='async' },
+    @{ name='leakcheck-inproc-async'; mode='redirect'; protocol='tcp'; hold=100; delay=250; rst=$true; leak=$true; lookup='async' },
+    @{ name='quic-inproc-async'; mode='redirect'; protocol='udp'; quic=$true; lookup='async' },
+    @{ name='ale-probe-inproc-tcp'; mode='hold'; protocol='tcp'; lookup='async'; ale=$true; clienthold=500 },
+    @{ name='ale-probe-inproc-udp'; mode='hold'; protocol='udp'; lookup='async'; ale=$true; clienthold=500 }
+  )
+  $snapshotProfiles = @(
+    @{ profile='baseline'; scope='legacy'; window=500 },
+    @{ profile='narrow'; scope='legacy'; window=5 },
+    @{ profile='destination'; scope='destination'; window=500 },
+    @{ profile='combined'; scope='destination'; window=5 }
+  )
+  foreach ($round in @(1, 2)) {
+    $order = @($snapshotProfiles)
+    if ($round -eq 2) { [array]::Reverse($order) }
+    foreach ($snapshotProfile in $order) {
+      $inprocCases += @{ name="snapshot-$($snapshotProfile.profile)-r$round"; mode='redirect'; protocol='tcp';
+        concurrency=50; lookup='async'; scope=$snapshotProfile.scope; window=$snapshotProfile.window; round=$round }
+    }
+  }
+  $inprocCases += @(
+    @{ name='scoped-inproc-udp'; mode='hold'; protocol='udp'; lookup='async'; scope='destination'; window=5 },
+    @{ name='scoped-leakcheck'; mode='redirect'; protocol='tcp'; lookup='async'; scope='destination'; window=5;
+       hold=100; delay=250; rst=$true; leak=$true },
+    @{ name='scoped-quic'; mode='redirect'; protocol='udp'; lookup='async'; scope='destination'; window=5; quic=$true }
+  )
+  foreach ($case in $inprocCases) {
+    Write-Host "Running $($case.name)"
+    $arguments = @("$PSScriptRoot\run.py", '--bin', $Bin, '--fixture', $Fixture,
+      '--out', (Join-Path $OutDir $case.name), '--engine', 'inproc', '--private-dir', $privateDir,
+      '--mode', $case.mode, '--protocol', $case.protocol,
+      '--hold-ms', ($case.ContainsKey('hold') ? $case.hold : 1000), '--seconds', 35)
+    if ($case.ContainsKey('concurrency')) { $arguments += @('--concurrency', $case.concurrency) }
+    if ($case.ContainsKey('quic')) { $arguments += '--quic' }
+    if ($case.ContainsKey('rst')) { $arguments += '--send-rst' }
+    if ($case.ContainsKey('delay')) { $arguments += @('--delay-ms', $case.delay) }
+    if ($case.ContainsKey('leak')) { $arguments += '--expect-leak' }
+    if ($case.ContainsKey('lookup')) { $arguments += @('--lookup-mode', $case.lookup) }
+    if ($case.ContainsKey('cache')) { $arguments += @('--filter-cache', $case.cache) }
+    if ($case.ContainsKey('ale')) { $arguments += '--ale-probe' }
+    if ($case.ContainsKey('scope')) { $arguments += @('--enum-scope', $case.scope) }
+    if ($case.ContainsKey('window')) { $arguments += @('--window-before-ms', $case.window) }
+    if ($case.ContainsKey('round')) { $arguments += @('--benchmark-round', $case.round) }
+    if ($case.ContainsKey('clienthold')) { $arguments += @('--client-hold-ms', $case.clienthold) }
+    python @arguments
+    if ($LASTEXITCODE) { $failures.Add($case.name) }
   }
 } finally {
   & auditpol /restore "/file:$audit"
   if ($LASTEXITCODE) { $failures.Add('audit-policy-restore') }
   Get-ChildItem $OutDir -Recurse -Filter 'private-manifest.json' | Remove-Item -Force
   @{ failed_cases = @($failures); windows_desktop = 'NOT RUN'; remote_topology = 'NOT RUN';
-     udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN' } |
+     udp_forwarding = 'NOT IMPLEMENTED'; external_retransmit_reuse_stress = 'NOT RUN';
+     inproc_engine = 'RUN (hold, redirect, leak-check, QUIC, paired snapshot profiles)';
+     ale_control = 'RUN (post-echo live sockets before packet interception)' }  |
     ConvertTo-Json | Set-Content (Join-Path $OutDir 'ci-summary.json')
   python "$PSScriptRoot\summarize.py" --root $OutDir --out (Join-Path $OutDir 'aggregate-evidence.json')
   if ($LASTEXITCODE) { $failures.Add('aggregate-evidence') }

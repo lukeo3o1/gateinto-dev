@@ -1,0 +1,2875 @@
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+#include "socket-owner.hpp"
+
+namespace inproc {
+
+enum class MatchOutcome { NoEvent, Matched, Ambiguous };
+enum class PendingResolution { Retry, Matched, Ambiguous, Timeout, Discard };
+enum class RestoreAction { AlreadyRestored, Restore, Conflict };
+
+PendingResolution pending_resolution(MatchOutcome outcome, int64_t observed, int64_t deadline) {
+    if (observed >= deadline) return PendingResolution::Timeout;
+    if (outcome == MatchOutcome::Matched) return PendingResolution::Matched;
+    if (outcome == MatchOutcome::Ambiguous) return PendingResolution::Ambiguous;
+    return PendingResolution::Retry;
+}
+
+struct GenerationTag {
+    int64_t generation;
+    int64_t capture_qpc;
+    bool operator==(const GenerationTag& other) const {
+        return generation == other.generation && capture_qpc == other.capture_qpc;
+    }
+};
+
+PendingResolution snapshot_resolution(MatchOutcome outcome, bool complete,
+        GenerationTag requested, GenerationTag current, int64_t observed, int64_t deadline) {
+    if (!complete || !(requested == current)) return PendingResolution::Discard;
+    return pending_resolution(outcome, observed, deadline);
+}
+
+int64_t lookup_wakeup(bool query_busy, int64_t retry, int64_t deadline) {
+    return query_busy || !retry ? deadline : (std::min)(retry, deadline);
+}
+
+class HandoffState {
+    enum class Phase { Idle, Queued, Running, Ready, Stopped };
+    Phase phase = Phase::Idle;
+    bool transition(Phase expected, Phase next) {
+        if (phase != expected) return false;
+        phase = next;
+        return true;
+    }
+public:
+    bool submit() { return transition(Phase::Idle, Phase::Queued); }
+    bool start() { return transition(Phase::Queued, Phase::Running); }
+    bool finish() { return transition(Phase::Running, Phase::Ready); }
+    bool consume() { return transition(Phase::Ready, Phase::Idle); }
+    bool busy() const { return phase == Phase::Queued || phase == Phase::Running || phase == Phase::Ready; }
+    bool ready() const { return phase == Phase::Ready; }
+    void stop() { phase = Phase::Stopped; }
+};
+
+enum class EnumScope { Legacy, Destination };
+
+enum ConditionMask : uint32_t {
+    EventTypeCondition = 1u << 0,
+    ProtocolCondition = 1u << 1,
+    LocalPortCondition = 1u << 2,
+    RemoteAddressCondition = 1u << 3,
+    RemotePortCondition = 1u << 4,
+};
+
+struct QueryTuple {
+    uint32_t remote_address;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint8_t protocol;
+};
+
+struct DestinationShape {
+    uint8_t protocol = 0;
+    bool has_subjects = false;
+    std::optional<uint32_t> remote_address;
+    std::optional<uint16_t> remote_port;
+    std::optional<uint16_t> local_port;
+};
+
+DestinationShape destination_shape(const std::vector<QueryTuple>& subjects, uint8_t protocol) {
+    DestinationShape result;
+    result.protocol = protocol;
+    for (const auto& subject : subjects) {
+        if (subject.protocol != protocol) continue;
+        if (!result.has_subjects) {
+            result.has_subjects = true;
+            result.remote_address = subject.remote_address;
+            result.remote_port = subject.remote_port;
+            result.local_port = subject.local_port;
+        } else {
+            if (result.remote_address && *result.remote_address != subject.remote_address) result.remote_address.reset();
+            if (result.remote_port && *result.remote_port != subject.remote_port) result.remote_port.reset();
+            if (result.local_port && *result.local_port != subject.local_port) result.local_port.reset();
+        }
+    }
+    return result;
+}
+
+std::vector<uint32_t> condition_keys(uint32_t mask) {
+    std::vector<uint32_t> result;
+    for (uint32_t key : {EventTypeCondition, ProtocolCondition, RemoteAddressCondition,
+                         RemotePortCondition, LocalPortCondition})
+        if (mask & key) result.push_back(key);
+    return result;
+}
+
+std::vector<uint32_t> destination_profiles(const DestinationShape& shape) {
+    if (!shape.has_subjects) return {};
+    uint32_t mask = EventTypeCondition | ProtocolCondition;
+    if (shape.remote_address) mask |= RemoteAddressCondition;
+    if (shape.remote_port) mask |= RemotePortCondition;
+    if (shape.local_port) mask |= LocalPortCondition;
+    std::vector<uint32_t> result{mask};
+    for (uint32_t key : {LocalPortCondition, RemotePortCondition, RemoteAddressCondition,
+                         ProtocolCondition, EventTypeCondition}) {
+        if (!(mask & key)) continue;
+        mask &= ~key;
+        result.push_back(mask);
+    }
+    return result;
+}
+
+struct FilterPattern {
+    uint8_t protocol;
+    int level;
+    bool multiple_ports;
+    EnumScope scope = EnumScope::Legacy;
+    uint32_t condition_mask = 0;
+    size_t condition_count = 0;
+    bool operator<(const FilterPattern& other) const {
+        if (scope != other.scope) return scope < other.scope;
+        if (protocol != other.protocol) return protocol < other.protocol;
+        if (level != other.level) return level < other.level;
+        if (condition_mask != other.condition_mask) return condition_mask < other.condition_mask;
+        if (scope == EnumScope::Destination && condition_count != other.condition_count)
+            return condition_count < other.condition_count;
+        return multiple_ports < other.multiple_ports;
+    }
+};
+
+class FilterCapabilityCache {
+    std::set<FilterPattern> unsupported;
+public:
+    bool enabled = true;
+    bool skip(const FilterPattern& pattern) const { return enabled && unsupported.count(pattern) != 0; }
+    static bool cacheable(uint32_t error) {
+        return error == 0x80320002u || error == 0x8032002Au || error == 0x80320026u || error == 0x80320027u;
+    }
+    static bool fallback_allowed(uint32_t error) {
+        return cacheable(error) || error == 0x80320035u || error == 87;
+    }
+    bool reject(const FilterPattern& pattern, uint32_t error) {
+        return enabled && cacheable(error) && unsupported.insert(pattern).second;
+    }
+};
+
+bool copy_budget_allows(size_t copied, size_t next) {
+    constexpr size_t capacity = 8 * 1024 * 1024;
+    return next <= 65536 && copied <= capacity && next <= capacity - copied;
+}
+
+RestoreAction restore_action(uint32_t previous, uint32_t expected, uint32_t current) {
+    if (current == previous) return RestoreAction::AlreadyRestored;
+    return current == expected ? RestoreAction::Restore : RestoreAction::Conflict;
+}
+
+struct EventRef {
+    int64_t event_filetime = 0;
+    uint32_t layer_id = 0;
+    bool outbound = false;
+    bool tuple_match = false;
+    bool complete = false;
+    std::string app_path;
+    uint32_t ip_version = 0;
+    uint32_t raw_local_addr = 0;
+    uint32_t raw_remote_addr = 0;
+    uint16_t match_local_port = 0;
+    uint16_t match_remote_port = 0;
+    uint8_t match_protocol = 0;
+};
+
+struct MatchConfig {
+    int64_t window_before = 5'000'000;
+    int64_t window_after = 500'000;
+    uint32_t ale_connect_v4 = 48;
+    uint32_t ale_connect_v6 = 50;
+};
+
+struct MatchResult {
+    MatchOutcome outcome = MatchOutcome::NoEvent;
+    std::string app_path;
+    int64_t event_filetime = 0;
+};
+
+static bool qualifies(const EventRef& event, int64_t capture, const MatchConfig& config) {
+    return event.complete && !event.app_path.empty() && event.tuple_match && event.outbound &&
+        (event.layer_id == config.ale_connect_v4 || event.layer_id == config.ale_connect_v6) &&
+        event.event_filetime >= capture - config.window_before &&
+        event.event_filetime <= capture + config.window_after;
+}
+
+MatchResult match_generation(const std::vector<EventRef>& events, int64_t capture,
+                             const MatchConfig& config) {
+    MatchResult result;
+    std::set<std::string> apps;
+    const EventRef* newest = nullptr;
+    for (const auto& event : events) {
+        if (!qualifies(event, capture, config)) continue;
+        apps.insert(event.app_path);
+        if (!newest || event.event_filetime > newest->event_filetime) newest = &event;
+    }
+    if (!newest) return result;
+    if (apps.size() != 1) {
+        result.outcome = MatchOutcome::Ambiguous;
+        return result;
+    }
+    result.outcome = MatchOutcome::Matched;
+    result.app_path = newest->app_path;
+    result.event_filetime = newest->event_filetime;
+    return result;
+}
+
+std::vector<uint16_t> pending_ports(const std::vector<uint16_t>& ports) {
+    std::set<uint16_t> unique(ports.begin(), ports.end());
+    return {unique.begin(), unique.end()};
+}
+
+struct Window {
+    int64_t start;
+    int64_t end;
+};
+
+Window lookup_window(const std::vector<int64_t>& captures, int64_t now, int64_t lookback) {
+    int64_t earliest = now;
+    for (int64_t capture : captures) earliest = std::min(earliest, capture);
+    return {earliest - lookback, now};
+}
+
+std::vector<int> backoff_schedule(int64_t remaining_ms, int cap_ms) {
+    std::vector<int> schedule;
+    int wait = 0;
+    int64_t elapsed = 0;
+    while (elapsed < remaining_ms) {
+        schedule.push_back(wait);
+        const int next = wait == 0 ? 1 : std::min(wait * 2, cap_ms);
+        elapsed += next;
+        wait = next;
+    }
+    return schedule;
+}
+
+struct Distribution {
+    size_t count = 0;
+    double p50 = 0, p95 = 0, max = 0;
+};
+
+static double percentile(const std::vector<double>& sorted, double fraction) {
+    if (sorted.empty()) return 0;
+    const auto rank = static_cast<int64_t>(std::ceil(static_cast<double>(sorted.size()) * fraction)) - 1;
+    const size_t index = rank < 0 ? 0 : std::min(static_cast<size_t>(rank), sorted.size() - 1);
+    return sorted[index];
+}
+
+Distribution distribution(std::vector<double> values) {
+    Distribution result;
+    if (values.empty()) return result;
+    std::sort(values.begin(), values.end());
+    result.count = values.size();
+    result.p50 = percentile(values, 0.5);
+    result.p95 = percentile(values, 0.95);
+    result.max = values.back();
+    return result;
+}
+
+}  // namespace inproc
+
+#if !defined(_WIN32) || defined(INPROC_TEST)
+#include <cassert>
+#include <chrono>
+#include <iostream>
+#include <thread>
+
+static inproc::EventRef event_a(int64_t when, uint32_t layer = 48,
+                                 const std::string& app = "\\device\\lab\\app-a.exe") {
+    inproc::EventRef event;
+    event.event_filetime = when;
+    event.layer_id = layer;
+    event.outbound = true;
+    event.tuple_match = true;
+    event.complete = true;
+    event.app_path = app;
+    return event;
+}
+
+int inproc_self_test() {
+    using namespace inproc;
+    {
+        struct ObservedMutex {
+            std::mutex native, observation;
+            std::condition_variable observed;
+            bool attempted = false, finished = false;
+            void lock() {
+                { std::lock_guard<std::mutex> lock(observation); attempted = true; }
+                observed.notify_one();
+                native.lock();
+            }
+            void unlock() { native.unlock(); }
+        } guard;
+        std::condition_variable wake;
+        socket_owner::RevisionWake<ObservedMutex> signal(guard, wake);
+        std::unique_lock<std::mutex> waiter(guard.native);
+        assert(signal.revision() == 0);
+        std::thread publisher([&] {
+            signal.changed();
+            { std::lock_guard<std::mutex> lock(guard.observation); guard.finished = true; }
+            guard.observed.notify_one();
+        });
+        {
+            std::unique_lock<std::mutex> observed(guard.observation);
+            assert(guard.observed.wait_for(observed, std::chrono::seconds(2), [&] { return guard.attempted || guard.finished; }));
+            assert(!guard.finished);
+            assert(signal.revision() == 0);
+        }
+        assert(wake.wait_for(waiter, std::chrono::seconds(2), [&] { return signal.revision() != 0; }));
+        publisher.join();
+    }
+    {
+        using namespace socket_owner;
+        const socket_owner::Tuple key{0xC0000202u, 0xCB007109u, 40001, 443, 6};
+        const Tag generation{1000, 1000};
+        Event connect;
+        connect.tuple = key;
+        connect.endpoint = 123;
+        connect.pid = 42;
+        connect.occurred = 990;
+        connect.received = 1001;
+        connect.ipv4 = true;
+        Event identity = connect;
+        identity.kind = Kind::Identity;
+        identity.creation = 500;
+        identity.creation_guard_valid = true;
+        identity.ready = 1002;
+        identity.path = "\\device\\lab\\app-a.exe";
+        History history;
+        assert(history.classify(connect) == ConnectChange::New);
+        assert(history.apply(connect));
+        assert(history.classify(connect) == ConnectChange::ExactDuplicate);
+        auto changed = connect;
+        ++changed.occurred;
+        assert(history.classify(changed) == ConnectChange::Timestamp);
+        changed = connect; ++changed.pid;
+        assert(history.classify(changed) == ConnectChange::Process);
+        changed = connect; ++changed.endpoint;
+        assert(history.classify(changed) == ConnectChange::Endpoint);
+        changed = connect; ++changed.tuple.remote_port;
+        assert(history.classify(changed) == ConnectChange::Tuple);
+        assert(history.match(key, generation, generation, 50).verdict == Verdict::Missing);
+        assert(history.apply(identity));
+        assert(history.match(key, generation, generation, 50).verdict == Verdict::Matched);
+        history.injected(key, generation, 1005, 1006);
+        changed = connect;
+        ++changed.endpoint; ++changed.pid;
+        changed.parent = connect.endpoint;
+        changed.occurred = 1007; changed.received = 1008;
+        const auto context = history.context(changed);
+        assert(context.bound && context.after_capture && context.injection_known);
+        assert(!context.same_endpoint && !context.same_pid && context.parent_matches);
+        assert(context.after_injection_start && context.after_injection_success && context.received_after_injection);
+        auto wrong = key;
+        ++wrong.remote_port;
+        assert(history.match(wrong, generation, generation, 50).verdict == Verdict::Missing);
+        assert(history.match(key, generation, Tag{1001, 1001}, 50).verdict == Verdict::Stale);
+        assert(history.match(key, Tag{1001, 1001}, Tag{1001, 1001}, 50).verdict == Verdict::Stale);
+        assert(route_allowed(true, generation, generation, 1099, 1100, Verdict::Matched));
+        assert(!route_allowed(true, generation, generation, 1100, 1100, Verdict::Matched));
+        assert(!route_allowed(false, generation, generation, 1050, 1100, Verdict::Matched));
+        assert(!route_allowed(true, generation, Tag{1001, 1001}, 1050, 1100, Verdict::Matched));
+        assert(forwarding_allowed(true, Verdict::Matched));
+        assert(forwarding_allowed(false, Verdict::Missing));
+        assert(!forwarding_allowed(true, Verdict::Missing));
+        for (const auto verdict : {Verdict::Closed, Verdict::Ambiguous, Verdict::Stale, Verdict::Invalid, Verdict::Poisoned}) {
+            assert(!forwarding_allowed(true, verdict));
+            assert(!forwarding_allowed(false, verdict));
+        }
+        Event close = connect;
+        close.kind = Kind::Close;
+        close.occurred = 1020;
+        assert(history.apply(close));
+        assert(history.match(key, generation, generation, 50).verdict == Verdict::Closed);
+        assert(history.match(key, generation, generation, 50, true).verdict == Verdict::Matched);
+        assert(history.forwarding(key, generation, 50, 1010, false, 50).verdict == Verdict::Matched);
+        assert(history.forwarding(key, generation, 50, 1030, true, 50).verdict == Verdict::Matched);
+        assert(history.forwarding(key, generation, 50, 1030, false, 50).verdict == Verdict::Closed);
+        assert(history.forwarding(key, generation, 50, 1071, true, 50).verdict == Verdict::Closed);
+        assert(history.forwarding(key, Tag{1001, 1001}, 50, 1030, true, 50).verdict == Verdict::Stale);
+        assert(socket_owner::teardown_only(false, true, false, false, 0));
+        assert(socket_owner::teardown_only(false, true, true, false, 0));
+        assert(socket_owner::teardown_only(false, false, false, true, 0));
+        assert(!socket_owner::teardown_only(true, true, false, false, 0));
+        assert(!socket_owner::teardown_only(false, true, true, false, 1));
+        assert(!forwarding_allowed(true, Verdict::Closed));
+        assert(!route_allowed(false, generation, generation, 1200, 1100, Verdict::Matched));
+        History ambiguous;
+        assert(ambiguous.apply(connect) && ambiguous.apply(identity));
+        auto other = connect;
+        ++other.endpoint;
+        assert(ambiguous.apply(other));
+        assert(ambiguous.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        History reused_pid;
+        auto reused = identity;
+        reused.creation_guard_valid = false;
+        assert(reused_pid.apply(connect) && reused_pid.apply(reused));
+        assert(reused_pid.match(key, generation, generation, 50).verdict == Verdict::Invalid);
+        History stale;
+        assert(stale.apply(connect) && stale.apply(identity));
+        assert(stale.match(key, generation, generation, 5).verdict == Verdict::Stale);
+        assert(stale.match(key, Tag{980, 980}, Tag{980, 980}, 50).verdict == Verdict::Stale);
+        History capped(1, 10);
+        assert(capped.apply(connect));
+        assert(!capped.apply(identity));
+        assert(capped.match(key, generation, generation, 50).verdict == Verdict::Poisoned);
+        History entry_cap(1);
+        assert(entry_cap.apply(connect));
+        other.tuple = wrong;
+        assert(!entry_cap.apply(other));
+        History changed_syn;
+        assert(changed_syn.apply(connect) && changed_syn.apply(identity));
+        changed_syn.invalidate(key);
+        assert(changed_syn.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        assert(socket_owner::creation_precedes(988, 90, 100, 102, 1000, 10'000'000));
+        assert(!socket_owner::creation_precedes(989, 90, 100, 102, 1000, 10'000'000));
+        History closed_first;
+        assert(closed_first.apply(close) && closed_first.apply(connect) && closed_first.apply(identity));
+        assert(closed_first.match(key, generation, generation, 50).verdict == Verdict::Closed);
+        assert(closed_first.match(key, generation, generation, 50, true).verdict == Verdict::Matched);
+        assert(closed_first.forwarding(key, generation, 50, 1010, true, 50).verdict == Verdict::Closed);
+        history.poison();
+        assert(history.forwarding(key, generation, 50, 1010, true, 50).verdict == Verdict::Poisoned);
+        assert(socket_owner::wakeup(251, 250, 2100) == 2100);
+        assert(socket_owner::wakeup(249, 250, 2100) == 250);
+        assert(socket_owner::wakeup(100, 0, 2100) == 2100);
+        History pid_changed;
+        assert(pid_changed.apply(connect) && pid_changed.apply(identity));
+        reused = identity;
+        ++reused.creation;
+        assert(pid_changed.apply(reused));
+        assert(pid_changed.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+
+        auto original = [&] {
+            History value;
+            assert(value.apply(connect) && value.apply(identity));
+            assert(value.match(key, generation, generation, 50).verdict == Verdict::Matched);
+            return value;
+        };
+        Event injected_connect = connect;
+        injected_connect.endpoint = 999;
+        injected_connect.pid = 777;
+        injected_connect.occurred = 1006;
+        injected_connect.received = 1007;
+        auto quarantined = original();
+        quarantined.injected(key, generation, 1005, 1010);
+        assert(!quarantined.reject_initial_syn(key));
+        assert(quarantined.apply(injected_connect));
+        assert(quarantined.forwarding(key, generation, 50, 1012, false, 50, true).verdict == Verdict::Ambiguous);
+        assert(quarantined.forwarding(key, generation, 50, 1012, false, 50).verdict == Verdict::Matched);
+        assert(quarantined.quarantined_count() == 1 && quarantined.quarantined_pairs() == 1);
+        assert(quarantined.quarantined_endpoints() == 1 && quarantined.reject_initial_syn(key));
+        assert(socket_owner::initial_syn_rejected(true, false, true, true, false));
+        assert(!socket_owner::initial_syn_rejected(false, false, true, true, false));
+        assert(socket_owner::initial_syn_rejected(false, false, true, false, false));
+        auto retained = quarantined.match(key, generation, generation, 50);
+        assert(retained.verdict == Verdict::Matched && retained.event.endpoint == connect.endpoint);
+        assert(retained.event.path == identity.path && retained.event.pid == identity.pid);
+        assert(quarantined.close_relation(injected_connect.endpoint) == CloseRelation::Quarantined);
+        Event injected_close = injected_connect;
+        injected_close.kind = Kind::Close;
+        injected_close.occurred = 1015;
+        assert(quarantined.apply(injected_close));
+        assert(quarantined.match(key, generation, generation, 50).verdict == Verdict::Matched);
+
+        Event second = connect;
+        ++second.tuple.local_port; ++second.endpoint;
+        Event second_identity = identity;
+        second_identity.tuple = second.tuple; second_identity.endpoint = second.endpoint;
+        assert(quarantined.apply(second) && quarantined.apply(second_identity));
+        assert(quarantined.match(second.tuple, generation, generation, 50).verdict == Verdict::Matched);
+        quarantined.injected(second.tuple, generation, 1005, 1010);
+        injected_connect.tuple = second.tuple;
+        assert(quarantined.apply(injected_connect));
+        assert(quarantined.quarantined_pairs() == 2 && quarantined.quarantined_endpoints() == 1);
+        assert(quarantined.match(key, generation, generation, 50).verdict == Verdict::Matched);
+        assert(quarantined.match(second.tuple, generation, generation, 50).verdict == Verdict::Matched);
+        injected_connect.tuple = key;
+        auto mapped_elsewhere = original();
+        assert(mapped_elsewhere.apply(second) && mapped_elsewhere.apply(second_identity));
+        assert(mapped_elsewhere.match(second.tuple, generation, generation, 50).verdict == Verdict::Matched);
+        mapped_elsewhere.injected(key, generation, 1005, 1010);
+        auto existing_endpoint = injected_connect;
+        existing_endpoint.endpoint = second.endpoint;
+        assert(mapped_elsewhere.apply(existing_endpoint));
+        assert(mapped_elsewhere.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        assert(mapped_elsewhere.match(second.tuple, generation, generation, 50).verdict == Verdict::Ambiguous);
+        assert(mapped_elsewhere.quarantined_count() == 0);
+
+        auto before_success = original();
+        assert(before_success.apply(injected_connect));
+        before_success.injected(key, generation, 1005, 1010);
+        assert(before_success.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        assert(before_success.quarantined_count() == 0);
+        for (const auto occurred : {990, 1000, 1005}) {
+            auto late_receipt = original();
+            late_receipt.injected(key, generation, 1005, 1010);
+            auto late = injected_connect;
+            late.occurred = occurred; late.received = 1012;
+            assert(late_receipt.apply(late));
+            assert(late_receipt.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        }
+        auto same_endpoint = original();
+        same_endpoint.injected(key, generation, 1005, 1010);
+        auto repeated = injected_connect;
+        repeated.endpoint = connect.endpoint;
+        assert(same_endpoint.apply(repeated));
+        assert(same_endpoint.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        History unresolved;
+        assert(unresolved.apply(connect));
+        assert(unresolved.match(key, generation, generation, 50).verdict == Verdict::Missing);
+        unresolved.injected(key, generation, 1005, 1010);
+        assert(unresolved.apply(injected_connect) && unresolved.apply(identity));
+        assert(unresolved.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        auto lost = original();
+        lost.injected(key, generation, 1005, 1010); lost.poison();
+        assert(!lost.apply(injected_connect));
+        assert(lost.forwarding(key, generation, 50, 1012, false, 50).verdict == Verdict::Poisoned);
+        auto wrong_generation = original();
+        wrong_generation.injected(key, Tag{1001, 1001}, 1005, 1010);
+        assert(wrong_generation.apply(injected_connect));
+        assert(wrong_generation.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        assert(quarantined.apply(close));
+        assert(quarantined.match(key, generation, generation, 50).verdict == Verdict::Closed);
+        assert(quarantined.forwarding(key, generation, 50, 1030, false, 50).verdict == Verdict::Closed);
+        assert(quarantined.forwarding(key, generation, 50, 1030, true, 50).verdict == Verdict::Matched);
+        auto failed_send = original();
+        failed_send.injected(key, generation, 1005, 0);
+        assert(failed_send.apply(injected_connect));
+        assert(failed_send.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        History late_only;
+        assert(late_only.apply(connect) && late_only.apply(identity));
+        assert(late_only.match(key, generation, generation, 50, true).verdict == Verdict::Matched);
+        late_only.injected(key, generation, 1005, 1010);
+        assert(late_only.apply(injected_connect));
+        assert(late_only.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        auto changed_identity = original();
+        changed_identity.injected(key, generation, 1005, 1010);
+        assert(changed_identity.apply(injected_connect));
+        auto replacement_identity = identity;
+        replacement_identity.path = "\\device\\other\\app-a.exe";
+        assert(changed_identity.apply(replacement_identity));
+        assert(changed_identity.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        History limited_quarantine(1);
+        assert(limited_quarantine.apply(connect) && limited_quarantine.apply(identity));
+        assert(limited_quarantine.match(key, generation, generation, 50).verdict == Verdict::Matched);
+        limited_quarantine.injected(key, generation, 1005, 1010);
+        assert(limited_quarantine.apply(injected_connect));
+        auto another_endpoint = injected_connect;
+        ++another_endpoint.endpoint;
+        assert(!limited_quarantine.apply(another_endpoint));
+        assert(limited_quarantine.match(key, generation, generation, 50).verdict == Verdict::Poisoned);
+    }
+    MatchConfig config;
+    config.window_before = 5'000'000;
+    config.window_after = 500'000;
+
+    const int64_t capture = 100'000'000;
+
+    assert(match_generation({}, capture, config).outcome == MatchOutcome::NoEvent);
+
+    auto exact = match_generation({event_a(capture - 1'000)}, capture, config);
+    assert(exact.outcome == MatchOutcome::Matched);
+    assert(exact.app_path == "\\device\\lab\\app-a.exe");
+
+    EventRef inbound = event_a(capture);
+    inbound.outbound = false;
+    assert(match_generation({inbound}, capture, config).outcome == MatchOutcome::NoEvent);
+
+    EventRef wrong_tuple = event_a(capture);
+    wrong_tuple.tuple_match = false;
+    assert(match_generation({wrong_tuple}, capture, config).outcome == MatchOutcome::NoEvent);
+
+    assert(match_generation({event_a(capture, 48, "")}, capture, config).outcome == MatchOutcome::NoEvent);
+    EventRef incomplete = event_a(capture);
+    incomplete.complete = false;
+    assert(match_generation({incomplete}, capture, config).outcome == MatchOutcome::NoEvent);
+
+    assert(pending_resolution(MatchOutcome::Matched, 1099, 1100) == PendingResolution::Matched);
+    assert(pending_resolution(MatchOutcome::Matched, 1100, 1100) == PendingResolution::Timeout);
+    assert(pending_resolution(MatchOutcome::Matched, 1115, 1100) == PendingResolution::Timeout);
+    assert(pending_resolution(MatchOutcome::NoEvent, 1099, 1100) == PendingResolution::Retry);
+    assert(pending_resolution(MatchOutcome::NoEvent, 1100, 1100) == PendingResolution::Timeout);
+    assert(pending_resolution(MatchOutcome::Ambiguous, 1099, 1100) == PendingResolution::Ambiguous);
+
+    GenerationTag requested{100, 1000};
+    GenerationTag current{100, 1000};
+    assert(snapshot_resolution(MatchOutcome::Matched, true, requested, current, 1101, 1100) == PendingResolution::Timeout);
+    assert(snapshot_resolution(MatchOutcome::Matched, true, requested, GenerationTag{101, 1000}, 1099, 1100) == PendingResolution::Discard);
+    assert(snapshot_resolution(MatchOutcome::Matched, true, requested, GenerationTag{100, 1001}, 1099, 1100) == PendingResolution::Discard);
+    assert(snapshot_resolution(MatchOutcome::Matched, false, requested, current, 1099, 1100) == PendingResolution::Discard);
+    assert(snapshot_resolution(MatchOutcome::Ambiguous, true, requested, current, 1099, 1100) == PendingResolution::Ambiguous);
+
+    HandoffState handoff;
+    assert(handoff.submit());
+    assert(!handoff.submit());
+    assert(handoff.start());
+    assert(!handoff.submit());
+    assert(handoff.finish());
+    assert(!handoff.submit());
+    assert(handoff.consume());
+    assert(handoff.submit());
+    handoff.stop();
+    assert(!handoff.start());
+    assert(!handoff.submit());
+    assert(!handoff.finish());
+    assert(!handoff.consume());
+
+    assert(lookup_wakeup(true, 900, 1100) == 1100);
+    assert(lookup_wakeup(true, 0, 1100) == 1100);
+    assert(lookup_wakeup(true, 800, 1200) == 1200);
+    assert(lookup_wakeup(false, 900, 1100) == 900);
+    assert(lookup_wakeup(false, 1200, 1100) == 1100);
+
+    FilterCapabilityCache capabilities;
+    FilterPattern single{6, 2, false}, multi{6, 2, true};
+    assert(!capabilities.skip(single));
+    assert(capabilities.reject(single, 0x80320002u));
+    assert(capabilities.skip(single));
+    assert(!capabilities.skip(multi));
+    assert(!capabilities.skip(FilterPattern{17, 2, false}));
+    assert(!capabilities.reject(multi, 5));
+    assert(!capabilities.reject(multi, 1722));
+    assert(!capabilities.reject(multi, 0x80320035u));
+    assert(!capabilities.skip(multi));
+    assert(FilterCapabilityCache::fallback_allowed(0x80320035u));
+    assert(FilterCapabilityCache::fallback_allowed(0x80320002u));
+    assert(!FilterCapabilityCache::fallback_allowed(5));
+    assert(!FilterCapabilityCache::fallback_allowed(1722));
+    capabilities.enabled = false;
+    assert(!capabilities.skip(single));
+    assert(!capabilities.reject(multi, 0x8032002Au));
+
+    const std::vector<QueryTuple> destinations{
+        {0xCB007101u, 40000, 443, 6}, {0xCB007101u, 40001, 443, 6},
+        {0xCB007102u, 41000, 8443, 17}};
+    const auto common = destination_shape(destinations, 6);
+    assert(common.has_subjects && common.protocol == 6);
+    assert(common.remote_address && *common.remote_address == 0xCB007101u);
+    assert(common.remote_port && *common.remote_port == 443);
+    assert(!common.local_port);
+    const auto common_profiles = destination_profiles(common);
+    assert(common_profiles.front() == (EventTypeCondition | ProtocolCondition |
+        RemoteAddressCondition | RemotePortCondition));
+    assert(common_profiles.back() == 0);
+    for (size_t i = 1; i < common_profiles.size(); ++i) {
+        assert((common_profiles[i] & common_profiles[i - 1]) == common_profiles[i]);
+        assert(common_profiles[i] != common_profiles[i - 1]);
+    }
+    for (uint32_t mask : common_profiles) {
+        const auto keys = condition_keys(mask);
+        assert(std::set<uint32_t>(keys.begin(), keys.end()).size() == keys.size());
+        for (const auto& subject : destinations) {
+            if (subject.protocol != common.protocol) continue;
+            assert(!(mask & ProtocolCondition) || subject.protocol == common.protocol);
+            assert(!(mask & RemoteAddressCondition) || subject.remote_address == *common.remote_address);
+            assert(!(mask & RemotePortCondition) || subject.remote_port == *common.remote_port);
+            assert(!(mask & LocalPortCondition) || subject.local_port == *common.local_port);
+        }
+    }
+    const auto singleton = destination_shape({destinations.front()}, 6);
+    assert(singleton.local_port && *singleton.local_port == 40000);
+    assert(destination_profiles(singleton).front() == (EventTypeCondition | ProtocolCondition |
+        RemoteAddressCondition | RemotePortCondition | LocalPortCondition));
+    assert(destination_profiles(destination_shape({}, 6)).empty());
+    assert(destination_profiles(destination_shape(destinations, 1)).empty());
+    const auto different_address = destination_shape({destinations.front(),
+        {0xCB007102u, 40001, 443, 6}}, 6);
+    assert(!different_address.remote_address && different_address.remote_port && !different_address.local_port);
+    assert(destination_profiles(different_address).front() ==
+        (EventTypeCondition | ProtocolCondition | RemotePortCondition));
+    const auto different_port = destination_shape({destinations.front(),
+        {0xCB007101u, 40001, 8443, 6}}, 6);
+    assert(different_port.remote_address && !different_port.remote_port && !different_port.local_port);
+    assert(destination_profiles(different_port).front() ==
+        (EventTypeCondition | ProtocolCondition | RemoteAddressCondition));
+    const auto different_destination = destination_shape({destinations.front(),
+        {0xCB007102u, 40001, 8443, 6}}, 6);
+    assert(!different_destination.remote_address && !different_destination.remote_port && !different_destination.local_port);
+    assert(destination_profiles(different_destination).front() == (EventTypeCondition | ProtocolCondition));
+    const std::vector<std::vector<QueryTuple>> coverage_cases{
+        destinations,
+        {destinations.front(), {0xCB007102u, 40001, 443, 6}, destinations.front()},
+        {destinations.front(), {0xCB007101u, 40001, 8443, 6}, destinations.front()},
+        {destinations.front(), {0xCB007102u, 40001, 8443, 6}, destinations.front()},
+        {destinations.front(), {0xCB007102u, 40000, 8443, 6}},
+        {destinations.front(), destinations.front()}};
+    for (const auto& subjects : coverage_cases) {
+        for (uint8_t protocol : {uint8_t(6), uint8_t(17)}) {
+            const auto shape = destination_shape(subjects, protocol);
+            const auto profiles = destination_profiles(shape);
+            for (uint32_t mask : profiles) {
+                const auto keys = condition_keys(mask);
+                assert(std::set<uint32_t>(keys.begin(), keys.end()).size() == keys.size());
+                for (const auto& subject : subjects) {
+                    if (subject.protocol != protocol) continue;
+                    assert(!(mask & ProtocolCondition) || shape.protocol == subject.protocol);
+                    assert(!(mask & RemoteAddressCondition) ||
+                        (shape.remote_address && *shape.remote_address == subject.remote_address));
+                    assert(!(mask & RemotePortCondition) ||
+                        (shape.remote_port && *shape.remote_port == subject.remote_port));
+                    assert(!(mask & LocalPortCondition) ||
+                        (shape.local_port && *shape.local_port == subject.local_port));
+                }
+            }
+        }
+    }
+
+    FilterCapabilityCache isolated;
+    const FilterPattern legacy_shape{6, 2, false, EnumScope::Legacy,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 3};
+    const FilterPattern destination_local{6, 2, false, EnumScope::Destination,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 3};
+    const FilterPattern destination_remote{6, 2, false, EnumScope::Destination,
+        EventTypeCondition | ProtocolCondition | RemotePortCondition, 3};
+    const FilterPattern destination_multiple{6, 2, false, EnumScope::Destination,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 4};
+    assert(isolated.reject(legacy_shape, 0x8032002Au));
+    assert(!isolated.skip(destination_local));
+    assert(isolated.reject(destination_local, 0x80320002u));
+    assert(!isolated.skip(destination_remote));
+    assert(!isolated.skip(destination_multiple));
+    for (uint32_t error : {5u, 1722u, 87u, 0x80320035u}) {
+        assert(!isolated.reject(destination_remote, error));
+        assert(!isolated.skip(destination_remote));
+    }
+    FilterCapabilityCache coarse_legacy;
+    const FilterPattern legacy_two_ports{6, 2, true, EnumScope::Legacy,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 4};
+    const FilterPattern legacy_three_ports{6, 2, true, EnumScope::Legacy,
+        EventTypeCondition | ProtocolCondition | LocalPortCondition, 5};
+    assert(coarse_legacy.reject(legacy_two_ports, 0x8032002Au));
+    assert(coarse_legacy.skip(legacy_three_ports));
+    assert(!coarse_legacy.skip(legacy_shape));
+    assert(!coarse_legacy.skip(destination_local));
+    assert(!coarse_legacy.skip(destination_multiple));
+    assert(coarse_legacy.reject(destination_local, 0x8032002Au));
+    assert(!coarse_legacy.skip(destination_multiple));
+
+    assert(copy_budget_allows(0, 65536));
+    assert(!copy_budget_allows(0, 65537));
+    assert(copy_budget_allows(8 * 1024 * 1024 - 65536, 65536));
+    assert(!copy_budget_allows(8 * 1024 * 1024 - 1, 2));
+    assert(!copy_budget_allows(static_cast<size_t>(-1), 1));
+
+    assert(restore_action(0, 16, 0) == RestoreAction::AlreadyRestored);
+    assert(restore_action(0, 16, 16) == RestoreAction::Restore);
+    assert(restore_action(0, 16, 32) == RestoreAction::Conflict);
+
+    assert(match_generation({event_a(capture, 44)}, capture, config).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture, 50)}, capture, config).outcome == MatchOutcome::Matched);
+
+    assert(match_generation({event_a(capture - 6'000'000)}, capture, config).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture + 600'000)}, capture, config).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture + 400'000)}, capture, config).outcome == MatchOutcome::Matched);
+
+    MatchConfig narrow = config;
+    narrow.window_before = 5 * 10000;
+    assert(match_generation({event_a(capture - 50'000)}, capture, narrow).outcome == MatchOutcome::Matched);
+    assert(match_generation({event_a(capture - 50'001)}, capture, narrow).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture - 5'000'000)}, capture, config).outcome == MatchOutcome::Matched);
+    assert(match_generation({event_a(capture - 5'000'001)}, capture, config).outcome == MatchOutcome::NoEvent);
+    const std::vector<EventRef> fresh_and_stale{event_a(capture - 49'999),
+        event_a(capture - 50'001, 48, "\\device\\lab\\app-b.exe")};
+    assert(match_generation(fresh_and_stale, capture, config).outcome == MatchOutcome::Ambiguous);
+    assert(match_generation(fresh_and_stale, capture, narrow).outcome == MatchOutcome::Matched);
+    assert(match_generation({fresh_and_stale.back()}, capture, narrow).outcome == MatchOutcome::NoEvent);
+    assert(match_generation({event_a(capture + 500'000)}, capture, narrow).outcome == MatchOutcome::Matched);
+    assert(match_generation({event_a(capture + 500'001)}, capture, narrow).outcome == MatchOutcome::NoEvent);
+
+    auto two_apps = match_generation(
+        {event_a(capture - 1000), event_a(capture - 2000, 48, "\\device\\lab\\app-b.exe")}, capture, config);
+    assert(two_apps.outcome == MatchOutcome::Ambiguous);
+    assert(two_apps.app_path.empty());
+
+    auto reused = match_generation(
+        {event_a(capture - 4'000'000), event_a(capture - 1000), event_a(capture - 2'000'000)}, capture, config);
+    assert(reused.outcome == MatchOutcome::Matched);
+    assert(reused.event_filetime == capture - 1000);
+
+    assert((pending_ports({40000, 40000, 40001, 39999}) == std::vector<uint16_t>{39999, 40000, 40001}));
+
+    auto window = lookup_window({capture, capture - 3'000'000, capture - 1'000'000}, capture + 10'000, 5'000'000);
+    assert(window.start == capture - 3'000'000 - 5'000'000);
+    assert(window.end == capture + 10'000);
+
+    assert((backoff_schedule(0, 8) == std::vector<int>{}));
+    assert((backoff_schedule(1, 8) == std::vector<int>{0}));
+    assert((backoff_schedule(16, 8) == std::vector<int>{0, 1, 2, 4, 8}));
+
+    assert(distribution({}).count == 0);
+    auto spread = distribution({5, 1, 4, 2, 3});
+    assert(spread.count == 5);
+    assert(spread.p50 == 3);
+    assert(spread.p95 == 5);
+    assert(spread.max == 5);
+
+    std::cout << "inproc engine helper self-tests passed\n";
+    return 0;
+}
+
+#ifndef _WIN32
+int main() { return inproc_self_test(); }
+#endif
+#endif
+
+#ifdef _WIN32
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000006
+#endif
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <initguid.h>
+#include <fwpmu.h>
+#include "windivert.h"
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <deque>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <tuple>
+
+#pragma comment(lib, "fwpuclnt.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "advapi32.lib")
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+namespace {
+
+constexpr uint32_t ALE_AUTH_CONNECT_V4 = 48;
+constexpr uint32_t ALE_AUTH_CONNECT_V6 = 50;
+
+int64_t qpc() {
+    LARGE_INTEGER value;
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+}
+
+int64_t qpf() {
+    LARGE_INTEGER value;
+    QueryPerformanceFrequency(&value);
+    return value.QuadPart;
+}
+
+uint64_t filetime(FILETIME value) {
+    return (static_cast<uint64_t>(value.dwHighDateTime) << 32) | value.dwLowDateTime;
+}
+
+uint64_t utc_now() {
+    FILETIME value{};
+    GetSystemTimePreciseAsFileTime(&value);
+    return filetime(value);
+}
+
+FILETIME to_filetime(uint64_t value) {
+    FILETIME result{};
+    result.dwLowDateTime = static_cast<DWORD>(value);
+    result.dwHighDateTime = static_cast<DWORD>(value >> 32);
+    return result;
+}
+
+std::string json(const std::string& value) {
+    const char* digits = "0123456789abcdef";
+    std::string result = "\"";
+    for (unsigned char c : value) {
+        switch (c) {
+        case '"': result += "\\\""; break;
+        case '\\': result += "\\\\"; break;
+        case '\n': result += "\\n"; break;
+        case '\r': result += "\\r"; break;
+        case '\t': result += "\\t"; break;
+        default:
+            if (c < 32) { result += "\\u00"; result += digits[c >> 4]; result += digits[c & 15]; }
+            else result += static_cast<char>(c);
+        }
+    }
+    return result + '"';
+}
+
+std::string ip(uint32_t address) {
+    char buffer[INET_ADDRSTRLEN]{};
+    IN_ADDR value;
+    value.s_addr = address;
+    if (!InetNtopA(AF_INET, &value, buffer, sizeof(buffer))) return "invalid";
+    return buffer;
+}
+
+uint32_t parse_ip(const std::string& text) {
+    IN_ADDR value;
+    if (InetPtonA(AF_INET, text.c_str(), &value) != 1)
+        throw std::runtime_error("IPv4 literal required: " + text);
+    return value.s_addr;
+}
+
+std::string lower(std::string value) {
+    for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+std::string blob_path(const FWP_BYTE_BLOB& blob) {
+    if (!blob.data || blob.size % sizeof(wchar_t)) return {};
+    std::vector<wchar_t> text(blob.size / sizeof(wchar_t));
+    std::memcpy(text.data(), blob.data, blob.size);
+    while (!text.empty() && text.back() == L'\0') text.pop_back();
+    if (text.empty()) return {};
+    int count = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return {};
+    std::string result(static_cast<size_t>(count), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), count, nullptr, nullptr);
+    return result;
+}
+
+struct Tuple {
+    uint32_t local, remote;
+    uint16_t local_port, remote_port;
+    uint8_t protocol;
+    bool operator<(const Tuple& rhs) const {
+        return std::tie(local, local_port, remote, remote_port, protocol) <
+               std::tie(rhs.local, rhs.local_port, rhs.remote, rhs.remote_port, rhs.protocol);
+    }
+    bool operator==(const Tuple& rhs) const {
+        return local == rhs.local && remote == rhs.remote && local_port == rhs.local_port &&
+               remote_port == rhs.remote_port && protocol == rhs.protocol;
+    }
+};
+
+std::string fields(const Tuple& tuple) {
+    std::ostringstream out;
+    out << "\"local_ip\":\"" << ip(tuple.local) << "\",\"local_port\":" << tuple.local_port
+        << ",\"remote_ip\":\"" << ip(tuple.remote) << "\",\"remote_port\":" << tuple.remote_port
+        << ",\"protocol\":" << unsigned(tuple.protocol);
+    return out.str();
+}
+
+struct Packet {
+    std::vector<unsigned char> bytes;
+    WINDIVERT_ADDRESS address{};
+    int64_t received = 0;
+};
+
+struct Parsed {
+    PWINDIVERT_IPHDR ip_header = nullptr;
+    PWINDIVERT_TCPHDR tcp = nullptr;
+    PWINDIVERT_UDPHDR udp = nullptr;
+    Tuple tuple{};
+    bool valid = false;
+    explicit Parsed(Packet& packet) {
+        UINT8 protocol = 0;
+        if (!WinDivertHelperParsePacket(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
+            &ip_header, nullptr, &protocol, nullptr, nullptr, &tcp, &udp, nullptr, nullptr,
+            nullptr, nullptr) || !ip_header || (!tcp && !udp)) return;
+        tuple.local = ip_header->SrcAddr;
+        tuple.remote = ip_header->DstAddr;
+        tuple.local_port = ntohs(tcp ? tcp->SrcPort : udp->SrcPort);
+        tuple.remote_port = ntohs(tcp ? tcp->DstPort : udp->DstPort);
+        tuple.protocol = protocol;
+        valid = true;
+    }
+};
+
+class Log {
+    std::ofstream output;
+    std::mutex mutex;
+    bool bounded = false;
+    size_t records = 0, bytes = 0;
+    std::atomic<bool> failed_flag{false};
+public:
+    explicit Log(const std::string& path, bool limit = false) : output(path, std::ios::trunc), bounded(limit) {
+        if (!output) throw std::runtime_error("cannot create inproc log");
+    }
+    void write(const std::string& line) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (bounded && (records >= 100000 || line.size() + 1 > 64 * 1024 * 1024 - bytes)) {
+            failed_flag = true;
+            return;
+        }
+        output << line << '\n';
+        output.flush();
+        if (bounded) { ++records; bytes += line.size() + 1; if (!output) failed_flag = true; }
+    }
+    bool failed() const { return failed_flag.load(); }
+};
+
+struct Options {
+    std::string target;
+    std::string output;
+    std::string summary;
+    std::string selected_app;
+    std::string stop_file;
+    std::string state_out;
+    std::string mode = "hold";
+    std::string lookup_mode = "inline";
+    std::string enum_scope = "legacy";
+    std::string ownership_source = "wfp";
+    bool filter_cache = true;
+    uint16_t port = 0;
+    uint16_t udp_port = 0;
+    uint16_t quic_port = 443;
+    uint16_t listener_port = 0;
+    int seconds = 35;
+    int hold_ms = 1000;
+    int window_before_ms = 500;
+    int window_after_ms = 50;
+    int leak_ms = 2000;
+    int delay_ms = 0;
+    bool send_rst = false;
+};
+
+unsigned number(const std::string& value, unsigned min, unsigned max) {
+    size_t count = 0;
+    unsigned long result = std::stoul(value, &count);
+    if (count != value.size() || result < min || result > max)
+        throw std::runtime_error("numeric option out of range");
+    return static_cast<unsigned>(result);
+}
+
+Options options(int argc, char** argv) {
+    Options result;
+    bool datagram_option = false;
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 == argc) throw std::runtime_error("missing option value");
+        std::string key = argv[i], value = argv[i + 1];
+        if (key == "--target") { parse_ip(value); result.target = value; }
+        else if (key == "--port") result.port = static_cast<uint16_t>(number(value, 1, 65535));
+        else if (key == "--udp-port") { result.udp_port = static_cast<uint16_t>(number(value, 1, 65535)); datagram_option = true; }
+        else if (key == "--quic-port") { result.quic_port = static_cast<uint16_t>(number(value, 1, 65535)); datagram_option = true; }
+        else if (key == "--listener-port") result.listener_port = static_cast<uint16_t>(number(value, 1, 65535));
+        else if (key == "--mode") result.mode = value;
+        else if (key == "--lookup-mode") result.lookup_mode = value;
+        else if (key == "--enum-scope") result.enum_scope = value;
+        else if (key == "--ownership-source") result.ownership_source = value;
+        else if (key == "--filter-cache") {
+            if (value != "on" && value != "off") throw std::runtime_error("filter-cache must be on or off");
+            result.filter_cache = value == "on";
+        }
+        else if (key == "--selected-app") result.selected_app = value;
+        else if (key == "--seconds") result.seconds = static_cast<int>(number(value, 1, 600));
+        else if (key == "--hold-ms") result.hold_ms = static_cast<int>(number(value, 1, 10000));
+        else if (key == "--window-before-ms") result.window_before_ms = static_cast<int>(number(value, 0, 10000));
+        else if (key == "--window-after-ms") result.window_after_ms = static_cast<int>(number(value, 0, 10000));
+        else if (key == "--leak-ms") result.leak_ms = static_cast<int>(number(value, 0, 10000));
+        else if (key == "--delay-ms") result.delay_ms = static_cast<int>(number(value, 0, 10000));
+        else if (key == "--send-rst") result.send_rst = number(value, 0, 1) != 0;
+        else if (key == "--out") result.output = value;
+        else if (key == "--summary") result.summary = value;
+        else if (key == "--stop-file") result.stop_file = value;
+        else if (key == "--state-out") result.state_out = value;
+        else throw std::runtime_error("unknown option: " + key);
+    }
+    if (result.target.empty() || !result.port || result.output.empty() || result.summary.empty())
+        throw std::runtime_error("required: --target IPv4 --port N --out PATH --summary PATH");
+    if (result.mode != "hold" && result.mode != "redirect")
+        throw std::runtime_error("mode must be hold or redirect");
+    if (result.lookup_mode != "inline" && result.lookup_mode != "async")
+        throw std::runtime_error("lookup-mode must be inline or async");
+    if (result.enum_scope != "legacy" && result.enum_scope != "destination")
+        throw std::runtime_error("enum-scope must be legacy or destination");
+    if (result.ownership_source != "wfp" && result.ownership_source != "socket")
+        throw std::runtime_error("ownership-source must be wfp or socket");
+    if (result.ownership_source == "socket" && datagram_option)
+        throw std::runtime_error("socket ownership source supports TCP only");
+    if (result.mode == "redirect" && !result.listener_port)
+        throw std::runtime_error("redirect mode requires --listener-port");
+    if (result.listener_port == result.port)
+        throw std::runtime_error("listener and controlled target ports must differ");
+    return result;
+}
+
+class SocketSource {
+    using Mutex = std::recursive_mutex;
+    Log& log;
+    socket_owner::RevisionWake<std::mutex> packet_signal;
+    int64_t frequency;
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    std::thread receiver, resolver;
+    Mutex mutex;
+    std::condition_variable_any identity_wake;
+    std::deque<socket_owner::Event> pending;
+    socket_owner::History history;
+    std::map<std::string, uint64_t> connect_changes, post_capture_connect, identity_failures, close_context;
+    bool resolver_stopping = false, stopped = false;
+    std::atomic<bool> stopping{false}, abort_receive{false}, receiver_done{true}, receiver_started{false};
+    void changed() { packet_signal.changed(); }
+    void fail(const char* operation, DWORD code) {
+        const auto ordinal = source_errors.fetch_add(1);
+        { std::lock_guard<Mutex> lock(mutex); history.poison(); }
+        if (ordinal < 10)
+            log.write("{\"kind\":\"error\",\"ownership_source\":\"socket\",\"operation\":" + json(operation) +
+                ",\"code\":" + std::to_string(code) + "}");
+        changed();
+    }
+    static std::optional<uint32_t> ipv4(const UINT32* address) {
+        if (address[1] != 0xFFFF || address[2] || address[3]) return {};
+        return htonl(address[0]);
+    }
+    static const char* change_name(socket_owner::ConnectChange change) {
+        switch (change) {
+        case socket_owner::ConnectChange::New: return "new";
+        case socket_owner::ConnectChange::ExactDuplicate: return "exact_duplicate";
+        case socket_owner::ConnectChange::Timestamp: return "timestamp_changed";
+        case socket_owner::ConnectChange::Process: return "pid_changed";
+        case socket_owner::ConnectChange::Endpoint: return "endpoint_changed";
+        case socket_owner::ConnectChange::Tuple: return "tuple_changed";
+        default: return "invalid";
+        }
+    }
+    void identity_failure(const char* stage) {
+        std::lock_guard<Mutex> lock(mutex);
+        ++identity_failures[stage];
+    }
+    void record_connect_context(const socket_owner::Event& event, bool queried) {
+        const auto context = history.context(event);
+        if (!context.bound || !context.after_capture) return;
+        ++post_capture_connect["total"];
+        ++post_capture_connect[context.same_endpoint ? "same_endpoint" : "different_endpoint"];
+        ++post_capture_connect[context.same_pid ? "same_pid" : "different_pid"];
+        ++post_capture_connect[!event.parent ? "parent_missing" : context.parent_matches ? "parent_matches" : "parent_other"];
+        ++post_capture_connect[event.pid == 4 ? "system_process" : "other_process"];
+        if (!queried) ++post_capture_connect["identity_not_requested"];
+        else ++post_capture_connect[event.creation_guard_valid && !event.path.empty() ? "identity_available" : "identity_unavailable"];
+        ++post_capture_connect[context.injection_known ? "injection_known" : "injection_unknown"];
+        if (context.after_injection_start) ++post_capture_connect["event_after_injection_start"];
+        if (context.after_injection_success) ++post_capture_connect["event_after_injection_success"];
+        if (context.received_after_injection) ++post_capture_connect["receive_after_injection_success"];
+    }
+    socket_owner::Event identity(socket_owner::Event event) {
+        event.kind = socket_owner::Kind::Identity;
+        const auto before = qpc();
+        const auto utc = utc_now();
+        const auto after = qpc();
+        struct Process {
+            HANDLE handle;
+            ~Process() { if (handle) CloseHandle(handle); }
+        } process{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, event.pid)};
+        if (!process.handle) {
+            identity_failure(GetLastError() == ERROR_ACCESS_DENIED ? "process_open_access_denied" : "process_open_other");
+            return event;
+        }
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(process.handle, &created, &exited, &kernel, &user)) { identity_failure("process_times"); return event; }
+        event.creation = filetime(created);
+        event.creation_guard_valid = socket_owner::creation_precedes(event.creation, event.occurred, before, after, utc, frequency);
+        if (!event.creation_guard_valid) identity_failure("creation_guard");
+        std::vector<wchar_t> path(32768);
+        DWORD length = static_cast<DWORD>(path.size());
+        if (!QueryFullProcessImageNameW(process.handle, PROCESS_NAME_NATIVE, path.data(), &length)) { identity_failure("image_name"); return event; }
+        const auto count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), static_cast<int>(length),
+            nullptr, 0, nullptr, nullptr);
+        if (count <= 0) { identity_failure("utf8"); return event; }
+        event.path.resize(static_cast<size_t>(count));
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), static_cast<int>(length),
+            event.path.data(), count, nullptr, nullptr) != count) { identity_failure("utf8"); event.path.clear(); return event; }
+        event.path = lower(std::move(event.path));
+        return event;
+    }
+    void receive() {
+        receiver_started = true;
+        for (;;) {
+            if (abort_receive) break;
+            WINDIVERT_ADDRESS address{};
+            const auto ok = WinDivertRecv(handle, nullptr, 0, nullptr, &address);
+            const auto code = ok ? ERROR_SUCCESS : GetLastError();
+            const auto received_qpc = qpc();
+            if (!ok) {
+                if (stopping && code == ERROR_NO_DATA) drained = true;
+                else if (!(abort_receive && code == ERROR_OPERATION_ABORTED)) fail("socket_receive", code);
+                break;
+            }
+            if (++received > 100000) { ++queue_overflow; fail("socket_event_limit", ERROR_MORE_DATA); continue; }
+            if (source_errors) continue;
+            if (address.Layer != WINDIVERT_LAYER_SOCKET) { fail("socket_layer", ERROR_INVALID_DATA); continue; }
+            if (address.Event != WINDIVERT_EVENT_SOCKET_CONNECT && address.Event != WINDIVERT_EVENT_SOCKET_CLOSE) continue;
+            socket_owner::Event event;
+            const auto& socket = address.Socket;
+            const auto local = ipv4(socket.LocalAddr), remote = ipv4(socket.RemoteAddr);
+            event.tuple = {local.value_or(0), remote.value_or(0), socket.LocalPort, socket.RemotePort, socket.Protocol};
+            event.endpoint = socket.EndpointId;
+            event.parent = socket.ParentEndpointId;
+            event.pid = socket.ProcessId;
+            event.ipv4 = !address.IPv6 && local.has_value() && remote.has_value();
+            event.occurred = address.Timestamp;
+            event.received = received_qpc;
+            event.kind = address.Event == WINDIVERT_EVENT_SOCKET_CONNECT ? socket_owner::Kind::Connect : socket_owner::Kind::Close;
+            if (event.kind == socket_owner::Kind::Connect) ++connect_received; else ++close_received;
+            {
+                std::lock_guard<Mutex> lock(mutex);
+                event_to_recv_ms.push_back(static_cast<double>(event.received - event.occurred) * 1000 / frequency);
+                if (event.kind == socket_owner::Kind::Connect) ++connect_changes[change_name(history.classify(event))];
+                else {
+                    const auto relation = history.close_relation(event.endpoint);
+                    ++close_context[relation == socket_owner::CloseRelation::Unknown ? "unknown_endpoint" :
+                        relation == socket_owner::CloseRelation::Original ? "original_endpoint" :
+                        relation == socket_owner::CloseRelation::Quarantined ? "quarantined_endpoint" : "other_known_endpoint"];
+                    if (!event.tuple.remote || !event.tuple.remote_port) ++close_context["remote_unspecified"];
+                }
+                const auto before_quarantine = history.quarantined_count();
+                if (!history.apply(event)) { ++history_overflow; fail("socket_history_limit", ERROR_MORE_DATA); }
+                else if (event.kind == socket_owner::Kind::Connect) {
+                    if (history.quarantined_count() != before_quarantine) {
+                        quarantined_connects = history.quarantined_count();
+                        quarantined_pairs = history.quarantined_pairs();
+                        quarantined_endpoints = history.quarantined_endpoints();
+                        ++identity_skipped_quarantine;
+                        record_connect_context(event, false);
+                    } else if (pending.size() >= 1024) { ++queue_overflow; fail("socket_identity_queue_limit", ERROR_MORE_DATA); }
+                    else pending.push_back(std::move(event));
+                }
+            }
+            identity_wake.notify_one();
+            changed();
+        }
+    }
+    void resolve() {
+        for (;;) {
+            socket_owner::Event event;
+            {
+                std::unique_lock<Mutex> lock(mutex);
+                identity_wake.wait(lock, [this] { return resolver_stopping || !pending.empty(); });
+                if (pending.empty() && resolver_stopping) break;
+                event = std::move(pending.front()); pending.pop_front();
+            }
+            if (source_errors) continue;
+            const auto began = qpc();
+            event = identity(std::move(event));
+            event.ready = qpc();
+            if (event.creation_guard_valid && !event.path.empty()) ++identity_ready; else ++identity_missing;
+            {
+                std::lock_guard<Mutex> lock(mutex);
+                identity_lookup_ms.push_back(static_cast<double>(event.ready - began) * 1000 / frequency);
+                event_to_identity_ready_ms.push_back(static_cast<double>(event.ready - event.occurred) * 1000 / frequency);
+                record_connect_context(event, true);
+                if (!history.apply(event)) { ++history_overflow; fail("socket_identity_history_limit", ERROR_MORE_DATA); }
+            }
+            changed();
+        }
+    }
+public:
+    std::atomic<uint64_t> received{0}, connect_received{0}, close_received{0}, identity_ready{0}, identity_missing{0};
+    std::atomic<uint64_t> source_errors{0}, queue_overflow{0}, history_overflow{0};
+    std::atomic<uint64_t> quarantined_connects{0}, quarantined_pairs{0}, quarantined_endpoints{0}, identity_skipped_quarantine{0};
+    std::atomic<bool> drained{false};
+    bool clean_shutdown = false;
+    std::vector<double> event_to_recv_ms, event_to_identity_ready_ms, identity_lookup_ms;
+    SocketSource(Log& output, std::condition_variable& wake, std::mutex& packet_mutex, int64_t ticks)
+        : log(output), packet_signal(packet_mutex, wake), frequency(ticks) {}
+    bool failed() const { return source_errors || log.failed(); }
+    void network_failure(const char* operation, DWORD code, bool overflow = false) {
+        if (overflow) ++queue_overflow;
+        fail(operation, code);
+    }
+    uint64_t revision() const { return packet_signal.revision(); }
+    size_t size() { std::lock_guard<Mutex> lock(mutex); return history.size(); }
+    template <class Operation>
+    void synchronized(Operation operation) {
+        std::lock_guard<Mutex> lock(mutex);
+        operation();
+    }
+    bool reject_initial_syn(const socket_owner::Tuple& tuple) {
+        std::lock_guard<Mutex> lock(mutex);
+        return history.reject_initial_syn(tuple);
+    }
+    void injected(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t started, int64_t succeeded) {
+        std::lock_guard<Mutex> lock(mutex);
+        history.injected(tuple, tag, started, succeeded);
+    }
+    std::string diagnostics() {
+        std::lock_guard<Mutex> lock(mutex);
+        auto counts = [](const auto& values) {
+            std::string result = "{";
+            for (const auto& item : values) {
+                if (result.size() > 1) result += ",";
+                result += json(item.first) + ":" + std::to_string(item.second);
+            }
+            return result + "}";
+        };
+        return "{\"connect_changes\":" + counts(connect_changes) + ",\"post_capture_connect\":" + counts(post_capture_connect) +
+            ",\"identity_failures\":" + counts(identity_failures) + ",\"close_context\":" + counts(close_context) + "}";
+    }
+    template <class Callback>
+    socket_owner::Verdict visit(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback, Callback callback, bool historical = false) {
+        std::lock_guard<Mutex> lock(mutex);
+        if (failed()) { history.poison(); return socket_owner::Verdict::Poisoned; }
+        const auto match = history.match(tuple, tag, tag, lookback, historical);
+        if (match.verdict == socket_owner::Verdict::Matched) callback(match.event);
+        return match.verdict;
+    }
+    socket_owner::Verdict forwarding(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback,
+                                     int64_t packet_qpc, bool teardown, bool initial_syn) {
+        std::lock_guard<Mutex> lock(mutex);
+        if (failed()) { history.poison(); return socket_owner::Verdict::Poisoned; }
+        return history.forwarding(tuple, tag, lookback, packet_qpc, teardown, frequency * 2, initial_syn).verdict;
+    }
+    bool unusable(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback) {
+        const auto verdict = visit(tuple, tag, lookback, [](const socket_owner::Event&) {});
+        return verdict == socket_owner::Verdict::Closed || verdict == socket_owner::Verdict::Ambiguous ||
+            verdict == socket_owner::Verdict::Poisoned;
+    }
+    void invalidate(const socket_owner::Tuple& tuple) {
+        std::lock_guard<Mutex> lock(mutex);
+        history.invalidate(tuple);
+        if (history.failed()) { ++history_overflow; fail("socket_reuse_history_limit", ERROR_MORE_DATA); }
+    }
+    void start(const std::string& target, uint16_t port) {
+        const auto filter = "protocol == 6 and (event == CLOSE or (event == CONNECT and remoteAddr == " +
+            target + " and remotePort == " + std::to_string(port) + "))";
+        handle = WinDivertOpen(filter.c_str(), WINDIVERT_LAYER_SOCKET, 0, WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY);
+        if (handle == INVALID_HANDLE_VALUE) { fail("socket_open", GetLastError()); throw std::runtime_error("Socket source open"); }
+        if (!WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_LENGTH, 4096) ||
+            !WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_SIZE, 8 * 1024 * 1024) ||
+            !WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_TIME, 2000)) {
+            fail("socket_queue_setup", GetLastError()); throw std::runtime_error("Socket source queue setup");
+        }
+        resolver = std::thread([this] { try { resolve(); } catch (...) { fail("socket_identity_exception", ERROR_INVALID_DATA); } });
+        receiver_done = false;
+        try {
+            receiver = std::thread([this] {
+                try { receive(); } catch (...) { fail("socket_receiver_exception", ERROR_INVALID_DATA); }
+                receiver_done = true;
+            });
+        } catch (...) { receiver_done = true; throw; }
+        const auto until = qpc() + frequency * 2;
+        while (!receiver_started && !failed() && qpc() < until) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!receiver_started || failed()) throw std::runtime_error("Socket source startup");
+    }
+    void stop() {
+        if (stopped) return;
+        stopped = true; stopping = true;
+        if (handle != INVALID_HANDLE_VALUE && !WinDivertShutdown(handle, WINDIVERT_SHUTDOWN_RECV)) {
+            fail("socket_shutdown", GetLastError()); abort_receive = true;
+        }
+        while (!receiver_done) {
+            if (abort_receive && receiver.joinable()) CancelSynchronousIo(static_cast<HANDLE>(receiver.native_handle()));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (receiver.joinable()) receiver.join();
+        { std::lock_guard<Mutex> lock(mutex); resolver_stopping = true; }
+        identity_wake.notify_one();
+        if (resolver.joinable()) resolver.join();
+        if (handle != INVALID_HANDLE_VALUE && !WinDivertClose(handle)) fail("socket_close", GetLastError());
+        handle = INVALID_HANDLE_VALUE;
+        clean_shutdown = drained && !failed();
+    }
+    ~SocketSource() { try { stop(); } catch (...) {} }
+};
+
+struct Bfe {
+    HANDLE engine = nullptr;
+    Log* log = nullptr;
+    UINT32 old_collect = 0, old_keywords = 0;
+    bool collect_changed = false, keywords_changed = false;
+    unsigned errors = 0;
+
+    static void check(DWORD result, const char* operation) {
+        if (result != ERROR_SUCCESS) throw std::runtime_error(std::string(operation) + ": " + std::to_string(result));
+    }
+    UINT32 get(FWPM_ENGINE_OPTION option) {
+        FWP_VALUE0* value = nullptr;
+        check(FwpmEngineGetOption0(engine, option, &value), "FwpmEngineGetOption0");
+        if (!value) throw std::runtime_error("Null engine option");
+        const bool valid = value->type == FWP_UINT32;
+        const UINT32 result = value->uint32;
+        FwpmFreeMemory0(reinterpret_cast<void**>(&value));
+        if (!valid) throw std::runtime_error("Engine option is not UINT32");
+        return result;
+    }
+    DWORD set(FWPM_ENGINE_OPTION option, UINT32 value_number) {
+        FWP_VALUE0 value{}; value.type = FWP_UINT32; value.uint32 = value_number;
+        return FwpmEngineSetOption0(engine, option, &value);
+    }
+    void start(const std::string& state_path) {
+        check(FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &engine), "FwpmEngineOpen0");
+        old_collect = get(FWPM_ENGINE_COLLECT_NET_EVENTS);
+        old_keywords = get(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS);
+        if (!state_path.empty()) {
+            std::ofstream backup(state_path, std::ios::binary | std::ios::trunc);
+            backup << "{\"version\":1,\"old_collect\":" << old_collect
+                   << ",\"old_keywords\":" << old_keywords << "}\n";
+            backup.flush();
+            if (!backup) throw std::runtime_error("Cannot persist BFE state before mutation");
+        }
+        if (old_collect != 1) {
+            check(set(FWPM_ENGINE_COLLECT_NET_EVENTS, 1), "Set COLLECT_NET_EVENTS");
+            collect_changed = true;
+        }
+        if (!(old_keywords & FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW)) {
+            check(set(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS,
+                      old_keywords | FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW), "Set CLASSIFY_ALLOW keyword");
+            keywords_changed = true;
+        }
+    }
+    void error(const char* operation, DWORD code) noexcept {
+        ++errors;
+        try {
+            if (log) log->write("{\"kind\":\"error\",\"operation\":" + json(operation) +
+                                ",\"code\":" + std::to_string(code) + "}");
+        } catch (...) {}
+    }
+    void restore(FWPM_ENGINE_OPTION option, UINT32 expected, UINT32 previous, const char* operation) noexcept {
+        try {
+            const auto action = inproc::restore_action(previous, expected, get(option));
+            if (action == inproc::RestoreAction::AlreadyRestored) return;
+            if (action == inproc::RestoreAction::Conflict) { error(operation, ERROR_BUSY); return; }
+            const auto result = set(option, previous);
+            if (result) error(operation, result);
+        } catch (...) { error(operation, ERROR_INVALID_DATA); }
+    }
+    void finish() noexcept {
+        if (!engine) return;
+        if (keywords_changed) restore(FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS,
+            old_keywords | FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW, old_keywords, "Restore MATCH_ANY_KEYWORDS");
+        if (collect_changed) restore(FWPM_ENGINE_COLLECT_NET_EVENTS, 1, old_collect, "Restore COLLECT_NET_EVENTS");
+        const auto closed = FwpmEngineClose0(engine);
+        if (closed) error("FwpmEngineClose0 BFE", closed);
+        engine = nullptr;
+    }
+    ~Bfe() { finish(); }
+};
+
+struct PhaseMetric {
+    uint64_t calls = 0;
+    double total_ms = 0, max_ms = 0;
+    void add(double ms) { ++calls; total_ms += ms; max_ms = (std::max)(max_ms, ms); }
+    void merge(const PhaseMetric& other) {
+        calls += other.calls; total_ms += other.total_ms; max_ms = (std::max)(max_ms, other.max_ms);
+    }
+};
+
+struct QueryStats {
+    std::set<std::string> filters;
+    std::set<std::pair<uint32_t, size_t>> condition_shapes;
+    unsigned calls = 0;
+    unsigned errors = 0;
+    std::vector<double> durations_ms;
+    PhaseMetric create, enumerate, destroy, process;
+    uint64_t events = 0;
+    size_t copied_bytes = 0;
+    uint64_t cache_hits = 0, cache_misses = 0, cache_rejections = 0;
+    double busy_ms = 0;
+    double cpu_ms = 0;
+    unsigned cpu_samples = 0, cpu_errors = 0;
+    DWORD cpu_error_code = ERROR_SUCCESS;
+};
+
+struct Lookup : QueryStats {
+    std::string filter;
+    unsigned queries = 0, completed = 0, cancelled = 0, backpressure = 0;
+    unsigned stale_subjects = 0, incomplete_results = 0;
+    size_t max_subjects = 0;
+    std::vector<double> apply_ms;
+};
+
+struct QuerySubject {
+    Tuple tuple;
+    inproc::GenerationTag tag;
+    uint64_t capture_filetime;
+};
+
+struct QueryRequest {
+    uint64_t id = 0;
+    std::vector<QuerySubject> subjects;
+};
+
+struct QueryResult {
+    QueryRequest request;
+    std::map<Tuple, std::vector<inproc::EventRef>> events;
+    bool complete = false;
+    QueryStats stats;
+};
+
+struct Flow {
+    int64_t generation = 0;
+    int64_t capture_qpc = 0;
+    uint64_t capture_filetime = 0;
+    int64_t deadline_qpc = 0;
+    uint8_t protocol = 6;
+    bool outbound_loopback = false;
+    std::string action = "pending";
+    int64_t next_retry_qpc = 0;
+    int backoff_ms = 0;
+    bool saw_syn = false;
+    bool socket_tcp_progress = false;
+    uint32_t syn_sequence = 0;
+    uint32_t last_seq = 0;
+    uint32_t last_ack = 0;
+    WINDIVERT_ADDRESS first_address{};
+    unsigned lookup_calls = 0;
+    SOCKET reservation = INVALID_SOCKET;
+    uint16_t alias = 0;
+    bool leak_selected = false;
+    bool rst_sent = false;
+    std::string drop_reason = "selected_quic";
+    std::deque<Packet> held;
+    ~Flow() { if (reservation != INVALID_SOCKET) closesocket(reservation); }
+};
+
+class Engine {
+    Options config;
+    Log log;
+    std::ofstream summary_file;
+    uint32_t target = 0;
+    int64_t frequency = 0;
+    int64_t anchor_qpc = 0;
+    uint64_t anchor_filetime = 0;
+    std::string selected_app;
+
+    HANDLE divert = INVALID_HANDLE_VALUE;
+    HANDLE session = nullptr;
+    Bfe bfe;
+    std::unique_ptr<SocketSource> socket_source;
+    uint64_t socket_revision_seen = 0;
+    uint64_t socket_matches = 0, socket_rejected = 0, socket_ambiguous = 0, socket_closed = 0;
+    uint64_t socket_missing = 0, socket_reuse_rejected = 0;
+    uint64_t socket_quarantined_syn_rejections = 0;
+    std::map<std::string, uint64_t> socket_forward_guard_verdicts, socket_reverse_guard_verdicts;
+    std::vector<double> socket_identity_ready_to_apply_ms;
+
+    std::atomic<bool> stopping{false};
+    std::atomic<DWORD> receive_error{0};
+    std::atomic<bool> fatal_send{false};
+    std::atomic<bool> lookup_worker_error{false};
+    std::thread receiver;
+    std::atomic<bool> network_receiver_done{true}, network_abort{false};
+    std::thread lookup_thread;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::condition_variable query_wake;
+    std::deque<Packet> input;
+    size_t input_bytes = 0;
+    inproc::HandoffState query_handoff;
+    std::optional<QueryRequest> query_request;
+    std::optional<QueryResult> query_result;
+    bool lookup_stopping = false;
+    inproc::FilterCapabilityCache filter_capabilities;
+    int64_t engine_started_qpc = 0;
+
+    std::map<Tuple, std::unique_ptr<Flow>> flows;
+    std::map<std::pair<uint32_t, uint16_t>, Tuple> aliases;
+
+    Lookup lookup;
+    std::vector<double> decision_latency_ms;
+    std::vector<double> added_held_ms, added_direct_ms, added_proxy_ms;
+    std::vector<double> lookups_per_flow;
+    unsigned unattributed = 0, leaked = 0, rst_count = 0, quic_drops = 0;
+    unsigned decided_proxy = 0, decided_direct = 0;
+    bool reuse_disrupted = false;
+    std::deque<std::pair<Tuple, int64_t>> leak_watch;
+    int64_t next_leak_check_qpc = 0;
+
+    static constexpr size_t MAX_BYTES = 8 * 1024 * 1024;
+    static constexpr size_t MAX_FLOWS = 4096;
+
+    uint64_t to_filetime_from_qpc(int64_t capture) const {
+        return anchor_filetime + static_cast<uint64_t>((capture - anchor_qpc) * 10'000'000 / frequency);
+    }
+
+    bool send(Packet& packet, const char* reason) {
+        if (socket_source && (socket_source->failed() || fatal_send || receive_error)) { fatal_send = true; return false; }
+        UINT sent = 0;
+        bool success = WinDivertSend(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
+                                    &sent, &packet.address) != 0;
+        DWORD error = success ? ERROR_SUCCESS : GetLastError();
+        success = success && sent == packet.bytes.size();
+        if (!success) {
+            fatal_send = true;
+            if (socket_source) socket_source->network_failure("socket_network_send", error ? error : ERROR_WRITE_FAULT);
+            log.write("{\"kind\":\"error\",\"operation\":\"send\",\"reason\":" + json(reason) +
+                      ",\"code\":" + std::to_string(error) + "}");
+        }
+        return success;
+    }
+
+    void record_added(bool held, const std::string& action, int64_t capture_qpc) {
+        const double ms = static_cast<double>(qpc() - capture_qpc) * 1000.0 / static_cast<double>(frequency);
+        if (held) added_held_ms.push_back(ms);
+        else if (action == "proxy") added_proxy_ms.push_back(ms);
+        else added_direct_ms.push_back(ms);
+    }
+
+    bool reserve(const Tuple& tuple, Flow& flow) {
+        SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (socket == INVALID_SOCKET) return false;
+        BOOL exclusive = TRUE;
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = tuple.local;
+        if (setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                       reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) ||
+            bind(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address))) {
+            closesocket(socket);
+            return false;
+        }
+        int size = sizeof(address);
+        if (getsockname(socket, reinterpret_cast<sockaddr*>(&address), &size)) {
+            closesocket(socket);
+            return false;
+        }
+        uint16_t alias = ntohs(address.sin_port);
+        if (alias == config.listener_port || aliases.count({tuple.local, alias})) {
+            closesocket(socket);
+            return false;
+        }
+        flow.reservation = socket;
+        flow.alias = alias;
+        aliases.emplace(std::make_pair(tuple.local, alias), tuple);
+        std::ostringstream line;
+        line << "{\"kind\":\"translation\"," << fields(tuple)
+             << ",\"peer_ip\":\"" << ip(tuple.local) << "\",\"peer_port\":" << alias
+             << ",\"listener_ip\":\"" << ip(tuple.local) << "\",\"listener_port\":" << config.listener_port
+             << ",\"original_ip\":\"" << ip(tuple.remote) << "\",\"original_port\":" << tuple.remote_port
+             << ",\"generation\":" << flow.generation << ",\"qpc\":" << qpc() << "}";
+        log.write(line.str());
+        return true;
+    }
+
+    bool socket_forward_allowed(const Tuple& tuple, const Flow& flow, const Packet& packet, const Parsed& parsed, bool reverse = false) {
+        if (!socket_source) return true;
+        auto& counts = reverse ? socket_reverse_guard_verdicts : socket_forward_guard_verdicts;
+        if (flow.action == "drop") { ++counts["drop_state"]; return false; }
+        if (!parsed.tcp || !parsed.ip_header) { ++counts["malformed"]; return false; }
+        const auto headers = static_cast<size_t>(parsed.ip_header->HdrLength + parsed.tcp->HdrLength) * 4;
+        const auto length = ntohs(parsed.ip_header->Length);
+        if (length < headers || length > packet.bytes.size()) { ++counts["malformed"]; return false; }
+        const auto teardown = socket_owner::teardown_only(parsed.tcp->Syn, parsed.tcp->Ack, parsed.tcp->Fin,
+            parsed.tcp->Rst, length - headers);
+        const auto verdict = socket_source->forwarding({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+            {flow.generation, flow.capture_qpc}, frequency * config.window_before_ms / 1000, packet.address.Timestamp, teardown,
+            parsed.tcp->Syn && !parsed.tcp->Ack);
+        static const char* labels[] = {"missing", "matched", "closed", "ambiguous", "stale", "invalid", "poisoned"};
+        ++counts[labels[static_cast<unsigned>(verdict)]];
+        return socket_owner::forwarding_allowed(flow.action == "proxy", verdict);
+    }
+
+    void reject_socket_tuple(const Tuple& tuple, Flow& flow, bool quarantined) {
+        socket_source->invalidate({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol});
+        ++socket_reuse_rejected;
+        if (quarantined) ++socket_quarantined_syn_rejections;
+        reuse_disrupted = true;
+        flow.action = "drop";
+        flow.drop_reason = "socket_tuple_reuse";
+        log_decision(tuple, flow, "drop", flow.drop_reason);
+    }
+
+    void forward(Packet& packet, const Tuple& tuple, Flow& flow, bool held) {
+        auto operation = [&] {
+            Parsed parsed(packet);
+            if (socket_source && parsed.tcp && parsed.tcp->Syn && !parsed.tcp->Ack &&
+                socket_source->reject_initial_syn({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol})) {
+                reject_socket_tuple(tuple, flow, true);
+                return;
+            }
+            if (!socket_forward_allowed(tuple, flow, packet, parsed)) {
+                log_decision(tuple, flow, "drop", "socket_authority_invalidated");
+                return;
+            }
+            if (flow.action == "proxy") {
+                if (!parsed.tcp || !flow.alias) { fatal_send = true; return; }
+                parsed.ip_header->DstAddr = tuple.local;
+                parsed.tcp->SrcPort = htons(flow.alias);
+                parsed.tcp->DstPort = htons(config.listener_port);
+                packet.address.Outbound = 1;
+                packet.address.Loopback = 1;
+                WinDivertHelperCalcChecksums(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
+                                            &packet.address, 0);
+            }
+            const auto injection_started = qpc();
+            if (send(packet, "forward")) {
+                if (socket_source) socket_source->injected({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+                    {flow.generation, flow.capture_qpc}, injection_started, qpc());
+                record_added(held, flow.action, packet.address.Timestamp);
+            }
+        };
+        if (socket_source) socket_source->synchronized(operation);
+        else operation();
+    }
+
+    void flush(Flow& flow, const Tuple& tuple) {
+        while (!flow.held.empty()) {
+            Packet packet = std::move(flow.held.front());
+            flow.held.pop_front();
+            forward(packet, tuple, flow, true);
+            if (flow.action == "drop") { flow.held.clear(); break; }
+        }
+    }
+
+    bool reverse(Packet& packet, Parsed& parsed) {
+        if (!parsed.tcp || parsed.tuple.local_port != config.listener_port) return false;
+        auto alias = aliases.find({parsed.tuple.remote, parsed.tuple.remote_port});
+        if (alias == aliases.end()) return false;
+        const Tuple& original = alias->second;
+        auto flow_it = flows.find(original);
+        if (flow_it == flows.end() || parsed.tuple.local != original.local) return false;
+        Flow& flow = *flow_it->second;
+        auto operation = [&] {
+            if (!socket_forward_allowed(original, flow, packet, parsed, true)) {
+                log_decision(original, flow, "drop", "socket_reverse_authority_invalidated");
+                return;
+            }
+            parsed.ip_header->SrcAddr = original.remote;
+            parsed.ip_header->DstAddr = original.local;
+            parsed.tcp->SrcPort = htons(original.remote_port);
+            parsed.tcp->DstPort = htons(original.local_port);
+            packet.address.Outbound = flow.outbound_loopback ? 1 : 0;
+            packet.address.Loopback = flow.outbound_loopback ? 1 : 0;
+            WinDivertHelperCalcChecksums(packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
+                                        &packet.address, 0);
+            send(packet, "reverse");
+        };
+        if (socket_source) socket_source->synchronized(operation);
+        else operation();
+        return true;
+    }
+
+    void send_rst(const Tuple& tuple, Flow& flow) {
+        if (tuple.protocol != IPPROTO_TCP) return;
+        unsigned char buffer[40]{};
+        WINDIVERT_IPHDR* ip_header = reinterpret_cast<WINDIVERT_IPHDR*>(buffer);
+        WINDIVERT_TCPHDR* tcp = reinterpret_cast<WINDIVERT_TCPHDR*>(buffer + 20);
+        ip_header->Version = 4;
+        ip_header->HdrLength = 5;
+        ip_header->Length = htons(40);
+        ip_header->TTL = 64;
+        ip_header->Protocol = IPPROTO_TCP;
+        tcp->HdrLength = 5;
+        tcp->Rst = 1;
+        tcp->Window = 0;
+        const int64_t send_qpc = qpc();
+        for (bool reverse_direction : {true, false}) {
+            ip_header->SrcAddr = reverse_direction ? tuple.remote : tuple.local;
+            ip_header->DstAddr = reverse_direction ? tuple.local : tuple.remote;
+            tcp->SrcPort = htons(reverse_direction ? tuple.remote_port : tuple.local_port);
+            tcp->DstPort = htons(reverse_direction ? tuple.local_port : tuple.remote_port);
+            tcp->SeqNum = htonl(reverse_direction ? flow.last_ack : flow.last_seq);
+            tcp->AckNum = htonl(reverse_direction ? flow.last_seq : flow.last_ack);
+            tcp->Ack = 1;
+            Packet packet;
+            packet.bytes.assign(buffer, buffer + 40);
+            packet.address = flow.first_address;
+            packet.address.Outbound = reverse_direction && !flow.outbound_loopback ? 0 : 1;
+            if (!WinDivertHelperCalcChecksums(packet.bytes.data(), 40, &packet.address, 0)) {
+                fatal_send = true;
+                log.write("{\"kind\":\"error\",\"operation\":\"rst_checksums\"}");
+                return;
+            }
+            if (!send(packet, reverse_direction ? "rst_client" : "rst_remote")) return;
+        }
+        flow.rst_sent = true;
+        flow.action = "drop";
+        flow.drop_reason = "leak_reset";
+        ++rst_count;
+        log.write("{\"kind\":\"rst\"," + fields(tuple) + ",\"generation\":" +
+                  std::to_string(flow.generation) + ",\"send_qpc\":" + std::to_string(send_qpc) +
+                  ",\"directions\":2,\"qpc\":" + std::to_string(qpc()) + "}");
+    }
+
+    double elapsed_ms(int64_t began) const {
+        return static_cast<double>(qpc() - began) * 1000.0 / static_cast<double>(frequency);
+    }
+
+    void lookup_error(QueryStats& stats, const char* operation, DWORD code) {
+        ++stats.errors;
+        log.write("{\"kind\":\"error\",\"operation\":" + json(operation) +
+                  ",\"code\":" + std::to_string(code) + "}");
+    }
+
+    bool enumerate(uint8_t protocol, const std::vector<uint16_t>& ports,
+                   const inproc::DestinationShape& destination, uint64_t window_start, QueryResult& result) {
+        auto& stats = result.stats;
+        if (!session) { lookup_error(stats, "lookup_session", ERROR_INVALID_HANDLE); return false; }
+        const bool destination_scope = config.enum_scope == "destination";
+        std::vector<FWPM_FILTER_CONDITION0> conditions;
+        FWPM_FILTER_CONDITION0 type_condition{};
+        type_condition.fieldKey = FWPM_CONDITION_NET_EVENT_TYPE;
+        type_condition.matchType = FWP_MATCH_EQUAL;
+        type_condition.conditionValue.type = FWP_UINT32;
+        type_condition.conditionValue.uint32 = static_cast<UINT32>(FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW);
+        FWPM_FILTER_CONDITION0 protocol_condition{};
+        protocol_condition.fieldKey = FWPM_CONDITION_IP_PROTOCOL;
+        protocol_condition.matchType = FWP_MATCH_EQUAL;
+        protocol_condition.conditionValue.type = FWP_UINT8;
+        protocol_condition.conditionValue.uint8 = protocol;
+        FWPM_FILTER_CONDITION0 remote_address_condition{};
+        remote_address_condition.fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
+        remote_address_condition.matchType = FWP_MATCH_EQUAL;
+        remote_address_condition.conditionValue.type = FWP_UINT32;
+        remote_address_condition.conditionValue.uint32 = destination.remote_address.value_or(0);
+        FWPM_FILTER_CONDITION0 remote_port_condition{};
+        remote_port_condition.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+        remote_port_condition.matchType = FWP_MATCH_EQUAL;
+        remote_port_condition.conditionValue.type = FWP_UINT16;
+        remote_port_condition.conditionValue.uint16 = destination.remote_port.value_or(0);
+        std::vector<FWPM_FILTER_CONDITION0> port_conditions;
+        if (!destination_scope) {
+            for (uint16_t port : ports) {
+                FWPM_FILTER_CONDITION0 condition{};
+                condition.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+                condition.matchType = FWP_MATCH_EQUAL;
+                condition.conditionValue.type = FWP_UINT16;
+                condition.conditionValue.uint16 = port;
+                port_conditions.push_back(condition);
+            }
+        }
+
+        auto build = [&](int level, uint32_t mask) {
+            conditions.clear();
+            if (!destination_scope) {
+                if (level >= 0) conditions.push_back(type_condition);
+                if (level >= 1) conditions.push_back(protocol_condition);
+                if (level >= 2) for (const auto& c : port_conditions) conditions.push_back(c);
+                return;
+            }
+            for (uint32_t key : inproc::condition_keys(mask)) {
+                switch (key) {
+                case inproc::EventTypeCondition: conditions.push_back(type_condition); break;
+                case inproc::ProtocolCondition: conditions.push_back(protocol_condition); break;
+                case inproc::RemoteAddressCondition: conditions.push_back(remote_address_condition); break;
+                case inproc::RemotePortCondition: conditions.push_back(remote_port_condition); break;
+                case inproc::LocalPortCondition:
+                    FWPM_FILTER_CONDITION0 condition{};
+                    condition.fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+                    condition.matchType = FWP_MATCH_EQUAL;
+                    condition.conditionValue.type = FWP_UINT16;
+                    condition.conditionValue.uint16 = destination.local_port.value();
+                    conditions.push_back(condition);
+                    break;
+                }
+            }
+        };
+
+        auto name = [&](int level, uint32_t mask) {
+            if (!destination_scope)
+                return std::string(level >= 2 ? "type+protocol+local_port" : level == 1 ? "type+protocol" :
+                    level == 0 ? "type" : "time_window_only");
+            std::string result;
+            for (uint32_t key : inproc::condition_keys(mask)) {
+                if (!result.empty()) result += "+";
+                switch (key) {
+                case inproc::EventTypeCondition: result += "type"; break;
+                case inproc::ProtocolCondition: result += "protocol"; break;
+                case inproc::RemoteAddressCondition: result += "remote_address"; break;
+                case inproc::RemotePortCondition: result += "remote_port"; break;
+                case inproc::LocalPortCondition: result += "local_port"; break;
+                }
+            }
+            return result.empty() ? std::string("time_window_only") : result;
+        };
+
+        std::vector<std::pair<int, uint32_t>> profiles;
+        if (destination_scope) {
+            const auto masks = inproc::destination_profiles(destination);
+            for (size_t i = 0; i < masks.size(); ++i)
+                profiles.emplace_back(static_cast<int>(masks.size() - i) - 2, masks[i]);
+        } else {
+            for (int level = port_conditions.empty() ? 1 : 2; level >= -1; --level) {
+                uint32_t mask = 0;
+                if (level >= 0) mask |= inproc::EventTypeCondition;
+                if (level >= 1) mask |= inproc::ProtocolCondition;
+                if (level >= 2) mask |= inproc::LocalPortCondition;
+                profiles.emplace_back(level, mask);
+            }
+        }
+        if (profiles.empty()) { lookup_error(stats, "lookup_empty_subjects", ERROR_INVALID_DATA); return false; }
+
+        FWPM_NET_EVENT_ENUM_TEMPLATE0 range{};
+        range.startTime = to_filetime(window_start);
+        GetSystemTimePreciseAsFileTime(&range.endTime);
+
+        struct EnumGuard {
+            HANDLE session;
+            HANDLE handle = nullptr;
+            ~EnumGuard() { if (handle) FwpmNetEventDestroyEnumHandle0(session, handle); }
+        } guard{session};
+        std::string chosen;
+        for (const auto& profile : profiles) {
+            const int level = profile.first;
+            const uint32_t mask = profile.second;
+            build(level, mask);
+            const inproc::FilterPattern pattern{protocol, level, !destination_scope && ports.size() > 1,
+                destination_scope ? inproc::EnumScope::Destination : inproc::EnumScope::Legacy,
+                mask, conditions.size()};
+            if (mask && filter_capabilities.skip(pattern)) {
+                ++stats.cache_hits;
+                continue;
+            }
+            if (config.filter_cache && mask) ++stats.cache_misses;
+            range.numFilterConditions = static_cast<UINT32>(conditions.size());
+            range.filterCondition = conditions.empty() ? nullptr : conditions.data();
+            const auto began = qpc();
+            const auto created = FwpmNetEventCreateEnumHandle0(session, &range, &guard.handle);
+            stats.create.add(elapsed_ms(began));
+            if (!created) {
+                chosen = name(level, mask);
+                stats.condition_shapes.emplace(mask, conditions.size());
+                break;
+            }
+            if (!mask || !inproc::FilterCapabilityCache::fallback_allowed(created)) {
+                lookup_error(stats, "FwpmNetEventCreateEnumHandle0", created);
+                return false;
+            }
+            const bool learned = filter_capabilities.reject(pattern, created);
+            if (learned) ++stats.cache_rejections;
+            log.write("{\"kind\":\"enum_filter_fallback\",\"level\":" + std::to_string(level) +
+                      ",\"enum_scope\":" + json(config.enum_scope) +
+                      ",\"protocol\":" + std::to_string(protocol) +
+                      ",\"condition_mask\":" + std::to_string(mask) +
+                      ",\"condition_count\":" + std::to_string(conditions.size()) +
+                      ",\"filter\":" + json(name(level, mask)) +
+                      ",\"multiple_ports\":" + (ports.size() > 1 ? "true" : "false") +
+                      ",\"cached\":" + (learned ? "true" : "false") +
+                      ",\"code\":" + std::to_string(created) + "}");
+        }
+        stats.filters.insert(chosen);
+
+        const UINT32 batch = 256;
+        const int64_t enumeration_deadline = qpc() + frequency * 2;
+        unsigned batches = 0;
+        bool complete = true;
+        for (;;) {
+            struct EntriesGuard {
+                FWPM_NET_EVENT3** value = nullptr;
+                ~EntriesGuard() { if (value) FwpmFreeMemory0(reinterpret_cast<void**>(&value)); }
+            } entries;
+            UINT32 count = 0;
+            const auto began = qpc();
+            const auto enumerated = FwpmNetEventEnum3(session, guard.handle, batch, &entries.value, &count);
+            stats.enumerate.add(elapsed_ms(began));
+            if (enumerated) {
+                lookup_error(stats, "FwpmNetEventEnum3", enumerated);
+                complete = false;
+                break;
+            }
+            if (count && !entries.value) {
+                lookup_error(stats, "FwpmNetEventEnum3_null_entries", ERROR_INVALID_DATA);
+                complete = false;
+                break;
+            }
+            const auto process_began = qpc();
+            stats.events += count;
+            for (UINT32 i = 0; i < count; ++i) {
+                const auto* entry = entries.value[i];
+                if (!entry || entry->type != FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW) continue;
+                const auto& header = entry->header;
+                const auto* allow = entry->classifyAllow;
+                inproc::EventRef ref;
+                ref.event_filetime = static_cast<int64_t>(filetime(header.timeStamp));
+                ref.layer_id = allow ? allow->layerId : 0;
+                ref.outbound = allow && allow->msFwpDirection == FWP_DIRECTION_OUTBOUND;
+                if (header.flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) {
+                    if (!inproc::copy_budget_allows(stats.copied_bytes, header.appId.size))
+                        throw std::runtime_error("native event snapshot byte limit");
+                    stats.copied_bytes += header.appId.size;
+                    ref.app_path = lower(blob_path(header.appId));
+                }
+                const UINT32 required = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_IP_VERSION_SET |
+                    FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET | FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET |
+                    FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET |
+                    FWPM_NET_EVENT_FLAG_APP_ID_SET;
+                ref.complete = (header.flags & required) == required && !ref.app_path.empty();
+                ref.tuple_match = header.ipVersion == FWP_IP_VERSION_V4;
+                ref.raw_local_addr = header.localAddrV4;
+                ref.raw_remote_addr = header.remoteAddrV4;
+                ref.match_local_port = static_cast<uint16_t>(header.localPort);
+                ref.match_remote_port = static_cast<uint16_t>(header.remotePort);
+                ref.match_protocol = static_cast<uint8_t>(header.ipProtocol);
+                ref.ip_version = header.ipVersion;
+                if (ref.ip_version != FWP_IP_VERSION_V4) continue;
+                Tuple key{htonl(ref.raw_local_addr), htonl(ref.raw_remote_addr),
+                    ref.match_local_port, ref.match_remote_port, ref.match_protocol};
+                result.events[key].push_back(std::move(ref));
+            }
+            stats.process.add(elapsed_ms(process_began));
+            if (count < batch) break;
+            if (++batches >= 64 || qpc() >= enumeration_deadline) {
+                lookup_error(stats, "FwpmNetEventEnum3_limit", ERROR_MORE_DATA);
+                complete = false;
+                break;
+            }
+        }
+        const auto destroy_began = qpc();
+        const auto destroyed = FwpmNetEventDestroyEnumHandle0(session, guard.handle);
+        guard.handle = nullptr;
+        stats.destroy.add(elapsed_ms(destroy_began));
+        if (destroyed) { lookup_error(stats, "FwpmNetEventDestroyEnumHandle0", destroyed); complete = false; }
+        return complete;
+    }
+
+    inproc::MatchResult match(const Flow& flow, const std::vector<inproc::EventRef>& events, int64_t observed) {
+        inproc::MatchConfig match_config;
+        match_config.window_before = static_cast<int64_t>(config.window_before_ms) * 10000;
+        match_config.window_after = static_cast<int64_t>(config.window_after_ms) * 10000;
+        match_config.ale_connect_v4 = ALE_AUTH_CONNECT_V4;
+        match_config.ale_connect_v6 = ALE_AUTH_CONNECT_V6;
+        auto result = inproc::match_generation(events, static_cast<int64_t>(flow.capture_filetime), match_config);
+        if (result.outcome == inproc::MatchOutcome::Matched && result.app_path == selected_app &&
+            observed < flow.capture_qpc + frequency * config.delay_ms / 1000)
+            return {};
+        return result;
+    }
+
+    void log_ownership(const Tuple& tuple, const Flow& flow, const inproc::MatchResult& result, uint64_t query_id) {
+        log.write("{\"kind\":\"ownership\"," + fields(tuple) + ",\"generation\":" +
+                  std::to_string(flow.generation) + ",\"app_path\":" + json(result.app_path) +
+                  ",\"event_filetime\":" + std::to_string(result.event_filetime) +
+                  ",\"capture_qpc\":" + std::to_string(flow.capture_qpc) +
+                  ",\"query_id\":" + std::to_string(query_id) +
+                  ",\"qpc\":" + std::to_string(qpc()) + "}");
+    }
+
+    QueryResult execute_query(QueryRequest request) {
+        QueryResult result;
+        result.request = std::move(request);
+        const int64_t began = qpc();
+        auto thread_cpu = [](uint64_t& ticks) {
+            FILETIME created{}, exited{}, kernel{}, user{};
+            if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return false;
+            ticks = filetime(kernel) + filetime(user);
+            return true;
+        };
+        uint64_t cpu_before = 0, cpu_after = 0;
+        const bool cpu_before_valid = thread_cpu(cpu_before);
+        const DWORD cpu_before_error = cpu_before_valid ? ERROR_SUCCESS : GetLastError();
+        bool complete = true;
+        try {
+            std::vector<inproc::QueryTuple> subjects;
+            if (config.enum_scope == "destination") {
+                subjects.reserve(result.request.subjects.size());
+                for (const auto& subject : result.request.subjects)
+                    subjects.push_back({ntohl(subject.tuple.remote), subject.tuple.local_port,
+                        subject.tuple.remote_port, subject.tuple.protocol});
+            }
+            for (uint8_t protocol : {uint8_t(6), uint8_t(17)}) {
+                std::vector<uint16_t> ports;
+                uint64_t window_start = utc_now();
+                for (const auto& subject : result.request.subjects) {
+                    if (subject.tuple.protocol != protocol) continue;
+                    ports.push_back(subject.tuple.local_port);
+                    window_start = (std::min)(window_start, subject.capture_filetime);
+                }
+                if (ports.empty()) continue;
+                window_start -= static_cast<uint64_t>(config.window_before_ms) * 10000;
+                const int64_t query_began = qpc();
+                ++result.stats.calls;
+                complete = enumerate(protocol, inproc::pending_ports(ports),
+                    inproc::destination_shape(subjects, protocol), window_start, result);
+                result.stats.durations_ms.push_back(elapsed_ms(query_began));
+                if (!complete) break;
+            }
+        } catch (const std::exception& error) {
+            lookup_error(result.stats, "lookup_exception", ERROR_GEN_FAILURE);
+            log.write("{\"kind\":\"error\",\"operation\":\"lookup_exception_detail\",\"message\":" + json(error.what()) + "}");
+            complete = false;
+        } catch (...) {
+            lookup_error(result.stats, "lookup_exception", ERROR_GEN_FAILURE);
+            complete = false;
+        }
+        result.complete = complete;
+        if (!complete) result.events.clear();
+        const bool cpu_after_valid = thread_cpu(cpu_after);
+        if (cpu_before_valid && cpu_after_valid && cpu_after >= cpu_before) {
+            result.stats.cpu_ms = static_cast<double>(cpu_after - cpu_before) / 10000.0;
+            result.stats.cpu_samples = 1;
+        } else {
+            ++result.stats.cpu_errors;
+            result.stats.cpu_error_code = !cpu_before_valid ? cpu_before_error :
+                !cpu_after_valid ? GetLastError() : ERROR_INVALID_DATA;
+        }
+        result.stats.busy_ms = elapsed_ms(began);
+        return result;
+    }
+
+    void merge_query_stats(const QueryResult& result) {
+        const auto& stats = result.stats;
+        ++lookup.completed;
+        lookup.calls += stats.calls;
+        lookup.errors += stats.errors;
+        lookup.durations_ms.insert(lookup.durations_ms.end(), stats.durations_ms.begin(), stats.durations_ms.end());
+        lookup.create.merge(stats.create);
+        lookup.enumerate.merge(stats.enumerate);
+        lookup.destroy.merge(stats.destroy);
+        lookup.process.merge(stats.process);
+        lookup.events += stats.events;
+        lookup.cache_hits += stats.cache_hits;
+        lookup.cache_misses += stats.cache_misses;
+        lookup.cache_rejections += stats.cache_rejections;
+        lookup.busy_ms += stats.busy_ms;
+        lookup.cpu_ms += stats.cpu_ms;
+        lookup.cpu_samples += stats.cpu_samples;
+        lookup.cpu_errors += stats.cpu_errors;
+        if (stats.cpu_errors) lookup.cpu_error_code = stats.cpu_error_code;
+        lookup.condition_shapes.insert(stats.condition_shapes.begin(), stats.condition_shapes.end());
+        for (const auto& filter : stats.filters) {
+            if (!lookup.filters.insert(filter).second) continue;
+            if (!lookup.filter.empty()) lookup.filter += "|";
+            lookup.filter += filter;
+        }
+    }
+
+    void apply_query(QueryResult result, bool apply = true) {
+        merge_query_stats(result);
+        if (!result.complete) { ++lookup.incomplete_results; return; }
+        if (!apply) return;
+        const int64_t began = qpc();
+        for (const auto& subject : result.request.subjects) {
+            auto found = flows.find(subject.tuple);
+            if (found == flows.end()) { ++lookup.stale_subjects; continue; }
+            Flow& flow = *found->second;
+            const inproc::GenerationTag current{flow.generation, flow.capture_qpc};
+            if (!(subject.tag == current)) { ++lookup.stale_subjects; continue; }
+            auto evidence = result.events.find(subject.tuple);
+            const std::vector<inproc::EventRef> empty;
+            auto outcome = match(flow, evidence == result.events.end() ? empty : evidence->second, qpc());
+            const int64_t observed = qpc();
+            if (flow.action == "pending") {
+                const auto resolution = inproc::snapshot_resolution(outcome.outcome, result.complete,
+                    subject.tag, current, observed, flow.deadline_qpc);
+                if (resolution == inproc::PendingResolution::Discard) { ++lookup.stale_subjects; continue; }
+                if (resolution == inproc::PendingResolution::Timeout) {
+                    decide(subject.tuple, flow, "direct", "timeout");
+                    continue;
+                }
+                if (resolution == inproc::PendingResolution::Retry) {
+                    flow.backoff_ms = flow.backoff_ms == 0 ? 1 : (std::min)(flow.backoff_ms * 2, 8);
+                    flow.next_retry_qpc = (std::min)(observed + frequency * flow.backoff_ms / 1000, flow.deadline_qpc);
+                    continue;
+                }
+                if (resolution == inproc::PendingResolution::Ambiguous) {
+                    decide(subject.tuple, flow, "direct", "ambiguous");
+                    continue;
+                }
+                log_ownership(subject.tuple, flow, outcome, result.request.id);
+                if (outcome.app_path != selected_app) {
+                    decide(subject.tuple, flow, "direct", "other_app");
+                } else if (flow.protocol == 17) {
+                    decide(subject.tuple, flow, subject.tuple.remote_port == config.quic_port ? "drop_quic" : "direct",
+                           subject.tuple.remote_port == config.quic_port ? "selected_quic" : "selected_udp_direct");
+                } else {
+                    decide(subject.tuple, flow, config.mode == "redirect" ? "proxy" : "direct", "selected");
+                }
+                continue;
+            }
+            auto watch = std::find_if(leak_watch.begin(), leak_watch.end(), [&](const auto& item) {
+                return item.first == subject.tuple && observed < item.second;
+            });
+            if (watch == leak_watch.end() || outcome.outcome != inproc::MatchOutcome::Matched) continue;
+            log_ownership(subject.tuple, flow, outcome, result.request.id);
+            if (outcome.app_path == selected_app && !flow.leak_selected) {
+                flow.leak_selected = true;
+                ++leaked;
+                log.write("{\"kind\":\"leaked\"," + fields(subject.tuple) + ",\"generation\":" +
+                    std::to_string(flow.generation) + ",\"qpc\":" + std::to_string(qpc()) + "}");
+                if (config.send_rst && !flow.rst_sent) send_rst(subject.tuple, flow);
+            }
+            leak_watch.erase(watch);
+        }
+        lookup.apply_ms.push_back(elapsed_ms(began));
+    }
+
+    void lookup_loop() {
+        for (;;) {
+            QueryRequest request;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                query_wake.wait(lock, [&] { return lookup_stopping || query_request.has_value(); });
+                if (lookup_stopping) return;
+                if (!query_handoff.start()) return;
+                request = std::move(*query_request);
+                query_request.reset();
+            }
+            QueryResult result = execute_query(std::move(request));
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                query_result = std::move(result);
+                query_handoff.finish();
+            }
+            wake.notify_one();
+        }
+    }
+
+    void consume_query(bool apply = true) {
+        std::optional<QueryResult> result;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!query_handoff.ready()) return;
+            result = std::move(query_result);
+            query_result.reset();
+            query_handoff.consume();
+        }
+        apply_query(std::move(*result), apply);
+    }
+
+    void stop_lookup() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            lookup_stopping = true;
+        }
+        query_wake.notify_all();
+        if (lookup_thread.joinable()) lookup_thread.join();
+        consume_query(false);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (query_request) { ++lookup.cancelled; query_request.reset(); }
+        query_handoff.stop();
+    }
+
+    void log_socket_ownership(const Tuple& tuple, const Flow& flow, const socket_owner::Event& owner) {
+        const auto applied = qpc();
+        ++socket_matches;
+        socket_identity_ready_to_apply_ms.push_back(static_cast<double>(applied - owner.ready) * 1000 / frequency);
+        log.write("{\"kind\":\"ownership\",\"ownership_source\":\"socket\"," + fields(tuple) +
+            ",\"generation\":" + std::to_string(flow.generation) + ",\"capture_qpc\":" + std::to_string(flow.capture_qpc) +
+            ",\"app_path\":" + json(owner.path) + ",\"pid\":" + std::to_string(owner.pid) +
+            ",\"endpoint_id\":" + std::to_string(owner.endpoint) + ",\"parent_endpoint_id\":" + std::to_string(owner.parent) +
+            ",\"process_creation_filetime\":" + std::to_string(owner.creation) +
+            ",\"socket_event_qpc\":" + std::to_string(owner.occurred) +
+            ",\"socket_recv_qpc\":" + std::to_string(owner.received) +
+            ",\"socket_app_ready_qpc\":" + std::to_string(owner.ready) +
+            ",\"creation_guard_valid\":true,\"apply_qpc\":" + std::to_string(applied) + ",\"qpc\":" + std::to_string(applied) + "}");
+    }
+
+    void resolve_socket(int64_t now) {
+        const auto revision = socket_source->revision();
+        leak_watch.erase(std::remove_if(leak_watch.begin(), leak_watch.end(),
+            [&](const auto& item) { return now >= item.second; }), leak_watch.end());
+        for (auto& item : flows) {
+            const auto& tuple = item.first;
+            auto& flow = *item.second;
+            if (flow.action == "pending" && now >= flow.deadline_qpc) {
+                ++socket_missing;
+                decide(tuple, flow, "direct", "timeout");
+            }
+            auto watched = std::find_if(leak_watch.begin(), leak_watch.end(), [&](const auto& entry) {
+                return entry.first == tuple && now < entry.second;
+            });
+            if (flow.action != "pending" && watched == leak_watch.end()) continue;
+            if (flow.next_retry_qpc && now < flow.next_retry_qpc) continue;
+            if (flow.protocol != 6) {
+                if (flow.action == "pending") decide(tuple, flow, "direct", "socket_tcp_only");
+                continue;
+            }
+            const socket_owner::Tag tag{flow.generation, flow.capture_qpc};
+            const auto verdict = socket_source->visit({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+                tag, frequency * config.window_before_ms / 1000, [&](const socket_owner::Event& owner) {
+                    const auto observed = qpc();
+                    const auto available = flow.capture_qpc + frequency * config.delay_ms / 1000;
+                    if (owner.path == selected_app && observed < available) { flow.next_retry_qpc = available; return; }
+                    flow.next_retry_qpc = 0;
+                    if (flow.action == "pending") {
+                        if (!socket_owner::route_allowed(true, tag, {flow.generation, flow.capture_qpc}, observed,
+                            flow.deadline_qpc, socket_owner::Verdict::Matched)) {
+                            ++socket_missing;
+                            decide(tuple, flow, "direct", "timeout");
+                            return;
+                        }
+                        log_socket_ownership(tuple, flow, owner);
+                        if (!log.failed()) decide(tuple, flow, owner.path == selected_app && config.mode == "redirect" ? "proxy" : "direct",
+                            owner.path == selected_app ? "selected" : "other_app");
+                    } else if (watched != leak_watch.end()) {
+                        log_socket_ownership(tuple, flow, owner);
+                        if (owner.path == selected_app && !flow.leak_selected) {
+                            flow.leak_selected = true;
+                            ++leaked;
+                            log.write("{\"kind\":\"leaked\",\"ownership_source\":\"socket\"," + fields(tuple) +
+                                ",\"generation\":" + std::to_string(flow.generation) + ",\"qpc\":" + std::to_string(qpc()) + "}");
+                            if (config.send_rst && !flow.rst_sent) send_rst(tuple, flow);
+                        }
+                        leak_watch.erase(watched);
+                        watched = leak_watch.end();
+                    }
+                }, flow.action != "pending");
+            if (verdict == socket_owner::Verdict::Missing || verdict == socket_owner::Verdict::Matched) continue;
+            ++socket_rejected;
+            if (verdict == socket_owner::Verdict::Ambiguous) ++socket_ambiguous;
+            if (verdict == socket_owner::Verdict::Closed) ++socket_closed;
+            if (flow.action == "pending") decide(tuple, flow, "direct", "socket_unattributed");
+            flow.next_retry_qpc = 0;
+            leak_watch.erase(std::remove_if(leak_watch.begin(), leak_watch.end(),
+                [&](const auto& entry) { return entry.first == tuple; }), leak_watch.end());
+        }
+        socket_revision_seen = revision;
+    }
+
+    void resolve_pending(int64_t now) {
+        if (socket_source) { resolve_socket(now); return; }
+        consume_query();
+        now = qpc();
+        bool pending_due = false;
+        for (auto& entry : flows) {
+            Flow& flow = *entry.second;
+            if (flow.action != "pending") continue;
+            if (now >= flow.deadline_qpc) decide(entry.first, flow, "direct", "timeout");
+            else if (flow.next_retry_qpc <= now) pending_due = true;
+        }
+        leak_watch.erase(std::remove_if(leak_watch.begin(), leak_watch.end(),
+            [&](const auto& item) { return now >= item.second; }), leak_watch.end());
+        const bool leaks_due = !leak_watch.empty() && now >= next_leak_check_qpc;
+        if ((!pending_due && !leaks_due) || lookup.errors || lookup_stopping) return;
+        if (config.lookup_mode == "async") {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (query_handoff.busy()) { ++lookup.backpressure; return; }
+        }
+        QueryRequest request;
+        std::set<Tuple> watched_tuples;
+        if (leaks_due) for (const auto& watch : leak_watch) watched_tuples.insert(watch.first);
+        for (const auto& entry : flows) {
+            const Flow& flow = *entry.second;
+            const bool watched = watched_tuples.count(entry.first) != 0;
+            if (!(pending_due && flow.action == "pending") && !watched) continue;
+            request.subjects.push_back({entry.first, {flow.generation, flow.capture_qpc}, flow.capture_filetime});
+        }
+        if (request.subjects.empty()) return;
+        if (config.lookup_mode == "async") {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!query_handoff.submit()) { ++lookup.backpressure; return; }
+        }
+        request.id = ++lookup.queries;
+        lookup.max_subjects = (std::max)(lookup.max_subjects, request.subjects.size());
+        for (const auto& subject : request.subjects) {
+            Flow& flow = *flows.at(subject.tuple);
+            if (flow.action == "pending") ++flow.lookup_calls;
+        }
+        if (leaks_due) next_leak_check_qpc = now + frequency * 8 / 1000;
+        if (config.lookup_mode == "async") {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                query_request = std::move(request);
+            }
+            query_wake.notify_one();
+        } else {
+            apply_query(execute_query(std::move(request)));
+        }
+    }
+
+    void decide(const Tuple& tuple, Flow& flow, std::string action, const char* reason) {
+        if (action == "proxy" && !reserve(tuple, flow)) {
+            fatal_send = true;
+            action = "direct";
+            reason = "alias_failure";
+            log.write("{\"kind\":\"error\",\"operation\":\"reserve_alias_direct\"}");
+        }
+        const int64_t now = qpc();
+        if (now >= flow.deadline_qpc && std::string(reason) != "pending_capacity") {
+            action = "direct";
+            reason = "timeout";
+            if (flow.alias) {
+                aliases.erase({tuple.local, flow.alias});
+                closesocket(flow.reservation);
+                flow.reservation = INVALID_SOCKET;
+                flow.alias = 0;
+            }
+        }
+        decision_latency_ms.push_back(static_cast<double>(now - flow.capture_qpc) * 1000.0 / static_cast<double>(frequency));
+        lookups_per_flow.push_back(static_cast<double>(flow.lookup_calls));
+        if (action == "drop_quic") {
+            flow.action = "drop";
+            ++quic_drops;
+            while (!flow.held.empty()) {
+                log_decision(tuple, flow, "drop", "selected_quic", now);
+                flow.held.pop_front();
+            }
+            return;
+        }
+        flow.action = action;
+        if (flow.action == "proxy") ++decided_proxy;
+        else {
+            ++decided_direct;
+            if (std::string(reason) == "timeout") {
+                ++unattributed;
+                if (tuple.protocol == IPPROTO_TCP && config.leak_ms) {
+                    leak_watch.emplace_back(tuple, now + frequency * config.leak_ms / 1000);
+                    next_leak_check_qpc = now;
+                }
+            }
+        }
+        log_decision(tuple, flow, flow.action, reason, now);
+        flush(flow, tuple);
+    }
+
+    void log_decision(const Tuple& tuple, Flow& flow, const std::string& action, const std::string& reason,
+                      int64_t now = 0) {
+        if (!now) now = qpc();
+        log.write("{\"kind\":\"decision\"," + fields(tuple) + ",\"generation\":" +
+                  std::to_string(flow.generation) + ",\"action\":" + json(action) +
+                  ",\"reason\":" + json(reason) + ",\"qpc\":" + std::to_string(now) +
+                  ",\"capture_qpc\":" + std::to_string(flow.capture_qpc) +
+                  ",\"deadline_qpc\":" + std::to_string(flow.deadline_qpc) + "}");
+    }
+
+    void handle(Packet packet) {
+        Parsed parsed(packet);
+        if (!parsed.valid) { send(packet, "unparsed"); return; }
+        if (config.listener_port && reverse(packet, parsed)) return;
+        const Tuple tuple = parsed.tuple;
+        const bool controlled = tuple.remote == target && packet.address.Outbound &&
+            ((tuple.protocol == 6 && tuple.remote_port == config.port) ||
+             (tuple.protocol == 17 && config.udp_port && tuple.remote_port == config.udp_port) ||
+             (tuple.protocol == 17 && tuple.remote_port == config.quic_port));
+        if (!controlled) { send(packet, "uncontrolled"); return; }
+
+        auto found = flows.find(tuple);
+        if (found == flows.end()) {
+            if (flows.size() >= MAX_FLOWS) {
+                if (socket_source) socket_source->network_failure("socket_flow_capacity", ERROR_MORE_DATA, true);
+                else send(packet, "flow_capacity");
+                return;
+            }
+            auto flow = std::make_unique<Flow>();
+            flow->generation = packet.address.Timestamp;
+            flow->capture_qpc = packet.address.Timestamp;
+            flow->capture_filetime = to_filetime_from_qpc(packet.address.Timestamp);
+            flow->deadline_qpc = flow->capture_qpc + frequency * config.hold_ms / 1000;
+            flow->protocol = tuple.protocol;
+            flow->first_address = packet.address;
+            flow->outbound_loopback = packet.address.Loopback != 0;
+            if (parsed.tcp && parsed.tcp->Syn && !parsed.tcp->Ack) {
+                flow->saw_syn = true;
+                flow->syn_sequence = parsed.tcp->SeqNum;
+            } else if (parsed.tcp) {
+                flow->action = "direct";
+            }
+            found = flows.emplace(tuple, std::move(flow)).first;
+        }
+        Flow& flow = *found->second;
+        if (parsed.tcp) {
+            const unsigned headers = static_cast<unsigned>(parsed.ip_header->HdrLength + parsed.tcp->HdrLength) * 4;
+            const unsigned length = ntohs(parsed.ip_header->Length);
+            const unsigned payload = length >= headers ? length - headers : 0;
+            flow.last_seq = ntohl(parsed.tcp->SeqNum) + payload + (parsed.tcp->Syn ? 1 : 0) + (parsed.tcp->Fin ? 1 : 0);
+            flow.last_ack = ntohl(parsed.tcp->AckNum);
+            const bool initial_syn = parsed.tcp->Syn && !parsed.tcp->Ack;
+            const bool quarantined_syn = socket_source && initial_syn && socket_source->reject_initial_syn(
+                {tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol});
+            if (socket_source && initial_syn && socket_owner::initial_syn_rejected(quarantined_syn, flow.socket_tcp_progress,
+                flow.saw_syn, parsed.tcp->SeqNum == flow.syn_sequence,
+                socket_source->unusable({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+                    {flow.generation, flow.capture_qpc}, frequency * config.window_before_ms / 1000))) {
+                reject_socket_tuple(tuple, flow, quarantined_syn);
+                flow.held.clear();
+                return;
+            }
+            if (socket_source && !initial_syn) flow.socket_tcp_progress = true;
+            if (parsed.tcp->Syn && !parsed.tcp->Ack && flow.action == "proxy" &&
+                flow.saw_syn && parsed.tcp->SeqNum != flow.syn_sequence) {
+                log_decision(tuple, flow, "drop", "ambiguous_reuse_of_proxy_tuple");
+                reuse_disrupted = true;
+                return;
+            }
+        }
+        if (flow.action == "drop") {
+            log_decision(tuple, flow, "drop", flow.drop_reason);
+            return;
+        }
+        if (flow.action != "pending") {
+            forward(packet, tuple, flow, false);
+            return;
+        }
+        if (flow.held.size() >= 256) {
+            if (socket_source) {
+                socket_source->network_failure("socket_pending_packet_capacity", ERROR_MORE_DATA, true);
+                return;
+            }
+            decide(tuple, flow, "direct", "pending_capacity");
+            forward(packet, tuple, flow, false);
+            return;
+        }
+        flow.held.push_back(std::move(packet));
+    }
+
+    int64_t next_deadline() const {
+        int64_t soonest = 0;
+        const auto now = qpc();
+        const auto consider = [&soonest](int64_t candidate) {
+            if (candidate && (soonest == 0 || candidate < soonest)) soonest = candidate;
+        };
+        for (const auto& entry : flows) {
+            const Flow& flow = *entry.second;
+            if (flow.action != "pending") continue;
+            if (socket_source) consider(socket_owner::wakeup(now, flow.next_retry_qpc, flow.deadline_qpc));
+            else consider(inproc::lookup_wakeup(query_handoff.busy(), flow.next_retry_qpc, flow.deadline_qpc));
+        }
+        for (const auto& watch : leak_watch) {
+            if (socket_source) {
+                const auto found = flows.find(watch.first);
+                const auto ready = found == flows.end() ? 0 : found->second->next_retry_qpc;
+                consider(socket_owner::wakeup(now, ready, watch.second));
+            } else consider(inproc::lookup_wakeup(query_handoff.busy(), next_leak_check_qpc, watch.second));
+        }
+        return soonest;
+    }
+
+    void receive() {
+        while (!stopping || socket_source) {
+            if (network_abort) break;
+            Packet packet;
+            packet.bytes.resize(65535);
+            UINT length = 0;
+            if (!WinDivertRecv(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
+                               &length, &packet.address)) {
+                DWORD error = GetLastError();
+                if (socket_source) {
+                    if (!(stopping && error == ERROR_NO_DATA) && !(network_abort && error == ERROR_OPERATION_ABORTED)) {
+                        receive_error = error;
+                        socket_source->network_failure("socket_network_receive", error);
+                    }
+                } else if (!stopping) receive_error = error;
+                break;
+            }
+            packet.received = qpc();
+            packet.bytes.resize(length);
+            bool overflow = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (socket_source && (input.size() >= MAX_FLOWS || packet.bytes.size() > MAX_BYTES - input_bytes)) {
+                    receive_error = ERROR_MORE_DATA;
+                    overflow = true;
+                } else {
+                    if (socket_source) input_bytes += packet.bytes.size();
+                    input.push_back(std::move(packet));
+                }
+            }
+            if (overflow) socket_source->network_failure("socket_network_handoff_limit", ERROR_MORE_DATA, true);
+            wake.notify_one();
+        }
+        network_receiver_done = true;
+        wake.notify_one();
+    }
+
+    void stop_network() {
+        if (divert == INVALID_HANDLE_VALUE) return;
+        const auto stopped = WinDivertShutdown(divert, WINDIVERT_SHUTDOWN_RECV);
+        if (socket_source && !stopped) {
+            socket_source->network_failure("socket_network_shutdown", GetLastError());
+            network_abort = true;
+        }
+        wake.notify_all();
+        if (socket_source) while (!network_receiver_done) {
+            if (network_abort && receiver.joinable()) CancelSynchronousIo(static_cast<HANDLE>(receiver.native_handle()));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (receiver.joinable()) receiver.join();
+    }
+
+public:
+    explicit Engine(Options value)
+        : config(std::move(value)), log(config.output, config.ownership_source == "socket"),
+          summary_file(config.summary, std::ios::trunc) {
+        if (!summary_file) throw std::runtime_error("cannot create summary file");
+        target = parse_ip(config.target);
+        frequency = qpf();
+        selected_app = lower(config.selected_app);
+        filter_capabilities.enabled = config.filter_cache;
+        bfe.log = &log;
+    }
+
+    ~Engine() {
+        stopping = true;
+        wake.notify_all();
+        stop_network();
+        if (socket_source) socket_source->stop();
+        stop_lookup();
+        if (divert != INVALID_HANDLE_VALUE) WinDivertClose(divert);
+        if (session) FwpmEngineClose0(session);
+    }
+
+    int run() {
+        if (config.ownership_source == "wfp") {
+            bfe.start(config.state_out);
+            if (FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &session))
+                throw std::runtime_error("FwpmEngineOpen0 lookup session");
+        } else {
+            socket_source = std::make_unique<SocketSource>(log, wake, mutex, frequency);
+            socket_source->start(config.target, config.port);
+        }
+
+        anchor_qpc = qpc();
+        anchor_filetime = utc_now();
+        engine_started_qpc = anchor_qpc;
+
+        std::string filter;
+        if (socket_source) {
+            filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
+                " and tcp and tcp.DstPort == " + std::to_string(config.port) + ")";
+        } else {
+            filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
+                " and ((tcp and tcp.DstPort == " + std::to_string(config.port) + ")";
+            if (config.udp_port)
+                filter += " or (udp and udp.DstPort == " + std::to_string(config.udp_port) + ")";
+            filter += " or (udp and udp.DstPort == " + std::to_string(config.quic_port) + ")))";
+        }
+        if (config.listener_port)
+            filter += " or (outbound and tcp and tcp.SrcPort == " + std::to_string(config.listener_port) + ")";
+        filter += ")";
+
+        divert = WinDivertOpen(filter.c_str(), WINDIVERT_LAYER_NETWORK, 0, 0);
+        if (divert == INVALID_HANDLE_VALUE) {
+            log.write("{\"kind\":\"error\",\"operation\":\"open\",\"code\":" + std::to_string(GetLastError()) + "}");
+            return 2;
+        }
+        if (!WinDivertSetParam(divert, WINDIVERT_PARAM_QUEUE_LENGTH, 4096) ||
+            !WinDivertSetParam(divert, WINDIVERT_PARAM_QUEUE_SIZE, MAX_BYTES) ||
+            !WinDivertSetParam(divert, WINDIVERT_PARAM_QUEUE_TIME, 2048))
+            throw std::runtime_error("cannot configure WinDivert queue");
+
+        log.write("{\"kind\":\"ready\",\"qpc\":" + std::to_string(qpc()) +
+                  ",\"qpc_frequency\":" + std::to_string(frequency) +
+                  ",\"anchor_qpc\":" + std::to_string(anchor_qpc) +
+                  ",\"anchor_filetime\":" + std::to_string(anchor_filetime) +
+                  ",\"mode\":" + json(config.mode) + ",\"lookup_mode\":" + json(config.lookup_mode) +
+                  ",\"enum_scope\":" + json(config.enum_scope) +
+                  ",\"ownership_source\":" + json(config.ownership_source) +
+                  ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
+                  ",\"hold_ms\":" + std::to_string(config.hold_ms) + "}");
+
+        if (!socket_source && config.lookup_mode == "async") lookup_thread = std::thread([this] {
+            try { lookup_loop(); }
+            catch (const std::exception& error) {
+                lookup_worker_error = true;
+                log.write("{\"kind\":\"error\",\"operation\":\"lookup_worker_exception\",\"message\":" + json(error.what()) + "}");
+            } catch (...) {
+                lookup_worker_error = true;
+                log.write("{\"kind\":\"error\",\"operation\":\"lookup_worker_exception\"}");
+            }
+            wake.notify_one();
+        });
+        network_receiver_done = false;
+        try { receiver = std::thread([this] {
+            try { receive(); }
+            catch (...) {
+                receive_error = ERROR_GEN_FAILURE;
+                if (socket_source) socket_source->network_failure("socket_network_receiver_exception", ERROR_GEN_FAILURE);
+                else log.write("{\"kind\":\"error\",\"operation\":\"network_receiver_exception\"}");
+                network_receiver_done = true;
+                wake.notify_one();
+            }
+        }); }
+        catch (...) { network_receiver_done = true; throw; }
+        const int64_t end = qpc() + frequency * config.seconds;
+
+        while (qpc() < end && !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error &&
+               !(socket_source && socket_source->failed())) {
+            if (!config.stop_file.empty() &&
+                GetFileAttributesA(config.stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+            std::deque<Packet> batch;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                if (input.empty() && !query_handoff.ready() && !lookup_worker_error && !receive_error &&
+                    !(socket_source && (socket_source->revision() != socket_revision_seen || socket_source->failed()))) {
+                    int64_t deadline = next_deadline();
+                    if (deadline) {
+                        int64_t wait_ticks = deadline - qpc();
+                        if (wait_ticks < 0) wait_ticks = 0;
+                        wake.wait_for(lock, std::chrono::microseconds(wait_ticks * 1'000'000 / frequency));
+                    } else {
+                        wake.wait_for(lock, std::chrono::milliseconds(50));
+                    }
+                }
+                batch.swap(input);
+                if (socket_source) input_bytes = 0;
+            }
+            for (auto& packet : batch) handle(std::move(packet));
+            const int64_t now = qpc();
+            resolve_pending(now);
+        }
+
+        stopping = true;
+        stop_network();
+        if (socket_source) socket_source->stop();
+        stop_lookup();
+        {
+            std::deque<Packet> batch;
+            { std::lock_guard<std::mutex> lock(mutex); batch.swap(input); if (socket_source) input_bytes = 0; }
+            for (auto& packet : batch) handle(std::move(packet));
+        }
+        for (auto& entry : flows) {
+            Flow& flow = *entry.second;
+            if (flow.action == "pending") { flow.action = "direct"; ++unattributed; }
+            flush(flow, entry.first);
+        }
+
+        bfe.finish();
+        write_summary();
+        if (receive_error)
+            log.write("{\"kind\":\"error\",\"operation\":\"receive\",\"code\":" +
+                      std::to_string(receive_error.load()) + "}");
+        log.write("{\"kind\":\"complete\",\"qpc\":" + std::to_string(qpc()) +
+                  ",\"flows\":" + std::to_string(flows.size()) +
+                  ",\"success\":" + (success() ? "true" : "false") + "}");
+        return success() ? 0 : 3;
+    }
+
+    bool success() const { return !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error && !bfe.errors &&
+        !(socket_source && (socket_source->failed() || !socket_source->clean_shutdown)); }
+
+    void write_summary() {
+        auto dist = [](const std::vector<double>& values) {
+            auto d = inproc::distribution(values);
+            std::ostringstream out;
+            out << "{\"count\":" << d.count << ",\"p50\":" << d.p50 << ",\"p95\":" << d.p95
+                << ",\"max\":" << d.max << "}";
+            return out.str();
+        };
+        auto phase = [](const PhaseMetric& metric) {
+            std::ostringstream out;
+            out << "{\"calls\":" << metric.calls << ",\"total_ms\":" << metric.total_ms
+                << ",\"max_ms\":" << metric.max_ms << "}";
+            return out.str();
+        };
+        auto counts = [](const auto& values) {
+            std::string result = "{";
+            for (const auto& item : values) {
+                if (result.size() > 1) result += ",";
+                result += json(item.first) + ":" + std::to_string(item.second);
+            }
+            return result + "}";
+        };
+        const double runtime_ms = elapsed_ms(engine_started_qpc);
+        std::ostringstream shapes;
+        shapes << "[";
+        for (const auto& shape : lookup.condition_shapes) {
+            if (shape != *lookup.condition_shapes.begin()) shapes << ",";
+            shapes << "{\"mask\":" << shape.first << ",\"count\":" << shape.second << "}";
+        }
+        shapes << "]";
+        std::ostringstream out;
+        out << "{\"engine\":\"inproc\",\"mode\":" << json(config.mode)
+            << ",\"ownership_source\":" << json(config.ownership_source)
+            << ",\"topology\":\"single-host-local\""
+            << ",\"selected_app\":" << json(selected_app)
+            << ",\"first_packet_decision_latency_ms\":" << dist(decision_latency_ms)
+            << ",\"lookup_calls\":" << lookup.calls
+            << ",\"lookup_errors\":" << lookup.errors
+            << ",\"lookup_worker_error\":" << (lookup_worker_error ? "true" : "false")
+            << ",\"lookup_mode\":" << json(config.lookup_mode)
+            << ",\"enum_scope\":" << json(config.enum_scope)
+            << ",\"filter_cache\":" << (config.filter_cache ? "true" : "false")
+            << ",\"lookup_query_count\":" << lookup.queries
+            << ",\"lookup_query_completed\":" << lookup.completed
+            << ",\"lookup_query_cancelled\":" << lookup.cancelled
+            << ",\"lookup_query_backpressure\":" << lookup.backpressure
+            << ",\"lookup_query_max_subjects\":" << lookup.max_subjects
+            << ",\"lookup_stale_subjects\":" << lookup.stale_subjects
+            << ",\"lookup_incomplete_results\":" << lookup.incomplete_results
+            << ",\"lookup_query_busy_ms\":" << lookup.busy_ms
+            << ",\"lookup_query_cpu_ms\":" << lookup.cpu_ms
+            << ",\"lookup_query_cpu_valid\":" << (lookup.cpu_samples && !lookup.cpu_errors ? "true" : "false")
+            << ",\"lookup_query_cpu_samples\":" << lookup.cpu_samples
+            << ",\"lookup_query_cpu_errors\":" << lookup.cpu_errors
+            << ",\"lookup_query_cpu_error_code\":" << lookup.cpu_error_code
+            << ",\"lookup_runtime_ms\":" << runtime_ms
+            << ",\"lookup_busy_share\":" << (runtime_ms > 0 ? lookup.busy_ms / runtime_ms : 0)
+            << ",\"lookup_create\":" << phase(lookup.create)
+            << ",\"lookup_enum\":" << phase(lookup.enumerate)
+            << ",\"lookup_destroy\":" << phase(lookup.destroy)
+            << ",\"lookup_process\":" << phase(lookup.process)
+            << ",\"lookup_result_apply_ms\":" << dist(lookup.apply_ms)
+            << ",\"lookup_returned_events\":" << lookup.events
+            << ",\"filter_cache_hits\":" << lookup.cache_hits
+            << ",\"filter_cache_misses\":" << lookup.cache_misses
+            << ",\"filter_cache_rejections\":" << lookup.cache_rejections
+            << ",\"bfe_errors\":" << bfe.errors
+            << ",\"lookup_calls_per_flow\":" << dist(lookups_per_flow)
+            << ",\"lookup_duration_ms\":" << dist(lookup.durations_ms)
+            << ",\"added_latency_held_ms\":" << dist(added_held_ms)
+            << ",\"added_latency_direct_ms\":" << dist(added_direct_ms)
+            << ",\"added_latency_proxy_ms\":" << dist(added_proxy_ms)
+            << ",\"decided_proxy\":" << decided_proxy
+            << ",\"decided_direct\":" << decided_direct
+            << ",\"unattributed\":" << unattributed
+            << ",\"leaked\":" << leaked
+            << ",\"rst_count\":" << rst_count
+            << ",\"quic_drops\":" << quic_drops
+            << ",\"nonselected_client_disrupted\":" << (reuse_disrupted ? "true" : "false")
+            << ",\"enum_filter\":" << json(lookup.filter.empty() ? "none" : lookup.filter)
+            << ",\"enum_condition_shapes\":" << shapes.str()
+            << ",\"window_before_ms\":" << config.window_before_ms
+            << ",\"window_after_ms\":" << config.window_after_ms
+            << ",\"send_rst\":" << (config.send_rst ? "true" : "false")
+            << ",\"delay_ms\":" << config.delay_ms;
+        if (socket_source) {
+            out << ",\"socket_received\":" << socket_source->received.load()
+                << ",\"socket_connect_received\":" << socket_source->connect_received.load()
+                << ",\"socket_close_received\":" << socket_source->close_received.load()
+                << ",\"socket_identity_ready\":" << socket_source->identity_ready.load()
+                << ",\"socket_identity_missing\":" << socket_source->identity_missing.load()
+                << ",\"socket_quarantined_connects\":" << socket_source->quarantined_connects.load()
+                << ",\"socket_quarantined_pairs\":" << socket_source->quarantined_pairs.load()
+                << ",\"socket_quarantined_endpoints\":" << socket_source->quarantined_endpoints.load()
+                << ",\"socket_quarantined_syn_rejections\":" << socket_quarantined_syn_rejections
+                << ",\"socket_identity_skipped_quarantine\":" << socket_source->identity_skipped_quarantine.load()
+                << ",\"socket_source_errors\":" << socket_source->source_errors.load()
+                << ",\"socket_queue_overflow\":" << socket_source->queue_overflow.load()
+                << ",\"socket_history_overflow\":" << socket_source->history_overflow.load()
+                << ",\"socket_output_errors\":" << (log.failed() ? 1 : 0)
+                << ",\"socket_matches\":" << socket_matches << ",\"socket_rejected\":" << socket_rejected
+                << ",\"socket_ambiguous\":" << socket_ambiguous << ",\"socket_closed\":" << socket_closed
+                << ",\"socket_missing\":" << socket_missing << ",\"socket_reuse_rejected\":" << socket_reuse_rejected
+                << ",\"socket_history_entries\":" << socket_source->size()
+                << ",\"socket_diagnostics\":" << socket_source->diagnostics()
+                << ",\"socket_forward_guard_verdicts\":" << counts(socket_forward_guard_verdicts)
+                << ",\"socket_reverse_guard_verdicts\":" << counts(socket_reverse_guard_verdicts)
+                << ",\"socket_clean_shutdown\":" << (socket_source->clean_shutdown ? "true" : "false")
+                << ",\"driver_queue_loss_known\":false"
+                << ",\"socket_event_to_recv_ms\":" << dist(socket_source->event_to_recv_ms)
+                << ",\"socket_event_to_identity_ready_ms\":" << dist(socket_source->event_to_identity_ready_ms)
+                << ",\"socket_identity_lookup_ms\":" << dist(socket_source->identity_lookup_ms)
+                << ",\"socket_identity_ready_to_apply_ms\":" << dist(socket_identity_ready_to_apply_ms);
+        }
+        out << ",\"success\":" << (success() ? "true" : "false") << "}";
+        summary_file << out.str() << '\n';
+        summary_file.flush();
+        log.write("{\"kind\":\"summary\",\"enum_filter\":" + json(lookup.filter.empty() ? "none" : lookup.filter) +
+                  ",\"ownership_source\":" + json(config.ownership_source) +
+                  ",\"lookup_mode\":" + json(config.lookup_mode) +
+                  ",\"enum_scope\":" + json(config.enum_scope) +
+                  ",\"enum_condition_shapes\":" + shapes.str() +
+                  ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
+                  ",\"lookup_calls\":" + std::to_string(lookup.calls) +
+                  ",\"decided_proxy\":" + std::to_string(decided_proxy) +
+                  ",\"decided_direct\":" + std::to_string(decided_direct) +
+                  ",\"unattributed\":" + std::to_string(unattributed) +
+                  ",\"leaked\":" + std::to_string(leaked) +
+                  ",\"rst_count\":" + std::to_string(rst_count) +
+                  ",\"quic_drops\":" + std::to_string(quic_drops) + "}");
+    }
+};
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    WSADATA winsock{};
+    if (WSAStartup(MAKEWORD(2, 2), &winsock)) return 1;
+    int result = 1;
+    try {
+        Engine engine(options(argc, argv));
+        result = engine.run();
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+    }
+    WSACleanup();
+    return result;
+}
+#endif

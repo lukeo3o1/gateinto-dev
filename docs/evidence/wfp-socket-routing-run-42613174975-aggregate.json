@@ -1,0 +1,3069 @@
+{
+  "schema_version": 1,
+  "phase": "initial_routing_failure",
+  "run_id": 42613174975,
+  "source_head": "38fa3a5dc90b00d3c6da4b188478f20e9b57f75d",
+  "checkout_merge": "5b26a5b6faae8658280122c687c5ed1714b56e33",
+  "operating_systems": {
+    "2022": {
+      "job_id": 129146557250,
+      "artifact_id": 13671133235,
+      "artifact_digest": "sha256:e26ffd94d0b690fe8a8f86bc71da99f1cd3788066d4970f733ae5a4a0045b87b",
+      "artifact_matches_projected_console": true,
+      "environment": {
+        "audit": "Independent native WFP poll, 1000 ms interval, before engine startup",
+        "default_ownership_source": "wfp",
+        "image": "win22",
+        "image_version": "20261101.353.1",
+        "topology": "single-host IPv4 loopback",
+        "os": "Microsoft Windows NT 10.0.20348.0",
+        "commit": "5b26a5b6faae8658280122c687c5ed1714b56e33",
+        "experiment": "TCP hold and proxy redirect, WFP versus SOCKET ownership"
+      },
+      "driver": {
+        "driver_sha256": "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2",
+        "signature_status": "Valid",
+        "archive_sha256": "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15",
+        "release": "v2.2.2"
+      },
+      "ci_summary": {
+        "failed_cases": [
+          "short-wfp-r1",
+          "short-socket-r1",
+          "burst-socket-r1",
+          "burst-socket-r2",
+          "short-socket-r2",
+          "short-wfp-r2",
+          "socket-leakcheck"
+        ],
+        "qualification": "Fresh controlled tuples only; no general lifecycle, zero-leak or production guarantee",
+        "fault_control": "Selected ownership deliberately delayed beyond hold; direct leak and checked reset",
+        "controlled_routing": "Selected app proxy; other app direct; exact CONNECT and echo verification",
+        "driver_queue_loss_observable": false,
+        "synchronized_bursts": true
+      },
+      "routing": {
+        "schema_version": 1,
+        "available_cases": 9,
+        "missing_cases": 0,
+        "unreadable_cases": 0,
+        "cases": [
+          {
+            "case": "short-wfp-r1",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "native_reference",
+              "failure_stage": "native_reference",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "clients": {
+                "total": 40,
+                "success": 40,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 60,
+                "lookup_errors": 0,
+                "lookup_query_count": 60,
+                "lookup_query_completed": 60,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 1,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 60,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 1006,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 60,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 20,
+                "decided_direct": 40,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 770.106,
+                "lookup_query_cpu_ms": 62.5,
+                "lookup_runtime_ms": 1837.43,
+                "lookup_busy_share": 0.419122,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 60,
+                  "max": 18.2369,
+                  "p50": 14.8355,
+                  "p95": 16.2407
+                },
+                "lookup_result_apply_ms": {
+                  "count": 60,
+                  "max": 1.0345,
+                  "p50": 0.3155,
+                  "p95": 0.4321
+                },
+                "lookup_calls_per_flow": {
+                  "count": 60,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 60,
+                  "max": 17.9306,
+                  "p50": 14.497,
+                  "p95": 15.9541
+                },
+                "added_latency_held_ms": {
+                  "count": 60,
+                  "max": 18.4635,
+                  "p50": 15.0413,
+                  "p95": 16.4506
+                },
+                "added_latency_direct_ms": {
+                  "count": 200,
+                  "max": 0.3573,
+                  "p50": 0.1546,
+                  "p95": 0.257
+                },
+                "added_latency_proxy_ms": {
+                  "count": 100,
+                  "max": 0.3358,
+                  "p50": 0.1665,
+                  "p95": 0.272
+                },
+                "lookup_create": {
+                  "calls": 60,
+                  "total_ms": 743.872,
+                  "max_ms": 17.4894
+                },
+                "lookup_enum": {
+                  "calls": 60,
+                  "total_ms": 19.332,
+                  "max_ms": 3.6882
+                },
+                "lookup_destroy": {
+                  "calls": 60,
+                  "total_ms": 2.3266,
+                  "max_ms": 0.0972
+                },
+                "lookup_process": {
+                  "calls": 60,
+                  "total_ms": 2.5121,
+                  "max_ms": 0.0669
+                },
+                "enum_filter": "type+protocol+local_port",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 26.046,
+                    "p50": 49.0646,
+                    "p95": 63.541,
+                    "max": 64.0263
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 26.0765,
+                    "p50": 49.1006,
+                    "p95": 63.5792,
+                    "max": 64.0631
+                  }
+                },
+                "direct": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 6.289,
+                    "p50": 15.6729,
+                    "p95": 16.9046,
+                    "max": 16.9599
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 6.3118,
+                    "p50": 15.7006,
+                    "p95": 16.9363,
+                    "max": 16.9938
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 40,
+                "matched_clients": 37,
+                "missing_clients": 3,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": false,
+                "native_summary": {
+                  "wfp_count": 366,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 3,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "short-socket-r1",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "clients",
+              "failure_stage": "clients",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "burst-wfp-r1",
+            "summary": {
+              "status": "PASS_RESTRICTED_CASE",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "complete",
+              "gateway_connect_count": 25,
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "selected_tuple_count": 25,
+              "quic_dropped_clients": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 50,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 5,
+                "lookup_errors": 0,
+                "lookup_query_count": 5,
+                "lookup_query_completed": 5,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 42,
+                "lookup_query_max_subjects": 49,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 5,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 1072,
+                "filter_cache_hits": 2,
+                "filter_cache_misses": 6,
+                "filter_cache_rejections": 1,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 223.844,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 536.496,
+                "lookup_busy_share": 0.417233,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 99.093,
+                  "p50": 83.9413,
+                  "p95": 91.5941
+                },
+                "lookup_result_apply_ms": {
+                  "count": 5,
+                  "max": 9.2985,
+                  "p50": 2.5882,
+                  "p95": 9.2985
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 5,
+                  "max": 54.1732,
+                  "p50": 44.5647,
+                  "p95": 54.1732
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 99.2129,
+                  "p50": 84.0521,
+                  "p95": 91.6794
+                },
+                "added_latency_direct_ms": {
+                  "count": 250,
+                  "max": 12.3292,
+                  "p50": 7.2492,
+                  "p95": 10.1158
+                },
+                "added_latency_proxy_ms": {
+                  "count": 125,
+                  "max": 12.661,
+                  "p50": 10.3137,
+                  "p95": 12.4513
+                },
+                "lookup_create": {
+                  "calls": 6,
+                  "total_ms": 213.524,
+                  "max_ms": 52.3886
+                },
+                "lookup_enum": {
+                  "calls": 7,
+                  "total_ms": 7.2502,
+                  "max_ms": 1.5947
+                },
+                "lookup_destroy": {
+                  "calls": 5,
+                  "total_ms": 0.2235,
+                  "max_ms": 0.0552
+                },
+                "lookup_process": {
+                  "calls": 7,
+                  "total_ms": 2.4606,
+                  "max_ms": 0.6116
+                },
+                "enum_filter": "type+protocol+local_port|type+protocol",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 3,
+                    "count": 2
+                  },
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 175.5181,
+                    "p50": 248.6053,
+                    "p95": 276.1862,
+                    "max": 276.6649
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 175.5562,
+                    "p50": 248.6306,
+                    "p95": 276.2239,
+                    "max": 276.6906
+                  }
+                },
+                "direct": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 45.7539,
+                    "p50": 99.9635,
+                    "p95": 101.7331,
+                    "max": 101.8309
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 45.7911,
+                    "p50": 99.9845,
+                    "p95": 101.759,
+                    "max": 101.8549
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 50,
+                "matched_clients": 50,
+                "missing_clients": 0,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": true,
+                "native_summary": {
+                  "wfp_count": 502,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 2,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              }
+            }
+          },
+          {
+            "case": "burst-socket-r1",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "client_attestation",
+              "failure_stage": "client_attestation",
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 0,
+                "failure": 50
+              },
+              "engine_summary": {
+                "lookup_calls": 0,
+                "lookup_errors": 0,
+                "lookup_query_count": 0,
+                "lookup_query_completed": 0,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 0,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 0,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 0,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 0,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "socket_received": 125,
+                "socket_connect_received": 125,
+                "socket_close_received": 0,
+                "socket_identity_ready": 75,
+                "socket_identity_missing": 50,
+                "socket_source_errors": 0,
+                "socket_queue_overflow": 0,
+                "socket_history_overflow": 0,
+                "socket_output_errors": 0,
+                "socket_matches": 75,
+                "socket_rejected": 0,
+                "socket_ambiguous": 0,
+                "socket_closed": 0,
+                "socket_missing": 0,
+                "socket_reuse_rejected": 0,
+                "socket_history_entries": 75,
+                "lookup_query_busy_ms": 0,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 8553.91,
+                "lookup_busy_share": 0,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": false,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "socket_clean_shutdown": true,
+                "driver_queue_loss_known": false,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "socket",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 74.0099,
+                  "p50": 7.2048,
+                  "p95": 70.002
+                },
+                "lookup_result_apply_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_duration_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 74.1365,
+                  "p50": 7.2923,
+                  "p95": 70.1144
+                },
+                "added_latency_direct_ms": {
+                  "count": 2,
+                  "max": 0.1639,
+                  "p50": 0.1456,
+                  "p95": 0.1639
+                },
+                "added_latency_proxy_ms": {
+                  "count": 75,
+                  "max": 9.3595,
+                  "p50": 4.6706,
+                  "p95": 9.3306
+                },
+                "socket_event_to_recv_ms": {
+                  "count": 125,
+                  "max": 64.5291,
+                  "p50": 0.2449,
+                  "p95": 64.0272
+                },
+                "socket_event_to_identity_ready_ms": {
+                  "count": 125,
+                  "max": 65.4545,
+                  "p50": 0.9592,
+                  "p95": 64.5313
+                },
+                "socket_identity_lookup_ms": {
+                  "count": 125,
+                  "max": 0.6022,
+                  "p50": 0.0329,
+                  "p95": 0.156
+                },
+                "socket_identity_ready_to_apply_ms": {
+                  "count": 75,
+                  "max": 64.5297,
+                  "p50": 4.3953,
+                  "p95": 15.1121
+                },
+                "lookup_create": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_enum": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_destroy": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_process": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "enum_filter": "none",
+                "enum_condition_shapes": [],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "burst-socket-r2",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "client_attestation",
+              "failure_stage": "client_attestation",
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 0,
+                "failure": 50
+              },
+              "engine_summary": {
+                "lookup_calls": 0,
+                "lookup_errors": 0,
+                "lookup_query_count": 0,
+                "lookup_query_completed": 0,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 0,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 0,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 0,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 0,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "socket_received": 125,
+                "socket_connect_received": 125,
+                "socket_close_received": 0,
+                "socket_identity_ready": 75,
+                "socket_identity_missing": 50,
+                "socket_source_errors": 0,
+                "socket_queue_overflow": 0,
+                "socket_history_overflow": 0,
+                "socket_output_errors": 0,
+                "socket_matches": 75,
+                "socket_rejected": 0,
+                "socket_ambiguous": 0,
+                "socket_closed": 0,
+                "socket_missing": 0,
+                "socket_reuse_rejected": 0,
+                "socket_history_entries": 75,
+                "lookup_query_busy_ms": 0,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 8281.28,
+                "lookup_busy_share": 0,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": false,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "socket_clean_shutdown": true,
+                "driver_queue_loss_known": false,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "socket",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 15.5605,
+                  "p50": 6.8215,
+                  "p95": 14.0064
+                },
+                "lookup_result_apply_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_duration_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 15.6504,
+                  "p50": 6.9613,
+                  "p95": 14.1276
+                },
+                "added_latency_direct_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_proxy_ms": {
+                  "count": 75,
+                  "max": 8.8396,
+                  "p50": 3.4659,
+                  "p95": 8.7399
+                },
+                "socket_event_to_recv_ms": {
+                  "count": 125,
+                  "max": 5.8294,
+                  "p50": 0.6781,
+                  "p95": 5.4406
+                },
+                "socket_event_to_identity_ready_ms": {
+                  "count": 125,
+                  "max": 6.7922,
+                  "p50": 2.2348,
+                  "p95": 6.1422
+                },
+                "socket_identity_lookup_ms": {
+                  "count": 125,
+                  "max": 1.0208,
+                  "p50": 0.0071,
+                  "p95": 0.1635
+                },
+                "socket_identity_ready_to_apply_ms": {
+                  "count": 75,
+                  "max": 15.2143,
+                  "p50": 3.9173,
+                  "p95": 8.2163
+                },
+                "lookup_create": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_enum": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_destroy": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_process": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "enum_filter": "none",
+                "enum_condition_shapes": [],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "burst-wfp-r2",
+            "summary": {
+              "status": "PASS_RESTRICTED_CASE",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "complete",
+              "gateway_connect_count": 25,
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "selected_tuple_count": 25,
+              "quic_dropped_clients": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 50,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 6,
+                "lookup_errors": 0,
+                "lookup_query_count": 6,
+                "lookup_query_completed": 6,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 51,
+                "lookup_query_max_subjects": 30,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 6,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 1514,
+                "filter_cache_hits": 4,
+                "filter_cache_misses": 7,
+                "filter_cache_rejections": 1,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 119.983,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 359.655,
+                "lookup_busy_share": 0.333605,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 54.4319,
+                  "p50": 38.2568,
+                  "p95": 50.0611
+                },
+                "lookup_result_apply_ms": {
+                  "count": 6,
+                  "max": 9.4267,
+                  "p50": 1.772,
+                  "p95": 9.4267
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 6,
+                  "max": 23.9512,
+                  "p50": 20.0113,
+                  "p95": 23.9512
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 54.5944,
+                  "p50": 38.4428,
+                  "p95": 50.1916
+                },
+                "added_latency_direct_ms": {
+                  "count": 248,
+                  "max": 9.9035,
+                  "p50": 4.1971,
+                  "p95": 8.8488
+                },
+                "added_latency_proxy_ms": {
+                  "count": 125,
+                  "max": 7.1855,
+                  "p50": 4.6773,
+                  "p95": 6.09
+                },
+                "lookup_create": {
+                  "calls": 7,
+                  "total_ms": 104.796,
+                  "max_ms": 19.9061
+                },
+                "lookup_enum": {
+                  "calls": 9,
+                  "total_ms": 10.9609,
+                  "max_ms": 2.2157
+                },
+                "lookup_destroy": {
+                  "calls": 6,
+                  "total_ms": 0.274,
+                  "max_ms": 0.0636
+                },
+                "lookup_process": {
+                  "calls": 9,
+                  "total_ms": 3.5945,
+                  "max_ms": 0.6541
+                },
+                "enum_filter": "type+protocol|type+protocol+local_port",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 3,
+                    "count": 2
+                  },
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 89.2482,
+                    "p50": 120.7484,
+                    "p95": 141.516,
+                    "max": 154.4897
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 89.2856,
+                    "p50": 120.814,
+                    "p95": 141.5439,
+                    "max": 154.5185
+                  }
+                },
+                "direct": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 25.4409,
+                    "p50": 54.0345,
+                    "p95": 59.5725,
+                    "max": 60.2295
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 25.4626,
+                    "p50": 54.0642,
+                    "p95": 59.5966,
+                    "max": 60.2528
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 50,
+                "matched_clients": 50,
+                "missing_clients": 0,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": true,
+                "native_summary": {
+                  "wfp_count": 502,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 2,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              }
+            }
+          },
+          {
+            "case": "short-socket-r2",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "clients",
+              "failure_stage": "clients",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "short-wfp-r2",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "native_reference",
+              "failure_stage": "native_reference",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "clients": {
+                "total": 40,
+                "success": 40,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 60,
+                "lookup_errors": 0,
+                "lookup_query_count": 60,
+                "lookup_query_completed": 60,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 1,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 60,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 968,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 60,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 20,
+                "decided_direct": 40,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 920.062,
+                "lookup_query_cpu_ms": 31.25,
+                "lookup_runtime_ms": 1911.93,
+                "lookup_busy_share": 0.481222,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 60,
+                  "max": 17.3266,
+                  "p50": 15.6304,
+                  "p95": 16.4378
+                },
+                "lookup_result_apply_ms": {
+                  "count": 60,
+                  "max": 1.0642,
+                  "p50": 0.3208,
+                  "p95": 0.4551
+                },
+                "lookup_calls_per_flow": {
+                  "count": 60,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 60,
+                  "max": 17.1098,
+                  "p50": 15.3128,
+                  "p95": 16.0225
+                },
+                "added_latency_held_ms": {
+                  "count": 60,
+                  "max": 17.5774,
+                  "p50": 15.8369,
+                  "p95": 16.6247
+                },
+                "added_latency_direct_ms": {
+                  "count": 200,
+                  "max": 0.3877,
+                  "p50": 0.1519,
+                  "p95": 0.2168
+                },
+                "added_latency_proxy_ms": {
+                  "count": 100,
+                  "max": 0.3773,
+                  "p50": 0.1712,
+                  "p95": 0.2966
+                },
+                "lookup_create": {
+                  "calls": 60,
+                  "total_ms": 897.27,
+                  "max_ms": 16.7622
+                },
+                "lookup_enum": {
+                  "calls": 60,
+                  "total_ms": 15.6853,
+                  "max_ms": 0.3308
+                },
+                "lookup_destroy": {
+                  "calls": 60,
+                  "total_ms": 2.303,
+                  "max_ms": 0.0486
+                },
+                "lookup_process": {
+                  "calls": 60,
+                  "total_ms": 2.6608,
+                  "max_ms": 0.1129
+                },
+                "enum_filter": "type+protocol+local_port",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 35.0108,
+                    "p50": 53.7392,
+                    "p95": 55.2955,
+                    "max": 60.1706
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 35.0485,
+                    "p50": 53.7755,
+                    "p95": 55.3326,
+                    "max": 60.2086
+                  }
+                },
+                "direct": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 15.2575,
+                    "p50": 16.2986,
+                    "p95": 17.021,
+                    "max": 18.2138
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 15.2901,
+                    "p50": 16.3326,
+                    "p95": 17.055,
+                    "max": 18.2471
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 40,
+                "matched_clients": 39,
+                "missing_clients": 1,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": false,
+                "native_summary": {
+                  "wfp_count": 393,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 3,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "socket-leakcheck",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "client_attestation",
+              "failure_stage": "client_attestation",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 0,
+              "delay_ms": 250,
+              "quic": false,
+              "expect_leak": true,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": false,
+              "clients": {
+                "total": 6,
+                "success": 0,
+                "failure": 6
+              },
+              "engine_summary": {
+                "lookup_calls": 0,
+                "lookup_errors": 0,
+                "lookup_query_count": 0,
+                "lookup_query_completed": 0,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 0,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 0,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 0,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 0,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 0,
+                "decided_direct": 6,
+                "unattributed": 3,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 250,
+                "socket_received": 12,
+                "socket_connect_received": 12,
+                "socket_close_received": 0,
+                "socket_identity_ready": 6,
+                "socket_identity_missing": 6,
+                "socket_source_errors": 0,
+                "socket_queue_overflow": 0,
+                "socket_history_overflow": 0,
+                "socket_output_errors": 0,
+                "socket_matches": 3,
+                "socket_rejected": 440625,
+                "socket_ambiguous": 440625,
+                "socket_closed": 0,
+                "socket_missing": 3,
+                "socket_reuse_rejected": 0,
+                "socket_history_entries": 6,
+                "lookup_query_busy_ms": 0,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 8239.63,
+                "lookup_busy_share": 0,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": false,
+                "nonselected_client_disrupted": false,
+                "send_rst": true,
+                "success": true,
+                "socket_clean_shutdown": true,
+                "driver_queue_loss_known": false,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "socket",
+                "first_packet_decision_latency_ms": {
+                  "count": 6,
+                  "max": 107.427,
+                  "p50": 0.5203,
+                  "p95": 107.427
+                },
+                "lookup_result_apply_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_calls_per_flow": {
+                  "count": 6,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_duration_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_held_ms": {
+                  "count": 6,
+                  "max": 107.759,
+                  "p50": 0.8361,
+                  "p95": 107.759
+                },
+                "added_latency_direct_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_proxy_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "socket_event_to_recv_ms": {
+                  "count": 12,
+                  "max": 0.0648,
+                  "p50": 0.0354,
+                  "p95": 0.0648
+                },
+                "socket_event_to_identity_ready_ms": {
+                  "count": 12,
+                  "max": 0.4718,
+                  "p50": 0.2113,
+                  "p95": 0.4718
+                },
+                "socket_identity_lookup_ms": {
+                  "count": 12,
+                  "max": 0.1605,
+                  "p50": 0.0921,
+                  "p95": 0.1605
+                },
+                "socket_identity_ready_to_apply_ms": {
+                  "count": 3,
+                  "max": 0.0273,
+                  "p50": 0.0222,
+                  "p95": 0.0273
+                },
+                "lookup_create": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_enum": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_destroy": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_process": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "enum_filter": "none",
+                "enum_condition_shapes": [],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          }
+        ]
+      }
+    },
+    "2025": {
+      "job_id": 129146557321,
+      "artifact_id": 13672280045,
+      "artifact_digest": "sha256:f0646f99d668e7493e0c85c9d15c796461b443cf93cd60cf12012085bd2b386c",
+      "artifact_matches_projected_console": true,
+      "environment": {
+        "image_version": "20261103.298.1",
+        "image": "win25-vs2026",
+        "commit": "5b26a5b6faae8658280122c687c5ed1714b56e33",
+        "experiment": "TCP hold and proxy redirect, WFP versus SOCKET ownership",
+        "audit": "Independent native WFP poll, 1000 ms interval, before engine startup",
+        "os": "Microsoft Windows NT 10.0.26100.0",
+        "default_ownership_source": "wfp",
+        "topology": "single-host IPv4 loopback"
+      },
+      "driver": {
+        "driver_sha256": "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2",
+        "archive_sha256": "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15",
+        "release": "v2.2.2",
+        "signature_status": "Valid"
+      },
+      "ci_summary": {
+        "controlled_routing": "Selected app proxy; other app direct; exact CONNECT and echo verification",
+        "qualification": "Fresh controlled tuples only; no general lifecycle, zero-leak or production guarantee",
+        "synchronized_bursts": true,
+        "driver_queue_loss_observable": false,
+        "failed_cases": [
+          "short-wfp-r1",
+          "short-socket-r1",
+          "burst-socket-r1",
+          "burst-socket-r2",
+          "short-socket-r2",
+          "short-wfp-r2",
+          "socket-leakcheck"
+        ],
+        "fault_control": "Selected ownership deliberately delayed beyond hold; direct leak and checked reset"
+      },
+      "routing": {
+        "schema_version": 1,
+        "available_cases": 9,
+        "missing_cases": 0,
+        "unreadable_cases": 0,
+        "cases": [
+          {
+            "case": "short-wfp-r1",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "native_reference",
+              "failure_stage": "native_reference",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "clients": {
+                "total": 40,
+                "success": 40,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 60,
+                "lookup_errors": 0,
+                "lookup_query_count": 60,
+                "lookup_query_completed": 60,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 1,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 60,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 1011,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 60,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 20,
+                "decided_direct": 40,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 726.382,
+                "lookup_query_cpu_ms": 31.25,
+                "lookup_runtime_ms": 1863.85,
+                "lookup_busy_share": 0.389721,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 60,
+                  "max": 32.6423,
+                  "p50": 12.4705,
+                  "p95": 17.1559
+                },
+                "lookup_result_apply_ms": {
+                  "count": 60,
+                  "max": 1.7095,
+                  "p50": 0.3991,
+                  "p95": 0.5168
+                },
+                "lookup_calls_per_flow": {
+                  "count": 60,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 60,
+                  "max": 32.3813,
+                  "p50": 12.1279,
+                  "p95": 16.6501
+                },
+                "added_latency_held_ms": {
+                  "count": 60,
+                  "max": 32.9803,
+                  "p50": 12.7249,
+                  "p95": 17.3633
+                },
+                "added_latency_direct_ms": {
+                  "count": 200,
+                  "max": 0.2976,
+                  "p50": 0.1798,
+                  "p95": 0.2721
+                },
+                "added_latency_proxy_ms": {
+                  "count": 100,
+                  "max": 0.587,
+                  "p50": 0.2123,
+                  "p95": 0.3307
+                },
+                "lookup_create": {
+                  "calls": 60,
+                  "total_ms": 703.826,
+                  "max_ms": 31.9802
+                },
+                "lookup_enum": {
+                  "calls": 60,
+                  "total_ms": 15.6482,
+                  "max_ms": 0.4079
+                },
+                "lookup_destroy": {
+                  "calls": 60,
+                  "total_ms": 1.94,
+                  "max_ms": 0.0571
+                },
+                "lookup_process": {
+                  "calls": 60,
+                  "total_ms": 2.6367,
+                  "max_ms": 0.0789
+                },
+                "enum_filter": "type+protocol+local_port",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 28.5794,
+                    "p50": 43.0072,
+                    "p95": 67.9447,
+                    "max": 69.8957
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 28.6108,
+                    "p50": 43.0404,
+                    "p95": 67.9804,
+                    "max": 69.9333
+                  }
+                },
+                "direct": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 7.412,
+                    "p50": 13.6846,
+                    "p95": 16.6456,
+                    "max": 17.4075
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 7.4488,
+                    "p50": 13.7182,
+                    "p95": 16.6805,
+                    "max": 17.4345
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 40,
+                "matched_clients": 37,
+                "missing_clients": 3,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": false,
+                "native_summary": {
+                  "wfp_count": 368,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 3,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "short-socket-r1",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "clients",
+              "failure_stage": "clients",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "burst-wfp-r1",
+            "summary": {
+              "status": "PASS_RESTRICTED_CASE",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "complete",
+              "gateway_connect_count": 25,
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "selected_tuple_count": 25,
+              "quic_dropped_clients": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 50,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 7,
+                "lookup_errors": 0,
+                "lookup_query_count": 7,
+                "lookup_query_completed": 7,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 56,
+                "lookup_query_max_subjects": 49,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 7,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 1344,
+                "filter_cache_hits": 3,
+                "filter_cache_misses": 8,
+                "filter_cache_rejections": 1,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 121.603,
+                "lookup_query_cpu_ms": 15.625,
+                "lookup_runtime_ms": 438.176,
+                "lookup_busy_share": 0.277522,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 47.182,
+                  "p50": 29.2891,
+                  "p95": 42.6113
+                },
+                "lookup_result_apply_ms": {
+                  "count": 7,
+                  "max": 10.8338,
+                  "p50": 1.3841,
+                  "p95": 10.8338
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 7,
+                  "max": 21.2667,
+                  "p50": 15.5961,
+                  "p95": 21.2667
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 47.5626,
+                  "p50": 29.3986,
+                  "p95": 42.774
+                },
+                "added_latency_direct_ms": {
+                  "count": 249,
+                  "max": 15.3192,
+                  "p50": 5.058,
+                  "p95": 14.5688
+                },
+                "added_latency_proxy_ms": {
+                  "count": 125,
+                  "max": 15.4521,
+                  "p50": 8.6784,
+                  "p95": 15.2834
+                },
+                "lookup_create": {
+                  "calls": 8,
+                  "total_ms": 105.519,
+                  "max_ms": 16.8811
+                },
+                "lookup_enum": {
+                  "calls": 10,
+                  "total_ms": 11.0003,
+                  "max_ms": 2.6016
+                },
+                "lookup_destroy": {
+                  "calls": 7,
+                  "total_ms": 0.7487,
+                  "max_ms": 0.46
+                },
+                "lookup_process": {
+                  "calls": 10,
+                  "total_ms": 3.6182,
+                  "max_ms": 0.942
+                },
+                "enum_filter": "type+protocol+local_port|type+protocol",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 3,
+                    "count": 2
+                  },
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 68.1188,
+                    "p50": 140.6652,
+                    "p95": 178.7559,
+                    "max": 179.0824
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 68.1541,
+                    "p50": 140.6903,
+                    "p95": 178.7837,
+                    "max": 179.1086
+                  }
+                },
+                "direct": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 42.7785,
+                    "p50": 50.065,
+                    "p95": 56.6183,
+                    "max": 56.8385
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 42.8094,
+                    "p50": 50.089,
+                    "p95": 56.6435,
+                    "max": 56.8626
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 50,
+                "matched_clients": 50,
+                "missing_clients": 0,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": true,
+                "native_summary": {
+                  "wfp_count": 501,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 2,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              }
+            }
+          },
+          {
+            "case": "burst-socket-r1",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "client_attestation",
+              "failure_stage": "client_attestation",
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 1,
+              "delay_ms": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 0,
+                "failure": 50
+              },
+              "engine_summary": {
+                "lookup_calls": 0,
+                "lookup_errors": 0,
+                "lookup_query_count": 0,
+                "lookup_query_completed": 0,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 0,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 0,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 0,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 0,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "socket_received": 125,
+                "socket_connect_received": 125,
+                "socket_close_received": 0,
+                "socket_identity_ready": 75,
+                "socket_identity_missing": 50,
+                "socket_source_errors": 0,
+                "socket_queue_overflow": 0,
+                "socket_history_overflow": 0,
+                "socket_output_errors": 0,
+                "socket_matches": 75,
+                "socket_rejected": 0,
+                "socket_ambiguous": 0,
+                "socket_closed": 0,
+                "socket_missing": 0,
+                "socket_reuse_rejected": 0,
+                "socket_history_entries": 75,
+                "lookup_query_busy_ms": 0,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 8327.13,
+                "lookup_busy_share": 0,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": false,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "socket_clean_shutdown": true,
+                "driver_queue_loss_known": false,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "socket",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 18.5626,
+                  "p50": 7.2944,
+                  "p95": 17.5731
+                },
+                "lookup_result_apply_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_duration_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 18.7519,
+                  "p50": 7.476,
+                  "p95": 17.6846
+                },
+                "added_latency_direct_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_proxy_ms": {
+                  "count": 75,
+                  "max": 14.3641,
+                  "p50": 5.9686,
+                  "p95": 14.0599
+                },
+                "socket_event_to_recv_ms": {
+                  "count": 125,
+                  "max": 4.1962,
+                  "p50": 0.0972,
+                  "p95": 1.9865
+                },
+                "socket_event_to_identity_ready_ms": {
+                  "count": 125,
+                  "max": 9.3126,
+                  "p50": 2.6871,
+                  "p95": 6.0859
+                },
+                "socket_identity_lookup_ms": {
+                  "count": 125,
+                  "max": 2.6871,
+                  "p50": 0.0098,
+                  "p95": 0.2002
+                },
+                "socket_identity_ready_to_apply_ms": {
+                  "count": 75,
+                  "max": 13.5815,
+                  "p50": 4.5168,
+                  "p95": 13.0528
+                },
+                "lookup_create": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_enum": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_destroy": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_process": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "enum_filter": "none",
+                "enum_condition_shapes": [],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "burst-socket-r2",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "client_attestation",
+              "failure_stage": "client_attestation",
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 0,
+                "failure": 50
+              },
+              "engine_summary": {
+                "lookup_calls": 0,
+                "lookup_errors": 0,
+                "lookup_query_count": 0,
+                "lookup_query_completed": 0,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 0,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 0,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 0,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 0,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "socket_received": 125,
+                "socket_connect_received": 125,
+                "socket_close_received": 0,
+                "socket_identity_ready": 75,
+                "socket_identity_missing": 50,
+                "socket_source_errors": 0,
+                "socket_queue_overflow": 0,
+                "socket_history_overflow": 0,
+                "socket_output_errors": 0,
+                "socket_matches": 75,
+                "socket_rejected": 0,
+                "socket_ambiguous": 0,
+                "socket_closed": 0,
+                "socket_missing": 0,
+                "socket_reuse_rejected": 0,
+                "socket_history_entries": 75,
+                "lookup_query_busy_ms": 0,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 8334.24,
+                "lookup_busy_share": 0,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": false,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "socket_clean_shutdown": true,
+                "driver_queue_loss_known": false,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "socket",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 18.1661,
+                  "p50": 7.4217,
+                  "p95": 16.0639
+                },
+                "lookup_result_apply_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_duration_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 18.2832,
+                  "p50": 7.5326,
+                  "p95": 16.1918
+                },
+                "added_latency_direct_ms": {
+                  "count": 1,
+                  "max": 0.1322,
+                  "p50": 0.1322,
+                  "p95": 0.1322
+                },
+                "added_latency_proxy_ms": {
+                  "count": 75,
+                  "max": 11.748,
+                  "p50": 4.9652,
+                  "p95": 11.2995
+                },
+                "socket_event_to_recv_ms": {
+                  "count": 125,
+                  "max": 2.6052,
+                  "p50": 0.1459,
+                  "p95": 1.8744
+                },
+                "socket_event_to_identity_ready_ms": {
+                  "count": 125,
+                  "max": 8.0439,
+                  "p50": 2.2612,
+                  "p95": 5.63
+                },
+                "socket_identity_lookup_ms": {
+                  "count": 125,
+                  "max": 1.4692,
+                  "p50": 0.0167,
+                  "p95": 0.1488
+                },
+                "socket_identity_ready_to_apply_ms": {
+                  "count": 75,
+                  "max": 15.1138,
+                  "p50": 5.0162,
+                  "p95": 14.1675
+                },
+                "lookup_create": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_enum": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_destroy": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_process": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "enum_filter": "none",
+                "enum_condition_shapes": [],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "burst-wfp-r2",
+            "summary": {
+              "status": "PASS_RESTRICTED_CASE",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "complete",
+              "gateway_connect_count": 25,
+              "concurrency": 50,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "selected_tuple_count": 25,
+              "quic_dropped_clients": 0,
+              "barrier_client_count": 50,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": true,
+              "clients": {
+                "total": 50,
+                "success": 50,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 5,
+                "lookup_errors": 0,
+                "lookup_query_count": 5,
+                "lookup_query_completed": 5,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 33,
+                "lookup_query_max_subjects": 35,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 5,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 1420,
+                "filter_cache_hits": 4,
+                "filter_cache_misses": 6,
+                "filter_cache_rejections": 1,
+                "bfe_errors": 0,
+                "decided_proxy": 25,
+                "decided_direct": 50,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 101.411,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 412.858,
+                "lookup_busy_share": 0.245632,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 75,
+                  "max": 56.1607,
+                  "p50": 37.3803,
+                  "p95": 48.1067
+                },
+                "lookup_result_apply_ms": {
+                  "count": 5,
+                  "max": 16.339,
+                  "p50": 4.0655,
+                  "p95": 16.339
+                },
+                "lookup_calls_per_flow": {
+                  "count": 75,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 5,
+                  "max": 28.3019,
+                  "p50": 21.3934,
+                  "p95": 28.3019
+                },
+                "added_latency_held_ms": {
+                  "count": 75,
+                  "max": 56.3562,
+                  "p50": 37.6983,
+                  "p95": 48.2264
+                },
+                "added_latency_direct_ms": {
+                  "count": 250,
+                  "max": 16.1228,
+                  "p50": 4.3487,
+                  "p95": 15.65
+                },
+                "added_latency_proxy_ms": {
+                  "count": 125,
+                  "max": 11.2209,
+                  "p50": 4.1358,
+                  "p95": 10.0113
+                },
+                "lookup_create": {
+                  "calls": 6,
+                  "total_ms": 79.9561,
+                  "max_ms": 22.2299
+                },
+                "lookup_enum": {
+                  "calls": 8,
+                  "total_ms": 15.205,
+                  "max_ms": 3.0279
+                },
+                "lookup_destroy": {
+                  "calls": 5,
+                  "total_ms": 0.9024,
+                  "max_ms": 0.6691
+                },
+                "lookup_process": {
+                  "calls": 8,
+                  "total_ms": 4.928,
+                  "max_ms": 0.9964
+                },
+                "enum_filter": "type+protocol",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 3,
+                    "count": 2
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 120.6216,
+                    "p50": 144.7264,
+                    "p95": 159.9177,
+                    "max": 160.9276
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 120.6564,
+                    "p50": 144.753,
+                    "p95": 159.9428,
+                    "max": 160.9513
+                  }
+                },
+                "direct": {
+                  "clients": 25,
+                  "echo_matches": 25,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 25,
+                    "min": 26.7074,
+                    "p50": 63.1251,
+                    "p95": 69.2582,
+                    "max": 69.2762
+                  },
+                  "start_to_done_ms": {
+                    "count": 25,
+                    "min": 26.7396,
+                    "p50": 63.147,
+                    "p95": 69.2825,
+                    "max": 69.2996
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 50,
+                "matched_clients": 50,
+                "missing_clients": 0,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": true,
+                "native_summary": {
+                  "wfp_count": 501,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 2,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              }
+            }
+          },
+          {
+            "case": "short-socket-r2",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "clients",
+              "failure_stage": "clients",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "short-wfp-r2",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "wfp",
+              "topology": "single-host-local",
+              "validation_stage": "native_reference",
+              "failure_stage": "native_reference",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 2,
+              "delay_ms": 0,
+              "quic": false,
+              "expect_leak": false,
+              "native_reference": true,
+              "sequential": true,
+              "synchronized_start": false,
+              "clients": {
+                "total": 40,
+                "success": 40,
+                "failure": 0
+              },
+              "engine_summary": {
+                "lookup_calls": 60,
+                "lookup_errors": 0,
+                "lookup_query_count": 60,
+                "lookup_query_completed": 60,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 1,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 60,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 974,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 60,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 20,
+                "decided_direct": 40,
+                "unattributed": 0,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 0,
+                "lookup_query_busy_ms": 792.546,
+                "lookup_query_cpu_ms": 15.625,
+                "lookup_runtime_ms": 1926.26,
+                "lookup_busy_share": 0.411443,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": true,
+                "nonselected_client_disrupted": false,
+                "send_rst": false,
+                "success": true,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "wfp",
+                "first_packet_decision_latency_ms": {
+                  "count": 60,
+                  "max": 18.7101,
+                  "p50": 13.4886,
+                  "p95": 16.1852
+                },
+                "lookup_result_apply_ms": {
+                  "count": 60,
+                  "max": 1.321,
+                  "p50": 0.4208,
+                  "p95": 0.6129
+                },
+                "lookup_calls_per_flow": {
+                  "count": 60,
+                  "max": 1,
+                  "p50": 1,
+                  "p95": 1
+                },
+                "lookup_duration_ms": {
+                  "count": 60,
+                  "max": 18.3003,
+                  "p50": 13.0506,
+                  "p95": 15.9045
+                },
+                "added_latency_held_ms": {
+                  "count": 60,
+                  "max": 19.1645,
+                  "p50": 13.6975,
+                  "p95": 16.4403
+                },
+                "added_latency_direct_ms": {
+                  "count": 200,
+                  "max": 0.8013,
+                  "p50": 0.1786,
+                  "p95": 0.278
+                },
+                "added_latency_proxy_ms": {
+                  "count": 100,
+                  "max": 0.3894,
+                  "p50": 0.2118,
+                  "p95": 0.3451
+                },
+                "lookup_create": {
+                  "calls": 60,
+                  "total_ms": 769.818,
+                  "max_ms": 17.5241
+                },
+                "lookup_enum": {
+                  "calls": 60,
+                  "total_ms": 15.5597,
+                  "max_ms": 0.5447
+                },
+                "lookup_destroy": {
+                  "calls": 60,
+                  "total_ms": 2.1452,
+                  "max_ms": 0.1262
+                },
+                "lookup_process": {
+                  "calls": 60,
+                  "total_ms": 2.686,
+                  "max_ms": 0.1587
+                },
+                "enum_filter": "type+protocol+local_port",
+                "enum_condition_shapes": [
+                  {
+                    "mask": 7,
+                    "count": 3
+                  }
+                ],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "client_latency": {
+                "start_boundary": "after_bind_before_connect_or_send",
+                "selected": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 32.2832,
+                    "p50": 45.2069,
+                    "p95": 69.1606,
+                    "max": 71.7475
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 32.3176,
+                    "p50": 45.2604,
+                    "p95": 69.2103,
+                    "max": 71.7829
+                  }
+                },
+                "direct": {
+                  "clients": 20,
+                  "echo_matches": 20,
+                  "reset_observed": 0,
+                  "start_to_echo_ms": {
+                    "count": 20,
+                    "min": 13.0133,
+                    "p50": 14.0688,
+                    "p95": 16.0199,
+                    "max": 17.3862
+                  },
+                  "start_to_done_ms": {
+                    "count": 20,
+                    "min": 13.04,
+                    "p50": 14.1065,
+                    "p95": 16.0497,
+                    "max": 17.4128
+                  }
+                }
+              },
+              "native_reference_audit": {
+                "client_total": 40,
+                "matched_clients": 38,
+                "missing_clients": 2,
+                "conflicting_clients": 0,
+                "poll_interval_ms": 1000,
+                "drain_ms": 1100,
+                "success": false,
+                "native_summary": {
+                  "wfp_count": 400,
+                  "wfp_raw_count": 0,
+                  "wfp_callback_count": 0,
+                  "wfp_drop_count": 0,
+                  "wfp_other_count": 0,
+                  "security5156_count": 0,
+                  "queue_dropped": 0,
+                  "errors": 0,
+                  "wfp_polls": 4,
+                  "wfp_poll_errors": 0,
+                  "wfp_enum_errors": 0,
+                  "wfp_api": "poll",
+                  "wfp_type_counts": {}
+                }
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          },
+          {
+            "case": "socket-leakcheck",
+            "summary": {
+              "status": "FAIL",
+              "mode": "redirect",
+              "protocol": "tcp",
+              "engine": "inproc",
+              "lookup_mode": "async",
+              "enum_scope": "legacy",
+              "filter_cache": "on",
+              "ownership_source": "socket",
+              "topology": "single-host-local",
+              "validation_stage": "client_attestation",
+              "failure_stage": "client_attestation",
+              "concurrency": 0,
+              "window_before_ms": 500,
+              "client_hold_ms": 0,
+              "benchmark_round": 0,
+              "delay_ms": 250,
+              "quic": false,
+              "expect_leak": true,
+              "native_reference": true,
+              "sequential": false,
+              "synchronized_start": false,
+              "clients": {
+                "total": 6,
+                "success": 0,
+                "failure": 6
+              },
+              "engine_summary": {
+                "lookup_calls": 0,
+                "lookup_errors": 0,
+                "lookup_query_count": 0,
+                "lookup_query_completed": 0,
+                "lookup_query_cancelled": 0,
+                "lookup_query_backpressure": 0,
+                "lookup_query_max_subjects": 0,
+                "lookup_stale_subjects": 0,
+                "lookup_incomplete_results": 0,
+                "lookup_query_cpu_samples": 0,
+                "lookup_query_cpu_errors": 0,
+                "lookup_query_cpu_error_code": 0,
+                "lookup_returned_events": 0,
+                "filter_cache_hits": 0,
+                "filter_cache_misses": 0,
+                "filter_cache_rejections": 0,
+                "bfe_errors": 0,
+                "decided_proxy": 0,
+                "decided_direct": 6,
+                "unattributed": 3,
+                "leaked": 0,
+                "rst_count": 0,
+                "quic_drops": 0,
+                "window_before_ms": 500,
+                "window_after_ms": 50,
+                "delay_ms": 250,
+                "socket_received": 12,
+                "socket_connect_received": 12,
+                "socket_close_received": 0,
+                "socket_identity_ready": 6,
+                "socket_identity_missing": 6,
+                "socket_source_errors": 0,
+                "socket_queue_overflow": 0,
+                "socket_history_overflow": 0,
+                "socket_output_errors": 0,
+                "socket_matches": 3,
+                "socket_rejected": 501050,
+                "socket_ambiguous": 501050,
+                "socket_closed": 0,
+                "socket_missing": 3,
+                "socket_reuse_rejected": 0,
+                "socket_history_entries": 6,
+                "lookup_query_busy_ms": 0,
+                "lookup_query_cpu_ms": 0,
+                "lookup_runtime_ms": 8259.21,
+                "lookup_busy_share": 0,
+                "lookup_worker_error": false,
+                "filter_cache": true,
+                "lookup_query_cpu_valid": false,
+                "nonselected_client_disrupted": false,
+                "send_rst": true,
+                "success": true,
+                "socket_clean_shutdown": true,
+                "driver_queue_loss_known": false,
+                "lookup_mode": "async",
+                "enum_scope": "legacy",
+                "ownership_source": "socket",
+                "first_packet_decision_latency_ms": {
+                  "count": 6,
+                  "max": 112.769,
+                  "p50": 0.5564,
+                  "p95": 112.769
+                },
+                "lookup_result_apply_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_calls_per_flow": {
+                  "count": 6,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "lookup_duration_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_held_ms": {
+                  "count": 6,
+                  "max": 113.187,
+                  "p50": 0.8616,
+                  "p95": 113.187
+                },
+                "added_latency_direct_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "added_latency_proxy_ms": {
+                  "count": 0,
+                  "max": 0,
+                  "p50": 0,
+                  "p95": 0
+                },
+                "socket_event_to_recv_ms": {
+                  "count": 12,
+                  "max": 0.054,
+                  "p50": 0.0373,
+                  "p95": 0.054
+                },
+                "socket_event_to_identity_ready_ms": {
+                  "count": 12,
+                  "max": 0.6086,
+                  "p50": 0.221,
+                  "p95": 0.6086
+                },
+                "socket_identity_lookup_ms": {
+                  "count": 12,
+                  "max": 0.1825,
+                  "p50": 0.1133,
+                  "p95": 0.1825
+                },
+                "socket_identity_ready_to_apply_ms": {
+                  "count": 3,
+                  "max": 0.0549,
+                  "p50": 0.0407,
+                  "p95": 0.0549
+                },
+                "lookup_create": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_enum": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_destroy": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "lookup_process": {
+                  "calls": 0,
+                  "total_ms": 0,
+                  "max_ms": 0
+                },
+                "enum_filter": "none",
+                "enum_condition_shapes": [],
+                "first_packet_decision_population": "all_engine_flows_including_fixture"
+              },
+              "native_reference_cleanup": {
+                "forced_processes": 0,
+                "fallback_restore_failed": false,
+                "success": true
+              },
+              "reason": "inspect_local_records"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "scope": "Fresh explicitly bound IPv4 loopback original clients; TCP routing through actual Gateinto proxy; retained child handles; finite Server sample",
+  "result": "Both dedicated routing jobs failed; no routed SOCKET speed or reliability qualification"
+}

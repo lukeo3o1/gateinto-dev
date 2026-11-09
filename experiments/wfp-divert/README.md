@@ -9,18 +9,29 @@ The hypothesis is that holding packets at NETWORK gives native WFP notifications
 time to identify the application before the packet is released or translated.
 This is a testable hypothesis, not a conclusion that notifications must arrive in
 time. Native callbacks and Security 5156 are tested independently. WinDivert
-SOCKET/FLOW, IP Helper owner tables and PID polling are not attribution sources.
+SOCKET/FLOW, IP Helper owner tables and PID polling are not routing attribution
+sources in the original experiments. A separate SOCKET observation experiment
+below measures coverage and timing without changing packet routing. A subsequent
+opt-in TCP routing comparison selects `--ownership-source socket`; the default
+source remains native WFP.
 
 ## Components
 
 | File | Purpose |
 | --- | --- |
-| `native-events.cpp` | Native Subscribe2 and Security 5156; raw App ID/path, validity flags, tuples, event FILETIME, callback QPC, and raw Security XML. Native PID is null. |
+| `native-events.cpp` | Native WFP net events (`--wfp-api subscribe2`, `subscribe3`, `subscribe4` or `poll`) and Security 5156; raw App ID/path, validity flags, tuples, event FILETIME, callback QPC, ABI/raw allow fields, and raw Security XML. Native PID is null. |
+| `ale-endpoints.cpp` | Separate native WFP live-endpoint shadow probe; exact app ID/tuple/endpoint ID and complete query interval, with no fabricated event time or routing authority. |
 | `packets.cpp` | NETWORK capture with bounded queues, first-packet buffering, generation-qualified control, pinned timeout-direct policy, and candidate TCP forward/reverse translation. |
+| `inproc.cpp` | Single-process `inproc` engine: WinDivert NETWORK capture/reinject, on-demand native WFP stored-event lookup, generation match, TCP redirect translation and post-hoc leak check in one native process. Portable match and metric helpers are unit-tested (`g++ -std=c++17 -Wall -Wextra inproc.cpp`). |
+| `socket-owner.hpp` | Bounded SOCKET event and identity history for the opt-in TCP routing source, with conservative lifecycle and generation checks. |
 | `run.py`, `test_run.py` | Correlate the selected native source, full device path and tuple; inject delayed/missing attribution; verify per-client evidence and final collector status. |
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
 | `client.cpp` | Built twice as app-a.exe and app-b.exe; echo nonces and original socket tuples provide test ground truth, never ownership authority. |
 | `positive_control.py` | A narrowly scoped blocked connection checks native drop-callback delivery. Drops are diagnostic only and cannot authorize proxying. |
+| `socket-events.cpp` | Concurrent WinDivert SOCKET and NETWORK sniffing, with event/capture, receipt and process-path readiness clocks. No blocking or injection. |
+| `socket_probe.py`, `test_socket_probe.py` | Compare fresh client attempts, SOCKET PID/path observations, first observed packets and independent native WFP references. |
+| `socket-ci.ps1`, `socket_results.py` | Run eight controlled observation cases on each Windows version and publish only projected aggregate results. |
+| `socket-routing-ci.ps1`, `routing_results.py` | Compare actual WFP/SOCKET TCP routing with sequential clients, synchronized bursts and delayed-identity reset controls. |
 | `../../examples/wfp_lab.rs` | Controlled echo endpoints, TLS CONNECT upstream and actual Gateinto proxy with session credentials and forced Gateway routing. |
 | `build.ps1`, `ci.ps1` | Download official signed WinDivert, compile probes, back up/restore audit policy, run cases and retain evidence. |
 
@@ -30,7 +41,8 @@ gateway credentials or user application traffic are required.
 
 ## Run
 
-GitHub workflow: `.github/workflows/wfp-divert-poc.yml`, on `windows-2022`.
+GitHub workflow: `.github/workflows/wfp-divert-poc.yml`, independently on
+`windows-2022` and `windows-2025`.
 It runs automatically for a PR changing these files; workflow_dispatch becomes
 available once the workflow exists on the default branch.
 
@@ -54,7 +66,10 @@ destructors ran.
 C:\wfp-lab\bin\native-events.exe --restore-state C:\wfp-lab\results\CASE\bfe-state.json --out C:\wfp-lab\restore.jsonl
 ```
 
-Do not run two collectors that modify BFE options concurrently. An external
+Do not start arbitrary concurrent collectors that modify BFE options. The routing
+comparison explicitly nests its independent reference outside the engine: start
+the reference first, fully stop and restore the engine, then drain and restore
+the reference. Each has a separate persisted state file. An external
 configuration change causes guarded restoration to report an error rather than
 overwrite it. Hard VM cancellation cannot promise finally blocks execute;
 GitHub-hosted VMs are disposable, while a persistent local VM requires inspection
@@ -71,6 +86,48 @@ requires client echo success, native evidence for each expected confirmed flow,
 accepted packet decisions, no B proxy packets, correct bridge count and gateway
 CONNECT destination/count, successful collector exit, and no collector error or
 overflow. Issuing a proxy command or accepting a local socket alone cannot pass.
+A `--source wfp` case whose native summary reports `wfp_count` 0 ends as
+INCONCLUSIVE_NO_NATIVE_EVENTS instead of passing, because its negative controls
+never exercised WFP attribution. Raw callbacks with zero usable target ownership
+similarly give INCONCLUSIVE_NO_USABLE_NATIVE_EVENTS. The summary also reports every subscription
+callback by type (`wfp_raw_count`, `wfp_type_counts`) and the stored net events
+enumerated for the collector window (`wfp_enum_total`, `wfp_enum_type_counts`,
+up to 200 `wfp_enum` CLASSIFY_ALLOW lines).
+On `wfp_enum` lines `recv_qpc` and `receipt_filetime` are the enumeration time;
+`event_filetime` is the event's own timestamp. Enumeration failures appear as
+`wfp_enum_error` lines and `wfp_enum_errors`, never as collector errors, and
+enumeration stops after about 2 s or 64 batches. Only the first 5 `wfp_enum_error`
+lines are written; `wfp_enum_errors` counts all of them. `wfp_enum_truncated` is
+true only when a limit stopped enumeration and a one-entry probe then found an
+unread event or failed.
+
+`--wfp-api` selects how the collector obtains WFP CLASSIFY_ALLOW events, all
+reported as `kind:"wfp"` and validated identically. `subscribe2` uses
+FwpmNetEventSubscribe2/FWPM_NET_EVENT3, `subscribe4` uses
+FwpmNetEventSubscribe4/FWPM_NET_EVENT5 (Windows 10 1809+), and `poll`
+enumerates only CLASSIFY_ALLOW stored net events (an `FWPM_CONDITION_NET_EVENT_TYPE`
+enum condition), waiting `--poll-interval-ms` (default 5) on a high-resolution
+waitable timer between polls, over a window that starts `--poll-overlap-ms`
+(default 300) before the previous poll end, deduplicated on timestamp, tuple and
+app ID. A polled event's `recv_qpc` is when the poll observed it, so
+`notification_minus_capture_ms` includes polling latency. The summary reports
+`wfp_api`, `wfp_polls`, `wfp_polls_with_new_events`, poll thread start/stop QPC,
+total, mean and max poll duration, total wait and maximum wait overshoot,
+`wfp_poll_timer` (`high_resolution`, or `sleep_for` when that timer is
+unavailable), `wfp_poll_errors` (capped `wfp_poll_error` lines, not collector
+errors) and `wfp_poll_missed`: CLASSIFY_ALLOW events in the final enumeration
+minus unique polled events, including events stored after the last poll. It is
+null when not polling or when the final enumeration was truncated or had errors,
+and negative if stored events were evicted before it. A poll case whose summary
+reports `wfp_polls` 0 ends as FAIL. Poll mode additionally runs the retransmit
+and reuse scenarios and repeats the TCP hold and redirect cases for stability.
+
+`subscribe3` uses FwpmNetEventSubscribe3/FWPM_NET_EVENT4. Subscription records
+preserve raw direction/BOOL/profile fields and callback sequence, while ready
+records report structure sizes/offsets. Subscribe3/4 additionally emit diagnostic
+`wfp_enum5` records for the same window as Enum3. These records never authorize a
+packet. The comparison cases use `--callback-drain-ms 1500` to retain callbacks
+after normal collection, which does not make a late callback meet a hold deadline.
 
 Local evidence includes raw native/packet JSONL, decision/control logs, translation and
 bridge logs, gateway requests, target payload hex and client nonces/tuples. New
@@ -102,16 +159,323 @@ This deliberately avoids claiming production-safe tuple reuse or reclamation.
 Active translated sessions must finish before stopping the collector.
 
 UDP currently supports hold and unchanged reinjection **only**. It cannot proxy
-UDP through Gateinto. The filter captures both fixture ports and tests one socket
-against both. A 1 s hold missed late second-peer controls; 2 s passed the twelve
-tuple case. SYN retransmission passed; deliberate full-tuple reuse was safely
-rejected but disrupted B, reported CHARACTERIZED_REUSE_REJECTION rather than a
-connectivity pass. External TCP connect-only attribution is observation, not a
-transparent external relay test. Queue stress, historic-event replay on real
-reused sockets, general map reclamation, IPv6, fragmentation, external controlled
-target NAT and desktop Windows remain pending.
+UDP through Gateinto. Split-engine cases capture both fixture ports and test one
+socket against both. Security 5156 missed some second-peer controls at a 1 s hold;
+2 s passed the twelve-tuple hold/direct case. SYN retransmission passed; full-tuple
+reuse was rejected but disrupted B, reported CHARACTERIZED_REUSE_REJECTION rather
+than a connectivity pass. In-process cases use fresh tuples and one UDP destination.
+External TCP connect-only attribution does not validate transparent external relay.
+Queue stress, historic replay against real reused sockets, safe tuple reclamation,
+IPv6, fragmentation, external controlled routing and desktop Windows remain pending.
 
 Local model/helper and fixture tests are separate from Windows runtime results.
 See [the review](../../docs/windows-per-app-feasibility.md) and
 [execution record](../../docs/windows-per-app-review-log.md) for the evidence
 boundary and the full qualification matrix.
+
+## In-process engine (`--engine inproc`)
+
+`inproc.exe` collapses the split `native-events.exe` + `packets.exe` + `run.py`
+control-file pipeline into one native process. It removes the file and
+control-file hops and the sleep-quantized 2 ms packet loop: a blocking
+`WinDivertRecv` receive thread feeds a worker that waits on a condition variable
+until the nearest pending-flow deadline or retry, and a high-resolution waitable
+timer is used for the native collector's own timing elsewhere.
+
+When a new flow's first packet is held, the engine enumerates stored net events
+on demand with `FWPM_NET_EVENT_ENUM_TEMPLATE0` over a bounded
+`[capture − window, now]` time window. `--enum-scope legacy` retains the measured
+baseline: CLASSIFY_ALLOW, protocol and attempted repeated local-port conditions,
+then protocol-only, type-only and time-only fallbacks. Repeated condition keys
+are invalid under the documented API contract; they do not form an OR filter.
+
+`--enum-scope destination` emits every condition key once. It includes event type,
+protocol, remote address/port shared by all pending subjects of that protocol, and
+local port only when shared. Unsupported conditions are removed in stages until
+a broader supported filter is reached; exact software tuple/app/time validation
+still applies. Destination cache entries distinguish condition masks and exact
+cardinality; legacy entries retain the original single/multiple-port grouping.
+The cache never stores ownership answers. `enum_scope`, `enum_filter`,
+`enum_condition_shapes` and `enum_filter_fallback` expose what was actually used.
+
+The new comparisons use `--window-before-ms 5` against the existing 500 ms baseline;
+`--window-after-ms` remains 50. These are experiment settings, not a proven clock
+or delivery bound. Lookups retry with a 0, 1, 2, 4, 8 ms backoff until the hold
+deadline. Enumeration errors, incomplete enumeration and cleanup failures discard
+the result and fail the case, with `lookup_errors` and `bfe_errors` in the summary.
+The completed comparisons below retain legacy/500 ms as the default; both
+destination/500 ms and destination/5 ms remain optional experiments.
+
+An ownership-based decision requires the match in the portable, unit-tested
+`inproc::match_generation` to accept an event: exact tuple,
+all required native header validity flags, a nonempty full app path, outbound
+direction, layer `ALE_AUTH_CONNECT` (48/50), and an `event_filetime`
+inside a configurable window (`--window-before-ms`, `--window-after-ms`) around
+the first-packet capture time converted through the QPC/FILETIME anchor. The
+newest qualifying event in that window is selected only when all qualifying
+events name the same app. The internal packet generation does not appear in the
+WFP event and cannot prove socket identity or safe tuple reuse. Once decided,
+packets are translated and forwarded straight from the worker. Each accepted
+match emits `ownership` with tuple, generation, app path and native event time.
+
+Decision QPC is sampled after enumeration and alias reservation; a match cannot
+authorize proxy/drop after the capture-based deadline. Synchronous BFE RPC still
+blocks the worker, so the hold value is a decision budget, not a hard upper bound
+on actual packet delay in inline mode. The receive backlog is not yet bounded in
+this engine. `--lookup-mode async` moves enumeration to a dedicated thread with
+one bounded request/result handoff; the packet worker continues to service packets
+and deadlines. Results must still match the requested tuple/capture/generation and
+current deadline. Joining that thread cannot cancel an active synchronous RPC.
+
+`--filter-cache on|off` compares learned unsupported-filter patterns against the
+uncached baseline. The cache separates protocol and single/multiple port shapes
+and never stores ownership answers. Generic invalid-parameter and transient errors
+are not learned. Per-phase create/enum/destroy/process elapsed metrics and
+query-thread CPU samples expose actual costs; caller CPU excludes BFE service work.
+
+The selected app's UDP to the QUIC port (`--quic-port`) is dropped and counted
+once attributed; other UDP is released direct. Flows released direct on a
+timeout or missing event are released direct. TCP flows are re-checked for a
+bounded period (`--leak-ms`); a flow later shown to be the selected app is counted
+as `leaked` and, with `--send-rst`, receives checked RST injections in both
+directions. `rst_count` counts successful pairs; whether the socket terminated
+requires client-observed reset evidence. Reset cannot undo bytes already sent.
+Gateinto's gateway TLS destination stays outside the target filter; fixture
+sockets to the controlled target are captured and must be attributed direct.
+
+`engine-summary.json` reports: first-packet decision latency p50/p95/max; lookup
+calls total, per flow and duration; per-packet added latency (capture to
+successful reinjection, including the WinDivert receive queue) for held,
+decided-direct and decided-proxy classes; `unattributed`,
+`leaked` and `rst_count`; `quic_drops`; whether a non-selected client was
+disrupted; and the `enum_filter` and window in effect. Lookup totals include the
+post-timeout checks; per-flow lookup counts cover the pending decision phase.
+
+PASS requires per-client attempted tuple and protocol, generation-matched native
+ownership with the exact expected app path, the expected decision within its
+deadline, and a successful client echo (or an evidenced selected QUIC drop).
+Unexpected timeout, leak, RST or non-selected proxy/drop/reset fails a normal case.
+
+`ci.ps1` runs the engine in `hold-inproc-tcp`, `hold-inproc-udp`,
+`redirect-inproc`, `hold-inproc-tcp-repeat`, `redirect-inproc-repeat`,
+`leakcheck-inproc` (TCP redirect, 100 ms hold and 250 ms selected-app attribution
+delay via `--delay-ms`, with `--send-rst --expect-leak`),
+`concurrency-inproc` (50 parallel clients split app-a/app-b, checking no
+wrong-app redirection and all CONNECTs correct) and `quic-inproc` (selected
+app UDP/QUIC drop). The existing poll and subscription cases are kept for
+comparison. In leakcheck, selected clients keep their TCP socket open after echo
+and must observe WSAECONNRESET after a logged timeout, late native ownership,
+leak and successful bidirectional RST. Other-app clients must still echo normally.
+The delay changes when selected ownership is consumed, preserving native timestamps.
+
+The original in-process Windows run had measurement and coverage gaps; see
+[the evidence audit](../../docs/evidence/wfp-divert-run-42348888370.md).
+The repaired timing, real UDP/QUIC and live-reset paths have now executed on
+Server 2022 and 2025: all 16 non-shadow in-process cases passed per OS. Async
+reduced decided-direct packet stalls, while first-decision latency did not
+consistently improve. See [the measured comparison](../../docs/evidence/wfp-divert-run-42356168781.md).
+
+Additional CI cases compare cache-off inline, cache-on inline, and cache-on async
+lookup, including concurrency, UDP, QUIC and deterministic leak/reset checks.
+`--ale-probe` adds a standalone native WFP endpoint sampler to separate shadow
+cases. Every controlled client's exact app/tuple must be observed in a complete
+query interval between capture and decision, or the shadow case is inconclusive.
+The sampler does not supply routing authority, event timestamps or packet-visible
+socket identity. Keep its extra BFE load outside the performance A/B comparison.
+The first shadow runs completed without native errors but returned System for
+controlled original-app tuples; all four shadow cases correctly stayed inconclusive.
+See [the low-latency research](../../docs/windows-per-app-low-latency.md) for the
+design, official API references, qualification limits and comparison criteria.
+
+### Executed snapshot comparisons
+
+[Run 42468677635](../../docs/evidence/wfp-divert-run-42468677635.md), source
+`7398bf4` with checkout merge `e3bd9e4`, completed attempt 1 on Server 2022/2025
+and attempt 2 on Server 2022. Attempt 1 passed all 27 non-shadow in-process cases
+per OS, including eight paired snapshot cases, and all 11 split poll cases
+reached expected statuses. The Server 2022 rerun passed all eight snapshot cases too.
+
+Destination/5 ms returned fewer rows and improved first-decision p95 in the
+initial rounds. The rerun instead reached 134.67/441.61 ms versus legacy/500 ms
+at 38.23/48.32 ms; destination/500 ms also reached 102.88 ms in round 1. Snapshot
+creation produced a 235.11 ms call and dominated query work. Row reduction is
+repeatable, but neither destination profile is established as faster or more
+reliable. Retain the legacy default; no CPU or production guarantee follows.
+
+Standard CI and the model job passed. Completed Windows experiment jobs remain
+red for subscription cases, short-hold Security UDP, native-drop recognition and
+first-packet ALE shadows. The Server 2025 attempt-2 dependency download failed
+with HTTP 504 before traffic; that failure provides no performance measurement.
+
+## Live endpoint control (`--engine endpoint-control`)
+
+This separate TCP/UDP control runs before any WinDivert case. The harness starts
+the controlled fixture, native stored-event polling and the ALE sampler; it does
+not launch `packets.exe` or `inproc.exe`. Both apps complete an echo and keep each
+fresh socket open with `--client-hold-ms 500`, forwarded to the client as
+`--hold-open-ms 500`. TCP does not send FIN before that live hold ends. Client
+`echo_qpc` records actual echo completion; `hold_end_qpc` records the hold boundary,
+so the artificial delay is distinguishable from echo latency.
+
+Each client needs fresh native stored-event evidence with its exact original app
+and tuple. A complete matching ALE snapshot must begin after `echo_qpc` and finish
+before `hold_end_qpc`. Missing or incomplete native/ALE evidence stays inconclusive.
+`OBSERVED_ALE_ORIGINAL_APP` records an original-app match;
+`CHARACTERIZED_ALE_APP_MISMATCH` records a clean source comparison that disagrees.
+Neither outcome authorizes packet routing or proves first-packet admission.
+
+The sampler records official SDK `sizeof`/`offsetof`, pointer width/architecture,
+OS version and resolved API names. It deep-copies token/IPsec/flag values and an
+app-ID hex prefix capped at 128 bytes with explicit size/truncation fields. Added
+copies count toward the snapshot byte budget. Raw endpoint diagnostics remain
+local; published summaries contain counts, relative timings and compiler layout
+metadata.
+
+In run 42468677635 attempt 1, both TCP/UDP controls on both operating systems
+matched all six original apps and native references, with no System app or shared
+endpoint groups. Server 2022 repeated both controls successfully in attempt 2.
+Mean complete query costs were 1.12/1.57 ms for TCP/UDP on Server 2022 and
+1.67/2.34 ms on Server 2025 in attempt 1; the rerun measured 1.95/1.96 ms.
+These established-socket costs do not measure first-packet admission latency.
+Both first-packet shadow cases per OS remained inconclusive with zero qualifying
+observations while held. The live control changes lifecycle and interception
+together, so it does not establish that WinDivert caused the earlier anomaly.
+
+## WinDivert SOCKET observation
+
+The separate `socket-observation` workflow job runs on Server 2022 and 2025.
+`socket-events.exe` opens SOCKET and NETWORK with SNIFF and RECV_ONLY before
+the clients start. Two broad CONNECT-only controls verify event delivery before
+six target-scoped TCP/UDP cases compare six live clients held open
+for 500 ms, forty short sequential clients and fifty fresh concurrent clients.
+Each case starts distinct app-a/app-b processes and an independent native WFP
+stored-event collector. No selected-app redirection or packet admission is tested.
+Clients explicitly bind an IPv4 loopback endpoint before connect/sendto so the
+attempted tuple is known. Auto-bound sockets, external adapters and IPv6 are not
+covered by this experiment.
+The harness retains child-process handles for independent creation-time ground
+truth. Short-process image-path availability therefore does not cover immediate
+process-object reclamation or worst-case PID reuse.
+
+SOCKET scopes use protocol and remote address/port, followed by exact software
+validation. The NETWORK scope additionally uses `ip`. WinDivert 2.2.2's shared
+filter evaluator implements `ip` as the presence of a parsed packet header;
+that header is absent for SOCKET metadata. Using that predicate on SOCKET
+suppressed all events in the initial run. The Windows DLL self-test checks the
+historical false predicate and the corrected scoped/broad predicates before
+traffic tests. Broad observations discard unrelated event details before
+process lookup or record output.
+
+The report separates the SOCKET event's kernel QPC, userspace receipt and
+completion of the PID-to-image-path query. Each is compared with the first
+observed NETWORK capture and receipt. An earlier kernel timestamp alone cannot
+establish that userspace knew the app before its first packet. Process creation
+and event timing must exclude an identity queried after PID reuse. Fast-closing
+processes can leave a correct SOCKET PID but no available image path.
+
+Kernel queue loss has no exposed WinDivert counter. Complete controlled-client
+coverage and clean userspace handling are checked, without inventing a zero-loss
+statistic. All raw PID, endpoint, path, tuple and absolute clock records stay in
+restricted local files. Public results include only fixed case names, statuses,
+counts and relative latency distributions.
+
+[Run 42497668177](../../docs/evidence/wfp-socket-run-42497668177.md), source
+`2dd799e`, passed both SOCKET jobs: eight cases and 204 clients per OS, 408 total.
+Every client had a correct PID/full-tuple match, usable image path, verified
+creation time, independent native WFP reference, first observed NETWORK packet
+and successful echo. Missing/mismatched identities, ambiguities and reported
+collector errors were zero. The initial
+[run 42496744881](https://github.com/lukeo3o1/gateinto-dev/actions/runs/42496744881)
+retains the `ip`-filter failure evidence described above; the corrected DLL-tested
+filters delivered all controlled events.
+
+For the 40-client short sequential cases, image-ready−capture p50 was
+0.0919/0.1011 ms for TCP/UDP on Server 2022 and 0.0989/0.1204 ms on Server 2025.
+Native poll receipt−capture p50 in those same cases was 21.4347/20.8902 ms and
+27.8970/27.4197 ms respectively. These are time differences from the first
+observed capture, not API-call durations or end-to-end routing latency. Only
+21/408 image identities were ready before capture, all in the TCP burst cases.
+Buffering and routing still need a separate controlled experiment; this run
+tested no packet blocking, injection, admission or proxy routing.
+
+Standard repository CI, the model job, 98 Python checks, cross-compilation and
+the actual Windows DLL helper tests passed. Other PoC Windows/native-control
+jobs remain red for the previously unqualified alternatives. The original
+Subscribe2/3/4 findings and the production qualification limits remain unchanged.
+
+## Opt-in SOCKET TCP routing comparison
+
+`socket-routing-ci.ps1` runs nine cases per Windows version. Two rounds compare
+the native WFP default and `--ownership-source socket` with forty sequential
+clients and a synchronized fifty-client burst. The second round reverses the
+profile order. Each selected-app client must traverse the real Gateinto CONNECT
+proxy and echo its nonce; the other app must echo directly. A separate native
+WFP collector audits each original client identity after routing, with the same
+100 ms poll interval and the same 1100 ms shutdown drain for both ownership sources. Missing
+independent references fail validation rather than borrowing the routing proof.
+The reference event must fall between the client attempt and its first exact
+generation's normal routing decision, which is logged before reinjection.
+This is a pre-reinjection audit; SOCKET admission separately requires its
+kernel CONNECT event no later than first packet capture.
+
+SOCKET routing opens its metadata receiver before NETWORK capture, resolves the
+process image on a separate worker, and buffers an undecided first packet until
+the identity is usable or the hold deadline expires. SOCKET mode does not query
+native WFP snapshots for routing. The existing WFP mode remains the default.
+The comparison reports selected/direct client attempt-to-echo distributions;
+the attempt clock starts after bind and the optional cohort barrier, before
+writing the attempt record and calling connect. It includes that local logging
+overhead, excludes process launch/barrier waiting, and is not an API duration.
+Engine first-decision metrics also include the proxy fixture's target flows and
+must not be interpreted as one sample per original client.
+
+The final case delays selected-app ownership beyond the hold deadline. It checks
+the existing timeout-direct policy, late leak detection and reset behavior.
+Late identity never changes an already direct flow into a proxied flow. Thus
+this policy does not promise zero leakage on attribution timeout.
+
+The lifecycle checks reject new admission after detected closure, conflicting
+ownership and changed SYN generations while preserving qualified TCP teardown.
+Bounded userspace history or queue loss invalidates attribution.
+NETWORK packets expose no SOCKET endpoint cookie, and WinDivert exposes no
+kernel queue-loss counter; clean controlled runs cannot establish arbitrary
+tuple reuse safety or zero loss. The experiment qualifies only its fresh IPv4
+loopback tuples, retained child-process handles and finite Server samples.
+Public artifacts contain aggregate results only. The
+[initial routing run](../../docs/evidence/wfp-socket-routing-run-42613174975.md)
+failed on both operating systems. The subsequent
+[Server 2022 diagnostic run](../../docs/evidence/wfp-socket-routing-run-42672188645.md)
+identified later System CONNECT metadata with different endpoints during this
+engine's successful packet injections. Neither run qualifies SOCKET routing
+speed. The observation offsets above are not routed application latency.
+
+The next candidate pins an already validated pre-capture identity to its TCP
+generation and quarantines a different, previously unbound endpoint only when
+its event occurs after capture and after the start of a known successful own
+forward injection. Validation, send and success recording are serialized before
+the receiver can apply that event. There is no process-ID whitelist, and the
+later event never supplies replacement ownership. Earlier-occurring late
+receipts, known original endpoints, same-endpoint changes, original closures,
+new initial SYNs after quarantine and detected loss remain strict failures.
+This conservative policy also rejects a SYN retransmission after quarantine;
+it does not qualify ordinary lossy-network retransmission behavior.
+This policy remains opt-in; production reuse remains unqualified.
+
+The [first pinned-owner comparison](../../docs/evidence/wfp-socket-routing-run-42674843682.md)
+passed all four SOCKET bursts and both delayed-identity controls, while three
+short cases failed and one passing short case had a slow tail. Its remaining
+check-and-wait notification race is repaired by publishing revisions under the
+same mutex used for the packet worker's wait. No periodic polling workaround is
+used. The following comparison tests that repair while retaining failed audits.
+
+[Run 42678849531](../../docs/evidence/wfp-socket-routing-run-42678849531.md),
+source `c1ea56e`, completes all 732 expected client responses and passes seventeen
+of eighteen cases. All four SOCKET short cases pass (160 clients), with selected
+attempt-to-echo p50 23.41–32.35 ms versus WFP 42.93–57.42 ms. Short identity-ready
+to apply maxima are 0.0467–0.0730 ms, without the former one-second stall.
+
+Server 2025 burst round 1 remains failed for four client tuples with conflicting
+native application candidates; its later gateway validation is not reached.
+Another passing selected burst is slightly slower with SOCKET. Keep these
+negative results, the retransmission restriction and the WFP default. Full
+case results, per-round latency and artifact/console checks are in the report.
