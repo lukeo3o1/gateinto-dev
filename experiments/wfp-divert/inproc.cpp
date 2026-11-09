@@ -1335,7 +1335,7 @@ class Engine {
     }
 
     bool send(Packet& packet, const char* reason) {
-        if (socket_source && socket_source->failed()) { fatal_send = true; return false; }
+        if (socket_source && (socket_source->failed() || fatal_send)) { fatal_send = true; return false; }
         UINT sent = 0;
         bool success = WinDivertSend(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                     &sent, &packet.address) != 0;
@@ -1343,6 +1343,7 @@ class Engine {
         success = success && sent == packet.bytes.size();
         if (!success) {
             fatal_send = true;
+            if (socket_source) socket_source->network_failure("socket_network_send", error ? error : ERROR_WRITE_FAULT);
             log.write("{\"kind\":\"error\",\"operation\":\"send\",\"reason\":" + json(reason) +
                       ",\"code\":" + std::to_string(error) + "}");
         }
@@ -2140,7 +2141,11 @@ class Engine {
 
         auto found = flows.find(tuple);
         if (found == flows.end()) {
-            if (flows.size() >= MAX_FLOWS) { send(packet, "flow_capacity"); return; }
+            if (flows.size() >= MAX_FLOWS) {
+                if (socket_source) socket_source->network_failure("socket_flow_capacity", ERROR_MORE_DATA, true);
+                else send(packet, "flow_capacity");
+                return;
+            }
             auto flow = std::make_unique<Flow>();
             flow->generation = packet.address.Timestamp;
             flow->capture_qpc = packet.address.Timestamp;
@@ -2195,6 +2200,10 @@ class Engine {
             return;
         }
         if (flow.held.size() >= 256) {
+            if (socket_source) {
+                socket_source->network_failure("socket_pending_packet_capacity", ERROR_MORE_DATA, true);
+                return;
+            }
             decide(tuple, flow, "direct", "pending_capacity");
             forward(packet, tuple, flow, false);
             return;
