@@ -11,7 +11,9 @@ This is a testable hypothesis, not a conclusion that notifications must arrive i
 time. Native callbacks and Security 5156 are tested independently. WinDivert
 SOCKET/FLOW, IP Helper owner tables and PID polling are not routing attribution
 sources in the original experiments. A separate SOCKET observation experiment
-below measures coverage and timing without changing packet routing.
+below measures coverage and timing without changing packet routing. A subsequent
+opt-in TCP routing comparison selects `--ownership-source socket`; the default
+source remains native WFP.
 
 ## Components
 
@@ -21,13 +23,15 @@ below measures coverage and timing without changing packet routing.
 | `ale-endpoints.cpp` | Separate native WFP live-endpoint shadow probe; exact app ID/tuple/endpoint ID and complete query interval, with no fabricated event time or routing authority. |
 | `packets.cpp` | NETWORK capture with bounded queues, first-packet buffering, generation-qualified control, pinned timeout-direct policy, and candidate TCP forward/reverse translation. |
 | `inproc.cpp` | Single-process `inproc` engine: WinDivert NETWORK capture/reinject, on-demand native WFP stored-event lookup, generation match, TCP redirect translation and post-hoc leak check in one native process. Portable match and metric helpers are unit-tested (`g++ -std=c++17 -Wall -Wextra inproc.cpp`). |
+| `socket-owner.hpp` | Bounded SOCKET event and identity history for the opt-in TCP routing source, with conservative lifecycle and generation checks. |
 | `run.py`, `test_run.py` | Correlate the selected native source, full device path and tuple; inject delayed/missing attribution; verify per-client evidence and final collector status. |
 | `bridge.py` | Recover destination from the translated map, send credential-authenticated CONNECT to Gateinto, consume the HTTP response and relay TCP bytes with half-close. |
 | `client.cpp` | Built twice as app-a.exe and app-b.exe; echo nonces and original socket tuples provide test ground truth, never ownership authority. |
 | `positive_control.py` | A narrowly scoped blocked connection checks native drop-callback delivery. Drops are diagnostic only and cannot authorize proxying. |
 | `socket-events.cpp` | Concurrent WinDivert SOCKET and NETWORK sniffing, with event/capture, receipt and process-path readiness clocks. No blocking or injection. |
 | `socket_probe.py`, `test_socket_probe.py` | Compare fresh client attempts, SOCKET PID/path observations, first observed packets and independent native WFP references. |
-| `socket-ci.ps1`, `socket_results.py` | Run six controlled observation cases on each Windows version and publish only projected aggregate results. |
+| `socket-ci.ps1`, `socket_results.py` | Run eight controlled observation cases on each Windows version and publish only projected aggregate results. |
+| `socket-routing-ci.ps1`, `routing_results.py` | Compare actual WFP/SOCKET TCP routing with sequential clients, synchronized bursts and delayed-identity reset controls. |
 | `../../examples/wfp_lab.rs` | Controlled echo endpoints, TLS CONNECT upstream and actual Gateinto proxy with session credentials and forced Gateway routing. |
 | `build.ps1`, `ci.ps1` | Download official signed WinDivert, compile probes, back up/restore audit policy, run cases and retain evidence. |
 
@@ -62,7 +66,10 @@ destructors ran.
 C:\wfp-lab\bin\native-events.exe --restore-state C:\wfp-lab\results\CASE\bfe-state.json --out C:\wfp-lab\restore.jsonl
 ```
 
-Do not run two collectors that modify BFE options concurrently. An external
+Do not start arbitrary concurrent collectors that modify BFE options. The routing
+comparison explicitly nests its independent reference outside the engine: start
+the reference first, fully stop and restore the engine, then drain and restore
+the reference. Each has a separate persisted state file. An external
 configuration change causes guarded restoration to report an error rather than
 overwrite it. Hard VM cancellation cannot promise finally blocks execute;
 GitHub-hosted VMs are disposable, while a persistent local VM requires inspection
@@ -395,3 +402,41 @@ Standard repository CI, the model job, 98 Python checks, cross-compilation and
 the actual Windows DLL helper tests passed. Other PoC Windows/native-control
 jobs remain red for the previously unqualified alternatives. The original
 Subscribe2/3/4 findings and the production qualification limits remain unchanged.
+
+## Opt-in SOCKET TCP routing comparison
+
+`socket-routing-ci.ps1` runs nine cases per Windows version. Two rounds compare
+the native WFP default and `--ownership-source socket` with forty sequential
+clients and a synchronized fifty-client burst. The second round reverses the
+profile order. Each selected-app client must traverse the real Gateinto CONNECT
+proxy and echo its nonce; the other app must echo directly. A separate native
+WFP collector audits each original client identity after routing, with the same
+1000 ms poll interval and shutdown drain for both ownership sources. Missing
+independent references fail validation rather than borrowing the routing proof.
+
+SOCKET routing opens its metadata receiver before NETWORK capture, resolves the
+process image on a separate worker, and buffers an undecided first packet until
+the identity is usable or the hold deadline expires. SOCKET mode does not query
+native WFP snapshots for routing. The existing WFP mode remains the default.
+The comparison reports selected/direct client attempt-to-echo distributions;
+the attempt clock starts after bind and the optional cohort barrier, before
+writing the attempt record and calling connect. It includes that local logging
+overhead, excludes process launch/barrier waiting, and is not an API duration.
+Engine first-decision metrics also include the proxy fixture's target flows and
+must not be interpreted as one sample per original client.
+
+The final case delays selected-app ownership beyond the hold deadline. It checks
+the existing timeout-direct policy, late leak detection and reset behavior.
+Late identity never changes an already direct flow into a proxied flow. Thus
+this policy does not promise zero leakage on attribution timeout.
+
+The lifecycle checks reject new admission after detected closure, conflicting
+ownership and changed SYN generations while preserving qualified TCP teardown.
+Bounded userspace history or queue loss invalidates attribution.
+NETWORK packets expose no SOCKET endpoint cookie, and WinDivert exposes no
+kernel queue-loss counter; clean controlled runs cannot establish arbitrary
+tuple reuse safety or zero loss. The experiment qualifies only its fresh IPv4
+loopback tuples, retained child-process handles and finite Server samples.
+Public artifacts contain aggregate results only. Actual routed performance is
+pending the dedicated Windows jobs; the earlier observation offsets above are
+not routed application latency.

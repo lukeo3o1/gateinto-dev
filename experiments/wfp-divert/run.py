@@ -17,6 +17,11 @@ class NoOwnershipConfirmation(RuntimeError):
     pass
 
 
+VALIDATION_STAGES = ("startup", "clients", "collectors", "client_evidence", "client_attestation",
+                     "client_latency", "native_reference", "gateway", "engine_complete",
+                     "engine_evaluation", "ale_shadow", "cleanup", "complete")
+
+
 def public_summary(summary):
     if not isinstance(summary, dict):
         summary = {}
@@ -29,10 +34,11 @@ def public_summary(summary):
                 "OBSERVED_WHILE_HELD", "OBSERVED_ALE_ORIGINAL_APP", "CHARACTERIZED_ALE_APP_MISMATCH"),
         source=("wfp", "security5156"), mode=("hold", "redirect"), protocol=("tcp", "udp"),
         engine=("external", "inproc", "endpoint-control"), lookup_mode=("inline", "async"),
-        enum_scope=("legacy", "destination"), filter_cache=("on", "off"),
+        enum_scope=("legacy", "destination"), filter_cache=("on", "off"), ownership_source=("wfp", "socket"),
         wfp_api=("subscribe2", "subscribe3", "subscribe4", "poll"),
         scenario=("baseline", "retransmit", "reuse"),
-        topology=("single-host-local", "external-connect-only"))
+        topology=("single-host-local", "external-connect-only"),
+        validation_stage=VALIDATION_STAGES, failure_stage=VALIDATION_STAGES)
     result = {key: summary[key] for key, choices in enums.items()
               if key in summary and summary[key] in choices}
     result.setdefault("status", "UNKNOWN")
@@ -49,10 +55,11 @@ def public_summary(summary):
                   "source_target_complete_outbound_events", "matching_native_drops", "client_exit",
                   "restore_exit", "fallback_restore_exit_code", "concurrency", "window_before_ms",
                   "window_after_ms", "client_hold_ms", "benchmark_round", "delay_ms",
-                  "selected_tuple_count", "quic_dropped_clients")
+                  "selected_tuple_count", "quic_dropped_clients", "barrier_client_count")
     result.update(numeric_fields(summary, count_keys, integers=True))
     for key in ("controlled_echo", "reused_syn_rejected", "nonselected_client_disrupted", "restore_failed",
-                "quic", "expect_leak", "cleanup_failed", "routing_authority", "packet_interception"):
+                "quic", "expect_leak", "cleanup_failed", "routing_authority", "packet_interception",
+                "native_reference", "sequential", "synchronized_start"):
         if type(summary.get(key)) is bool:
             result[key] = summary[key]
     if isinstance(summary.get("clients"), list):
@@ -101,16 +108,23 @@ def public_summary(summary):
             "lookup_query_cpu_errors", "lookup_query_cpu_error_code", "lookup_returned_events",
             "filter_cache_hits", "filter_cache_misses", "filter_cache_rejections", "bfe_errors",
             "decided_proxy", "decided_direct", "unattributed", "leaked", "rst_count", "quic_drops",
-            "window_before_ms", "window_after_ms", "delay_ms"), integers=True)
+            "window_before_ms", "window_after_ms", "delay_ms",
+            "socket_received", "socket_connect_received", "socket_close_received", "socket_identity_ready",
+            "socket_identity_missing", "socket_source_errors", "socket_queue_overflow", "socket_history_overflow",
+            "socket_output_errors", "socket_matches", "socket_rejected", "socket_ambiguous", "socket_closed",
+            "socket_missing", "socket_reuse_rejected", "socket_history_entries"), integers=True)
         projected.update(numeric_fields(engine, ("lookup_query_busy_ms", "lookup_query_cpu_ms",
                                                   "lookup_runtime_ms", "lookup_busy_share")))
         projected.update(booleans(engine, ("lookup_worker_error", "filter_cache", "lookup_query_cpu_valid",
-                                           "nonselected_client_disrupted", "send_rst", "success")))
-        for key in ("lookup_mode", "enum_scope"):
+                                           "nonselected_client_disrupted", "send_rst", "success",
+                                           "socket_clean_shutdown", "driver_queue_loss_known")))
+        for key in ("lookup_mode", "enum_scope", "ownership_source"):
             if engine.get(key) in enums[key]:
                 projected[key] = engine[key]
         for key in ("first_packet_decision_latency_ms", "lookup_result_apply_ms", "lookup_calls_per_flow",
-                    "lookup_duration_ms", "added_latency_held_ms", "added_latency_direct_ms", "added_latency_proxy_ms"):
+                    "lookup_duration_ms", "added_latency_held_ms", "added_latency_direct_ms", "added_latency_proxy_ms",
+                    "socket_event_to_recv_ms", "socket_event_to_identity_ready_ms", "socket_identity_lookup_ms",
+                    "socket_identity_ready_to_apply_ms"):
             if isinstance(engine.get(key), dict):
                 projected[key] = numeric_fields(engine[key], ("count", "min", "max", "p50", "p95"))
         projected.update(phases(engine, ("lookup_create", "lookup_enum", "lookup_destroy", "lookup_process")))
@@ -126,6 +140,37 @@ def public_summary(summary):
             projected["enum_condition_shapes"] = [numeric_fields(shape, ("mask", "count"), integers=True)
                                                    for shape in engine["enum_condition_shapes"] if isinstance(shape, dict)]
         result["engine_summary"] = projected
+        result["engine_summary"]["first_packet_decision_population"] = "all_engine_flows_including_fixture"
+    if isinstance(summary.get("client_latency"), dict):
+        result["client_latency"] = dict(start_boundary="after_bind_before_connect_or_send")
+        for group in ("selected", "direct"):
+            value = summary["client_latency"].get(group)
+            if not isinstance(value, dict):
+                continue
+            projected = numeric_fields(value, ("clients", "echo_matches", "reset_observed"), integers=True)
+            for key in ("start_to_echo_ms", "start_to_done_ms"):
+                if isinstance(value.get(key), dict):
+                    projected[key] = numeric_fields(value[key], ("count", "min", "p50", "p95", "max"))
+            result["client_latency"][group] = projected
+    for name, fields in (("socket_attestation", ("client_total", "matched_clients", "pid_creation_matches",
+                                                "deadline_checked_clients", "late_leak_clients")),
+                         ("native_reference_audit", ("client_total", "matched_clients", "missing_clients",
+                                                     "conflicting_clients", "poll_interval_ms", "drain_ms"))):
+        value = summary.get(name)
+        if isinstance(value, dict):
+            projected = numeric_fields(value, fields, integers=True)
+            projected.update(booleans(value, ("success",)))
+            if isinstance(value.get("native_summary"), dict):
+                projected["native_summary"] = public_summary(dict(native_summary=value["native_summary"]))["native_summary"]
+            result[name] = projected
+    if isinstance(summary.get("native_reference_cleanup"), dict):
+        cleanup = summary["native_reference_cleanup"]
+        forced = len(cleanup["cleanup_forced_pids"]) if isinstance(cleanup.get("cleanup_forced_pids"), list) else cleanup.get("forced_processes", 0)
+        forced = forced if type(forced) is int and forced >= 0 else 0
+        failed = bool(cleanup.get("fallback_restore_exit_code", 0) or cleanup.get("fallback_restore_error")
+                      or cleanup.get("fallback_restore_failed"))
+        result["native_reference_cleanup"] = dict(forced_processes=forced, fallback_restore_failed=failed,
+                                                   success=forced == 0 and not failed)
     for name in ("endpoint_control", "ale_probe"):
         if not isinstance(summary.get(name), dict):
             continue
@@ -268,6 +313,10 @@ def native_command(bin_dir, out_dir, seconds, wfp_api, callback_drain_ms=0):
             "--wfp-api", wfp_api, "--callback-drain-ms", callback_drain_ms]
 
 
+def native_reference_command(bin_dir, out_dir, seconds):
+    return native_command(bin_dir, out_dir / "native-reference", seconds, "poll") + ["--poll-interval-ms", 1000]
+
+
 def inproc_command(bin_dir, out_dir, manifest, selected_app, args):
     port = manifest["target_port"]
     command = [bin_dir / "inproc.exe", "--target", manifest["target_ip"], "--port", port,
@@ -282,7 +331,8 @@ def inproc_command(bin_dir, out_dir, manifest, selected_app, args):
                "--delay-ms", args.delay_ms,
                "--lookup-mode", getattr(args, "lookup_mode", "inline"),
                "--filter-cache", getattr(args, "filter_cache", "on"),
-               "--enum-scope", getattr(args, "enum_scope", "legacy")]
+               "--enum-scope", getattr(args, "enum_scope", "legacy"),
+               "--ownership-source", getattr(args, "ownership_source", "wfp")]
     if args.protocol == "udp" or args.quic:
         command += ["--udp-port", manifest["udp_ports"][0]]
     if args.quic:
@@ -294,7 +344,7 @@ def inproc_client_plan(args, manifest):
     protocol = "udp" if args.quic else args.protocol
     port = manifest["udp_ports"][0] if protocol == "udp" else manifest["target_port"]
     apps = [("a" if index % 2 == 0 else "b", index) for index in range(args.concurrency)] \
-        if args.concurrency else [(app, iteration) for iteration in range(3) for app in ["a", "b"]]
+        if args.concurrency else [(app, iteration) for iteration in range(getattr(args, "iterations", 3)) for app in ["a", "b"]]
     return [dict(app=app, iteration=iteration, protocol=protocol, port=port) for app, iteration in apps]
 
 
@@ -465,9 +515,137 @@ def ale_control_report(clients, native_records, ale_records, app_paths, frequenc
     return report
 
 
-def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect_leak=False):
+def positive_integer(value):
+    return type(value) is int and value > 0
+
+
+def socket_ownership_valid(record, client, attempt, capture, decided, deadline, leaking, clock):
+    if not clock or len(clock) != 4:
+        return False
+    frequency, anchor_filetime, anchor_qpc, uncertainty = clock
+    if (not all(positive_integer(value) for value in (frequency, anchor_filetime, anchor_qpc))
+            or type(uncertainty) is not int or uncertainty < 0):
+        return False
+    pid, creation = client.get("pid"), client.get("process_creation_filetime")
+    event, received, ready = (record.get(key) for key in ("socket_event_qpc", "socket_recv_qpc", "socket_app_ready_qpc"))
+    applied = record.get("apply_qpc")
+    if (record.get("ownership_source") != "socket" or "event_filetime" in record
+            or record.get("creation_guard_valid") is not True
+            or not all(positive_integer(value) for value in (pid, creation, event, received, ready, applied,
+                                                            record.get("endpoint_id"), attempt.get("attempt_qpc")))
+            or record.get("pid") != pid or attempt.get("pid") != pid
+            or record.get("process_creation_filetime") != creation or record.get("capture_qpc") != capture
+            or record.get("qpc") != applied
+            or not attempt["attempt_qpc"] <= event <= capture
+            or not event <= received <= ready <= applied
+            or not leaking and not applied <= decided < deadline
+            or leaking and not deadline <= decided <= applied):
+        return False
+    creation_ticks = anchor_qpc * 10_000_000 + (creation - anchor_filetime) * frequency
+    return creation_ticks <= (event - uncertainty) * 10_000_000
+
+
+def client_latency_summary(clients, frequency):
+    if not positive_integer(frequency):
+        raise RuntimeError("invalid client latency clock")
+    result = {}
+    for app, group in (("a", "selected"), ("b", "direct")):
+        members = [client for client in clients if client.get("app") == app]
+        echoes, done, resets = [], [], 0
+        for client in members:
+            attempts = [r for r in client.get("attempts", []) if r.get("kind") == "client_attempt"
+                        and r.get("nonce") == client.get("nonce")]
+            replies = [r for r in client.get("results", []) if r.get("kind") == "client"
+                       and r.get("nonce") == client.get("nonce")]
+            if not replies and client.get("returncode") != 0:
+                continue
+            if len(attempts) != 1 or len(replies) != 1:
+                raise RuntimeError("client latency evidence missing")
+            start, echo, end = (replies[0].get(key) for key in ("start_qpc", "echo_qpc", "done_qpc"))
+            if (not all(positive_integer(value) for value in (start, echo, end)) or not start <= echo <= end
+                    or attempts[0].get("attempt_qpc") != start or tuple_key(attempts[0]) != tuple_key(replies[0])):
+                raise RuntimeError("invalid client latency evidence")
+            echoes.append((echo - start) * 1000 / frequency)
+            done.append((end - start) * 1000 / frequency)
+            resets += replies[0].get("status") == "reset_observed"
+
+        def distribution(values):
+            values = sorted(values)
+            if not values:
+                return dict(count=0)
+            return dict(count=len(values), min=values[0], p50=values[math.ceil(len(values) * .5) - 1],
+                        p95=values[math.ceil(len(values) * .95) - 1], max=values[-1])
+
+        result[group] = dict(clients=len(members), echo_matches=len(echoes), reset_observed=resets,
+                             start_to_echo_ms=distribution(echoes), start_to_done_ms=distribution(done))
+    return result
+
+
+def native_reference_audit(clients, packet_records, native_records, app_paths, clock, returncode):
+    report = dict(success=False, client_total=len(clients), matched_clients=0, missing_clients=0,
+                  conflicting_clients=0, poll_interval_ms=1000, drain_ms=1100, rows=[])
+    summaries = [r for r in native_records if r.get("kind") == "summary"]
+    summary = summaries[0] if len(summaries) == 1 else None
+    report["native_summary"] = summary
+    report["poll_interval_ms"] = summary.get("wfp_poll_interval_ms") if summary else None
+    if (returncode != 0 or not summary or summary.get("wfp_api") != "poll" or not summary.get("wfp_polls")
+            or type(summary.get("wfp_poll_interval_ms")) is not int or summary["wfp_poll_interval_ms"] != 1000
+            or any(summary.get(key) != 0 for key in ("errors", "queue_dropped", "wfp_poll_errors", "wfp_enum_errors"))
+            or summary.get("wfp_enum_truncated") is not False
+            or any(r.get("kind") in ("error", "wfp_poll_error", "wfp_enum_error") for r in native_records)):
+        report["missing_clients"] = len(clients)
+        return report
+    frequency, anchor_filetime, anchor_qpc, uncertainty = clock
+    if (not all(positive_integer(value) for value in (frequency, anchor_filetime, anchor_qpc))
+            or type(uncertainty) is not int or uncertainty < 0):
+        report["missing_clients"] = len(clients)
+        return report
+    seen = set()
+    for client in clients:
+        attempts = [r for r in client.get("attempts", []) if r.get("kind") == "client_attempt"
+                    and r.get("nonce") == client.get("nonce")]
+        key = tuple_key(attempts[0]) if len(attempts) == 1 else None
+        captures = [r.get("capture_qpc") for r in packet_records if r.get("kind") == "decision"
+                    and tuple_key(r) == key and positive_integer(r.get("capture_qpc"))]
+        if (not key or key in seen or not captures or not positive_integer(client.get("pid"))
+                or attempts[0].get("pid") != client["pid"] or not positive_integer(attempts[0].get("attempt_qpc"))):
+            report["missing_clients"] += 1
+            continue
+        seen.add(key)
+        began, captured = attempts[0]["attempt_qpc"], min(captures)
+        expected = normalized_path(app_paths[client["app"]])
+        matches, conflict = [], False
+        for event in native_records:
+            if (event.get("kind") != "wfp" or tuple_key(event) != key or event.get("complete") is not True
+                    or event.get("direction") != "outbound" or event.get("layer_id") != 48
+                    or not positive_integer(event.get("event_filetime")) or not event.get("app_path")):
+                continue
+            occurred = anchor_qpc * 10_000_000 + (event["event_filetime"] - anchor_filetime) * frequency
+            if not (began - uncertainty) * 10_000_000 <= occurred <= (captured + uncertainty) * 10_000_000:
+                continue
+            if normalized_path(event["app_path"]) == expected:
+                matches.append(event)
+            else:
+                conflict = True
+        report["matched_clients"] += bool(matches) and not conflict
+        report["missing_clients"] += not matches or conflict
+        report["conflicting_clients"] += conflict
+        report["rows"].append(dict(app=client["app"], tuple=list(key), matched=bool(matches) and not conflict,
+                                   attempt_qpc=began, capture_qpc=captured, references=matches))
+    report["success"] = bool(clients) and report["matched_clients"] == len(clients)
+    return report
+
+
+def inproc_ready_matches(record, ownership_source):
+    return (ownership_source in ("wfp", "socket") and record.get("kind") == "ready"
+            and record.get("ownership_source") == ownership_source)
+
+
+def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect_leak=False,
+                           ownership_source="wfp", clock=None):
     selected_tuples, all_tuples = set(), set()
     quic_dropped = 0
+    attested, late = 0, 0
     for client in clients:
         app, nonce = client["app"], client["nonce"]
         attempts = [r for r in client["attempts"] if r.get("kind") == "client_attempt" and r.get("nonce") == nonce]
@@ -503,10 +681,18 @@ def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect
         deadline = decision.get("deadline_qpc", 0)
         if capture <= 0 or deadline <= capture or decided < capture or not leaking and decided >= deadline:
             raise RuntimeError(f"client {nonce} has invalid decision timing")
-        ownership = [r for r in records if r.get("kind") == "ownership" and tuple_key(r) == key
-                     and r.get("generation") == generation and r.get("capture_qpc") == capture
+        candidates = [r for r in records if r.get("kind") == "ownership" and tuple_key(r) == key
+                      and r.get("generation") == generation]
+        if ownership_source == "socket" and any(
+                not socket_ownership_valid(r, client, attempts[0], capture, decided, deadline, leaking, clock)
+                for r in candidates):
+            raise RuntimeError(f"client {nonce} has conflicting socket ownership metadata")
+        ownership = [r for r in candidates
+                     if r.get("generation") == generation and r.get("capture_qpc") == capture
                      and normalized_path(r.get("app_path", "")) == normalized_path(app_paths[app])
-                     and r.get("event_filetime", 0) > 0]
+                     and r.get("ownership_source", "wfp") == ownership_source
+                     and (socket_ownership_valid(r, client, attempts[0], capture, decided, deadline, leaking, clock)
+                          if ownership_source == "socket" else r.get("event_filetime", 0) > 0)]
         if not ownership:
             raise RuntimeError(f"client {nonce} lacks generation-matched native ownership")
         if any(normalized_path(r.get("app_path", "")) != normalized_path(app_paths[app])
@@ -523,6 +709,8 @@ def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect
             if client["returncode"] != 0 or len(results) != 1 or results[0].get("status") != status \
                     or tuple_key(results[0]) != key:
                 raise RuntimeError(f"client {nonce} lacks a matching {status} result")
+            if ownership_source == "socket" and results[0].get("pid") != client.get("pid"):
+                raise RuntimeError(f"client {nonce} result has the wrong process identity")
         if leaking:
             leaks = [r for r in records if r.get("kind") == "leaked" and tuple_key(r) == key
                      and r.get("generation") == generation]
@@ -539,6 +727,9 @@ def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect
                 raise RuntimeError(f"client {nonce} was dropped before its checked reset")
         elif not any(o.get("qpc", 0) <= decided for o in ownership):
             raise RuntimeError(f"client {nonce} was decided before native ownership was observed")
+        if ownership_source == "socket":
+            attested += 1
+            late += leaking
 
     if not clients or not selected_tuples:
         raise RuntimeError("inproc case lacks selected client attempts")
@@ -548,7 +739,11 @@ def inproc_client_evidence(clients, records, app_paths, mode, quic=False, expect
             tuple_key(r) not in selected_tuples and (r.get("kind") == "rst" or
             r.get("kind") == "decision" and r.get("action") == "drop") for r in records):
         raise RuntimeError("a non-selected tuple was redirected, dropped or reset")
-    return dict(selected_tuples=selected_tuples, quic_dropped_clients=quic_dropped)
+    result = dict(selected_tuples=selected_tuples, quic_dropped_clients=quic_dropped)
+    if ownership_source == "socket":
+        result["socket_attestation"] = dict(client_total=len(clients), matched_clients=attested,
+            pid_creation_matches=attested, deadline_checked_clients=attested - late, late_leak_clients=late)
+    return result
 
 
 def inproc_client_results(path):
@@ -568,11 +763,22 @@ def inproc_client_results(path):
 def inproc_evaluate(summary, mode, protocol, quic, expected_proxy_clients, gateway_count,
                     expect_leak=False, expected_selected_clients=None,
                     expected_lookup_mode=None, expected_filter_cache=None,
-                    expected_enum_scope=None, expected_window_before_ms=None):
+                    expected_enum_scope=None, expected_window_before_ms=None, expected_ownership_source=None):
     if not summary or summary.get("engine") != "inproc" or not summary.get("success"):
         return "FAIL", "inproc engine summary missing or reported failure"
     if summary.get("lookup_errors") or summary.get("bfe_errors"):
         return "FAIL", "inproc native lookup or BFE restoration reported an error"
+    if expected_ownership_source is not None and summary.get("ownership_source") != expected_ownership_source:
+        return "FAIL", "native ownership source differs from the requested comparison"
+    if expected_ownership_source == "socket" and (summary.get("socket_clean_shutdown") is not True or any(
+            summary.get(key) for key in ("socket_source_errors", "socket_queue_overflow", "socket_history_overflow", "socket_output_errors"))):
+        return "FAIL", "socket ownership source reported a receiver, history or shutdown failure"
+    if expected_ownership_source == "socket":
+        counters = [summary.get(key) for key in ("lookup_calls", "lookup_query_count", "lookup_returned_events")]
+        counters += [summary.get(key, {}).get("calls") if isinstance(summary.get(key), dict) else None
+                     for key in ("lookup_create", "lookup_enum", "lookup_destroy")]
+        if any(type(value) is not int or value != 0 for value in counters):
+            return "FAIL", "socket routing unexpectedly used or omitted native WFP query work"
     if expected_lookup_mode is not None and summary.get("lookup_mode") != expected_lookup_mode:
         return "FAIL", "native lookup mode differs from the requested comparison"
     if expected_filter_cache is not None and summary.get("filter_cache") is not expected_filter_cache:
@@ -769,6 +975,15 @@ def qpc():
     return result.value
 
 
+def process_creation_filetime(process):
+    created, exited, kernel, user = (ctypes.c_ulonglong() for _ in range(4))
+    handle = ctypes.c_void_p(int(process._handle))
+    if not ctypes.windll.kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                                ctypes.byref(kernel), ctypes.byref(user)):
+        return None
+    return created.value
+
+
 def stop_inproc_collectors(engine, probe, bin_dir, out_dir):
     report = dict(cleanup_forced_pids=[])
     for process in [probe, engine]:
@@ -797,9 +1012,56 @@ def stop_inproc_collectors(engine, probe, bin_dir, out_dir):
     return report
 
 
+def stop_native_reference(reference, bin_dir, out_dir):
+    directory = out_dir / "native-reference"
+    if reference is None:
+        return dict(cleanup_forced_pids=[])
+    deadline = time.monotonic() + 1.1
+    while reference.poll() is None and time.monotonic() < deadline:
+        time.sleep(.02)
+    (directory / "native.stop").touch()
+    return stop_inproc_collectors(reference, None, bin_dir, directory)
+
+
+def finish_routing_collectors(engine, probe, reference, bin_dir, out_dir,
+                              engine_cleanup=None, reference_cleanup=None):
+    if engine_cleanup is None:
+        engine_cleanup = stop_inproc_collectors(engine, probe, bin_dir, out_dir)
+    if reference is not None and reference_cleanup is None:
+        reference_cleanup = stop_native_reference(reference, bin_dir, out_dir)
+    return engine_cleanup, reference_cleanup
+
+
+def release_client_start_barrier(clients, start_file, check_collectors):
+    if not clients or start_file.exists():
+        raise RuntimeError("invalid client start barrier")
+    deadline = time.monotonic() + 8
+    while True:
+        check_collectors()
+        if any(client["process"].poll() is not None for client in clients):
+            raise RuntimeError("barrier client exited before release")
+        if all(client["ready_file"].is_file() for client in clients):
+            start_file.touch()
+            return len(clients)
+        if time.monotonic() > deadline:
+            raise TimeoutError("client start barrier readiness missing")
+        time.sleep(.01)
+
+
+def inproc_source_supported(ownership_source, protocol, quic):
+    return (ownership_source in ("wfp", "socket") and protocol in ("tcp", "udp")
+            and (ownership_source == "wfp" or protocol == "tcp" and not quic))
+
+
 def run_inproc(args, parser):
-    if args.seconds < 15 or args.hold_ms < 1 or not 0 <= args.delay_ms <= 10000 or not 0 <= args.concurrency <= 4096:
+    if not inproc_source_supported(args.ownership_source, args.protocol, args.quic):
+        parser.error("socket ownership routing currently supports TCP only")
+    if args.seconds < 15 or args.hold_ms < 1 or args.iterations < 1 or not 0 <= args.delay_ms <= 10000 or not 0 <= args.concurrency <= 4096:
         parser.error("require --seconds >= 15, --hold-ms >= 1, --delay-ms 0..10000 and --concurrency 0..4096")
+    if args.synchronized_start and (args.concurrency <= 0 or args.sequential):
+        parser.error("--synchronized-start requires positive concurrency and no --sequential")
+    if args.sequential and args.concurrency:
+        parser.error("--sequential cannot be combined with --concurrency")
     if args.expect_leak and (args.mode != "redirect" or args.protocol != "tcp" or args.quic or not args.send_rst
                              or not args.hold_ms < args.delay_ms < args.hold_ms + args.leak_ms):
         parser.error("--expect-leak requires TCP redirect, --send-rst and a selected-app delay inside the post-timeout leak window")
@@ -813,11 +1075,17 @@ def run_inproc(args, parser):
     bridge = None
     probe = None
     engine = None
-    summary = dict(status="NOT_COMPLETED", engine="inproc", mode=args.mode, protocol="udp" if args.quic else args.protocol,
+    reference = None
+    engine_cleanup = None
+    reference_cleanup = None
+    summary = dict(status="NOT_COMPLETED", validation_stage="startup", engine="inproc", mode=args.mode,
+                   protocol="udp" if args.quic else args.protocol,
                    quic=args.quic, expect_leak=args.expect_leak, delay_ms=args.delay_ms,
                    lookup_mode=args.lookup_mode, filter_cache=args.filter_cache, enum_scope=args.enum_scope,
                    client_hold_ms=args.client_hold_ms, window_before_ms=args.window_before_ms,
                    benchmark_round=args.benchmark_round,
+                   ownership_source=args.ownership_source, native_reference=args.native_reference,
+                   sequential=args.sequential, synchronized_start=args.synchronized_start,
                    concurrency=args.concurrency, topology="single-host-local")
 
     def start(command, name):
@@ -851,12 +1119,30 @@ def run_inproc(args, parser):
         app_paths = {app: native_path(args.bin / f"app-{app}.exe") for app in ["a", "b"]}
         selected_app = app_paths["a"]
         summary["selected_app"] = selected_app
+        clock = windows_clock()
+        summary.update(qpc_frequency=clock[0], anchor_filetime=clock[1], anchor_qpc=clock[2],
+                       clock_uncertainty_ticks=clock[3])
         packet_file = args.out / "packets.jsonl"
         packet_tail = JsonTail(packet_file)
         if redirecting:
             from bridge import Bridge
             bridge = Bridge(manifest, packet_file, args.out / "bridge.jsonl")
             bridge.start()
+        if args.native_reference:
+            reference_dir = args.out / "native-reference"
+            reference_dir.mkdir()
+            reference = start(native_reference_command(args.bin, args.out, args.seconds + 30), "native-reference")
+            reference_tail = JsonTail(reference_dir / "native.jsonl")
+            deadline = time.monotonic() + 10
+            while True:
+                alive(reference, "native reference")
+                ready = next((r for r in reference_tail.read() if r.get("kind") == "ready"), None)
+                if ready:
+                    summary["native_reference_ready"] = ready
+                    break
+                if time.monotonic() > deadline:
+                    raise TimeoutError("native reference readiness missing")
+                time.sleep(.01)
         engine_args = inproc_command(args.bin, args.out, manifest, selected_app, args)
         if redirecting:
             engine_args += ["--listener-port", bridge.port]
@@ -868,11 +1154,16 @@ def run_inproc(args, parser):
             alive(engine, "inproc engine")
             for record in packet_tail.read():
                 if record.get("kind") == "ready":
+                    if not inproc_ready_matches(record, args.ownership_source):
+                        raise RuntimeError("engine ready ownership source differs from request")
                     packet_ready = True
                     packet_frequency = record.get("qpc_frequency", 0)
+                    summary["engine_ready"] = record
             if time.monotonic() > deadline:
                 raise TimeoutError("inproc engine readiness missing")
             time.sleep(.01)
+        if packet_frequency != clock[0]:
+            raise RuntimeError("engine clock differs from the client reference clock")
 
         if args.ale_probe:
             probe = start(ale_probe_command(args.bin, args.out, manifest, args), "ale-endpoints")
@@ -885,7 +1176,18 @@ def run_inproc(args, parser):
                     raise TimeoutError("ALE endpoint probe readiness missing")
                 time.sleep(.01)
 
+        summary["validation_stage"] = "clients"
         clients = []
+        client_deadline = time.monotonic() + min(args.seconds - 5, 40)
+
+        def wait_clients(waiting):
+            while any(c["process"].poll() is None for c in waiting):
+                alive(engine, "inproc engine")
+                if reference:
+                    alive(reference, "native reference")
+                if time.monotonic() > client_deadline:
+                    raise TimeoutError("client timeout")
+                time.sleep(.01)
 
         def launch(app, iteration, protocol, port):
             name = f"client-{app}-{protocol}-{iteration}"
@@ -897,19 +1199,34 @@ def run_inproc(args, parser):
                 command += ["--expect-reset", 1]
             if args.client_hold_ms:
                 command += ["--hold-open-ms", args.client_hold_ms]
-            clients.append(dict(app=app, protocol=protocol, nonce=nonce, process=start(command, name),
-                                attempt_file=attempt_file, stdout_file=args.out / f"{name}.stdout.txt"))
+            ready_file = args.out / f"{name}.ready"
+            if args.synchronized_start:
+                command += ["--start-file", (args.out / "clients.start").resolve(), "--ready-file", ready_file.resolve()]
+            launched = qpc()
+            process = start(command, name)
+            created = process_creation_filetime(process)
+            if not positive_integer(created):
+                raise RuntimeError("client process creation time unavailable")
+            client = dict(app=app, protocol=protocol, nonce=nonce, process=process, pid=process.pid,
+                          process_creation_filetime=created, launched_qpc=launched, ready_file=ready_file,
+                          attempt_file=attempt_file, stdout_file=args.out / f"{name}.stdout.txt")
+            clients.append(client)
+            if args.sequential and not args.concurrency:
+                wait_clients([client])
 
         for client in inproc_client_plan(args, manifest):
             launch(**client)
 
-        deadline = time.monotonic() + min(args.seconds - 5, 40)
-        while any(c["process"].poll() is None for c in clients):
-            alive(engine, "inproc engine")
-            if time.monotonic() > deadline:
-                raise TimeoutError("client timeout")
-            time.sleep(.01)
+        if args.synchronized_start:
+            def check_collectors():
+                alive(engine, "inproc engine")
+                if reference:
+                    alive(reference, "native reference")
+            summary["barrier_client_count"] = release_client_start_barrier(
+                clients, args.out / "clients.start", check_collectors)
+        wait_clients(clients)
 
+        summary["validation_stage"] = "collectors"
         if probe:
             (args.out / "ale-endpoints.stop").touch()
             try:
@@ -923,6 +1240,11 @@ def run_inproc(args, parser):
         except subprocess.TimeoutExpired:
             engine.terminate()
             raise RuntimeError("inproc engine did not exit")
+        engine_cleanup, reference_cleanup = finish_routing_collectors(
+            engine, probe, reference, args.bin, args.out)
+        if reference:
+            summary["native_reference_cleanup"] = reference_cleanup
+        summary["validation_stage"] = "client_evidence"
         packet_records = JsonTail(packet_file).read()
         try:
             engine_summary = json.loads((args.out / "engine-summary.json").read_text())
@@ -932,6 +1254,8 @@ def run_inproc(args, parser):
         client_evidence = []
         for client in clients:
             client_evidence.append(dict(app=client["app"], protocol=client["protocol"], nonce=client["nonce"],
+                                        pid=client["pid"], process_creation_filetime=client["process_creation_filetime"],
+                                        launched_qpc=client["launched_qpc"],
                                         attempts=JsonTail(client["attempt_file"]).read(),
                                         results=inproc_client_results(client["stdout_file"]),
                                         returncode=client["process"].returncode))
@@ -939,10 +1263,24 @@ def run_inproc(args, parser):
         if probe:
             summary["ale_probe"] = ale_probe_report(client_evidence, packet_records,
                 JsonTail(args.out / "ale-endpoints.jsonl").read(), app_paths, packet_frequency, probe.returncode)
+        summary["validation_stage"] = "client_attestation"
         evidence = inproc_client_evidence(client_evidence, packet_records, app_paths, args.mode,
-                                         quic=args.quic, expect_leak=args.expect_leak)
+                                         quic=args.quic, expect_leak=args.expect_leak,
+                                         ownership_source=args.ownership_source, clock=clock)
         selected_tuples = evidence["selected_tuples"]
+        summary["validation_stage"] = "client_latency"
+        summary["client_latency"] = client_latency_summary(client_evidence, packet_frequency)
+        if "socket_attestation" in evidence:
+            summary["socket_attestation"] = evidence["socket_attestation"]
+        if reference:
+            summary["validation_stage"] = "native_reference"
+            audit = native_reference_audit(client_evidence, packet_records,
+                JsonTail(args.out / "native-reference" / "native.jsonl").read(), app_paths, clock, reference.returncode)
+            summary["native_reference_audit"] = audit
+            if not audit["success"]:
+                raise RuntimeError("independent native reference did not confirm every fresh original client")
 
+        summary["validation_stage"] = "gateway"
         gateway_records = []
         gateway_path = args.out / "gateway.jsonl"
         expected_proxy = len(selected_tuples) if redirecting and not args.expect_leak else 0
@@ -958,6 +1296,7 @@ def run_inproc(args, parser):
         if any(r.get("kind") != "gateway_connect" or r.get("request_line") != expected_line for r in gateway_records):
             raise RuntimeError("gateway CONNECT destination differs from expected transparent tunnels")
 
+        summary["validation_stage"] = "engine_complete"
         if any(r.get("kind") == "error" for r in packet_records):
             raise RuntimeError("inproc engine reported an error")
         complete = [r for r in packet_records if r.get("kind") == "complete"]
@@ -965,29 +1304,43 @@ def run_inproc(args, parser):
             raise RuntimeError("inproc engine did not complete successfully")
         if engine.returncode != 0:
             raise RuntimeError("inproc engine exit code was nonzero")
+        summary["validation_stage"] = "engine_evaluation"
         status, error = inproc_evaluate(engine_summary, args.mode, "udp" if args.quic else args.protocol,
                                         args.quic, expected_proxy, len(gateway_records), expect_leak=args.expect_leak,
                                         expected_selected_clients=len(selected_tuples), expected_lookup_mode=args.lookup_mode,
                                         expected_filter_cache=args.filter_cache == "on", expected_enum_scope=args.enum_scope,
-                                        expected_window_before_ms=args.window_before_ms)
+                                        expected_window_before_ms=args.window_before_ms,
+                                        expected_ownership_source=args.ownership_source)
         summary["status"] = status
         if error:
             summary["error"] = error
+            summary["failure_stage"] = "engine_evaluation"
         summary["selected_tuple_count"] = len(selected_tuples)
         summary["gateway_connect_count"] = len(gateway_records)
         summary["quic_dropped_clients"] = evidence["quic_dropped_clients"]
         if args.ale_probe and status == "PASS_RESTRICTED_CASE" and summary["ale_probe"]["status"] != "OBSERVED_WHILE_HELD":
             summary.update(routing_case_status=status, status="INCONCLUSIVE_ALE_ENDPOINT_PROBE",
+                           validation_stage="ale_shadow", failure_stage="ale_shadow",
                            error=summary["ale_probe"].get("reason"))
+        elif status == "PASS_RESTRICTED_CASE":
+            summary["validation_stage"] = "complete"
     except Exception as error:
-        summary.update(status="FAIL", error=str(error))
+        summary.update(status="FAIL", failure_stage=summary["validation_stage"], error=str(error))
     finally:
         for name in ["inproc.stop", "ale-endpoints.stop"]:
             (args.out / name).touch()
-        cleanup = stop_inproc_collectors(engine, probe, args.bin, args.out)
+        cleanup, reference_cleanup = finish_routing_collectors(
+            engine, probe, reference, args.bin, args.out, engine_cleanup, reference_cleanup)
         summary.update(cleanup)
         if cleanup["cleanup_forced_pids"] or cleanup.get("fallback_restore_exit_code", 0) or cleanup.get("fallback_restore_error"):
-            summary.update(status="FAIL", cleanup_failed=True)
+            summary.update(status="FAIL", cleanup_failed=True, validation_stage="cleanup")
+            summary.setdefault("failure_stage", "cleanup")
+        if reference:
+            summary["native_reference_cleanup"] = reference_cleanup
+            if (reference_cleanup["cleanup_forced_pids"] or reference_cleanup.get("fallback_restore_exit_code", 0)
+                    or reference_cleanup.get("fallback_restore_error")):
+                summary.update(status="FAIL", cleanup_failed=True, validation_stage="cleanup")
+                summary.setdefault("failure_stage", "cleanup")
         if bridge:
             bridge.close()
         for process in reversed(processes):
@@ -1158,6 +1511,10 @@ def main():
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--seconds", type=int, default=35)
     parser.add_argument("--engine", choices=["external", "inproc", "endpoint-control"], default="external")
+    parser.add_argument("--ownership-source", choices=["wfp", "socket"], default="wfp")
+    parser.add_argument("--native-reference", action="store_true")
+    parser.add_argument("--sequential", action="store_true")
+    parser.add_argument("--synchronized-start", action="store_true")
     parser.add_argument("--concurrency", type=int, default=0)
     parser.add_argument("--quic", action="store_true")
     parser.add_argument("--window-before-ms", type=int, default=500)
@@ -1176,6 +1533,8 @@ def main():
         parser.error("Windows is required; pure attribution tests run on other hosts")
     if not 0 <= args.client_hold_ms <= 5000:
         parser.error("--client-hold-ms must be 0..5000")
+    if args.engine != "inproc" and (args.ownership_source != "wfp" or args.native_reference or args.sequential or args.synchronized_start):
+        parser.error("ownership-source, native-reference and client launch controls require --engine inproc")
     if args.engine == "endpoint-control":
         return run_endpoint_control(args, parser)
     if args.engine == "inproc":

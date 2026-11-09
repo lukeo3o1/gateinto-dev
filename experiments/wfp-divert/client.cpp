@@ -1,7 +1,32 @@
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
 namespace client {
+enum class StartGateState { Waiting, Released, TimedOut };
+
+bool start_gate_enabled(bool has_start, const std::string& start,
+                        bool has_ready, const std::string& ready) {
+    if (!has_start && !has_ready) return false;
+    if (!has_start || !has_ready || start.empty() || ready.empty())
+        throw std::runtime_error("start-file and ready-file require paired nonempty paths");
+    const auto normalize = [](std::string path) {
+        for (auto& value : path) {
+            if (value == '/') value = '\\';
+            if (value >= 'A' && value <= 'Z') value = static_cast<char>(value - 'A' + 'a');
+        }
+        return path;
+    };
+    if (normalize(start) == normalize(ready))
+        throw std::runtime_error("start-file and ready-file must be distinct");
+    return true;
+}
+
+StartGateState start_gate_state(bool signaled, uint64_t elapsed_ms) {
+    if (elapsed_ms >= 10000) return StartGateState::TimedOut;
+    return signaled ? StartGateState::Released : StartGateState::Waiting;
+}
+
 bool reset_observed(int received, int error) {
     return received == -1 && error == 10054;
 }
@@ -34,6 +59,26 @@ EchoPolicy echo_policy(const std::string& value, bool udp, bool connect_only,
 #include <iostream>
 
 int main() {
+    assert(!client::start_gate_enabled(false, "", false, ""));
+    assert(client::start_gate_enabled(true, "C:\\lab\\start", true, "C:\\lab\\ready"));
+    const auto bad_gate = [](bool has_start, const std::string& start,
+                             bool has_ready, const std::string& ready) {
+        try { client::start_gate_enabled(has_start, start, has_ready, ready); }
+        catch (const std::exception&) { return true; }
+        return false;
+    };
+    assert(bad_gate(true, "start", false, ""));
+    assert(bad_gate(false, "", true, "ready"));
+    assert(bad_gate(true, "", true, "ready"));
+    assert(bad_gate(true, "start", true, ""));
+    assert(bad_gate(true, "same", true, "same"));
+    assert(bad_gate(true, "C:\\Lab\\START", true, "c:/lab/start"));
+    assert(client::start_gate_state(false, 0) == client::StartGateState::Waiting);
+    assert(client::start_gate_state(false, 9999) == client::StartGateState::Waiting);
+    assert(client::start_gate_state(true, 9999) == client::StartGateState::Released);
+    assert(client::start_gate_state(false, 10000) == client::StartGateState::TimedOut);
+    assert(client::start_gate_state(true, 10000) == client::StartGateState::TimedOut);
+    assert(client::start_gate_state(true, 10001) == client::StartGateState::TimedOut);
     assert(client::reset_observed(-1, 10054));
     assert(!client::reset_observed(0, 0));
     assert(!client::reset_observed(-1, 10060));
@@ -99,6 +144,56 @@ struct Socket {
     ~Socket() { if (value != INVALID_SOCKET) closesocket(value); }
 };
 
+static std::string full_path(const std::string& path) {
+    const DWORD size = GetFullPathNameA(path.c_str(), 0, nullptr, nullptr);
+    if (!size) throw std::runtime_error("start gate path resolution failed");
+    std::vector<char> buffer(size);
+    const DWORD length = GetFullPathNameA(path.c_str(), size, buffer.data(), nullptr);
+    if (!length || length >= size) throw std::runtime_error("start gate path resolution failed");
+    return std::string(buffer.data(), length);
+}
+
+static bool start_file_exists(const std::string& path) {
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY) throw std::runtime_error("start-file must be a file");
+        return true;
+    }
+    const DWORD error = GetLastError();
+    if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+        throw std::runtime_error("start-file status query failed");
+    return false;
+}
+
+static void wait_start_gate(const std::string& start, const std::string& ready) {
+    const auto start_path = full_path(start);
+    const auto ready_path = full_path(ready);
+    client::start_gate_enabled(true, start_path, true, ready_path);
+    if (start_file_exists(start_path)) throw std::runtime_error("start-file already exists");
+    const auto began = GetTickCount64();
+    {
+        struct ReadyFile {
+            HANDLE value;
+            ~ReadyFile() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+        } flag{CreateFileA(ready_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        if (flag.value == INVALID_HANDLE_VALUE) throw std::runtime_error("ready-file creation failed");
+        const char value = '1';
+        DWORD written = 0;
+        if (!WriteFile(flag.value, &value, 1, &written, nullptr) || written != 1 || !FlushFileBuffers(flag.value))
+            throw std::runtime_error("ready-file write failed");
+    }
+    for (;;) {
+        const bool signaled = start_file_exists(start_path);
+        const auto elapsed = GetTickCount64() - began;
+        switch (client::start_gate_state(signaled, elapsed)) {
+        case client::StartGateState::Released: return;
+        case client::StartGateState::TimedOut: throw std::runtime_error("start-file wait timed out");
+        case client::StartGateState::Waiting: Sleep(1); break;
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) return 2;
@@ -108,6 +203,9 @@ int main(int argc, char** argv) {
             if (i + 1 == argc) throw std::runtime_error("missing argument value");
             args[argv[i]] = argv[i + 1];
         }
+        const bool gated = client::start_gate_enabled(args.count("--start-file") != 0,
+            args.count("--start-file") ? args.at("--start-file") : "",
+            args.count("--ready-file") != 0, args.count("--ready-file") ? args.at("--ready-file") : "");
         const auto ip = args.at("--target");
         const auto nonce = args.at("--nonce");
         const bool udp = args.at("--protocol") == "udp";
@@ -136,6 +234,7 @@ int main(int argc, char** argv) {
             if (!udp) throw std::runtime_error("second port requires UDP");
             ports.push_back(std::stoi(args.at("--second-port")));
         }
+        if (gated) wait_start_gate(args.at("--start-file"), args.at("--ready-file"));
         for (const int port : ports) {
             const auto remote = address(ip, port);
             const auto started = qpc();

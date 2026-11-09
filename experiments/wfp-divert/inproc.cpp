@@ -5,6 +5,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "socket-owner.hpp"
 
 namespace inproc {
 
@@ -295,6 +296,105 @@ static inproc::EventRef event_a(int64_t when, uint32_t layer = 48,
 
 int inproc_self_test() {
     using namespace inproc;
+    {
+        using namespace socket_owner;
+        const socket_owner::Tuple key{0xC0000202u, 0xCB007109u, 40001, 443, 6};
+        const Tag generation{1000, 1000};
+        Event connect;
+        connect.tuple = key;
+        connect.endpoint = 123;
+        connect.pid = 42;
+        connect.occurred = 990;
+        connect.received = 1001;
+        connect.ipv4 = true;
+        Event identity = connect;
+        identity.kind = Kind::Identity;
+        identity.creation = 500;
+        identity.creation_guard_valid = true;
+        identity.ready = 1002;
+        identity.path = "\\device\\lab\\app-a.exe";
+        History history;
+        assert(history.apply(connect));
+        assert(history.match(key, generation, generation, 50).verdict == Verdict::Missing);
+        assert(history.apply(identity));
+        assert(history.match(key, generation, generation, 50).verdict == Verdict::Matched);
+        auto wrong = key;
+        ++wrong.remote_port;
+        assert(history.match(wrong, generation, generation, 50).verdict == Verdict::Missing);
+        assert(history.match(key, generation, Tag{1001, 1001}, 50).verdict == Verdict::Stale);
+        assert(history.match(key, Tag{1001, 1001}, Tag{1001, 1001}, 50).verdict == Verdict::Stale);
+        assert(route_allowed(true, generation, generation, 1099, 1100, Verdict::Matched));
+        assert(!route_allowed(true, generation, generation, 1100, 1100, Verdict::Matched));
+        assert(!route_allowed(false, generation, generation, 1050, 1100, Verdict::Matched));
+        assert(!route_allowed(true, generation, Tag{1001, 1001}, 1050, 1100, Verdict::Matched));
+        assert(forwarding_allowed(true, Verdict::Matched));
+        assert(forwarding_allowed(false, Verdict::Missing));
+        assert(!forwarding_allowed(true, Verdict::Missing));
+        for (const auto verdict : {Verdict::Closed, Verdict::Ambiguous, Verdict::Stale, Verdict::Invalid, Verdict::Poisoned}) {
+            assert(!forwarding_allowed(true, verdict));
+            assert(!forwarding_allowed(false, verdict));
+        }
+        Event close = connect;
+        close.kind = Kind::Close;
+        close.occurred = 1020;
+        assert(history.apply(close));
+        assert(history.match(key, generation, generation, 50).verdict == Verdict::Closed);
+        assert(history.match(key, generation, generation, 50, true).verdict == Verdict::Matched);
+        assert(history.forwarding(key, generation, 50, 1010, false, 50).verdict == Verdict::Matched);
+        assert(history.forwarding(key, generation, 50, 1030, true, 50).verdict == Verdict::Matched);
+        assert(history.forwarding(key, generation, 50, 1030, false, 50).verdict == Verdict::Closed);
+        assert(history.forwarding(key, generation, 50, 1071, true, 50).verdict == Verdict::Closed);
+        assert(history.forwarding(key, Tag{1001, 1001}, 50, 1030, true, 50).verdict == Verdict::Stale);
+        assert(socket_owner::teardown_only(false, true, false, false, 0));
+        assert(socket_owner::teardown_only(false, true, true, false, 0));
+        assert(socket_owner::teardown_only(false, false, false, true, 0));
+        assert(!socket_owner::teardown_only(true, true, false, false, 0));
+        assert(!socket_owner::teardown_only(false, true, true, false, 1));
+        assert(!forwarding_allowed(true, Verdict::Closed));
+        assert(!route_allowed(false, generation, generation, 1200, 1100, Verdict::Matched));
+        History ambiguous;
+        assert(ambiguous.apply(connect) && ambiguous.apply(identity));
+        auto other = connect;
+        ++other.endpoint;
+        assert(ambiguous.apply(other));
+        assert(ambiguous.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        History reused_pid;
+        auto reused = identity;
+        reused.creation_guard_valid = false;
+        assert(reused_pid.apply(connect) && reused_pid.apply(reused));
+        assert(reused_pid.match(key, generation, generation, 50).verdict == Verdict::Invalid);
+        History stale;
+        assert(stale.apply(connect) && stale.apply(identity));
+        assert(stale.match(key, generation, generation, 5).verdict == Verdict::Stale);
+        assert(stale.match(key, Tag{980, 980}, Tag{980, 980}, 50).verdict == Verdict::Stale);
+        History capped(1, 10);
+        assert(capped.apply(connect));
+        assert(!capped.apply(identity));
+        assert(capped.match(key, generation, generation, 50).verdict == Verdict::Poisoned);
+        History entry_cap(1);
+        assert(entry_cap.apply(connect));
+        other.tuple = wrong;
+        assert(!entry_cap.apply(other));
+        History changed_syn;
+        assert(changed_syn.apply(connect) && changed_syn.apply(identity));
+        changed_syn.invalidate(key);
+        assert(changed_syn.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+        assert(socket_owner::creation_precedes(988, 90, 100, 102, 1000, 10'000'000));
+        assert(!socket_owner::creation_precedes(989, 90, 100, 102, 1000, 10'000'000));
+        History closed_first;
+        assert(closed_first.apply(close) && closed_first.apply(connect) && closed_first.apply(identity));
+        assert(closed_first.match(key, generation, generation, 50).verdict == Verdict::Closed);
+        assert(closed_first.match(key, generation, generation, 50, true).verdict == Verdict::Matched);
+        assert(closed_first.forwarding(key, generation, 50, 1010, true, 50).verdict == Verdict::Closed);
+        history.poison();
+        assert(history.forwarding(key, generation, 50, 1010, true, 50).verdict == Verdict::Poisoned);
+        History pid_changed;
+        assert(pid_changed.apply(connect) && pid_changed.apply(identity));
+        reused = identity;
+        ++reused.creation;
+        assert(pid_changed.apply(reused));
+        assert(pid_changed.match(key, generation, generation, 50).verdict == Verdict::Ambiguous);
+    }
     MatchConfig config;
     config.window_before = 5'000'000;
     config.window_after = 500'000;
@@ -722,15 +822,24 @@ struct Parsed {
 class Log {
     std::ofstream output;
     std::mutex mutex;
+    bool bounded = false;
+    size_t records = 0, bytes = 0;
+    std::atomic<bool> failed_flag{false};
 public:
-    explicit Log(const std::string& path) : output(path, std::ios::trunc) {
+    explicit Log(const std::string& path, bool limit = false) : output(path, std::ios::trunc), bounded(limit) {
         if (!output) throw std::runtime_error("cannot create inproc log");
     }
     void write(const std::string& line) {
         std::lock_guard<std::mutex> lock(mutex);
+        if (bounded && (records >= 100000 || line.size() + 1 > 64 * 1024 * 1024 - bytes)) {
+            failed_flag = true;
+            return;
+        }
         output << line << '\n';
         output.flush();
+        if (bounded) { ++records; bytes += line.size() + 1; if (!output) failed_flag = true; }
     }
+    bool failed() const { return failed_flag.load(); }
 };
 
 struct Options {
@@ -743,6 +852,7 @@ struct Options {
     std::string mode = "hold";
     std::string lookup_mode = "inline";
     std::string enum_scope = "legacy";
+    std::string ownership_source = "wfp";
     bool filter_cache = true;
     uint16_t port = 0;
     uint16_t udp_port = 0;
@@ -767,17 +877,19 @@ unsigned number(const std::string& value, unsigned min, unsigned max) {
 
 Options options(int argc, char** argv) {
     Options result;
+    bool datagram_option = false;
     for (int i = 1; i < argc; i += 2) {
         if (i + 1 == argc) throw std::runtime_error("missing option value");
         std::string key = argv[i], value = argv[i + 1];
         if (key == "--target") { parse_ip(value); result.target = value; }
         else if (key == "--port") result.port = static_cast<uint16_t>(number(value, 1, 65535));
-        else if (key == "--udp-port") result.udp_port = static_cast<uint16_t>(number(value, 1, 65535));
-        else if (key == "--quic-port") result.quic_port = static_cast<uint16_t>(number(value, 1, 65535));
+        else if (key == "--udp-port") { result.udp_port = static_cast<uint16_t>(number(value, 1, 65535)); datagram_option = true; }
+        else if (key == "--quic-port") { result.quic_port = static_cast<uint16_t>(number(value, 1, 65535)); datagram_option = true; }
         else if (key == "--listener-port") result.listener_port = static_cast<uint16_t>(number(value, 1, 65535));
         else if (key == "--mode") result.mode = value;
         else if (key == "--lookup-mode") result.lookup_mode = value;
         else if (key == "--enum-scope") result.enum_scope = value;
+        else if (key == "--ownership-source") result.ownership_source = value;
         else if (key == "--filter-cache") {
             if (value != "on" && value != "off") throw std::runtime_error("filter-cache must be on or off");
             result.filter_cache = value == "on";
@@ -804,12 +916,215 @@ Options options(int argc, char** argv) {
         throw std::runtime_error("lookup-mode must be inline or async");
     if (result.enum_scope != "legacy" && result.enum_scope != "destination")
         throw std::runtime_error("enum-scope must be legacy or destination");
+    if (result.ownership_source != "wfp" && result.ownership_source != "socket")
+        throw std::runtime_error("ownership-source must be wfp or socket");
+    if (result.ownership_source == "socket" && datagram_option)
+        throw std::runtime_error("socket ownership source supports TCP only");
     if (result.mode == "redirect" && !result.listener_port)
         throw std::runtime_error("redirect mode requires --listener-port");
     if (result.listener_port == result.port)
         throw std::runtime_error("listener and controlled target ports must differ");
     return result;
 }
+
+class SocketSource {
+    using Mutex = std::recursive_mutex;
+    Log& log;
+    std::condition_variable& packet_wake;
+    int64_t frequency;
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    std::thread receiver, resolver;
+    Mutex mutex;
+    std::condition_variable_any identity_wake;
+    std::deque<socket_owner::Event> pending;
+    socket_owner::History history;
+    bool resolver_stopping = false, stopped = false;
+    std::atomic<bool> stopping{false}, abort_receive{false}, receiver_done{true}, receiver_started{false};
+    std::atomic<uint64_t> version{0};
+
+    void changed() { ++version; packet_wake.notify_one(); }
+    void fail(const char* operation, DWORD code) {
+        const auto ordinal = source_errors.fetch_add(1);
+        { std::lock_guard<Mutex> lock(mutex); history.poison(); }
+        if (ordinal < 10)
+            log.write("{\"kind\":\"error\",\"ownership_source\":\"socket\",\"operation\":" + json(operation) +
+                ",\"code\":" + std::to_string(code) + "}");
+        changed();
+    }
+    static std::optional<uint32_t> ipv4(const UINT32* address) {
+        if (address[1] != 0xFFFF || address[2] || address[3]) return {};
+        return htonl(address[0]);
+    }
+    socket_owner::Event identity(socket_owner::Event event) {
+        event.kind = socket_owner::Kind::Identity;
+        const auto before = qpc();
+        const auto utc = utc_now();
+        const auto after = qpc();
+        struct Process {
+            HANDLE handle;
+            ~Process() { if (handle) CloseHandle(handle); }
+        } process{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, event.pid)};
+        if (!process.handle) return event;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(process.handle, &created, &exited, &kernel, &user)) return event;
+        event.creation = filetime(created);
+        event.creation_guard_valid = socket_owner::creation_precedes(event.creation, event.occurred, before, after, utc, frequency);
+        std::vector<wchar_t> path(32768);
+        DWORD length = static_cast<DWORD>(path.size());
+        if (!QueryFullProcessImageNameW(process.handle, PROCESS_NAME_NATIVE, path.data(), &length)) return event;
+        const auto count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), static_cast<int>(length),
+            nullptr, 0, nullptr, nullptr);
+        if (count <= 0) return event;
+        event.path.resize(static_cast<size_t>(count));
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(), static_cast<int>(length),
+            event.path.data(), count, nullptr, nullptr) != count) { event.path.clear(); return event; }
+        event.path = lower(std::move(event.path));
+        return event;
+    }
+    void receive() {
+        receiver_started = true;
+        for (;;) {
+            if (abort_receive) break;
+            WINDIVERT_ADDRESS address{};
+            const auto ok = WinDivertRecv(handle, nullptr, 0, nullptr, &address);
+            const auto code = ok ? ERROR_SUCCESS : GetLastError();
+            const auto received_qpc = qpc();
+            if (!ok) {
+                if (stopping && code == ERROR_NO_DATA) drained = true;
+                else if (!(abort_receive && code == ERROR_OPERATION_ABORTED)) fail("socket_receive", code);
+                break;
+            }
+            if (++received > 100000) { ++queue_overflow; fail("socket_event_limit", ERROR_MORE_DATA); continue; }
+            if (source_errors) continue;
+            if (address.Layer != WINDIVERT_LAYER_SOCKET) { fail("socket_layer", ERROR_INVALID_DATA); continue; }
+            if (address.Event != WINDIVERT_EVENT_SOCKET_CONNECT && address.Event != WINDIVERT_EVENT_SOCKET_CLOSE) continue;
+            socket_owner::Event event;
+            const auto& socket = address.Socket;
+            const auto local = ipv4(socket.LocalAddr), remote = ipv4(socket.RemoteAddr);
+            event.tuple = {local.value_or(0), remote.value_or(0), socket.LocalPort, socket.RemotePort, socket.Protocol};
+            event.endpoint = socket.EndpointId;
+            event.parent = socket.ParentEndpointId;
+            event.pid = socket.ProcessId;
+            event.ipv4 = !address.IPv6 && local.has_value() && remote.has_value();
+            event.occurred = address.Timestamp;
+            event.received = received_qpc;
+            event.kind = address.Event == WINDIVERT_EVENT_SOCKET_CONNECT ? socket_owner::Kind::Connect : socket_owner::Kind::Close;
+            if (event.kind == socket_owner::Kind::Connect) ++connect_received; else ++close_received;
+            {
+                std::lock_guard<Mutex> lock(mutex);
+                event_to_recv_ms.push_back(static_cast<double>(event.received - event.occurred) * 1000 / frequency);
+                if (!history.apply(event)) { ++history_overflow; fail("socket_history_limit", ERROR_MORE_DATA); }
+                else if (event.kind == socket_owner::Kind::Connect) {
+                    if (pending.size() >= 1024) { ++queue_overflow; fail("socket_identity_queue_limit", ERROR_MORE_DATA); }
+                    else pending.push_back(std::move(event));
+                }
+            }
+            identity_wake.notify_one();
+            changed();
+        }
+    }
+    void resolve() {
+        for (;;) {
+            socket_owner::Event event;
+            {
+                std::unique_lock<Mutex> lock(mutex);
+                identity_wake.wait(lock, [this] { return resolver_stopping || !pending.empty(); });
+                if (pending.empty() && resolver_stopping) break;
+                event = std::move(pending.front()); pending.pop_front();
+            }
+            if (source_errors) continue;
+            const auto began = qpc();
+            event = identity(std::move(event));
+            event.ready = qpc();
+            if (event.creation_guard_valid && !event.path.empty()) ++identity_ready; else ++identity_missing;
+            {
+                std::lock_guard<Mutex> lock(mutex);
+                identity_lookup_ms.push_back(static_cast<double>(event.ready - began) * 1000 / frequency);
+                event_to_identity_ready_ms.push_back(static_cast<double>(event.ready - event.occurred) * 1000 / frequency);
+                if (!history.apply(event)) { ++history_overflow; fail("socket_identity_history_limit", ERROR_MORE_DATA); }
+            }
+            changed();
+        }
+    }
+public:
+    std::atomic<uint64_t> received{0}, connect_received{0}, close_received{0}, identity_ready{0}, identity_missing{0};
+    std::atomic<uint64_t> source_errors{0}, queue_overflow{0}, history_overflow{0};
+    std::atomic<bool> drained{false};
+    bool clean_shutdown = false;
+    std::vector<double> event_to_recv_ms, event_to_identity_ready_ms, identity_lookup_ms;
+    SocketSource(Log& output, std::condition_variable& wake, int64_t ticks) : log(output), packet_wake(wake), frequency(ticks) {}
+    bool failed() const { return source_errors || log.failed(); }
+    void network_failure(const char* operation, DWORD code, bool overflow = false) {
+        if (overflow) ++queue_overflow;
+        fail(operation, code);
+    }
+    uint64_t revision() const { return version.load(); }
+    size_t size() { std::lock_guard<Mutex> lock(mutex); return history.size(); }
+    template <class Callback>
+    socket_owner::Verdict visit(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback, Callback callback, bool historical = false) {
+        std::lock_guard<Mutex> lock(mutex);
+        if (failed()) { history.poison(); return socket_owner::Verdict::Poisoned; }
+        const auto match = history.match(tuple, tag, tag, lookback, historical);
+        if (match.verdict == socket_owner::Verdict::Matched) callback(match.event);
+        return match.verdict;
+    }
+    socket_owner::Verdict forwarding(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback,
+                                     int64_t packet_qpc, bool teardown) {
+        std::lock_guard<Mutex> lock(mutex);
+        if (failed()) { history.poison(); return socket_owner::Verdict::Poisoned; }
+        return history.forwarding(tuple, tag, lookback, packet_qpc, teardown, frequency * 2).verdict;
+    }
+    bool unusable(const socket_owner::Tuple& tuple, socket_owner::Tag tag, int64_t lookback) {
+        const auto verdict = visit(tuple, tag, lookback, [](const socket_owner::Event&) {});
+        return verdict == socket_owner::Verdict::Closed || verdict == socket_owner::Verdict::Ambiguous ||
+            verdict == socket_owner::Verdict::Poisoned;
+    }
+    void invalidate(const socket_owner::Tuple& tuple) {
+        std::lock_guard<Mutex> lock(mutex);
+        history.invalidate(tuple);
+        if (history.failed()) { ++history_overflow; fail("socket_reuse_history_limit", ERROR_MORE_DATA); }
+    }
+    void start(const std::string& target, uint16_t port) {
+        const auto filter = "protocol == 6 and remoteAddr == " + target + " and remotePort == " + std::to_string(port);
+        handle = WinDivertOpen(filter.c_str(), WINDIVERT_LAYER_SOCKET, 0, WINDIVERT_FLAG_SNIFF | WINDIVERT_FLAG_RECV_ONLY);
+        if (handle == INVALID_HANDLE_VALUE) { fail("socket_open", GetLastError()); throw std::runtime_error("Socket source open"); }
+        if (!WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_LENGTH, 4096) ||
+            !WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_SIZE, 8 * 1024 * 1024) ||
+            !WinDivertSetParam(handle, WINDIVERT_PARAM_QUEUE_TIME, 2000)) {
+            fail("socket_queue_setup", GetLastError()); throw std::runtime_error("Socket source queue setup");
+        }
+        resolver = std::thread([this] { try { resolve(); } catch (...) { fail("socket_identity_exception", ERROR_INVALID_DATA); } });
+        receiver_done = false;
+        try {
+            receiver = std::thread([this] {
+                try { receive(); } catch (...) { fail("socket_receiver_exception", ERROR_INVALID_DATA); }
+                receiver_done = true;
+            });
+        } catch (...) { receiver_done = true; throw; }
+        const auto until = qpc() + frequency * 2;
+        while (!receiver_started && !failed() && qpc() < until) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!receiver_started || failed()) throw std::runtime_error("Socket source startup");
+    }
+    void stop() {
+        if (stopped) return;
+        stopped = true; stopping = true;
+        if (handle != INVALID_HANDLE_VALUE && !WinDivertShutdown(handle, WINDIVERT_SHUTDOWN_RECV)) {
+            fail("socket_shutdown", GetLastError()); abort_receive = true;
+        }
+        while (!receiver_done) {
+            if (abort_receive && receiver.joinable()) CancelSynchronousIo(static_cast<HANDLE>(receiver.native_handle()));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (receiver.joinable()) receiver.join();
+        { std::lock_guard<Mutex> lock(mutex); resolver_stopping = true; }
+        identity_wake.notify_one();
+        if (resolver.joinable()) resolver.join();
+        if (handle != INVALID_HANDLE_VALUE && !WinDivertClose(handle)) fail("socket_close", GetLastError());
+        handle = INVALID_HANDLE_VALUE;
+        clean_shutdown = drained && !failed();
+    }
+    ~SocketSource() { try { stop(); } catch (...) {} }
+};
 
 struct Bfe {
     HANDLE engine = nullptr;
@@ -946,6 +1261,7 @@ struct Flow {
     int64_t next_retry_qpc = 0;
     int backoff_ms = 0;
     bool saw_syn = false;
+    bool socket_tcp_progress = false;
     uint32_t syn_sequence = 0;
     uint32_t last_seq = 0;
     uint32_t last_ack = 0;
@@ -973,17 +1289,24 @@ class Engine {
     HANDLE divert = INVALID_HANDLE_VALUE;
     HANDLE session = nullptr;
     Bfe bfe;
+    std::unique_ptr<SocketSource> socket_source;
+    uint64_t socket_revision_seen = 0;
+    uint64_t socket_matches = 0, socket_rejected = 0, socket_ambiguous = 0, socket_closed = 0;
+    uint64_t socket_missing = 0, socket_reuse_rejected = 0;
+    std::vector<double> socket_identity_ready_to_apply_ms;
 
     std::atomic<bool> stopping{false};
     std::atomic<DWORD> receive_error{0};
     std::atomic<bool> fatal_send{false};
     std::atomic<bool> lookup_worker_error{false};
     std::thread receiver;
+    std::atomic<bool> network_receiver_done{true}, network_abort{false};
     std::thread lookup_thread;
     std::mutex mutex;
     std::condition_variable wake;
     std::condition_variable query_wake;
     std::deque<Packet> input;
+    size_t input_bytes = 0;
     inproc::HandoffState query_handoff;
     std::optional<QueryRequest> query_request;
     std::optional<QueryResult> query_result;
@@ -1012,6 +1335,7 @@ class Engine {
     }
 
     bool send(Packet& packet, const char* reason) {
+        if (socket_source && socket_source->failed()) { fatal_send = true; return false; }
         UINT sent = 0;
         bool success = WinDivertSend(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                     &sent, &packet.address) != 0;
@@ -1068,8 +1392,26 @@ class Engine {
         return true;
     }
 
+    bool socket_forward_allowed(const Tuple& tuple, const Flow& flow, const Packet& packet, const Parsed& parsed) {
+        if (!socket_source) return true;
+        if (flow.action == "drop") return false;
+        if (!parsed.tcp || !parsed.ip_header) return false;
+        const auto headers = static_cast<size_t>(parsed.ip_header->HdrLength + parsed.tcp->HdrLength) * 4;
+        const auto length = ntohs(parsed.ip_header->Length);
+        if (length < headers || length > packet.bytes.size()) return false;
+        const auto teardown = socket_owner::teardown_only(parsed.tcp->Syn, parsed.tcp->Ack, parsed.tcp->Fin,
+            parsed.tcp->Rst, length - headers);
+        const auto verdict = socket_source->forwarding({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+            {flow.generation, flow.capture_qpc}, frequency * config.window_before_ms / 1000, packet.address.Timestamp, teardown);
+        return socket_owner::forwarding_allowed(flow.action == "proxy", verdict);
+    }
+
     void forward(Packet& packet, const Tuple& tuple, Flow& flow, bool held) {
         Parsed parsed(packet);
+        if (!socket_forward_allowed(tuple, flow, packet, parsed)) {
+            log_decision(tuple, flow, "drop", "socket_authority_invalidated");
+            return;
+        }
         if (flow.action == "proxy") {
             if (!parsed.tcp || !flow.alias) { fatal_send = true; return; }
             parsed.ip_header->DstAddr = tuple.local;
@@ -1099,6 +1441,10 @@ class Engine {
         auto flow_it = flows.find(original);
         if (flow_it == flows.end() || parsed.tuple.local != original.local) return false;
         Flow& flow = *flow_it->second;
+        if (!socket_forward_allowed(original, flow, packet, parsed)) {
+            log_decision(original, flow, "drop", "socket_reverse_authority_invalidated");
+            return true;
+        }
         parsed.ip_header->SrcAddr = original.remote;
         parsed.ip_header->DstAddr = original.local;
         parsed.tcp->SrcPort = htons(original.remote_port);
@@ -1601,7 +1947,82 @@ class Engine {
         query_handoff.stop();
     }
 
+    void log_socket_ownership(const Tuple& tuple, const Flow& flow, const socket_owner::Event& owner) {
+        const auto applied = qpc();
+        ++socket_matches;
+        socket_identity_ready_to_apply_ms.push_back(static_cast<double>(applied - owner.ready) * 1000 / frequency);
+        log.write("{\"kind\":\"ownership\",\"ownership_source\":\"socket\"," + fields(tuple) +
+            ",\"generation\":" + std::to_string(flow.generation) + ",\"capture_qpc\":" + std::to_string(flow.capture_qpc) +
+            ",\"app_path\":" + json(owner.path) + ",\"pid\":" + std::to_string(owner.pid) +
+            ",\"endpoint_id\":" + std::to_string(owner.endpoint) + ",\"parent_endpoint_id\":" + std::to_string(owner.parent) +
+            ",\"process_creation_filetime\":" + std::to_string(owner.creation) +
+            ",\"socket_event_qpc\":" + std::to_string(owner.occurred) +
+            ",\"socket_recv_qpc\":" + std::to_string(owner.received) +
+            ",\"socket_app_ready_qpc\":" + std::to_string(owner.ready) +
+            ",\"creation_guard_valid\":true,\"apply_qpc\":" + std::to_string(applied) + ",\"qpc\":" + std::to_string(applied) + "}");
+    }
+
+    void resolve_socket(int64_t now) {
+        const auto revision = socket_source->revision();
+        leak_watch.erase(std::remove_if(leak_watch.begin(), leak_watch.end(),
+            [&](const auto& item) { return now >= item.second; }), leak_watch.end());
+        for (auto& item : flows) {
+            const auto& tuple = item.first;
+            auto& flow = *item.second;
+            if (flow.action == "pending" && now >= flow.deadline_qpc) {
+                ++socket_missing;
+                decide(tuple, flow, "direct", "timeout");
+            }
+            auto watched = std::find_if(leak_watch.begin(), leak_watch.end(), [&](const auto& entry) {
+                return entry.first == tuple && now < entry.second;
+            });
+            if (flow.action != "pending" && watched == leak_watch.end()) continue;
+            if (flow.next_retry_qpc && now < flow.next_retry_qpc) continue;
+            if (flow.protocol != 6) {
+                if (flow.action == "pending") decide(tuple, flow, "direct", "socket_tcp_only");
+                continue;
+            }
+            const socket_owner::Tag tag{flow.generation, flow.capture_qpc};
+            const auto verdict = socket_source->visit({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+                tag, frequency * config.window_before_ms / 1000, [&](const socket_owner::Event& owner) {
+                    const auto observed = qpc();
+                    const auto available = flow.capture_qpc + frequency * config.delay_ms / 1000;
+                    if (owner.path == selected_app && observed < available) { flow.next_retry_qpc = available; return; }
+                    flow.next_retry_qpc = 0;
+                    if (flow.action == "pending") {
+                        if (!socket_owner::route_allowed(true, tag, {flow.generation, flow.capture_qpc}, observed,
+                            flow.deadline_qpc, socket_owner::Verdict::Matched)) {
+                            ++socket_missing;
+                            decide(tuple, flow, "direct", "timeout");
+                            return;
+                        }
+                        log_socket_ownership(tuple, flow, owner);
+                        if (!log.failed()) decide(tuple, flow, owner.path == selected_app && config.mode == "redirect" ? "proxy" : "direct",
+                            owner.path == selected_app ? "selected" : "other_app");
+                    } else if (watched != leak_watch.end()) {
+                        log_socket_ownership(tuple, flow, owner);
+                        if (owner.path == selected_app && !flow.leak_selected) {
+                            flow.leak_selected = true;
+                            ++leaked;
+                            log.write("{\"kind\":\"leaked\",\"ownership_source\":\"socket\"," + fields(tuple) +
+                                ",\"generation\":" + std::to_string(flow.generation) + ",\"qpc\":" + std::to_string(qpc()) + "}");
+                            if (config.send_rst && !flow.rst_sent) send_rst(tuple, flow);
+                        }
+                        leak_watch.erase(watched);
+                        watched = leak_watch.end();
+                    }
+                }, flow.action != "pending");
+            if (verdict == socket_owner::Verdict::Missing || verdict == socket_owner::Verdict::Matched) continue;
+            ++socket_rejected;
+            if (verdict == socket_owner::Verdict::Ambiguous) ++socket_ambiguous;
+            if (verdict == socket_owner::Verdict::Closed) ++socket_closed;
+            if (flow.action == "pending") decide(tuple, flow, "direct", "socket_unattributed");
+        }
+        socket_revision_seen = revision;
+    }
+
     void resolve_pending(int64_t now) {
+        if (socket_source) { resolve_socket(now); return; }
         consume_query();
         now = qpc();
         bool pending_due = false;
@@ -1743,6 +2164,21 @@ class Engine {
             const unsigned payload = length >= headers ? length - headers : 0;
             flow.last_seq = ntohl(parsed.tcp->SeqNum) + payload + (parsed.tcp->Syn ? 1 : 0) + (parsed.tcp->Fin ? 1 : 0);
             flow.last_ack = ntohl(parsed.tcp->AckNum);
+            const bool initial_syn = parsed.tcp->Syn && !parsed.tcp->Ack;
+            if (socket_source && initial_syn && (flow.socket_tcp_progress ||
+                (flow.saw_syn && parsed.tcp->SeqNum != flow.syn_sequence) ||
+                socket_source->unusable({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol},
+                    {flow.generation, flow.capture_qpc}, frequency * config.window_before_ms / 1000))) {
+                socket_source->invalidate({tuple.local, tuple.remote, tuple.local_port, tuple.remote_port, tuple.protocol});
+                ++socket_reuse_rejected;
+                reuse_disrupted = true;
+                flow.action = "drop";
+                flow.drop_reason = "socket_tuple_reuse";
+                flow.held.clear();
+                log_decision(tuple, flow, "drop", flow.drop_reason);
+                return;
+            }
+            if (socket_source && !initial_syn) flow.socket_tcp_progress = true;
             if (parsed.tcp->Syn && !parsed.tcp->Ack && flow.action == "proxy" &&
                 flow.saw_syn && parsed.tcp->SeqNum != flow.syn_sequence) {
                 log_decision(tuple, flow, "drop", "ambiguous_reuse_of_proxy_tuple");
@@ -1774,38 +2210,72 @@ class Engine {
         for (const auto& entry : flows) {
             const Flow& flow = *entry.second;
             if (flow.action != "pending") continue;
-            consider(inproc::lookup_wakeup(query_handoff.busy(), flow.next_retry_qpc, flow.deadline_qpc));
+            if (socket_source) consider(flow.next_retry_qpc ? (std::min)(flow.next_retry_qpc, flow.deadline_qpc) : flow.deadline_qpc);
+            else consider(inproc::lookup_wakeup(query_handoff.busy(), flow.next_retry_qpc, flow.deadline_qpc));
         }
-        for (const auto& watch : leak_watch)
-            consider(inproc::lookup_wakeup(query_handoff.busy(), next_leak_check_qpc, watch.second));
+        for (const auto& watch : leak_watch) {
+            if (socket_source) {
+                const auto found = flows.find(watch.first);
+                const auto ready = found == flows.end() ? 0 : found->second->next_retry_qpc;
+                consider(ready ? (std::min)(ready, watch.second) : watch.second);
+            } else consider(inproc::lookup_wakeup(query_handoff.busy(), next_leak_check_qpc, watch.second));
+        }
         return soonest;
     }
 
     void receive() {
-        while (!stopping) {
+        while (!stopping || socket_source) {
+            if (network_abort) break;
             Packet packet;
             packet.bytes.resize(65535);
             UINT length = 0;
             if (!WinDivertRecv(divert, packet.bytes.data(), static_cast<UINT>(packet.bytes.size()),
                                &length, &packet.address)) {
                 DWORD error = GetLastError();
-                if (!stopping) receive_error = error;
+                if (socket_source) {
+                    if (!(stopping && error == ERROR_NO_DATA) && !(network_abort && error == ERROR_OPERATION_ABORTED)) {
+                        receive_error = error;
+                        socket_source->network_failure("socket_network_receive", error);
+                    }
+                } else if (!stopping) receive_error = error;
                 break;
             }
             packet.received = qpc();
             packet.bytes.resize(length);
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                input.push_back(std::move(packet));
+                if (socket_source && (input.size() >= MAX_FLOWS || packet.bytes.size() > MAX_BYTES - input_bytes)) {
+                    receive_error = ERROR_MORE_DATA;
+                    socket_source->network_failure("socket_network_handoff_limit", ERROR_MORE_DATA, true);
+                } else {
+                    if (socket_source) input_bytes += packet.bytes.size();
+                    input.push_back(std::move(packet));
+                }
             }
             wake.notify_one();
         }
+        network_receiver_done = true;
         wake.notify_one();
+    }
+
+    void stop_network() {
+        if (divert == INVALID_HANDLE_VALUE) return;
+        const auto stopped = WinDivertShutdown(divert, WINDIVERT_SHUTDOWN_RECV);
+        if (socket_source && !stopped) {
+            socket_source->network_failure("socket_network_shutdown", GetLastError());
+            network_abort = true;
+        }
+        wake.notify_all();
+        if (socket_source) while (!network_receiver_done) {
+            if (network_abort && receiver.joinable()) CancelSynchronousIo(static_cast<HANDLE>(receiver.native_handle()));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (receiver.joinable()) receiver.join();
     }
 
 public:
     explicit Engine(Options value)
-        : config(std::move(value)), log(config.output),
+        : config(std::move(value)), log(config.output, config.ownership_source == "socket"),
           summary_file(config.summary, std::ios::trunc) {
         if (!summary_file) throw std::runtime_error("cannot create summary file");
         target = parse_ip(config.target);
@@ -1818,27 +2288,38 @@ public:
     ~Engine() {
         stopping = true;
         wake.notify_all();
-        if (divert != INVALID_HANDLE_VALUE) WinDivertShutdown(divert, WINDIVERT_SHUTDOWN_RECV);
-        if (receiver.joinable()) receiver.join();
+        stop_network();
+        if (socket_source) socket_source->stop();
         stop_lookup();
         if (divert != INVALID_HANDLE_VALUE) WinDivertClose(divert);
         if (session) FwpmEngineClose0(session);
     }
 
     int run() {
-        bfe.start(config.state_out);
-        if (FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &session))
-            throw std::runtime_error("FwpmEngineOpen0 lookup session");
+        if (config.ownership_source == "wfp") {
+            bfe.start(config.state_out);
+            if (FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &session))
+                throw std::runtime_error("FwpmEngineOpen0 lookup session");
+        } else {
+            socket_source = std::make_unique<SocketSource>(log, wake, frequency);
+            socket_source->start(config.target, config.port);
+        }
 
         anchor_qpc = qpc();
         anchor_filetime = utc_now();
         engine_started_qpc = anchor_qpc;
 
-        std::string filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
-            " and ((tcp and tcp.DstPort == " + std::to_string(config.port) + ")";
-        if (config.udp_port)
-            filter += " or (udp and udp.DstPort == " + std::to_string(config.udp_port) + ")";
-        filter += " or (udp and udp.DstPort == " + std::to_string(config.quic_port) + ")))";
+        std::string filter;
+        if (socket_source) {
+            filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
+                " and tcp and tcp.DstPort == " + std::to_string(config.port) + ")";
+        } else {
+            filter = "ip and !impostor and ((outbound and ip.DstAddr == " + config.target +
+                " and ((tcp and tcp.DstPort == " + std::to_string(config.port) + ")";
+            if (config.udp_port)
+                filter += " or (udp and udp.DstPort == " + std::to_string(config.udp_port) + ")";
+            filter += " or (udp and udp.DstPort == " + std::to_string(config.quic_port) + ")))";
+        }
         if (config.listener_port)
             filter += " or (outbound and tcp and tcp.SrcPort == " + std::to_string(config.listener_port) + ")";
         filter += ")";
@@ -1859,10 +2340,11 @@ public:
                   ",\"anchor_filetime\":" + std::to_string(anchor_filetime) +
                   ",\"mode\":" + json(config.mode) + ",\"lookup_mode\":" + json(config.lookup_mode) +
                   ",\"enum_scope\":" + json(config.enum_scope) +
+                  ",\"ownership_source\":" + json(config.ownership_source) +
                   ",\"filter_cache\":" + (config.filter_cache ? "true" : "false") +
                   ",\"hold_ms\":" + std::to_string(config.hold_ms) + "}");
 
-        if (config.lookup_mode == "async") lookup_thread = std::thread([this] {
+        if (!socket_source && config.lookup_mode == "async") lookup_thread = std::thread([this] {
             try { lookup_loop(); }
             catch (const std::exception& error) {
                 lookup_worker_error = true;
@@ -1873,16 +2355,29 @@ public:
             }
             wake.notify_one();
         });
-        receiver = std::thread([this] { receive(); });
+        network_receiver_done = false;
+        try { receiver = std::thread([this] {
+            try { receive(); }
+            catch (...) {
+                receive_error = ERROR_GEN_FAILURE;
+                if (socket_source) socket_source->network_failure("socket_network_receiver_exception", ERROR_GEN_FAILURE);
+                else log.write("{\"kind\":\"error\",\"operation\":\"network_receiver_exception\"}");
+                network_receiver_done = true;
+                wake.notify_one();
+            }
+        }); }
+        catch (...) { network_receiver_done = true; throw; }
         const int64_t end = qpc() + frequency * config.seconds;
 
-        while (qpc() < end && !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error) {
+        while (qpc() < end && !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error &&
+               !(socket_source && socket_source->failed())) {
             if (!config.stop_file.empty() &&
                 GetFileAttributesA(config.stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
             std::deque<Packet> batch;
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                if (input.empty() && !query_handoff.ready() && !lookup_worker_error && !receive_error) {
+                if (input.empty() && !query_handoff.ready() && !lookup_worker_error && !receive_error &&
+                    !(socket_source && (socket_source->revision() != socket_revision_seen || socket_source->failed()))) {
                     int64_t deadline = next_deadline();
                     if (deadline) {
                         int64_t wait_ticks = deadline - qpc();
@@ -1893,6 +2388,7 @@ public:
                     }
                 }
                 batch.swap(input);
+                if (socket_source) input_bytes = 0;
             }
             for (auto& packet : batch) handle(std::move(packet));
             const int64_t now = qpc();
@@ -1900,13 +2396,12 @@ public:
         }
 
         stopping = true;
-        WinDivertShutdown(divert, WINDIVERT_SHUTDOWN_RECV);
-        wake.notify_all();
-        if (receiver.joinable()) receiver.join();
+        stop_network();
+        if (socket_source) socket_source->stop();
         stop_lookup();
         {
             std::deque<Packet> batch;
-            { std::lock_guard<std::mutex> lock(mutex); batch.swap(input); }
+            { std::lock_guard<std::mutex> lock(mutex); batch.swap(input); if (socket_source) input_bytes = 0; }
             for (auto& packet : batch) handle(std::move(packet));
         }
         for (auto& entry : flows) {
@@ -1926,7 +2421,8 @@ public:
         return success() ? 0 : 3;
     }
 
-    bool success() const { return !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error && !bfe.errors; }
+    bool success() const { return !receive_error && !fatal_send && !lookup.errors && !lookup_worker_error && !bfe.errors &&
+        !(socket_source && (socket_source->failed() || !socket_source->clean_shutdown)); }
 
     void write_summary() {
         auto dist = [](const std::vector<double>& values) {
@@ -1952,6 +2448,7 @@ public:
         shapes << "]";
         std::ostringstream out;
         out << "{\"engine\":\"inproc\",\"mode\":" << json(config.mode)
+            << ",\"ownership_source\":" << json(config.ownership_source)
             << ",\"topology\":\"single-host-local\""
             << ",\"selected_app\":" << json(selected_app)
             << ",\"first_packet_decision_latency_ms\":" << dist(decision_latency_ms)
@@ -2003,11 +2500,33 @@ public:
             << ",\"window_before_ms\":" << config.window_before_ms
             << ",\"window_after_ms\":" << config.window_after_ms
             << ",\"send_rst\":" << (config.send_rst ? "true" : "false")
-            << ",\"delay_ms\":" << config.delay_ms
-            << ",\"success\":" << (success() ? "true" : "false") << "}";
+            << ",\"delay_ms\":" << config.delay_ms;
+        if (socket_source) {
+            out << ",\"socket_received\":" << socket_source->received.load()
+                << ",\"socket_connect_received\":" << socket_source->connect_received.load()
+                << ",\"socket_close_received\":" << socket_source->close_received.load()
+                << ",\"socket_identity_ready\":" << socket_source->identity_ready.load()
+                << ",\"socket_identity_missing\":" << socket_source->identity_missing.load()
+                << ",\"socket_source_errors\":" << socket_source->source_errors.load()
+                << ",\"socket_queue_overflow\":" << socket_source->queue_overflow.load()
+                << ",\"socket_history_overflow\":" << socket_source->history_overflow.load()
+                << ",\"socket_output_errors\":" << (log.failed() ? 1 : 0)
+                << ",\"socket_matches\":" << socket_matches << ",\"socket_rejected\":" << socket_rejected
+                << ",\"socket_ambiguous\":" << socket_ambiguous << ",\"socket_closed\":" << socket_closed
+                << ",\"socket_missing\":" << socket_missing << ",\"socket_reuse_rejected\":" << socket_reuse_rejected
+                << ",\"socket_history_entries\":" << socket_source->size()
+                << ",\"socket_clean_shutdown\":" << (socket_source->clean_shutdown ? "true" : "false")
+                << ",\"driver_queue_loss_known\":false"
+                << ",\"socket_event_to_recv_ms\":" << dist(socket_source->event_to_recv_ms)
+                << ",\"socket_event_to_identity_ready_ms\":" << dist(socket_source->event_to_identity_ready_ms)
+                << ",\"socket_identity_lookup_ms\":" << dist(socket_source->identity_lookup_ms)
+                << ",\"socket_identity_ready_to_apply_ms\":" << dist(socket_identity_ready_to_apply_ms);
+        }
+        out << ",\"success\":" << (success() ? "true" : "false") << "}";
         summary_file << out.str() << '\n';
         summary_file.flush();
         log.write("{\"kind\":\"summary\",\"enum_filter\":" + json(lookup.filter.empty() ? "none" : lookup.filter) +
+                  ",\"ownership_source\":" + json(config.ownership_source) +
                   ",\"lookup_mode\":" + json(config.lookup_mode) +
                   ",\"enum_scope\":" + json(config.enum_scope) +
                   ",\"enum_condition_shapes\":" + shapes.str() +
