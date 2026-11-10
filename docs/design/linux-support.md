@@ -250,9 +250,19 @@ documented. `mimeapps.list` is parsed as an INI-like file and only the
 `x-scheme-handler/<scheme>` key in `[Default Applications]` is added or
 removed; every other line, comment and
 section is kept byte for byte. A `mimeapps.list` or desktop file that is a
-symlink is refused rather than followed, and so is a target directory not
-owned by the effective uid (which catches `sudo gateinto uri register` with a
-preserved `HOME`).
+symlink or not a regular file is refused rather than followed or replaced.
+Every write and removal is anchored at a directory that must contain the
+target lexically (the home directory, or the XDG root when it is not under
+it). The anchor must be a directory owned by the effective uid, which refuses
+`sudo gateinto uri register` with a preserved `HOME`. Each level between the
+anchor and the target directory is then checked in turn: symlinks are
+followed, the resolved directory must be owned by the effective uid, and a
+missing level is created with mode `0o700` and checked before the next one,
+so nothing is created under a foreign directory. A removal checks the same
+levels and never creates any. The checks resolve paths and the later writes
+resolve them again, so a process that can write to a checked directory
+(normally only the same user, who is trusted; see Security) can still swap a
+level in between. A kept mode loses its setuid, setgid and sticky bits.
 
 ### Security
 
@@ -283,8 +293,9 @@ environment):
   desktop-specific override, each with the expected result;
 - `mimeapps.list` round trip keeps unrelated lines, comments, sections and
   other keys;
-- symlinked `mimeapps.list` and a foreign-owned directory are refused (the
-  ownership test uses a directory created by `sudo` on the runner);
+- symlinked `mimeapps.list` and a foreign-owned anchor, level or symlinked
+  directory are refused (the ownership tests use `/` when not running as
+  root, and a directory chowned to `nobody` when running as root);
 - rollback when the second write fails (read-only directory);
 - relative XDG values are ignored.
 

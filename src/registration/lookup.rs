@@ -1,10 +1,7 @@
+use super::files::{self, Contents, Links};
 use super::xdg::Roots;
 use super::{keyfile, mimeapps};
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-
-const MAX_FILE_SIZE: u64 = 1 << 20;
 
 pub(crate) fn registered_command(roots: &Roots, scheme: &str) -> Option<String> {
     let applications: Vec<PathBuf> = roots
@@ -47,20 +44,10 @@ fn installed(applications: &[PathBuf], id: &str) -> Option<String> {
 }
 
 fn read(path: &Path) -> Option<String> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
+    match files::read(path, Links::Follow) {
+        Ok(Contents::Text(text)) => Some(text),
+        _ => None,
     }
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_SIZE + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > MAX_FILE_SIZE {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
 }
 
 fn is_desktop_id(id: &str) -> bool {
@@ -74,6 +61,7 @@ fn exec(entry: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registration::files::MAX_FILE_SIZE;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct Scratch(PathBuf);
