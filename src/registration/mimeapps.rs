@@ -2,7 +2,6 @@ use super::keyfile;
 
 const GROUP: &str = "Default Applications";
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn desktop_id(scheme: &str) -> String {
     format!("{scheme}.desktop")
 }
@@ -13,12 +12,10 @@ pub(crate) fn default_ids<'a>(text: &'a str, scheme: &str) -> Vec<&'a str> {
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn listed_ids<'a>(text: &'a str, scheme: &str) -> Vec<&'a str> {
     values(text, scheme).flat_map(ids).collect()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn with_handler(text: &str, scheme: &str) -> String {
     let entry = format!("{}={}", key(scheme), desktop_id(scheme));
     let lines = lines(text, scheme);
@@ -49,7 +46,6 @@ pub(crate) fn with_handler(text: &str, scheme: &str) -> String {
     out
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn without_handler(text: &str, scheme: &str) -> Option<String> {
     let lines = lines(text, scheme);
     lines

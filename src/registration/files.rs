@@ -28,7 +28,6 @@ pub(crate) enum Refusal {
     NotUtf8,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     Exactly(u32),
@@ -43,6 +42,22 @@ pub(crate) enum FileError {
     NotADirectory(PathBuf),
     ForeignDirectory { path: PathBuf, uid: u32 },
     OutsideAnchor { path: PathBuf, anchor: PathBuf },
+    MissingAnchor(PathBuf),
+    Unsynced(PathBuf, io::Error),
+    TooLarge(PathBuf),
+    NotUtf8(PathBuf),
+}
+
+impl Refusal {
+    pub(crate) fn error(self, path: &Path) -> FileError {
+        let path = path.to_owned();
+        match self {
+            Self::Symlink => FileError::Symlink(path),
+            Self::NotRegular => FileError::NotRegular(path),
+            Self::TooLarge => FileError::TooLarge(path),
+            Self::NotUtf8 => FileError::NotUtf8(path),
+        }
+    }
 }
 
 impl fmt::Display for FileError {
@@ -66,6 +81,21 @@ impl fmt::Display for FileError {
             Self::OutsideAnchor { path, anchor } => {
                 write!(f, "{} is not inside {}", path.display(), anchor.display())
             }
+            Self::MissingAnchor(path) => {
+                write!(f, "directory {} does not exist", path.display())
+            }
+            Self::Unsynced(dir, error) => write!(
+                f,
+                "{}: the change was written but could not be flushed to disk: {error}",
+                dir.display()
+            ),
+            Self::TooLarge(path) => write!(
+                f,
+                "{} is larger than {} MiB",
+                path.display(),
+                MAX_FILE_SIZE >> 20
+            ),
+            Self::NotUtf8(path) => write!(f, "{} is not valid UTF-8", path.display()),
         }
     }
 }
@@ -73,7 +103,7 @@ impl fmt::Display for FileError {
 impl std::error::Error for FileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(_, error) => Some(error),
+            Self::Io(_, error) | Self::Unsynced(_, error) => Some(error),
             _ => None,
         }
     }
@@ -110,11 +140,15 @@ pub(crate) fn read(path: &Path, links: Links) -> Result<Contents, FileError> {
     Ok(String::from_utf8(bytes).map_or(Contents::Refused(Refusal::NotUtf8), Contents::Text))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write(anchor: &Path, path: &Path, bytes: &[u8], mode: Mode) -> Result<(), FileError> {
-    write_with(anchor, path, bytes, mode, |from, to| {
-        std::fs::rename(from, to)
-    })
+    write_with(
+        anchor,
+        path,
+        bytes,
+        mode,
+        |from, to| std::fs::rename(from, to),
+        File::sync_all,
+    )
 }
 
 fn write_with(
@@ -123,10 +157,10 @@ fn write_with(
     bytes: &[u8],
     mode: Mode,
     rename: impl Fn(&Path, &Path) -> io::Result<()>,
+    sync: impl Fn(&File) -> io::Result<()>,
 ) -> Result<(), FileError> {
-    let dir = owned_dir(anchor, path, Missing::Create)?.ok_or_else(|| {
-        FileError::Io(anchor.to_owned(), io::Error::from(io::ErrorKind::NotFound))
-    })?;
+    let dir = owned_dir(anchor, path, Missing::Create)?
+        .ok_or_else(|| FileError::MissingAnchor(anchor.to_owned()))?;
     let io = |error| FileError::Io(path.to_owned(), error);
     let existing = regular_mode(path)?;
     let mode = match (mode, existing) {
@@ -143,7 +177,7 @@ fn write_with(
         let _ = std::fs::remove_file(&temp);
     }
     published.map_err(io)?;
-    sync_dir(path, &dir)
+    sync(&dir).map_err(|error| FileError::Unsynced(parent(path), error))
 }
 
 fn create_temp(path: &Path) -> io::Result<(PathBuf, File)> {
@@ -174,7 +208,6 @@ fn temp_name(path: &Path, attempt: u32) -> PathBuf {
     path.with_file_name(name)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn remove(anchor: &Path, path: &Path) -> Result<bool, FileError> {
     let Some(dir) = owned_dir(anchor, path, Missing::Absent)? else {
         return Ok(false);
@@ -183,7 +216,8 @@ pub(crate) fn remove(anchor: &Path, path: &Path) -> Result<bool, FileError> {
         return Ok(false);
     }
     std::fs::remove_file(path).map_err(|error| FileError::Io(path.to_owned(), error))?;
-    sync_dir(path, &dir)?;
+    dir.sync_all()
+        .map_err(|error| FileError::Unsynced(parent(path), error))?;
     Ok(true)
 }
 
@@ -233,6 +267,12 @@ fn owned_dir(anchor: &Path, path: &Path, missing: Missing) -> Result<Option<File
     Ok(Some(dir))
 }
 
+pub(crate) fn check_anchor(anchor: &Path) -> Result<(), FileError> {
+    open_owned_dir(anchor)?
+        .map(drop)
+        .ok_or_else(|| FileError::MissingAnchor(anchor.to_owned()))
+}
+
 fn open_owned_dir(dir: &Path) -> Result<Option<File>, FileError> {
     let io = |error| FileError::Io(dir.to_owned(), error);
     let handle = match OpenOptions::new()
@@ -257,7 +297,7 @@ fn open_owned_dir(dir: &Path) -> Result<Option<File>, FileError> {
     Ok(Some(handle))
 }
 
-fn euid() -> u32 {
+pub(crate) fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }
@@ -272,14 +312,14 @@ fn regular_mode(path: &Path) -> Result<Option<u32>, FileError> {
     }
 }
 
-fn sync_dir(path: &Path, dir: &File) -> Result<(), FileError> {
-    dir.sync_all()
-        .map_err(|error| FileError::Io(path.parent().unwrap_or(path).to_owned(), error))
+fn parent(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(path).to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registration::testing::{foreign_dir, mkfifo};
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -330,16 +370,8 @@ mod tests {
         format!("gateinto-files-{}-{name}", std::process::id())
     }
 
-    // Root owns every directory it creates, so a foreign directory is made by handing a scratch
-    // directory to nobody; any other user meets one in `/`.
     fn foreign_target(scratch: &Scratch) -> PathBuf {
-        if euid() != 0 {
-            return PathBuf::from("/");
-        }
-        let dir = scratch.path("foreign");
-        std::fs::create_dir(&dir).unwrap();
-        std::os::unix::fs::chown(&dir, Some(65534), Some(65534)).unwrap();
-        dir
+        foreign_dir(&scratch.0)
     }
 
     fn foreign_inside(scratch: &Scratch) -> PathBuf {
@@ -419,11 +451,12 @@ mod tests {
         let scratch = Scratch::new();
         let anchor = scratch.path("home");
         let path = anchor.join("config/mimeapps.list");
-        assert!(matches!(
-            write(&anchor, &path, b"new", Mode::KeepOr(0o644)),
-            Err(FileError::Io(missing, error))
-                if missing == anchor && error.kind() == io::ErrorKind::NotFound
-        ));
+        let error = write(&anchor, &path, b"new", Mode::KeepOr(0o644)).unwrap_err();
+        assert!(matches!(&error, FileError::MissingAnchor(missing) if *missing == anchor));
+        assert_eq!(
+            error.to_string(),
+            format!("directory {} does not exist", anchor.display())
+        );
         assert!(scratch.names("").is_empty());
     }
 
@@ -571,11 +604,39 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.path("mimeapps.list");
         std::fs::write(&path, b"old").unwrap();
-        let failed = write_with(&scratch.0, &path, b"new", Mode::KeepOr(0o644), |_, _| {
-            Err(io::Error::other("injected"))
-        });
-        assert!(matches!(failed, Err(FileError::Io(..))));
+        let failed = write_with(
+            &scratch.0,
+            &path,
+            b"new",
+            Mode::KeepOr(0o644),
+            |_, _| Err(io::Error::other("injected")),
+            |_| Ok(()),
+        );
+        assert!(matches!(
+            failed,
+            Err(FileError::Io(failed, error)) if failed == path && error.to_string() == "injected"
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(scratch.names(""), ["mimeapps.list"]);
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_publishing_is_reported_as_such() {
+        let scratch = Scratch::new();
+        let path = scratch.path("mimeapps.list");
+        let failed = write_with(
+            &scratch.0,
+            &path,
+            b"new",
+            Mode::KeepOr(0o644),
+            |from, to| std::fs::rename(from, to),
+            |_| Err(io::Error::other("injected")),
+        );
+        assert!(matches!(
+            failed,
+            Err(FileError::Unsynced(dir, error)) if dir == scratch.0 && error.to_string() == "injected"
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert_eq!(scratch.names(""), ["mimeapps.list"]);
     }
 
@@ -728,8 +789,7 @@ mod tests {
     fn reading_refuses_fifos_and_directories_without_blocking() {
         let scratch = Scratch::new();
         let fifo = scratch.path("fifo");
-        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        mkfifo(&fifo);
         assert_eq!(
             read(&fifo, Links::Refuse).unwrap(),
             Contents::Refused(Refusal::NotRegular)
@@ -738,6 +798,31 @@ mod tests {
             read(&scratch.0, Links::Refuse).unwrap(),
             Contents::Refused(Refusal::NotRegular)
         );
+    }
+
+    #[test]
+    fn refusals_become_errors_that_name_the_file() {
+        let path = Path::new("/home/u/.config/mimeapps.list");
+        for (refusal, text) in [
+            (
+                Refusal::Symlink,
+                "/home/u/.config/mimeapps.list is a symbolic link; refusing to follow it",
+            ),
+            (
+                Refusal::NotRegular,
+                "/home/u/.config/mimeapps.list is not a regular file",
+            ),
+            (
+                Refusal::TooLarge,
+                "/home/u/.config/mimeapps.list is larger than 1 MiB",
+            ),
+            (
+                Refusal::NotUtf8,
+                "/home/u/.config/mimeapps.list is not valid UTF-8",
+            ),
+        ] {
+            assert_eq!(refusal.error(path).to_string(), text);
+        }
     }
 
     #[test]

@@ -3,7 +3,18 @@ use super::xdg::Roots;
 use super::{keyfile, mimeapps};
 use std::path::{Path, PathBuf};
 
+pub(crate) struct Found {
+    pub(crate) id: String,
+    pub(crate) list: PathBuf,
+    pub(crate) entry: PathBuf,
+    pub(crate) text: String,
+}
+
 pub(crate) fn registered_command(roots: &Roots, scheme: &str) -> Option<String> {
+    effective_default(roots, scheme).and_then(|found| exec(&found.text).map(str::to_owned))
+}
+
+pub(crate) fn effective_default(roots: &Roots, scheme: &str) -> Option<Found> {
     let applications: Vec<PathBuf> = roots
         .data_home
         .iter()
@@ -23,12 +34,18 @@ pub(crate) fn registered_command(roots: &Roots, scheme: &str) -> Option<String> 
         .chain(&applications);
     for dir in dirs {
         for name in &names {
-            let Some(text) = read(&dir.join(name)) else {
+            let list = dir.join(name);
+            let Some(text) = read(&list) else {
                 continue;
             };
             for id in mimeapps::default_ids(&text, scheme) {
-                if let Some(entry) = installed(&applications, id) {
-                    return exec(&entry).map(str::to_owned);
+                if let Some((entry, text)) = installed(&applications, id) {
+                    return Some(Found {
+                        id: id.to_owned(),
+                        list,
+                        entry,
+                        text,
+                    });
                 }
             }
         }
@@ -36,11 +53,14 @@ pub(crate) fn registered_command(roots: &Roots, scheme: &str) -> Option<String> 
     None
 }
 
-fn installed(applications: &[PathBuf], id: &str) -> Option<String> {
+fn installed(applications: &[PathBuf], id: &str) -> Option<(PathBuf, String)> {
     if !is_desktop_id(id) {
         return None;
     }
-    applications.iter().find_map(|dir| read(&dir.join(id)))
+    applications.iter().find_map(|dir| {
+        let entry = dir.join(id);
+        read(&entry).map(|text| (entry, text))
+    })
 }
 
 fn read(path: &Path) -> Option<String> {
@@ -54,7 +74,7 @@ fn is_desktop_id(id: &str) -> bool {
     id.ends_with(".desktop") && !id.contains(['/', '\\']) && !id.contains(char::is_control)
 }
 
-fn exec(entry: &str) -> Option<&str> {
+pub(crate) fn exec(entry: &str) -> Option<&str> {
     keyfile::values(entry, "Desktop Entry", |key| key == "Exec").last()
 }
 
@@ -62,6 +82,7 @@ fn exec(entry: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::registration::files::MAX_FILE_SIZE;
+    use crate::registration::testing::mkfifo;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct Scratch(PathBuf);
@@ -281,12 +302,6 @@ mod tests {
         std::fs::create_dir_all(scratch.0.join("data/applications/dir.desktop")).unwrap();
         scratch.install("data", "gateinto.desktop", "ours");
         assert_eq!(lookup(&scratch).as_deref(), Some("ours"));
-    }
-
-    fn mkfifo(path: &Path) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     }
 
     #[test]
