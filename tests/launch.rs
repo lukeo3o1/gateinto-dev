@@ -1240,9 +1240,9 @@ mod interrupt {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[tokio::test(flavor = "multi_thread")]
-async fn uri_registration_is_windows_only() {
+async fn uri_registration_is_windows_and_linux_only() {
     let launcher = Launcher::new("").await;
     for args in [&["uri", "register"][..], &["uri", "unregister"]] {
         let output = launcher.run(args).await;
@@ -1250,7 +1250,7 @@ async fn uri_registration_is_windows_only() {
             output
                 .failure()
                 .stderr
-                .contains("only supported on Windows"),
+                .contains("only supported on Windows and Linux"),
             "{}",
             output.stderr
         );

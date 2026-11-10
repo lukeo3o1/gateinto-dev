@@ -104,7 +104,7 @@ be uninstalled before a release MSI is installed.
 | `gateinto session verification <id>` | Show the pending gateway verification of one of the agent's sessions (link, origin, pairing code, targets, remaining time) on standard error, only when it is a terminal; never on standard output and never in a browser. See [interactive verification](docs/design/interactive-auth.md). |
 | `gateinto stop` | Close all of the agent's sessions and stop it, saying how many terminal sessions it closed. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their default route and their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
-| `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows, development use). |
+| `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows and Linux, development use). |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
 | `gateinto setup` | First run as the key's user: refuse service accounts, check the config, create or reuse the device key, report the `gateinto://` handler. See [docs/install.md](docs/install.md#first-run-gateinto-setup). |
@@ -1046,7 +1046,9 @@ subject `CN=gateinto-test-client` to `CurrentUser\My` and removes it again;
 its self-signed certificate test only keeps certificates in memory.
 `tests/uri_registration.rs` (Windows only) writes and deletes
 `HKCU\Software\Classes\gateinto-test-*` keys; it never touches
-`HKCU\Software\Classes\gateinto`. The CLI and launch tests point
+`HKCU\Software\Classes\gateinto`. `tests/uri_registration_linux.rs` (Linux
+only) registers a `gateinto-test-*` scheme in a temporary `HOME` and checks
+the result with `gio` when it is installed. The CLI and launch tests point
 `XDG_CONFIG_HOME` and `APPDATA` at empty temporary directories so that a real
 default config file does not change them. The agent and launch tests start a fake
 browser (`tests/fake_browser.rs`, built as a test target) instead of Chrome or

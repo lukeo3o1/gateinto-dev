@@ -150,7 +150,7 @@ certificate or Gateinto outer TLS/key-exchange policy.
 ### Launch URIs and the agent
 
 Any website, e-mail or document can open a `gateinto://` link, and with the
-handler registered Windows passes it to `gateinto open` without further
+handler registered Windows or the Linux desktop passes it to `gateinto open` without further
 checks. Gateinto therefore treats the URI as attacker-controlled. The exact
 format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 
@@ -226,7 +226,21 @@ How that is bounded:
 - **Registration.** `gateinto uri register` writes only the current user's
   `HKCU\Software\Classes\gateinto`, with quoted absolute paths that cannot
   contain quotes or `%`, and neither registration nor removal changes a
-  handler that does not run Gateinto.
+  handler that does not run Gateinto. On Linux it writes only
+  `gateinto.desktop` in the user's applications directory and the
+  `x-scheme-handler/gateinto` line of the user's `mimeapps.list`. Like
+  HKCU, these files are writable by every program of the same user, which is
+  trusted; the boundary is against other users and other applications'
+  handlers. A desktop file that is not Gateinto's own, or a default that
+  names another application, is reported and left unchanged, never replaced
+  or removed. Symlinked or non-regular files are refused, and every directory
+  level must be owned by the effective uid, so `sudo gateinto uri register`
+  with a preserved `HOME` is refused instead of writing root-owned files into
+  the user's home. No executable (`update-desktop-database`, `xdg-mime`) is
+  run to register. When a higher-priority setting may still send links to
+  another application, Gateinto prints a warning rather than changing it.
+  Directories are opened `O_RDONLY` for these checks, so a directory of the
+  user's own without read permission fails with "Permission denied".
 
 ### Gateways added from links
 

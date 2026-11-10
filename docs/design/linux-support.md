@@ -164,7 +164,11 @@ to each scheme's file separately: `<scheme>.desktop` is ours only if it has
 that `is_handler_command` accepts.
 
 A relative `XDG_DATA_HOME` or `XDG_CONFIG_HOME` is ignored as in
-`src/config.rs:25-39`.
+`src/config.rs:25-39`, and so is a relative `HOME`. When neither an absolute
+XDG value nor an absolute `HOME` gives a directory, `register` and
+`unregister` fail with "cannot find the per-user config directory: set HOME
+or XDG_CONFIG_HOME to an absolute path" (or the data directory and
+`XDG_DATA_HOME`).
 
 **Files, not `xdg-mime`.** `xdg-mime` is an optional shell script from
 `xdg-utils`, behaves differently per desktop, rewrites `mimeapps.list` in its
@@ -213,30 +217,72 @@ and a shared parser, not a second implementation. The executable is
     looked up as `kde4/foo.desktop`); such a default counts as not
     installed.
   - `Hidden=true` is not honoured, so a hidden desktop file still counts as
-    installed. The override warning of `register` must account for this.
+    installed. The override warning of `register` is given for it all the
+    same.
   - A default whose desktop file has no `Exec` (for example
-    `DBusActivatable=true`) yields no command; to be revisited with the
-    override warning.
+    `DBusActivatable=true`) yields no command, and the override warning is
+    given for it.
   - `[Added Associations]` and the `mimeinfo.cache` fallback are not
     consulted, so status can say "not registered" while a desktop picks a
     handler that way.
-- `register(scheme, command)` refuses a command that `is_handler_command`
-  does not accept. It returns `ForeignHandler` when `<scheme>.desktop` exists
-  and is not ours (as defined above), or when the value for the scheme in
-  `$XDG_CONFIG_HOME/mimeapps.list` contains any id other than
-  `<scheme>.desktop`. Otherwise it writes the desktop file, then the
-  `mimeapps.list` line, and removes a desktop file it created if the second
-  write fails (the rollback of `src/registration.rs:186-189`). If a file
-  earlier in the lookup order (for example a desktop-specific
-  `mimeapps.list`) yields another installed handler, `register` succeeds
-  and returns a warning that the desktop will not use ours; `setup` and `uri
-  register` print it. This changes the signature from
-  `Result<(), RegistrationError>` to one that returns the warning (for
-  example `Result<Option<Overridden>, RegistrationError>`), on Windows too;
-  Windows always returns `None`.
-- `unregister(scheme)` removes our `mimeapps.list` line and our desktop file
-  only, returns `ForeignHandler` if either is foreign, and `Ok(true)` if it
-  removed anything, `Ok(false)` otherwise.
+- `register(scheme, command)` refuses an invalid scheme, and a command that
+  `is_handler_command` does not accept with `NotAHandlerCommand`, before any
+  file is read, so the error does not name a desktop file that may not
+  exist (Windows keeps `ForeignHandler` there).
+  It returns `ForeignHandler` when `<scheme>.desktop` exists and is not ours
+  (as defined above, with the command of its last `Exec` in the error, or
+  none), and `ForeignDefault` (naming the file and the ids) when the
+  scheme's values in `[Default Applications]` of `$XDG_CONFIG_HOME/mimeapps.list`
+  list any id other than `<scheme>.desktop`. These are the raw ids of every
+  line for the key, so a duplicate line and an id with a backslash count,
+  and they are taken before the line is edited. A line without ids is
+  replaced. Both files are read without following symlinks; a symlink, a
+  file that is not regular, one over 1 MiB or one that is not UTF-8 is
+  refused with an error that names it and is never rewritten. Otherwise it
+  writes the desktop file (always, so its mode is reset to `0o600`), then
+  re-reads and re-checks `mimeapps.list` and writes the line if it is not
+  there yet. A desktop file it created is removed if the desktop file write
+  itself fails or the line is not written; it is removed only while it still
+  holds what was written, and a desktop file that existed before (ours, with
+  another command) is kept with the new command. When the rename of
+  `mimeapps.list` succeeded and only the directory sync after it failed, the
+  line is in place: both files are kept and the error says that the change
+  was written but could not be flushed to disk. Running `register` again is
+  idempotent in every state this leaves.
+
+  After writing, `register` runs the lookup of `registered_command` and
+  returns `Ok(Some(Overridden))` unless the effective default is our own
+  desktop file in `$XDG_DATA_HOME/applications` and still ours. The signature
+  is `Result<Option<Overridden>, RegistrationError>` on every platform;
+  Windows always returns `None`. The wording is deliberately "may", because
+  the lookup is narrower than GIO's (see above), so the warning can be given
+  when a desktop would still use ours:
+  - another file in the lookup order sets an installed id: "`<file>` sets
+    "`<id>`" as the default for x-scheme-handler/`<scheme>`, so
+    `<scheme>`:// links may open that application instead of Gateinto";
+  - no installed default is found at all: "no installed default for
+    x-scheme-handler/`<scheme>` was found that is the Gateinto desktop file,
+    so `<scheme>`:// links may open another application or none".
+
+  The absence of a warning is not a guarantee: other desktops'
+  `<desktop>-mimeapps.list` files (only `XDG_CURRENT_DESKTOP` of the
+  registering process is read), `[Removed Associations]`, sandboxed browsers
+  going through the portal, and desktops that do not follow the
+  specification are not considered. `uri register` prints the warning to
+  stderr after the success line. `setup` does not register a handler (it
+  only reports one, and keeps failing on Linux until Area 5), so it prints
+  no warning yet; that is left to step 14.
+- `unregister(scheme)` reads and checks both files before changing anything.
+  It removes our `mimeapps.list` line only when every id on the scheme's
+  lines is `<scheme>.desktop` and there is at least one, then our desktop
+  file. It returns `ForeignHandler` or `ForeignDefault` if either is foreign,
+  `Ok(true)` if it removed anything and `Ok(false)` otherwise, and never
+  creates a directory. If the line was removed but the desktop file removal
+  fails, running it again removes the desktop file.
+
+`gateinto uri register` and `uri unregister` take a hidden `--scheme`
+option, restricted to `gateinto` and `gateinto-test-<name>`, for the
+integration test.
 
 **Writes.** Each file is written to a temporary file in the same directory
 (`create_new`; mode `0o600` for the desktop file; for `mimeapps.list` the
@@ -249,11 +295,15 @@ the file just before writing to keep the window small, and the race is
 documented. `mimeapps.list` is parsed as an INI-like file and only the
 `x-scheme-handler/<scheme>` key in `[Default Applications]` is added or
 removed; every other line, comment and
-section is kept byte for byte. A `mimeapps.list` or desktop file that is a
+section is kept byte for byte. The one exception is a
+`[Default Applications]` header that `register` added to a list without
+one: `unregister` removes only the key line and leaves that header. A `mimeapps.list` or desktop file that is a
 symlink or not a regular file is refused rather than followed or replaced.
 Every write and removal is anchored at a directory that must contain the
 target lexically (the home directory, or the XDG root when it is not under
-it). The anchor must be a directory owned by the effective uid, which refuses
+it). Both anchors are checked before anything is written: an anchor is never
+created, and a missing one fails with "directory `<anchor>` does not exist".
+The anchor must be a directory owned by the effective uid, which refuses
 `sudo gateinto uri register` with a preserved `HOME`. Each level between the
 anchor and the target directory is then checked in turn: symlinks are
 followed, the resolved directory must be owned by the effective uid, and a
@@ -263,6 +313,10 @@ levels and never creates any. The checks resolve paths and the later writes
 resolve them again, so a process that can write to a checked directory
 (normally only the same user, who is trusted; see Security) can still swap a
 level in between. A kept mode loses its setuid, setgid and sticky bits.
+
+Known limit: directories are opened `O_RDONLY` to check their owner and to
+sync them, so a directory of the user's own without read permission (for
+example mode `0o300`) fails with "Permission denied" instead of being used.
 
 ### Security
 
@@ -299,10 +353,15 @@ environment):
 - rollback when the second write fails (read-only directory);
 - relative XDG values are ignored.
 
-An integration test runs `gateinto uri register --scheme gateinto-test-<n>`
-with `HOME` and XDG variables pointed at a temporary directory and checks
-`gio mime x-scheme-handler/gateinto-test-<n>` when `gio` is installed
-(skipped otherwise; it is on the runner image, which needs verification).
+An integration test (`tests/uri_registration_linux.rs`) runs `gateinto uri
+register --scheme gateinto-test-<n>` with `HOME` and XDG variables pointed at
+a temporary directory, checks the two files, and checks `gio mime
+x-scheme-handler/gateinto-test-<n>` under `LC_ALL=C` when `/usr/bin/gio` or
+`/bin/gio` exists (skipped otherwise; `gio` is never looked up on `PATH`).
+GIO treats a desktop file whose `Exec` binary does not exist as invalid, so
+the test registers the built `gateinto` binary. It then unregisters and
+checks that `gio` reports no default. `gio` is present locally at
+`/usr/bin/gio`; whether it is on the runner image still needs verification.
 
 ### Manual and unverified
 

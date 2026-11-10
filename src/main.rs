@@ -73,7 +73,7 @@ enum Command {
     /// List the gateways, or remove one that was added from a gateinto:// link
     #[command(subcommand)]
     Gateway(GatewayCommand),
-    /// Register or remove the per-user gateinto:// URI handler (Windows, development use)
+    /// Register or remove the per-user gateinto:// URI handler (development use)
     #[command(subcommand)]
     Uri(UriCommand),
     /// Prepare Gateinto for the current Windows user: check the config, create or reuse the
@@ -209,10 +209,40 @@ enum GatewayCommand {
 
 #[derive(Subcommand)]
 enum UriCommand {
-    /// Write HKCU\Software\Classes\gateinto so that gateinto:// links run `gateinto open`
-    Register(ConfigArg),
-    /// Remove HKCU\Software\Classes\gateinto if it runs a Gateinto executable
-    Unregister,
+    /// Make gateinto:// links run `gateinto open` for the current user: HKCU\Software\Classes
+    /// on Windows, a desktop file and the mimeapps.list default on Linux
+    Register(UriRegisterArgs),
+    /// Remove the current user's gateinto:// handler if it runs a Gateinto executable
+    Unregister(SchemeArg),
+}
+
+#[derive(Args)]
+struct UriRegisterArgs {
+    #[command(flatten)]
+    config: ConfigArg,
+
+    #[command(flatten)]
+    scheme: SchemeArg,
+}
+
+#[derive(Args)]
+struct SchemeArg {
+    #[arg(long, hide = true, default_value = registration::SCHEME, value_parser = test_scheme)]
+    scheme: String,
+}
+
+fn test_scheme(scheme: &str) -> std::result::Result<String, String> {
+    let allowed = scheme == registration::SCHEME
+        || scheme
+            .strip_prefix("gateinto-test-")
+            .is_some_and(|name| !name.is_empty());
+    match registration::validate_scheme(scheme) {
+        Ok(()) if allowed => Ok(scheme.to_owned()),
+        _ => Err(format!(
+            "expected {} or gateinto-test-<name>",
+            registration::SCHEME
+        )),
+    }
 }
 
 #[derive(Args)]
@@ -1465,8 +1495,11 @@ async fn stop(args: StopArgs) -> Result {
 
 fn uri(command: UriCommand) -> Result {
     match command {
-        UriCommand::Register(args) => {
-            let config = args
+        UriCommand::Register(UriRegisterArgs {
+            config,
+            scheme: SchemeArg { scheme },
+        }) => {
+            let config = config
                 .config
                 .as_deref()
                 .map(std::path::absolute)
@@ -1476,14 +1509,17 @@ fn uri(command: UriCommand) -> Result {
             }
             let command =
                 registration::handler_command(&std::env::current_exe()?, config.as_deref())?;
-            registration::register(registration::SCHEME, &command)?;
-            println!("registered gateinto:// for the current user: {command}");
+            let overridden = registration::register(&scheme, &command)?;
+            println!("registered {scheme}:// for the current user: {command}");
+            if let Some(overridden) = overridden {
+                eprintln!("warning: {overridden}");
+            }
         }
-        UriCommand::Unregister => {
-            if registration::unregister(registration::SCHEME)? {
-                println!("removed the gateinto:// handler of the current user");
+        UriCommand::Unregister(SchemeArg { scheme }) => {
+            if registration::unregister(&scheme)? {
+                println!("removed the {scheme}:// handler of the current user");
             } else {
-                println!("no gateinto:// handler is registered for the current user");
+                println!("no {scheme}:// handler is registered for the current user");
             }
         }
     }
