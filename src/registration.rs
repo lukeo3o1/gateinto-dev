@@ -2,6 +2,8 @@ use std::fmt;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
+mod files;
+#[cfg(target_os = "linux")]
 mod keyfile;
 #[cfg(target_os = "linux")]
 mod lookup;
