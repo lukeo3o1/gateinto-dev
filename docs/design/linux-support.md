@@ -203,7 +203,23 @@ and a shared parser, not a second implementation. The executable is
   skipped, and when no id of a file is installed the lookup falls through to
   the next file. For `foo.desktop;gateinto.desktop;` the effective handler is
   `foo.desktop` if it is installed and ours only otherwise. `None` when no
-  installed default is found.
+  installed default is found. Only regular files of at most 1 MiB are read,
+  opened without blocking so a FIFO cannot stall `gateinto status`; any
+  other file is treated as missing, and an unreadable desktop file falls
+  through to the same id in the later data dirs.
+
+  The lookup is narrower than GIO's:
+  - Desktop ids are not mapped to subdirectories (`kde4-foo.desktop` is not
+    looked up as `kde4/foo.desktop`); such a default counts as not
+    installed.
+  - `Hidden=true` is not honoured, so a hidden desktop file still counts as
+    installed. The override warning of `register` must account for this.
+  - A default whose desktop file has no `Exec` (for example
+    `DBusActivatable=true`) yields no command; to be revisited with the
+    override warning.
+  - `[Added Associations]` and the `mimeinfo.cache` fallback are not
+    consulted, so status can say "not registered" while a desktop picks a
+    handler that way.
 - `register(scheme, command)` refuses a command that `is_handler_command`
   does not accept. It returns `ForeignHandler` when `<scheme>.desktop` exists
   and is not ours (as defined above), or when the value for the scheme in
@@ -843,6 +859,8 @@ to 17 still ship and terminals stay unavailable on Linux.
   through the `mimeapps.list` default without `update-desktop-database`;
   `NoDisplay=true` keeps the handler eligible.
 - `gio` is on the `ubuntu-latest` image.
+- How GIO and each desktop treat a `Hidden=true` default, and a default
+  without `Exec`, when deciding the override warning.
 - The hosted runner allows `loginctl enable-linger` and a user manager with
   a delegated cgroup subtree.
 - Transient user scopes are created under `app.slice` on the supported

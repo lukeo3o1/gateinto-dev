@@ -1,7 +1,7 @@
 mod isolated;
 use std::path::PathBuf;
 
-use isolated::{gateinto as gateinto_command, no_config_home};
+use isolated::{gateinto as gateinto_command, isolated_root};
 
 #[test]
 fn prints_version() {
@@ -350,7 +350,7 @@ fn reset_deletes_a_config_file_only_when_named_or_at_the_default_location() {
         stderr.contains(&format!(
             "--purge-config found no config file named with --config or at {}, and no gateways \
              added from links; nothing was deleted",
-            default_config(&no_config_home()).display()
+            default_config(&isolated_root()).display()
         )),
         "{stderr}"
     );
@@ -407,6 +407,28 @@ fn setup_requires_windows() {
 
 #[cfg(not(windows))]
 #[test]
+fn commands_never_read_host_xdg_directories() {
+    use std::ffi::OsStr;
+
+    let command = gateinto_command();
+    let envs: Vec<_> = command.get_envs().collect();
+    let root = isolated_root();
+    for name in [
+        "XDG_CONFIG_HOME",
+        "XDG_CONFIG_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_DATA_DIRS",
+    ] {
+        assert!(
+            envs.contains(&(OsStr::new(name), Some(root.as_os_str()))),
+            "{name}"
+        );
+    }
+    assert!(envs.contains(&(OsStr::new("XDG_CURRENT_DESKTOP"), None)));
+}
+
+#[cfg(not(windows))]
+#[test]
 fn status_is_read_only_and_reports_what_it_can() {
     let (success, stdout, stderr) = gateinto_without_terminal(&["status"]);
     assert!(success, "{stdout}{stderr}");
@@ -418,11 +440,16 @@ fn status_is_read_only_and_reports_what_it_can() {
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
-             uri-handler: not supported on this platform\n",
-            default_config(&no_config_home()).display(),
-            default_config(&no_config_home())
+             uri-handler: {}\n",
+            default_config(&isolated_root()).display(),
+            default_config(&isolated_root())
                 .with_file_name("gateways")
-                .display()
+                .display(),
+            if cfg!(target_os = "linux") {
+                "not registered"
+            } else {
+                "not supported on this platform"
+            }
         )
     );
 }

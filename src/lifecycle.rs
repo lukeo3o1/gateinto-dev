@@ -97,12 +97,46 @@ pub fn handler_state(registered: Result<Option<String>, RegistrationError>) -> S
     match registered {
         Ok(None) => "not registered".to_owned(),
         Ok(Some(command)) if registration::is_handler_command(&command) => {
-            format!("gateinto: {command}")
+            format!("gateinto: {}", printable(&command))
         }
-        Ok(Some(command)) => format!("another program: {command}"),
+        Ok(Some(command)) => format!("another program: {}", printable(&command)),
         Err(RegistrationError::Unsupported) => "not supported on this platform".to_owned(),
         Err(error) => format!("unknown: {error}"),
     }
+}
+
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else if is_format(c) {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61c}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 fn address_line(gateway: &KnownGateway) -> String {
@@ -357,6 +391,31 @@ mod tests {
             })),
             "unknown: RegOpenKeyExW failed with Windows error 5"
         );
+    }
+
+    #[test]
+    fn foreign_handler_commands_cannot_inject_terminal_controls() {
+        assert_eq!(
+            handler_state(Ok(Some(
+                "\"C:\\x.exe\" \u{1b}]0;title\u{7}\r\n%u\u{9b}".to_owned()
+            ))),
+            "another program: \"C:\\x.exe\" \\u{1b}]0;title\\u{7}\\r\\n%u\\u{9b}"
+        );
+    }
+
+    #[test]
+    fn foreign_handler_commands_cannot_spoof_text_direction() {
+        let spoofing = [
+            '\u{61c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
+            '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}',
+            '\u{2069}', '\u{feff}',
+        ];
+        for c in spoofing {
+            assert_eq!(
+                handler_state(Ok(Some(format!("a{c}b")))),
+                format!("another program: a\\u{{{:x}}}b", u32::from(c))
+            );
+        }
     }
 
     fn known_gateways() -> Vec<KnownGateway> {

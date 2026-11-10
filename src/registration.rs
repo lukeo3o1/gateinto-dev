@@ -2,6 +2,10 @@ use std::fmt;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
+mod keyfile;
+#[cfg(target_os = "linux")]
+mod lookup;
+#[cfg(target_os = "linux")]
 mod mimeapps;
 #[cfg(target_os = "linux")]
 mod xdg;
@@ -160,7 +164,14 @@ pub fn unregister(_scheme: &str) -> Result<bool, RegistrationError> {
     Err(RegistrationError::Unsupported)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn registered_command(scheme: &str) -> Result<Option<String>, RegistrationError> {
+    validate_scheme(scheme)?;
+    let roots = xdg::Roots::from_env(|name| std::env::var_os(name));
+    Ok(lookup::registered_command(&roots, scheme))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn registered_command(_scheme: &str) -> Result<Option<String>, RegistrationError> {
     Err(RegistrationError::Unsupported)
 }
@@ -338,6 +349,15 @@ mod tests {
         ] {
             assert!(validate_scheme(scheme).is_err(), "{scheme:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_lookup_refuses_invalid_schemes() {
+        assert_eq!(
+            registered_command("../gateinto"),
+            Err(RegistrationError::InvalidScheme("../gateinto".to_owned()))
+        );
     }
 
     #[test]
