@@ -381,7 +381,7 @@ Linux implements `Owners` (`src/proxy/os_user.rs:32-34`) from `/proc`:
 1. **Row.** `/proc/net/tcp` and `/proc/net/tcp6` have no pid column, so Linux
    has its own row type, `LinuxRow { local, remote, uid, inode }`, and its own
    matcher. Only the address rule is shared with `owner`
-   (`src/proxy/os_user.rs:59-71`): the row's local end is the client's address
+   (`src/proxy/os_user.rs:59-61`): the row's local end is the client's address
    and its remote end is the listener. Addresses are hex; an IPv4 address (and
    each 32-bit word of an IPv6 address) is in host byte order, the port is the
    plain hex port number, and IPv4-mapped IPv6 addresses are matched as IPv4.
@@ -406,6 +406,13 @@ Linux implements `Owners` (`src/proxy/os_user.rs:32-34`) from `/proc`:
    agent's uid, otherwise `OtherUser`.
 5. **Membership.** When the check has a containment unit, the process's
    cgroup path must be the scope's path or below it, otherwise `NotInJob`.
+
+The `/proc` parsers are strict and any malformed input is a `Lookup`
+denial: a table without its header or with a row of fewer than the twelve
+fields the kernel always writes, a `status` without exactly one `Uid:` line
+of four decimal fields, a `cgroup` without exactly one `0::/<path>` line. A
+second `Uid:` or `0::` line is malformed rather than ignored, so a process
+or cgroup name containing a newline cannot add one.
 
 The connection is accepted only when a readable, live holder with our uid
 (and, in scope mode, inside the scope) is positively found. Otherwise it is
