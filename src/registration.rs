@@ -1,6 +1,11 @@
 use std::fmt;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+mod mimeapps;
+#[cfg(target_os = "linux")]
+mod xdg;
+
 pub const SCHEME: &str = "gateinto";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,7 +350,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn the_windows_executable_name_is_matched_case_insensitively() {
         assert!(is_handler_command(
@@ -368,7 +373,7 @@ mod tests {
             r#""bin/gateinto" open -- %u"#,
             r#""/opt/$X/gateinto" open -- %u"#,
             r#""/opt/a`id`/gateinto" open -- %u"#,
-            r#""/opt/a\"/gateinto" open -- %u"#,
+            r#""/opt/a\b/gateinto" open -- %u"#,
             r#""/opt/100%/gateinto" open -- %u"#,
             r#""/opt/gateinto/gateinto" open --config "$HOME/g.toml" -- %u"#,
             r#""/opt/gateinto/gateinto" open --config "/a`id`.toml" -- %u"#,
@@ -378,6 +383,9 @@ mod tests {
             r#""/opt/gateinto/gateinto" open --config "/etc/" -- %u"#,
             r#""/opt/gateinto/gateinto" open --config "" -- %u"#,
             "\"/opt/gateinto/gateinto\" open --config \"/a\tb.toml\" -- %u",
+            r#""/opt/gateinto/gateinto" open -- %u & calc"#,
+            r#""/opt/gateinto/gateinto" open -- %u "#,
+            r#""/opt/gateinto/gateinto" open --config "/a" "/b" -- %u"#,
         ] {
             assert!(!is_handler_command(command), "{command}");
         }
