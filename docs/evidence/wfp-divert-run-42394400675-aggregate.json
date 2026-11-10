@@ -1,0 +1,738 @@
+{
+  "source_url": "https://github.com/lukeo3o1/gateinto-dev/actions/runs/42394400675",
+  "head_sha": "0d769c50b084f02017da13de38e7f20cb60b1dc2",
+  "runner": "windows-2022",
+  "redaction": "Aggregate lab results; no paths, PIDs, endpoints, absolute timestamps, raw XML or per-flow identifiers.",
+  "results": [
+    {
+      "test_case": "hold-wfp-tcp",
+      "status": "FAIL",
+      "source": "wfp",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0053
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 11,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "client lacked accepted native ownership control"
+    },
+    {
+      "test_case": "hold-security-tcp",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 6,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 6,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 6,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 6,
+        "native_after_packet_receive": 6,
+        "notification_minus_capture_ms": {
+          "count": 6,
+          "min": 447.3944,
+          "max": 451.9605,
+          "p50": 449.1854,
+          "p95": 451.9605
+        },
+        "decision_minus_capture_ms": {
+          "count": 6,
+          "min": 449.7445,
+          "max": 454.5745,
+          "p50": 451.6392,
+          "p95": 454.5745
+        },
+        "anchor_uncertainty_ms": 0.0047
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 18,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "hold-wfp-delayed",
+      "status": "FAIL",
+      "source": "wfp",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.005
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 18,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "client lacked accepted native ownership control"
+    },
+    {
+      "test_case": "hold-wfp-missing",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "wfp",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 0,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0044
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 30,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "hold-wfp-too-late",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "wfp",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 0,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0047
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 0,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "hold-wfp-udp",
+      "status": "FAIL",
+      "source": "wfp",
+      "mode": "hold",
+      "protocol": "udp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 12,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0046
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 42,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "client lacked accepted native ownership control"
+    },
+    {
+      "test_case": "hold-security-udp",
+      "status": "FAIL",
+      "source": "security5156",
+      "mode": "hold",
+      "protocol": "udp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "source_target_complete_outbound_events": 12,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 12,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 12,
+        "native_after_packet_receive": 12,
+        "notification_minus_capture_ms": {
+          "count": 12,
+          "min": 510.2498,
+          "max": 1013.0767,
+          "p50": 514.4839,
+          "p95": 1013.0767
+        },
+        "decision_minus_capture_ms": {
+          "count": 6,
+          "min": 512.3211,
+          "max": 516.8678,
+          "p50": 513.9562,
+          "p95": 516.8678
+        },
+        "anchor_uncertainty_ms": 0.0055
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 37,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "client lacked accepted native ownership control"
+    },
+    {
+      "test_case": "hold-security-udp-2000",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "hold",
+      "protocol": "udp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 12,
+      "accepted_controls": 12,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 12,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 12,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 12,
+        "native_after_packet_receive": 12,
+        "notification_minus_capture_ms": {
+          "count": 12,
+          "min": 511.1648,
+          "max": 1017.9275,
+          "p50": 515.4855,
+          "p95": 1017.9275
+        },
+        "decision_minus_capture_ms": {
+          "count": 12,
+          "min": 513.6404,
+          "max": 1020.9025,
+          "p50": 518.2357,
+          "p95": 1020.9025
+        },
+        "anchor_uncertainty_ms": 0.0042
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 36,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "hold-security-delayed",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 6,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 6,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 6,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 6,
+        "native_after_packet_receive": 6,
+        "notification_minus_capture_ms": {
+          "count": 6,
+          "min": 476.7468,
+          "max": 481.0253,
+          "p50": 477.9434,
+          "p95": 481.0253
+        },
+        "decision_minus_capture_ms": {
+          "count": 6,
+          "min": 577.7494,
+          "max": 582.2953,
+          "p50": 579.0494,
+          "p95": 582.2953
+        },
+        "anchor_uncertainty_ms": 0.0039
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 23,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "hold-security-too-late",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 0,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 6,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 6,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 6,
+        "native_after_packet_receive": 6,
+        "notification_minus_capture_ms": {
+          "count": 6,
+          "min": 491.4496,
+          "max": 495.617,
+          "p50": 492.9444,
+          "p95": 495.617
+        },
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.004
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 30,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "redirect-security-missing",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "redirect",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 0,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.005
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 0,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "redirect-wfp-missing",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "wfp",
+      "mode": "redirect",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 0,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0046
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 24,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "redirect-wfp",
+      "status": "FAIL",
+      "source": "wfp",
+      "mode": "redirect",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 6,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0041
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 18,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "selected client did not receive effective native-authorized proxying"
+    },
+    {
+      "test_case": "redirect-security",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "redirect",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 9,
+      "effective_proxy_packets": 18,
+      "bridge_tunnels": 3,
+      "gateway_connect_count": 3,
+      "source_target_complete_outbound_events": 6,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 6,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 6,
+        "native_after_packet_receive": 6,
+        "notification_minus_capture_ms": {
+          "count": 6,
+          "min": 440.9787,
+          "max": 445.3148,
+          "p50": 442.3106,
+          "p95": 445.3148
+        },
+        "decision_minus_capture_ms": {
+          "count": 6,
+          "min": 443.341,
+          "max": 447.9696,
+          "p50": 444.7973,
+          "p95": 447.9696
+        },
+        "anchor_uncertainty_ms": 0.0056
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 48,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "retransmit-security",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "redirect",
+      "protocol": "tcp",
+      "scenario": "retransmit",
+      "topology": "single-host-local",
+      "client_tuple_count": 6,
+      "accepted_controls": 9,
+      "effective_proxy_packets": 18,
+      "bridge_tunnels": 3,
+      "gateway_connect_count": 3,
+      "source_target_complete_outbound_events": 6,
+      "client_successes": 6,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 6,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 6,
+        "native_after_packet_receive": 6,
+        "notification_minus_capture_ms": {
+          "count": 6,
+          "min": 462.0339,
+          "max": 465.6171,
+          "p50": 463.2925,
+          "p95": 465.6171
+        },
+        "decision_minus_capture_ms": {
+          "count": 6,
+          "min": 464.397,
+          "max": 468.342,
+          "p50": 465.8545,
+          "p95": 468.342
+        },
+        "anchor_uncertainty_ms": 0.0051
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 42,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "reuse-security",
+      "status": "CHARACTERIZED_REUSE_REJECTION",
+      "source": "security5156",
+      "mode": "redirect",
+      "protocol": "tcp",
+      "scenario": "reuse",
+      "topology": "single-host-local",
+      "client_tuple_count": 1,
+      "accepted_controls": 1,
+      "effective_proxy_packets": 5,
+      "bridge_tunnels": 1,
+      "gateway_connect_count": 1,
+      "nonselected_client_disrupted": true,
+      "reused_syn_rejected": true,
+      "source_target_complete_outbound_events": 1,
+      "client_successes": 1,
+      "client_failures": 1,
+      "timing": {
+        "matched_client_tuples": 1,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 1,
+        "native_after_packet_receive": 1,
+        "notification_minus_capture_ms": {
+          "count": 1,
+          "min": 413.8902,
+          "max": 413.8902,
+          "p50": 413.8902,
+          "p95": 413.8902
+        },
+        "decision_minus_capture_ms": {
+          "count": 1,
+          "min": 416.344,
+          "max": 416.344,
+          "p50": 416.344,
+          "p95": 416.344
+        },
+        "anchor_uncertainty_ms": 0.0052
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 16,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "external-wfp-tcp",
+      "status": "NO_OWNERSHIP_CONFIRMATION",
+      "source": "wfp",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "external-connect-only",
+      "source_target_complete_outbound_events": 0,
+      "client_successes": 2,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 0,
+        "unmatched_client_tuples": 2,
+        "native_after_packet_capture": 0,
+        "native_after_packet_receive": 0,
+        "notification_minus_capture_ms": null,
+        "decision_minus_capture_ms": null,
+        "anchor_uncertainty_ms": 0.0041
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 6,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "client lacked accepted native ownership control"
+    },
+    {
+      "test_case": "external-security-tcp",
+      "status": "PASS_RESTRICTED_CASE",
+      "source": "security5156",
+      "mode": "hold",
+      "protocol": "tcp",
+      "scenario": "baseline",
+      "topology": "external-connect-only",
+      "client_tuple_count": 2,
+      "accepted_controls": 2,
+      "effective_proxy_packets": 0,
+      "bridge_tunnels": 0,
+      "gateway_connect_count": 0,
+      "source_target_complete_outbound_events": 2,
+      "client_successes": 2,
+      "client_failures": 0,
+      "timing": {
+        "matched_client_tuples": 2,
+        "unmatched_client_tuples": 0,
+        "native_after_packet_capture": 2,
+        "native_after_packet_receive": 2,
+        "notification_minus_capture_ms": {
+          "count": 2,
+          "min": 511.478,
+          "max": 511.8671,
+          "p50": 511.478,
+          "p95": 511.8671
+        },
+        "decision_minus_capture_ms": {
+          "count": 2,
+          "min": 513.4367,
+          "max": 513.9146,
+          "p50": 513.4367,
+          "p95": 513.9146
+        },
+        "anchor_uncertainty_ms": 0.0041
+      },
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 4,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 0,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      }
+    },
+    {
+      "test_case": "native-drop-control",
+      "status": "FAIL",
+      "matching_native_drops": 0,
+      "client_exit": 1,
+      "purpose": "blocked-flow positive control, never an allow ownership source",
+      "client_successes": 0,
+      "client_failures": 0,
+      "timing": {},
+      "native_counts": {
+        "wfp_count": 0,
+        "security5156_count": 6,
+        "queue_dropped": 0,
+        "errors": 0,
+        "wfp_callback_count": 1,
+        "wfp_drop_count": 0,
+        "wfp_type_counts": {}
+      },
+      "failure_reason": "blocked connection and native drop notification were not both verified"
+    }
+  ]
+}
