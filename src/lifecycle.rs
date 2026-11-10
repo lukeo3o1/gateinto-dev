@@ -332,6 +332,9 @@ mod tests {
 
     #[test]
     fn handler_states_say_whose_handler_is_registered() {
+        #[cfg(target_os = "linux")]
+        let ours = r#""/home/me/.local/bin/gateinto" open -- %u"#;
+        #[cfg(not(target_os = "linux"))]
         let ours = r#""C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1""#;
         let foreign = r#""C:\Other\other.exe" "%1""#;
         assert_eq!(handler_state(Ok(None)), "not registered");
