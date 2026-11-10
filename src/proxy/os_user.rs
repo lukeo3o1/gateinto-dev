@@ -56,15 +56,16 @@ fn port_of(port: u32) -> u16 {
     u16::from_be_bytes([high, low])
 }
 
+fn same(a: SocketAddr, b: SocketAddr) -> bool {
+    a.ip().to_canonical() == b.ip().to_canonical() && a.port() == b.port()
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn owner(
     rows: impl IntoIterator<Item = Row>,
     peer: SocketAddr,
     local: SocketAddr,
 ) -> Option<u32> {
-    let same = |a: SocketAddr, b: SocketAddr| {
-        a.ip().to_canonical() == b.ip().to_canonical() && a.port() == b.port()
-    };
     rows.into_iter()
         .find(|row| row.pid != 0 && same(row.local, peer) && same(row.remote, local))
         .map(|row| row.pid)
@@ -120,6 +121,9 @@ pub(crate) unsafe fn entries<R>(buffer: &[u64], offset: usize) -> io::Result<&[R
     })
 }
 
+#[cfg(target_os = "linux")]
+#[cfg_attr(not(test), allow(dead_code))]
+mod procfs;
 #[cfg(windows)]
 mod windows;
 
