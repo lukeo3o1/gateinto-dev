@@ -2,7 +2,6 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Roots {
     pub(crate) config_home: Option<PathBuf>,
@@ -13,7 +12,6 @@ pub(crate) struct Roots {
 }
 
 impl Roots {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Self {
         let absolute = |name| {
             env(name)

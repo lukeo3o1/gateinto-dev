@@ -1,3 +1,5 @@
+use super::keyfile;
+
 const GROUP: &str = "Default Applications";
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5,11 +7,10 @@ pub(crate) fn desktop_id(scheme: &str) -> String {
     format!("{scheme}.desktop")
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn default_ids<'a>(text: &'a str, scheme: &str) -> Vec<&'a str> {
-    values(text, scheme)
-        .last()
-        .map_or_else(Vec::new, |value| ids(value).collect())
+    values(text, scheme).last().map_or_else(Vec::new, |value| {
+        ids(value).filter(|id| !id.contains('\\')).collect()
+    })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -32,16 +33,18 @@ pub(crate) fn with_handler(text: &str, scheme: &str) -> String {
             }
         }
     } else if let Some(anchor) = insertion_point(&lines) {
+        let newline = newline(text, lines[anchor].text);
         for (index, line) in lines.iter().enumerate() {
             out.push_str(line.text);
             if index == anchor {
-                push_line(&mut out, &entry);
+                push_line(&mut out, &entry, newline);
             }
         }
     } else {
+        let newline = newline(text, lines.last().map_or("", |line| line.text));
         out.push_str(text);
-        push_line(&mut out, &format!("[{GROUP}]"));
-        push_line(&mut out, &entry);
+        push_line(&mut out, &format!("[{GROUP}]"), newline);
+        push_line(&mut out, &entry, newline);
     }
     out
 }
@@ -78,28 +81,24 @@ fn key(scheme: &str) -> String {
     format!("x-scheme-handler/{scheme}")
 }
 
+fn is_key(name: &str, scheme: &str) -> bool {
+    name.eq_ignore_ascii_case(&key(scheme))
+}
+
 fn lines<'a>(text: &'a str, scheme: &str) -> Vec<Line<'a>> {
-    let key = key(scheme);
-    let mut in_group = false;
-    text.split_inclusive('\n')
-        .map(|text| {
-            let content = text.trim();
-            let kind = if let Some(name) = content
-                .strip_prefix('[')
-                .and_then(|rest| rest.strip_suffix(']'))
-            {
-                in_group = name == GROUP;
-                Kind::Group { ours: in_group }
-            } else if !in_group || content.starts_with('#') {
-                Kind::Other
-            } else {
-                match content.split_once('=') {
-                    Some((name, _)) if name.trim_end() == key => Kind::Handler,
-                    Some(_) => Kind::Entry,
-                    None => Kind::Other,
-                }
+    keyfile::lines(text)
+        .map(|line| {
+            let ours = line.group == Some(GROUP);
+            let kind = match line.kind {
+                keyfile::Kind::Group(_) => Kind::Group { ours },
+                keyfile::Kind::Entry { key, .. } if ours && is_key(key, scheme) => Kind::Handler,
+                keyfile::Kind::Entry { .. } if ours => Kind::Entry,
+                _ => Kind::Other,
             };
-            Line { text, kind }
+            Line {
+                text: line.text,
+                kind,
+            }
         })
         .collect()
 }
@@ -121,23 +120,36 @@ fn insertion_point(lines: &[Line]) -> Option<usize> {
     )
 }
 
-fn push_line(out: &mut String, line: &str) {
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
+fn push_line(out: &mut String, line: &str, newline: &str) {
+    if !out.trim_start_matches(keyfile::BOM).is_empty() && !out.ends_with('\n') {
+        out.push_str(newline);
     }
     out.push_str(line);
-    out.push('\n');
+    out.push_str(newline);
+}
+
+fn newline<'a>(text: &'a str, anchor: &'a str) -> &'a str {
+    std::iter::once(anchor)
+        .chain(text.split_inclusive('\n'))
+        .map(ending)
+        .find(|ending| ending.ends_with('\n'))
+        .unwrap_or("\n")
 }
 
 fn values<'a>(text: &'a str, scheme: &str) -> impl Iterator<Item = &'a str> {
-    lines(text, scheme)
-        .into_iter()
-        .filter(|line| line.kind == Kind::Handler)
-        .filter_map(|line| line.text.split_once('=').map(|(_, value)| value))
+    keyfile::values(text, GROUP, move |name| is_key(name, scheme))
 }
 
 fn ids(value: &str) -> impl Iterator<Item = &str> {
-    value.split(';').map(str::trim).filter(|id| !id.is_empty())
+    let mut escaped = false;
+    value
+        .split(move |c| {
+            let separator = c == ';' && !escaped;
+            escaped = c == '\\' && !escaped;
+            separator
+        })
+        .map(keyfile::trim)
+        .filter(|id| !id.is_empty())
 }
 
 fn ending(line: &str) -> &str {
@@ -206,13 +218,87 @@ x-scheme-handler/gateinto=removed.desktop
                 &[][..],
             ),
             ("x-scheme-handler/gateinto=a.desktop\n", &[][..]),
-            (
-                "[Default Applications]\nX-Scheme-Handler/gateinto=a.desktop\n",
-                &[][..],
-            ),
         ] {
             assert_eq!(default_ids(text, "gateinto"), expected, "{text:?}");
         }
+    }
+
+    #[test]
+    fn escaped_ids_are_never_defaults_but_are_listed() {
+        for (value, listed) in [
+            (
+                "a\\;b.desktop;c.desktop",
+                &["a\\;b.desktop", "c.desktop"][..],
+            ),
+            (
+                "a\\sb.desktop;c.desktop",
+                &["a\\sb.desktop", "c.desktop"][..],
+            ),
+            (
+                "a\\\\b.desktop;c.desktop",
+                &["a\\\\b.desktop", "c.desktop"][..],
+            ),
+            ("c.desktop;d\\", &["c.desktop", "d\\"][..]),
+        ] {
+            let text = format!("[Default Applications]\nx-scheme-handler/gateinto={value}\n");
+            assert_eq!(default_ids(&text, "gateinto"), ["c.desktop"], "{value}");
+            assert_eq!(listed_ids(&text, "gateinto"), listed, "{value}");
+        }
+    }
+
+    #[test]
+    fn unicode_whitespace_is_part_of_the_key_and_the_ids() {
+        let text = "[Default Applications]\n\
+                    x-scheme-handler/gateinto\u{a0}=a.desktop\n\
+                    x-scheme-handler/https=\u{3000}b.desktop\n";
+        assert_eq!(default_ids(text, "gateinto"), Vec::<&str>::new());
+        assert_eq!(default_ids(text, "https"), ["\u{3000}b.desktop"]);
+    }
+
+    #[test]
+    fn the_key_is_matched_ignoring_ascii_case() {
+        let text = "\
+[Default Applications]
+X-Scheme-Handler/gateinto=a.desktop
+x-scheme-handler/GATEINTO=b.desktop
+text/html=firefox.desktop
+";
+        assert_eq!(default_ids(text, "gateinto"), ["b.desktop"]);
+        assert_eq!(listed_ids(text, "gateinto"), ["a.desktop", "b.desktop"]);
+        assert_eq!(
+            with_handler(text, "gateinto"),
+            "[Default Applications]\n\
+             x-scheme-handler/gateinto=gateinto.desktop\n\
+             text/html=firefox.desktop\n"
+        );
+        assert_eq!(
+            without_handler(text, "gateinto").as_deref(),
+            Some("[Default Applications]\ntext/html=firefox.desktop\n")
+        );
+        let dotless = "[Default Applications]\nx-scheme-handler/gateİnto=a.desktop\n";
+        assert_eq!(default_ids(dotless, "gateinto"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_tolerated_and_kept() {
+        let text = "\u{feff}[Default Applications]\nx-scheme-handler/gateinto=a.desktop\n";
+        assert_eq!(default_ids(text, "gateinto"), ["a.desktop"]);
+        assert_eq!(
+            with_handler(text, "gateinto"),
+            "\u{feff}[Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop\n"
+        );
+        assert_eq!(
+            without_handler(text, "gateinto").as_deref(),
+            Some("\u{feff}[Default Applications]\n")
+        );
+        assert_eq!(
+            with_handler("\u{feff}[Default Applications]\n", "gateinto"),
+            "\u{feff}[Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop\n"
+        );
+        assert_eq!(
+            with_handler("\u{feff}", "gateinto"),
+            "\u{feff}[Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop\n"
+        );
     }
 
     #[test]
@@ -288,6 +374,39 @@ x-scheme-handler/gateinto=gateinto.desktop
                 ),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn added_lines_reuse_the_line_ending_of_the_line_they_follow() {
+        for (text, expected) in [
+            (
+                "[Default Applications]\r\na=b.desktop\r\n",
+                "[Default Applications]\r\na=b.desktop\r\n\
+                 x-scheme-handler/gateinto=gateinto.desktop\r\n",
+            ),
+            (
+                "[Default Applications]\r\n\r\n[Other]\n",
+                "[Default Applications]\r\n\
+                 x-scheme-handler/gateinto=gateinto.desktop\r\n\r\n[Other]\n",
+            ),
+            (
+                "[Default Applications]\r\na=b.desktop",
+                "[Default Applications]\r\na=b.desktop\r\n\
+                 x-scheme-handler/gateinto=gateinto.desktop\r\n",
+            ),
+            (
+                "[Added Associations]\r\n",
+                "[Added Associations]\r\n[Default Applications]\r\n\
+                 x-scheme-handler/gateinto=gateinto.desktop\r\n",
+            ),
+            (
+                "[Added Associations]\r\na=b",
+                "[Added Associations]\r\na=b\r\n[Default Applications]\r\n\
+                 x-scheme-handler/gateinto=gateinto.desktop\r\n",
+            ),
+        ] {
+            assert_eq!(with_handler(text, "gateinto"), expected, "{text:?}");
         }
     }
 
