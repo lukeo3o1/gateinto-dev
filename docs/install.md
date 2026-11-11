@@ -2,7 +2,8 @@
 
 This page covers the Windows installer and the commands that manage the device identity across
 installs: `gateinto setup`, `gateinto status` and `gateinto reset`. The MSI is built from
-[packaging/wix](../packaging/wix/README.md).
+[packaging/wix](../packaging/wix/README.md). The Linux tarball, not yet verified on a real Linux
+desktop, is covered in [Linux tarball](#linux-tarball).
 
 No WinGet package exists. `winget install` and `winget uninstall` do not install or remove
 Gateinto; [packaging/winget](../packaging/winget/README.md) only holds unsubmitted manifest
@@ -34,7 +35,9 @@ run whose commit is no longer the tip of `master` publishes nothing). A rerun of
 Give the manual run a full commit SHA, so that the release is built from exactly the commit you
 checked; a branch is resolved when the run starts. Only commits that contain this release
 workflow's `.github/actions` and `.github/scripts` can be released, so commits from before the
-release channels were added cannot be published.
+release channels were added cannot be published. Publishing also needs the Linux tarball, so
+commits without the Linux packaging (`packaging/linux` and `.github/scripts/linux-tarball.sh`)
+can no longer be published on any channel.
 
 The release notes start with "Pre-release, not externally security reviewed." and the title and
 notes name the channel, the full commit SHA and the build date, followed by a notice that the
@@ -42,7 +45,8 @@ files are not code-signed, that TPM keys, real browsers, physical Windows machin
 are not yet verified on real hardware
 ([#23](https://github.com/lukeo3o1/gateinto-dev/issues/23)), and, for `alpha` and `beta`, that
 the Windows 7 build is experimental and can use only the Microsoft Software Key Storage
-Provider.
+Provider. They also say that the Linux tarball and its scripts are not yet verified on a real
+Linux desktop and that Linux has no device key yet.
 
 Each file is attached twice: with the first 12 characters of the commit in its name, and as a
 copy without it. The copy keeps the same download URL from one publish to the next:
@@ -54,6 +58,7 @@ copy without it. The copy keeps the same download URL from one publish to the ne
 | `gateinto-i686-pc-windows-msvc.exe`, 32-bit Windows 10 | yes | yes |
 | `gateinto-i686-pc-windows-msvc.msi`, the per-user installer below, 32-bit (x86) | yes | yes |
 | `gateinto-i686-win7-windows-msvc-experimental.exe` | no | yes |
+| `gateinto-x86_64-unknown-linux-gnu.tar.gz`, the [Linux tarball](#linux-tarball), x86_64 glibc | yes | yes |
 
 Each file has a `.sha256` next to it, one line with the lowercase SHA-256, two spaces and the
 file name. The names with the commit are `gateinto-<commit>-<target>.exe` and so on, for
@@ -422,6 +427,64 @@ Rules:
 development without the MSI. They refuse to change a handler that is not Gateinto's, and
 they recognise the MSI's handler as Gateinto's. Registering after installing replaces the MSI's
 command until the next uninstall or repair.
+
+## Linux tarball
+
+Not yet verified on a real Linux desktop. Linux has no device key yet, so Gateinto connects from
+Linux without a device certificate. No distribution package exists; the tarball is the only
+Linux release file.
+
+The release build needs glibc 2.38 or newer on x86_64. It is built on Ubuntu 24.04 (glibc
+2.39). This was measured with `objdump -T` and `readelf -V` on a release build made locally on
+Ubuntu 24.04: the newest glibc symbol version it requires is `GLIBC_2.38` (`__isoc23_strtol`,
+`__isoc23_sscanf`), and its `GLIBC_2.39` symbols (`pidfd_spawnp`, `pidfd_getpid`) are weak, so
+the dynamic loader does not require them. It has not been run on any system with an older glibc
+or on any other distribution.
+
+Download the tarball and its `.sha256`, verify it, extract it into a new, empty directory and run
+`install.sh` there, as the user who uses Gateinto, not as root and not through `sudo`:
+
+```sh
+gh release download latest --repo lukeo3o1/gateinto-dev --pattern 'gateinto-x86_64-unknown-linux-gnu.tar.gz*'
+sha256sum -c gateinto-x86_64-unknown-linux-gnu.tar.gz.sha256 &&
+  mkdir gateinto-tarball &&
+  tar -xzf gateinto-x86_64-unknown-linux-gnu.tar.gz -C gateinto-tarball --strip-components=1 &&
+  cd gateinto-tarball &&
+  ./install.sh
+```
+
+Do not use the tarball if `sha256sum -c` does not print `OK`. The commands are chained with `&&`,
+so they stop at the first failure: nothing is extracted or run when the checksum does not match,
+and nothing is extracted into or run from an existing `gateinto-tarball`, because `mkdir` then
+fails. Files of an earlier tarball are therefore not mixed in by these commands. The tarball
+holds one directory with the commit in its name, `gateinto-<commit>-x86_64-unknown-linux-gnu/`,
+with `gateinto`, `install.sh`, `uninstall.sh`, a `README` and the license files;
+`--strip-components=1` puts them directly in `gateinto-tarball`. No script is published for
+piping into a shell.
+
+`install.sh` copies `gateinto` to `~/.local/bin/gateinto`, creating `~/.local/bin` if needed and
+replacing an earlier copy, runs `~/.local/bin/gateinto uri register` and warns when
+`~/.local/bin` is not on `PATH`. It creates no device key and writes no configuration. Running it
+from a newer tarball upgrades the binary in place.
+
+To uninstall, run `uninstall.sh` in the directory the tarball was extracted to:
+
+```sh
+cd gateinto-tarball && ./uninstall.sh
+```
+
+It runs `~/.local/bin/gateinto stop --remove-stale-profiles`, which stops a running agent with
+its sessions and deletes leftover Gateinto browser profiles, then
+`~/.local/bin/gateinto uri unregister`, then removes `~/.local/bin/gateinto`. If either command
+fails, it keeps the binary and exits with an error, so it can be run again. It keeps the
+configuration and the gateways added from links in `~/.config/gateinto` (or
+`$XDG_CONFIG_HOME/gateinto`).
+
+CI installs and uninstalls a tarball of the debug build on `ubuntu-latest`, and the release
+workflow does the same with the release tarball on `ubuntu-24.04` before publishing, each in a
+temporary home directory
+([.github/scripts/linux-install-check.sh](../.github/scripts/linux-install-check.sh)). Neither
+opens a `gateinto://` link in a browser.
 
 ## Verification
 

@@ -804,14 +804,16 @@ None beyond Areas 1 and 3.
 ### Design
 
 - **Release asset.** `gateinto-<version>-x86_64-unknown-linux-gnu.tar.gz`
-  containing `gateinto`, `LICENSE`, the optional unit file and a `README`
-  with the install steps. Whether to build for `musl` instead is open:
-  `aws-lc-rs` on `musl` is unverified. `release.yml` gains an
+  containing `gateinto`, the license files, the optional unit file, a
+  `README` and the `install.sh` and `uninstall.sh` scripts. The target is
+  `x86_64-unknown-linux-gnu`, not `musl`. `release.yml` gains an
   `ubuntu-latest` build; `.github/scripts/release-test.sh` and
   `.github/scripts/release-assets.sh` learn the new name.
-- **Install** (documented in `docs/install.md`, no installer script in the
-  first version): copy `gateinto` to `~/.local/bin`, run `gateinto uri
-  register`. Optionally copy `gateinto-agent.service` to
+- **Install** (documented in `docs/install.md`): `install.sh` inside the
+  tarball, which the user runs after verifying the SHA-256 and extracting
+  it. No script is hosted for `curl | sh`. It copies `gateinto` to
+  `~/.local/bin` and runs `gateinto uri register`. Optionally copy
+  `gateinto-agent.service` to
   `~/.config/systemd/user/` and `systemctl --user enable --now
   gateinto-agent`. Key creation is separate from installation, as on
   Windows: nothing in the package creates or touches a device key.
@@ -857,23 +859,96 @@ None beyond Areas 1 and 3.
 - XDG autostart (`~/.config/autostart`) is an alternative to the unit for
   desktops without a user manager; it is not shipped in the first version.
 
+As implemented in step 15:
+
+- `.github/scripts/linux-tarball.sh <gateinto> <output .tar.gz>` packages
+  one top-level directory named after the output without `.tar.gz`, for
+  example `gateinto-0123456789ab-x86_64-unknown-linux-gnu/`, holding
+  `gateinto`, `install.sh` and `uninstall.sh` (mode 0755), `README`,
+  `LICENSE-APACHE` and `LICENSE-MIT` (mode 0644), and nothing else. The
+  project is dual-licensed and has no single `LICENSE`, so both license
+  files ship. There is no unit file yet; step 16 adds it.
+- The archive is deterministic: entries sorted by name, owner and group
+  0, numeric ids, every mtime `SOURCE_DATE_EPOCH` (0 when unset; the
+  release job passes the commit time), GNU format and `gzip -n`. The same
+  inputs give the same bytes whatever the umask. Entries are relative to
+  the top-level directory, never absolute.
+- `release.yml` has a `linux` job on `ubuntu-24.04` (Decision 9):
+  `cargo test`, then
+  `cargo build --locked --release --target x86_64-unknown-linux-gnu --bin
+  gateinto`, the version check, the tarball, its `.sha256` from
+  `.github/scripts/write-sha256.sh` (the format of `write-sha256.ps1`), and
+  an install and uninstall of the tarball with
+  `.github/scripts/linux-install-check.sh`. `publish` needs it to succeed.
+  `release-assets.sh` expects
+  `gateinto-<commit>-x86_64-unknown-linux-gnu.tar.gz` on every channel and
+  adds the fixed-name copy `gateinto-x86_64-unknown-linux-gnu.tar.gz`. The
+  release notes say that the tarball and its scripts are not yet verified
+  on a real Linux desktop and that Linux has no device key.
+- `install.sh` and `uninstall.sh` are POSIX `sh` with `set -eu`, take no
+  arguments, and print only fixed messages. Both refuse to run as root
+  (euid 0, which includes `sudo`) with a fixed message and change nothing,
+  and both refuse a `HOME` that is not an absolute path to an existing
+  directory. Neither reads credentials from the environment, resolves
+  anything against the working directory, calls `sudo`, or touches the
+  configuration, the link store or a device key.
+- `install.sh` finds `gateinto` next to itself and refuses, changing
+  nothing, when `~/.local/bin/gateinto` is a directory or a symbolic link
+  to one, because the rename would move the binary into it. It creates
+  `~/.local/bin` with mode 0755 if missing (an existing directory keeps
+  its mode), copies the binary to a temporary file in that directory, sets
+  mode 0755 and
+  renames it over `~/.local/bin/gateinto`, so a running `gateinto` is
+  replaced without `ETXTBSY` and no partial file is left. It then runs
+  `~/.local/bin/gateinto uri register`, so the handler points at the
+  installed path, and warns when `~/.local/bin` is not on `PATH`. If
+  registering fails it says so and exits non-zero; the binary stays
+  installed and running `install.sh` again retries.
+- `uninstall.sh` does nothing when `~/.local/bin/gateinto` does not
+  exist and is not a symbolic link. When it is a symbolic link to a
+  missing file, it exits non-zero before running anything and asks the
+  user to remove the link by hand. Otherwise it runs
+  `~/.local/bin/gateinto stop --remove-stale-profiles` (with no agent
+  running this prints `no agent is
+  running` and still removes stale profiles), then `~/.local/bin/gateinto
+  uri unregister`, then removes the binary. If either command fails it
+  stops, keeps the binary, so that running it again can retry, and exits
+  non-zero. It prints that the configuration and the linked gateways
+  were kept. There is no purge.
+- `release-test.sh` runs both scripts against a stub `gateinto` in a
+  temporary `HOME`, as uid 65534 through `setpriv` when the tests run as
+  root, and as root through `sudo -n` (or directly) to check the refusal;
+  without root that case is skipped and reported. CI shellchecks
+  `packaging/linux/*.sh` and installs and uninstalls a tarball of the
+  debug `gateinto` with `linux-install-check.sh`, which refuses a tarball
+  without exactly one top-level directory and checks that the
+  registered handler runs `~/.local/bin/gateinto` and that uninstall
+  removes the binary and the desktop file.
+
 ### Security
 
 The tarball gets a SHA-256 file like the Windows assets
-(`.github/workflows/release.yml` runs `write-sha256.ps1` for them). The
+(`.github/workflows/release.yml` runs `write-sha256.ps1` for them and
+`write-sha256.sh` for the tarball). The checksum proves only that a
+download matches the published file; nothing is signed. The installer is
+shipped only inside the tarball, so it is covered by the same checksum,
+and nothing is piped from the network into a shell. The
 unit runs as the user with `NoNewPrivileges`. No step of install
 or uninstall replaces, exports or deletes a key.
 
 ### CI on `ubuntu-latest`
 
 Build the tarball in `release-scripts`, check its contents, and shellcheck
-any new script. `systemd-analyze --user verify` checks that `ExecStart`
+any new script (done in step 15, together with the install and uninstall
+checks described above). `systemd-analyze --user verify` checks that `ExecStart`
 exists, so the job first installs the built binary at
 `$HOME/.local/bin/gateinto` and then verifies the unit.
 
 ### Manual and unverified
 
-Install, upgrade and uninstall on a real desktop; the unit starting at login
+Install, upgrade and uninstall on a real desktop, including the
+`gateinto://` handler that `install.sh` registers opening links in real
+browsers; the unit starting at login
 and restarting after a crash; and the four unit consequences listed above
 (Chrome's sandbox under `NoNewPrivileges`, the display variables, the start
 target, browsers killed on stop).
@@ -985,6 +1060,18 @@ The constraints that hold on Windows hold on Linux without exception:
 7. **Packaging is a tarball with an optional user unit**; install never
    creates a key and uninstall keeps key and configuration.
 8. **Linux runs without a device certificate** until Area 7 is decided.
+9. **The release target is `x86_64-unknown-linux-gnu`**, not `musl`,
+   built on the fixed `ubuntu-24.04` image so the glibc floor does not
+   drift with `ubuntu-latest`. The release build needs glibc 2.38 or
+   newer: measured with `objdump -T` and `readelf -V` on a release build
+   made locally on Ubuntu 24.04 (glibc 2.39), its newest required version
+   is `GLIBC_2.38` (`__isoc23_strtol`, `__isoc23_sscanf`), and the
+   `GLIBC_2.39` symbols (`pidfd_spawnp`, `pidfd_getpid`) are weak. It has
+   not been run on an older glibc or on other distributions.
+10. **An installer script ships only inside the tarball.** The user
+    verifies the SHA-256, extracts the tarball and runs `install.sh`
+    locally; uninstall is `uninstall.sh` from the same tarball. Nothing is
+    hosted for `curl | sh`.
 
 ## Implementation plan
 
@@ -1051,8 +1138,6 @@ to 17 still ship and terminals stay unavailable on Linux.
   `/usr/bin/systemd-run`.
 - **`os_user` in browser sessions**: a scope for the browser and whether
   Chrome's non-dumpable processes allow the holder check.
-- **`gnu` vs `musl`** release target.
-- **Installer script** or documented steps only.
 
 ## Needs verification
 
@@ -1075,7 +1160,6 @@ to 17 still ship and terminals stay unavailable on Linux.
 - The holder scan in containers and its cost on a busy desktop.
 - tty foreground handoff and restore, and signal behaviour, in real terminal
   emulators.
-- `aws-lc-rs` on `musl`, if `musl` is chosen.
 - The user unit at login and after a crash; Chrome's sandbox under
   `NoNewPrivileges=true`; `DISPLAY` and `WAYLAND_DISPLAY` in the user
   manager's environment; `default.target` vs `graphical-session.target`;

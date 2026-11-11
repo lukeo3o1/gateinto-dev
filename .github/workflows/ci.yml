@@ -45,6 +45,11 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features --locked
         env:
           GATEINTO_TEST_SUDO_NOBODY: ${{ runner.os == 'Linux' && '1' || '' }}
+      - name: Install and uninstall the Linux tarball with the debug gateinto
+        if: runner.os == 'Linux'
+        run: |
+          .github/scripts/linux-tarball.sh target/debug/gateinto "$RUNNER_TEMP/gateinto-ci-x86_64-unknown-linux-gnu.tar.gz"
+          .github/scripts/linux-install-check.sh "$RUNNER_TEMP/gateinto-ci-x86_64-unknown-linux-gnu.tar.gz"
       - name: Check that gateinto.exe links the C runtime statically
         if: runner.os == 'Windows'
         shell: pwsh
@@ -63,7 +68,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck .github/scripts/*.sh
+      - run: shellcheck .github/scripts/*.sh packaging/linux/*.sh
       - run: .github/scripts/release-test.sh
 
   windows-i686:

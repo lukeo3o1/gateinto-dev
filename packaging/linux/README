@@ -1,0 +1,40 @@
+Gateinto for Linux (x86_64-unknown-linux-gnu)
+
+Not yet verified on a real Linux desktop. Linux has no device key yet, so
+Gateinto connects to gateways without a device certificate.
+
+The gateinto executable needs glibc 2.38 or newer. That was measured from the
+glibc symbol versions of a release build made on Ubuntu 24.04; it has not
+been run on other distributions or older glibc versions.
+
+Verify the tarball, extract it into a new, empty directory and install
+from there, for the current user, not as root and not through sudo:
+
+    sha256sum -c gateinto-x86_64-unknown-linux-gnu.tar.gz.sha256 &&
+      mkdir gateinto-tarball &&
+      tar -xzf gateinto-x86_64-unknown-linux-gnu.tar.gz -C gateinto-tarball --strip-components=1 &&
+      cd gateinto-tarball &&
+      ./install.sh
+
+The commands stop at the first failure, so nothing is extracted or run when
+the checksum does not match or gateinto-tarball already exists.
+
+install.sh copies gateinto to ~/.local/bin/gateinto (creating ~/.local/bin
+if needed), replaces an earlier copy there, runs
+`~/.local/bin/gateinto uri register` to register the gateinto:// handler,
+and warns when ~/.local/bin is not on PATH. It creates no device key and
+writes no configuration.
+
+Uninstall, from the directory that holds gateinto-tarball:
+
+    cd gateinto-tarball && ./uninstall.sh
+
+uninstall.sh runs `~/.local/bin/gateinto stop --remove-stale-profiles`,
+which stops a running agent with its sessions and deletes the Gateinto
+browser profiles left behind, then `~/.local/bin/gateinto uri unregister`,
+then removes ~/.local/bin/gateinto. If either command fails, it stops and
+keeps the binary. It keeps the configuration and the gateways added from
+links in ~/.config/gateinto (or $XDG_CONFIG_HOME/gateinto).
+
+LICENSE-APACHE and LICENSE-MIT: Gateinto is licensed under either license,
+at your option.
