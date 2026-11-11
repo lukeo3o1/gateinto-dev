@@ -139,7 +139,7 @@ pub(crate) unsafe fn entries<R>(buffer: &[u64], offset: usize) -> io::Result<&[R
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-mod procfs;
+pub(crate) mod procfs;
 #[cfg(windows)]
 mod windows;
 

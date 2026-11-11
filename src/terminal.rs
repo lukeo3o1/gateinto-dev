@@ -591,9 +591,9 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     #[test]
-    fn terminal_sessions_have_no_job_outside_windows() {
+    fn terminal_sessions_have_no_job_outside_windows_and_linux() {
         assert!(terminal_job(Job::new()).is_err());
     }
 

@@ -47,8 +47,7 @@ pub(super) fn uids(status: &str) -> io::Result<[u32; 4]> {
         .ok_or_else(|| invalid("malformed Uid line in the process status"))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn cgroup(text: &str) -> io::Result<&str> {
+pub(crate) fn cgroup(text: &str) -> io::Result<&str> {
     let mut unified = None;
     for line in text.lines() {
         let mut parts = line.splitn(3, ':');

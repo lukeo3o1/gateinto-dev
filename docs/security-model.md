@@ -475,7 +475,17 @@ Guarantees:
 - **Linux: no session containment yet.** There is no equivalent of the job
   object: binding a proxy that asks for `os_user` with a session's
   containment fails on Linux, so `os_user` there is never the same-user
-  check alone where Windows also requires the job.
+  check alone where Windows also requires the job. `Job::new` on Linux
+  only checks the prerequisites of a systemd user scope (the cgroup v2
+  hierarchy at `/sys/fs/cgroup`, with the path of Gateinto's own cgroup
+  naming a directory in it, a private `XDG_RUNTIME_DIR` of the effective
+  uid with the user manager's bus or directory, the user manager's
+  delegated cgroup owned by that uid, and
+  `systemd-run` at `/usr/bin/systemd-run` or `/bin/systemd-run`, owned by
+  root or that uid and writable by no one else) and fails with a fixed
+  message naming the first missing piece. `systemd-run` is never looked up
+  on `PATH` or in the current directory. Nothing on Linux calls it yet and
+  no process is placed in a scope.
 - **Browser sessions: only the browser's job.** Agent-launched browsers on
   Windows start through `CreateProcessW` with
   `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so the browser is in a job object created
