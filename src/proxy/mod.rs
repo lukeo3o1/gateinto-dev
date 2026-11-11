@@ -45,7 +45,7 @@ mod verifications;
 pub use challenge::VerificationOrigin;
 pub use local_auth::LocalAuth;
 #[cfg(target_os = "linux")]
-pub(crate) use os_user::procfs;
+pub(crate) use os_user::{pidfd_probe, procfs};
 pub use routing::Route;
 use verifications::Refusal;
 pub use verifications::{PendingVerifications, Verification, Verifications};

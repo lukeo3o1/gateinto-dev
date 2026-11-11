@@ -141,6 +141,11 @@ fn holds(fds: &Path, socket: &str) -> io::Result<bool> {
     Ok(false)
 }
 
+pub(crate) fn pidfd_probe() -> io::Result<()> {
+    // SAFETY: getpid has no preconditions and always succeeds.
+    pidfd_open(unsafe { libc::getpid() }).map(drop)
+}
+
 fn pidfd_open(pid: libc::pid_t) -> io::Result<OwnedFd> {
     let flags: libc::c_uint = 0;
     // SAFETY: pidfd_open only reads its two integer arguments.
@@ -529,6 +534,11 @@ mod tests {
         assert_eq!(tree.check(), Ok(()));
         fs::write(tree.root.join("net/tcp"), "garbage\n").unwrap();
         assert!(matches!(tree.check(), Err(Denial::Lookup(_))));
+    }
+
+    #[test]
+    fn the_pidfd_probe_of_this_process_succeeds_on_this_kernel() {
+        assert!(pidfd_probe().is_ok());
     }
 
     #[test]

@@ -269,9 +269,10 @@ and a shared parser, not a second implementation. The executable is
   registering process is read), `[Removed Associations]`, sandboxed browsers
   going through the portal, and desktops that do not follow the
   specification are not considered. `uri register` prints the warning to
-  stderr after the success line. `setup` does not register a handler (it
-  only reports one, and keeps failing on Linux until Area 5), so it prints
-  no warning yet; that is left to step 14.
+  stderr after the success line. `setup` does not register a handler and
+  fails on Linux (Area 5), so it prints no override warning; `status` prints
+  the same text as `uri-handler-warning` when our desktop file is installed
+  (Area 5).
 - `unregister(scheme)` reads and checks both files before changing anything.
   It removes our `mimeapps.list` line only when every id on the scheme's
   lines is `<scheme>.desktop` and there is at least one, then our desktop
@@ -725,15 +726,74 @@ the terminal window (SIGHUP) ending the scope.
   ownership rule of Area 1).
 - `src/main.rs:76` stops saying "Windows".
 
+As implemented in step 14:
+
+- `status` on Linux prints, after `key-name`:
+
+  ```text
+  device-key: unavailable: no device key backend on Linux; connections are unauthenticated
+  ```
+
+  then the config, gateways, agent and `uri-handler` lines as before, and
+  then:
+
+  ```text
+  uri-handler-warning: <the override warning of Area 1>
+  terminal-sessions: not supported on Linux yet
+  terminal-containment: available
+  os-user: not offered by any session on Linux yet; pidfd_open is available
+  ```
+
+  `uri-handler-warning` appears only when our desktop file is installed and
+  the lookup finds another installed default, or none, for the scheme;
+  without our desktop file the `uri-handler` line already says
+  `not registered` or `another program: ...`. `terminal-containment` runs the
+  prerequisite check of Area 3 (`Host::current`, which only reads) and is
+  `available` or `unavailable: <fixed message>`, with the same fixed
+  messages as `Job::new`. `available` means only that the prerequisites are
+  present; `terminal-sessions` stays `not supported on Linux yet` until
+  steps 9 to 13. `os-user` opens and closes a pidfd for Gateinto's own
+  process: `ENOSYS` gives "pidfd_open is unavailable (Linux 5.3 or later is
+  needed), so os_user would refuse every connection", any other error
+  "pidfd_open failed (<error>), so os_user may refuse connections". No
+  session offers `os_user` on Linux yet, because it is offered only to
+  sessions in a job.
+- `setup` on Linux checks the account, loads the config and prints the
+  config and gateway lines as on Windows, then fails with "setup is not
+  available on Linux yet: it creates the device key, and no device key
+  backend for Linux has been decided; run `gateinto uri register` to
+  register the gateinto:// handler on its own". It touches no key and
+  writes nothing.
+- `check_current_account` on Linux first refuses when the anchor of the
+  data or the config directory (the home directory, or the XDG root when it
+  is not under it) exists and belongs to another uid, with the Area 1
+  `ForeignDirectory` error followed by "Gateinto registers its gateinto://
+  handler only for the user who owns the per-user directories, so run it as
+  that user, not through sudo or su". A missing anchor or an unset `HOME` is
+  left to `register`. It then returns, for effective uid 0, "warning:
+  running as root, which can bypass every check Gateinto makes and is
+  outside its security model; run Gateinto as the user who uses it", which
+  `setup` and `uri register` print on stderr. Both run the check before
+  they load the config or touch anything else.
+  `key init` does not call it on Linux, because it registers nothing and
+  fails with "device keys are only supported on Windows".
+- The help of `key`, `setup` and `status` says what they do on Linux.
+
 ### Security
 
 Status output never prints credentials, `Proxy-Authorization`, or key
-material; it reports presence and state only.
+material; it reports presence and state only. The Linux lines add no
+path, uid or environment value: the containment messages are the fixed
+ones of Area 3, and the override warning names only the `mimeapps.list`
+file and desktop id that the `uri-handler` line's lookup already reads.
 
 ### CI on `ubuntu-latest`
 
 Snapshot tests of `status` output with a temporary XDG tree and with each
-terminal prerequisite missing; `setup` returns the Linux message.
+terminal prerequisite missing; `setup` returns the Linux message. The
+`terminal-containment` line of the binary depends on the host, so the
+integration test only requires `available` or one of the fixed messages;
+each message is pinned by a unit test over a fake tree.
 
 ### Manual and unverified
 

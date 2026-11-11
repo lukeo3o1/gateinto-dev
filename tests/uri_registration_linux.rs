@@ -2,9 +2,14 @@
 
 mod isolated;
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+const ROOT_WARNING: &str = "warning: running as root, which can bypass every check Gateinto \
+                            makes and is outside its security model; run Gateinto as the user \
+                            who uses it";
 
 struct Home {
     dir: PathBuf,
@@ -39,6 +44,30 @@ impl Home {
         self.env(&mut command);
         command.args(args).args(["--scheme", &self.scheme]);
         command.output().unwrap()
+    }
+
+    fn status(&self, desktop: Option<&str>) -> String {
+        let mut command = isolated::gateinto();
+        self.env(&mut command);
+        if let Some(desktop) = desktop {
+            command.env("XDG_CURRENT_DESKTOP", desktop);
+        }
+        command
+            .arg("status")
+            .env("GATEINTO_INSTANCE", format!("uri-{}", std::process::id()));
+        stdout(&command.output().unwrap())
+    }
+
+    fn stderr(&self, output: &Output) -> String {
+        let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+        if std::fs::metadata(&self.dir).unwrap().uid() == 0 {
+            stderr
+                .strip_prefix(&format!("{ROOT_WARNING}\n"))
+                .unwrap_or_else(|| panic!("{stderr}"))
+                .to_owned()
+        } else {
+            stderr
+        }
     }
 
     fn entry(&self) -> PathBuf {
@@ -103,7 +132,7 @@ fn registering_a_test_scheme_writes_a_handler_that_unregistering_removes() {
         )),
         "{registered:?}"
     );
-    assert!(registered.stderr.is_empty(), "{registered:?}");
+    assert_eq!(home.stderr(&registered), "", "{registered:?}");
     let entry = std::fs::read_to_string(home.entry()).unwrap();
     assert!(
         entry.contains(&format!("MimeType=x-scheme-handler/{};\n", home.scheme)),
@@ -145,6 +174,110 @@ fn registering_a_test_scheme_writes_a_handler_that_unregistering_removes() {
             home.scheme
         )
     );
+}
+
+#[test]
+fn status_reports_the_registered_handler_and_a_default_that_overrides_it() {
+    let home = Home::new();
+    let mut command = isolated::gateinto();
+    home.env(&mut command);
+    let registered = command.args(["uri", "register"]).output().unwrap();
+    let handler = format!("\"{}\" open -- %u", env!("CARGO_BIN_EXE_gateinto"));
+    assert_eq!(
+        stdout(&registered),
+        format!("registered gateinto:// for the current user: {handler}\n")
+    );
+    assert_eq!(home.stderr(&registered), "");
+
+    let status = home.status(None);
+    assert!(
+        status.contains(&format!(
+            "\nuri-handler: gateinto: {handler}\nterminal-sessions: "
+        )),
+        "{status}"
+    );
+    assert!(!status.contains("warning"), "{status}");
+
+    let kde = home.dir.join(".config/kde-mimeapps.list");
+    std::fs::write(
+        &kde,
+        "[Default Applications]\nx-scheme-handler/gateinto=other.desktop\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.dir.join(".local/share/applications/other.desktop"),
+        "[Desktop Entry]\nExec=other %u\n",
+    )
+    .unwrap();
+    let status = home.status(None);
+    assert!(
+        status.contains(&format!(
+            "\nuri-handler: gateinto: {handler}\nterminal-sessions: "
+        )),
+        "{status}"
+    );
+    let status = home.status(Some("KDE"));
+    assert!(
+        status.contains(&format!(
+            "\nuri-handler: another program: other %u\n\
+             uri-handler-warning: {} sets \"other.desktop\" as the default for \
+             x-scheme-handler/gateinto, so gateinto:// links may open that application instead \
+             of Gateinto\n\
+             terminal-sessions: ",
+            kde.display()
+        )),
+        "{status}"
+    );
+}
+
+#[test]
+fn setup_and_registering_refuse_the_directories_of_another_user() {
+    let home = Home::new();
+    let foreign = if std::fs::metadata(&home.dir).unwrap().uid() == 0 {
+        let foreign = home.dir.join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::os::unix::fs::chown(&foreign, Some(65534), Some(65534)).unwrap();
+        foreign
+    } else {
+        PathBuf::from("/")
+    };
+    for args in [&["uri", "register"][..], &["setup"]] {
+        let output = isolated::gateinto()
+            .env("HOME", &foreign)
+            .env("XDG_CONFIG_HOME", foreign.join(".config"))
+            .env("XDG_DATA_HOME", foreign.join(".local/share"))
+            .args(args)
+            .arg("--config")
+            .arg(home.dir.join("missing.toml"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            stderr.contains(&format!(
+                "directory {} is owned by uid {}, not by the current user; Gateinto registers \
+                 its gateinto:// handler only for the user who owns the per-user directories, \
+                 so run it as that user, not through sudo or su",
+                foreign.display(),
+                std::fs::metadata(&foreign).unwrap().uid()
+            )),
+            "{args:?}: {stderr}"
+        );
+    }
+    let key_init = isolated::gateinto()
+        .env("HOME", &foreign)
+        .env("XDG_CONFIG_HOME", foreign.join(".config"))
+        .env("XDG_DATA_HOME", foreign.join(".local/share"))
+        .args(["key", "init"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(key_init.stderr).unwrap(),
+        "error: device keys are only supported on Windows\n"
+    );
+    assert!(!foreign.join(".config").exists());
+    assert!(!foreign.join(".local").exists());
 }
 
 #[test]

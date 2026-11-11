@@ -240,6 +240,22 @@ pub fn unregister(scheme: &str) -> Result<bool, RegistrationError> {
     )
 }
 
+#[cfg(target_os = "linux")]
+pub fn check_owner() -> Result<(), RegistrationError> {
+    handler::check_owner(
+        &handler::Target::from_env(|name| std::env::var_os(name)),
+        SCHEME,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn overridden(scheme: &str) -> Option<Overridden> {
+    handler::installed_override(
+        &handler::Target::from_env(|name| std::env::var_os(name)),
+        scheme,
+    )
+}
+
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn register(_scheme: &str, _command: &str) -> Result<Option<Overridden>, RegistrationError> {
     Err(RegistrationError::Unsupported)

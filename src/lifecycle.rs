@@ -59,9 +59,78 @@ pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::erro
     )?)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::error::Error>> {
+    registration::check_owner()?;
+    // SAFETY: geteuid has no preconditions and always succeeds.
+    Ok(root_warning(unsafe { libc::geteuid() }))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::error::Error>> {
     Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+pub const LINUX_DEVICE_KEY: &str =
+    "unavailable: no device key backend on Linux; connections are unauthenticated";
+
+#[cfg(target_os = "linux")]
+pub const LINUX_SETUP: &str = "setup is not available on Linux yet: it creates the device key, \
+     and no device key backend for Linux has been decided; run `gateinto uri register` to \
+     register the gateinto:// handler on its own";
+
+#[cfg(target_os = "linux")]
+pub fn root_warning(euid: u32) -> Option<&'static str> {
+    (euid == 0).then_some(
+        "warning: running as root, which can bypass every check Gateinto makes and is outside \
+         its security model; run Gateinto as the user who uses it",
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn current_linux_status() -> Vec<String> {
+    linux_status(
+        registration::overridden(registration::SCHEME),
+        crate::job::terminal_containment(),
+        crate::proxy::pidfd_probe(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status(
+    overridden: Option<impl fmt::Display>,
+    containment: String,
+    pidfd: std::io::Result<()>,
+) -> Vec<String> {
+    overridden
+        .map(|overridden| {
+            format!(
+                "uri-handler-warning: {}",
+                printable(&overridden.to_string())
+            )
+        })
+        .into_iter()
+        .chain([
+            "terminal-sessions: not supported on Linux yet".to_owned(),
+            format!("terminal-containment: {containment}"),
+            format!("os-user: {}", os_user_state(pidfd)),
+        ])
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn os_user_state(pidfd: std::io::Result<()>) -> String {
+    let pidfd = match pidfd {
+        Ok(()) => "pidfd_open is available".to_owned(),
+        Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => {
+            "pidfd_open is unavailable (Linux 5.3 or later is needed), so os_user would refuse \
+             every connection"
+                .to_owned()
+        }
+        Err(error) => format!("pidfd_open failed ({error}), so os_user may refuse connections"),
+    };
+    format!("not offered by any session on Linux yet; {pidfd}")
 }
 
 #[cfg(windows)]
@@ -361,6 +430,63 @@ mod tests {
              user who uses Gateinto, so run `gateinto setup` or `gateinto key init` as that \
              user, not from an installer, a service or a scheduled task running as a service \
              account"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_root_is_warned_about() {
+        assert!(root_warning(0).is_some());
+        for euid in [1, 1000, 65534] {
+            assert_eq!(root_warning(euid), None, "{euid}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_os_user_state_names_a_kernel_without_pidfd_open() {
+        assert_eq!(
+            os_user_state(Ok(())),
+            "not offered by any session on Linux yet; pidfd_open is available"
+        );
+        assert_eq!(
+            os_user_state(Err(std::io::Error::from_raw_os_error(libc::ENOSYS))),
+            "not offered by any session on Linux yet; pidfd_open is unavailable (Linux 5.3 or \
+             later is needed), so os_user would refuse every connection"
+        );
+        assert_eq!(
+            os_user_state(Err(std::io::Error::from_raw_os_error(libc::EPERM))),
+            "not offered by any session on Linux yet; pidfd_open failed (Operation not \
+             permitted (os error 1)), so os_user may refuse connections"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_status_puts_an_escaped_override_warning_before_the_terminal_and_os_user_lines() {
+        assert_eq!(
+            linux_status(None::<&str>, "available".to_owned(), Ok(())),
+            vec![
+                "terminal-sessions: not supported on Linux yet",
+                "terminal-containment: available",
+                "os-user: not offered by any session on Linux yet; pidfd_open is available",
+            ]
+        );
+        assert_eq!(
+            linux_status(
+                Some("a\nb\u{202e}c"),
+                "unavailable: terminal sessions need systemd-run".to_owned(),
+                Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
+            ),
+            vec![
+                "uri-handler-warning: a\\nb\\u{202e}c".to_owned(),
+                "terminal-sessions: not supported on Linux yet".to_owned(),
+                "terminal-containment: unavailable: terminal sessions need systemd-run".to_owned(),
+                format!(
+                    "os-user: {}",
+                    os_user_state(Err(std::io::Error::from_raw_os_error(libc::ENOSYS)))
+                ),
+            ]
         );
     }
 

@@ -143,6 +143,9 @@ pub(crate) mod procfs;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "linux")]
+pub(crate) use linux::pidfd_probe;
+
 #[cfg(windows)]
 pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
     Ok(Arc::new(windows::System::new(job)?))

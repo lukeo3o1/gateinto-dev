@@ -51,6 +51,13 @@ impl Host {
         self.systemd_run()
     }
 
+    pub(super) fn availability(&self) -> String {
+        match self.check() {
+            Ok(_) => "available".to_owned(),
+            Err(error) => format!("unavailable: {error}"),
+        }
+    }
+
     fn cgroup_v2(&self) -> io::Result<()> {
         if !lstat(&self.cgroup.join("cgroup.controllers")).is_some_and(|m| m.is_file()) {
             return Err(refuse(CGROUP_V2));
@@ -532,6 +539,39 @@ mod tests {
         assert_eq!(refused(tree.check()), OWN_CGROUP);
         tree.remove("cgroup");
         assert_eq!(refused(tree.check()), CGROUP_V2);
+    }
+
+    #[test]
+    fn the_availability_names_each_missing_prerequisite_with_a_fixed_message() {
+        assert_eq!(Tree::new().host().availability(), "available");
+        let delegated = Tree::new().delegated();
+        for (missing, message) in [
+            (vec!["cgroup/cgroup.controllers"], CGROUP_V2),
+            (vec!["proc/self/cgroup"], OWN_CGROUP),
+            (vec!["run"], RUNTIME_DIR),
+            (vec!["run/bus", "run/systemd"], USER_MANAGER),
+            (vec![delegated.as_str()], DELEGATED),
+            (
+                vec!["usr/bin/systemd-run", "bin/systemd-run"],
+                SYSTEMD_RUN_MISSING,
+            ),
+        ] {
+            let tree = Tree::new();
+            for path in &missing {
+                tree.remove(path);
+            }
+            assert_eq!(
+                tree.host().availability(),
+                format!("unavailable: {message}"),
+                "{missing:?}"
+            );
+        }
+        let tree = Tree::new();
+        tree.mode("usr/bin/systemd-run", 0o777);
+        assert_eq!(
+            tree.host().availability(),
+            format!("unavailable: {SYSTEMD_RUN_UNSAFE}")
+        );
     }
 
     #[test]
