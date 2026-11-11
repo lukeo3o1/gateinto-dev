@@ -394,7 +394,7 @@ fn setup_and_status_check_the_config_before_touching_the_key() {
     let _ = std::fs::remove_file(&path);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn setup_requires_windows() {
     let (success, _, stderr) = gateinto_without_terminal(&["setup"]);
@@ -403,6 +403,22 @@ fn setup_requires_windows() {
         stderr.contains("device keys are only supported on Windows"),
         "{stderr}"
     );
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_SETUP: &str = "setup is not available on Linux yet: it creates the device key, and \
+                           no device key backend for Linux has been decided; run `gateinto uri \
+                           register` to register the gateinto:// handler on its own";
+
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_on_linux_points_to_uri_register() {
+    let (success, stdout, stderr) = gateinto_without_terminal(&["setup"]);
+    assert!(!success);
+    assert!(stdout.starts_with("config: none (no file at "), "{stdout}");
+    assert!(!stdout.contains("device-key"), "{stdout}");
+    assert!(stderr.ends_with(&format!("{LINUX_SETUP}\n")), "{stderr}");
+    assert!(!stderr.contains("only supported on Windows"), "{stderr}");
 }
 
 #[cfg(not(windows))]
@@ -427,7 +443,7 @@ fn commands_never_read_host_xdg_directories() {
     assert!(envs.contains(&(OsStr::new("XDG_CURRENT_DESKTOP"), None)));
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn status_is_read_only_and_reports_what_it_can() {
     let (success, stdout, stderr) = gateinto_without_terminal(&["status"]);
@@ -440,17 +456,63 @@ fn status_is_read_only_and_reports_what_it_can() {
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
-             uri-handler: {}\n",
+             uri-handler: not supported on this platform\n",
             default_config(&isolated_root()).display(),
             default_config(&isolated_root())
                 .with_file_name("gateways")
                 .display(),
-            if cfg!(target_os = "linux") {
-                "not registered"
-            } else {
-                "not supported on this platform"
-            }
         )
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_on_linux_reports_the_device_key_terminals_and_os_user_as_they_are() {
+    let (success, stdout, stderr) = gateinto_without_terminal(&["status"]);
+    assert!(success, "{stdout}{stderr}");
+    let (containment, rest): (Vec<&str>, Vec<&str>) = stdout
+        .lines()
+        .partition(|line| line.starts_with("terminal-containment: "));
+    assert_eq!(
+        rest.join("\n"),
+        format!(
+            "key-name: gateinto-device-v1\n\
+             device-key: unavailable: no device key backend on Linux; connections are \
+             unauthenticated\n\
+             config: none (no file at {}; pass --config to use another file)\n\
+             linked-gateways: none (no directory at {})\n\
+             agent: not running\n\
+             uri-handler: not registered\n\
+             terminal-sessions: not supported on Linux yet\n\
+             os-user: not offered by any session on Linux yet; pidfd_open is available",
+            default_config(&isolated_root()).display(),
+            default_config(&isolated_root())
+                .with_file_name("gateways")
+                .display(),
+        )
+    );
+    let [containment] = containment[..] else {
+        panic!("{stdout}");
+    };
+    assert!(
+        containment == "terminal-containment: available"
+            || containment
+                .starts_with("terminal-containment: unavailable: terminal sessions need "),
+        "{containment}"
+    );
+    let order: Vec<&str> = stdout
+        .lines()
+        .map(|line| line.split_once(':').unwrap().0)
+        .skip(5)
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "uri-handler",
+            "terminal-sessions",
+            "terminal-containment",
+            "os-user"
+        ]
     );
 }
 
@@ -825,10 +887,12 @@ fn setup_reports_a_damaged_gateway_file_and_continues() {
     let (success, stdout, stderr) = home.run(&["setup"]);
     assert!(stdout.contains("linked-gateway: error: "), "{stdout}");
     assert!(!success);
-    assert!(
-        stderr.contains("device keys are only supported on Windows"),
-        "{stderr}"
-    );
+    let expected = if cfg!(target_os = "linux") {
+        "setup is not available on Linux yet"
+    } else {
+        "device keys are only supported on Windows"
+    };
+    assert!(stderr.contains(expected), "{stderr}");
 }
 
 #[cfg(unix)]

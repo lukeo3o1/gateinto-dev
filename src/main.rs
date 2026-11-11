@@ -57,7 +57,7 @@ struct Cli {
 enum Command {
     /// Connect to the upstream once and print the negotiated TLS parameters
     CheckUpstream(CheckUpstreamArgs),
-    /// Manage the device key held by Windows CNG
+    /// Manage the device key held by Windows CNG; Linux has no device key yet
     #[command(subcommand)]
     Key(KeyCommand),
     /// Run or manage sessions
@@ -77,10 +77,11 @@ enum Command {
     #[command(subcommand)]
     Uri(UriCommand),
     /// Prepare Gateinto for the current Windows user: check the config, create or reuse the
-    /// device key and report the gateinto:// handler
+    /// device key and report the gateinto:// handler; on Linux it checks the config and fails,
+    /// because there is no device key yet, so register the handler with `gateinto uri register`
     Setup(KeyInitArgs),
-    /// Show the device key, gateways, agent sessions and gateinto:// handler without changing
-    /// anything
+    /// Show the device key, gateways, agent sessions and gateinto:// handler, and on Linux
+    /// the prerequisites of terminal sessions and os_user, without changing anything
     Status(StatusArgs),
     /// Permanently delete Gateinto data that an uninstall keeps
     Reset(ResetArgs),
@@ -606,6 +607,7 @@ fn device_key_settings(config: &ConfigArg, name: Option<KeyName>) -> Result<Devi
 fn key(command: KeyCommand) -> Result {
     match command {
         KeyCommand::Init(args) => {
+            #[cfg(not(target_os = "linux"))]
             if let Some(note) = lifecycle::check_current_account()? {
                 eprintln!("{note}");
             }
@@ -1499,6 +1501,10 @@ fn uri(command: UriCommand) -> Result {
             config,
             scheme: SchemeArg { scheme },
         }) => {
+            #[cfg(target_os = "linux")]
+            if let Some(note) = lifecycle::check_current_account()? {
+                eprintln!("{note}");
+            }
             let config = config
                 .config
                 .as_deref()
@@ -1638,6 +1644,16 @@ fn setup(args: KeyInitArgs) -> Result {
     let file = args.config.load()?;
     let settings = args.settings()?;
     print_config(&args.config, &file);
+    set_up_device_key(settings)
+}
+
+#[cfg(target_os = "linux")]
+fn set_up_device_key(_settings: DeviceKeySettings) -> Result {
+    Err(lifecycle::LINUX_SETUP.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_up_device_key(settings: DeviceKeySettings) -> Result {
     let store = gateinto::identity::system_store()?;
     let options = InitOptions {
         backend: settings.preferred,
@@ -1660,13 +1676,16 @@ fn setup(args: KeyInitArgs) -> Result {
     Ok(())
 }
 
-async fn status(args: StatusArgs) -> Result {
-    let file = args.config.load()?;
-    let name = device_key_settings(&args.config, args.name.clone())?.name;
-    println!("key-name: {name}");
+#[cfg(target_os = "linux")]
+fn print_device_key(_name: &KeyName) {
+    println!("device-key: {}", lifecycle::LINUX_DEVICE_KEY);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn print_device_key(name: &KeyName) {
     match gateinto::identity::system_store() {
         Err(error) => println!("device-key: unavailable: {error}"),
-        Ok(store) => match device_key::info(&store, &name) {
+        Ok(store) => match device_key::info(&store, name) {
             Ok((key, duplicate)) => {
                 if let Some(duplicate) = duplicate {
                     eprintln!("{}", duplicate.info_warning());
@@ -1681,6 +1700,13 @@ async fn status(args: StatusArgs) -> Result {
             Err(error) => println!("device-key: error: {error}"),
         },
     }
+}
+
+async fn status(args: StatusArgs) -> Result {
+    let file = args.config.load()?;
+    let name = device_key_settings(&args.config, args.name.clone())?.name;
+    println!("key-name: {name}");
+    print_device_key(&name);
     print_config(&args.config, &file);
     let agent = match Endpoint::for_current_user() {
         Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
@@ -1701,6 +1727,10 @@ async fn status(args: StatusArgs) -> Result {
         Err(error) => println!("agent: unknown: {error}"),
     }
     print_handler();
+    #[cfg(target_os = "linux")]
+    for line in lifecycle::current_linux_status() {
+        println!("{line}");
+    }
     Ok(())
 }
 

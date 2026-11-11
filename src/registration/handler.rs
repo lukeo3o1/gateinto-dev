@@ -216,6 +216,27 @@ fn overridden(target: &Target, places: &Places, scheme: &str) -> Option<Overridd
     }
 }
 
+pub(crate) fn check_owner(target: &Target, scheme: &str) -> Result<(), RegistrationError> {
+    let Ok(places) = Places::new(target, scheme) else {
+        return Ok(());
+    };
+    for anchor in [&places.data_anchor, &places.config_anchor] {
+        if let Err(error @ FileError::ForeignDirectory { .. }) = files::check_anchor(anchor) {
+            return Err(RegistrationError::File(format!(
+                "{error}; Gateinto registers its {scheme}:// handler only for the user who owns \
+                 the per-user directories, so run it as that user, not through sudo or su"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn installed_override(target: &Target, scheme: &str) -> Option<Overridden> {
+    let places = Places::new(target, scheme).ok()?;
+    read_entry(&places.entry, scheme).ok()??;
+    overridden(target, &places, scheme)
+}
+
 fn file(error: FileError) -> RegistrationError {
     RegistrationError::File(error.to_string())
 }
@@ -811,6 +832,95 @@ X-Gateinto-Handler=1
         );
         assert!(!unique("config").exists());
         assert!(!unique("data").exists());
+    }
+
+    #[test]
+    fn only_an_anchor_of_another_user_fails_the_owner_check() {
+        let scratch = Scratch::new();
+        assert_eq!(check_owner(&scratch.target(&[]), SCHEME), Ok(()));
+        let unset = Target {
+            home: None,
+            roots: Roots {
+                config_home: None,
+                data_home: None,
+                ..scratch.target(&[]).roots
+            },
+        };
+        assert_eq!(check_owner(&unset, SCHEME), Ok(()));
+        let absent = scratch.0.join("absent");
+        let missing = Target {
+            home: Some(absent.clone()),
+            roots: Roots {
+                config_home: Some(absent.join(".config")),
+                data_home: Some(absent.join(".local/share")),
+                ..scratch.target(&[]).roots
+            },
+        };
+        assert_eq!(check_owner(&missing, SCHEME), Ok(()));
+        assert!(!absent.exists());
+
+        let home = foreign_dir(&scratch.0);
+        let uid = std::fs::metadata(&home).unwrap().uid();
+        let refused = Err(RegistrationError::File(format!(
+            "directory {} is owned by uid {uid}, not by the current user; Gateinto registers \
+             its gateinto:// handler only for the user who owns the per-user directories, so \
+             run it as that user, not through sudo or su",
+            home.display()
+        )));
+        for (config, data) in [(true, false), (false, true)] {
+            let root = |foreign: bool, name: &str| {
+                if foreign {
+                    home.clone()
+                } else {
+                    scratch.home().join(name)
+                }
+            };
+            let target = Target {
+                home: Some(scratch.home()),
+                roots: Roots {
+                    config_home: Some(root(config, ".config")),
+                    data_home: Some(root(data, ".local/share")),
+                    ..scratch.target(&[]).roots
+                },
+            };
+            assert_eq!(check_owner(&target, SCHEME), refused, "{config} {data}");
+        }
+    }
+
+    #[test]
+    fn an_installed_handler_reports_a_default_that_overrides_it() {
+        let scratch = Scratch::new();
+        let target = scratch.target(&["kde"]);
+        assert_eq!(installed_override(&target, SCHEME), None);
+        assert_eq!(register(&target, SCHEME, COMMAND), Ok(None));
+        assert_eq!(installed_override(&target, SCHEME), None);
+
+        let kde = scratch.home().join(".config/kde-mimeapps.list");
+        put(&kde, &default_line("other.desktop"));
+        put(
+            &scratch.applications().join("other.desktop"),
+            "[Desktop Entry]\nExec=other %u\n",
+        );
+        assert_eq!(
+            installed_override(&target, SCHEME),
+            Some(Overridden {
+                scheme: SCHEME.to_owned(),
+                by: Some(("other.desktop".to_owned(), kde.clone())),
+            })
+        );
+
+        std::fs::remove_file(&kde).unwrap();
+        std::fs::remove_file(scratch.list()).unwrap();
+        assert_eq!(
+            installed_override(&target, SCHEME),
+            Some(Overridden {
+                scheme: SCHEME.to_owned(),
+                by: None,
+            })
+        );
+
+        put(&scratch.entry(), "[Desktop Entry]\nExec=other %u\n");
+        assert_eq!(installed_override(&target, SCHEME), None);
     }
 
     #[test]

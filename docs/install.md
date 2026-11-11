@@ -272,11 +272,18 @@ session: 2 browser office 127.0.0.1:50123
 uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1"
 ```
 
-`device-key` is `present`, `absent`, `unavailable` (not Windows) or `error: …`. Gateways show
+`device-key` is `present`, `absent`, `unavailable` (not Windows; on Linux `unavailable: no device key backend on Linux; connections are unauthenticated`) or `error: …`. Gateways show
 only name, host, port, default route (`mixed`, the default, or `gateway`) and source (`config` or `linked`); CA files, certificate files, portal
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
 its path or query. Sessions come from the running agent, the same lines as `gateinto session list`.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.
+On Linux, `status` also prints `uri-handler-warning` when Gateinto's desktop file is installed
+but another installed default overrides it or no installed default is found,
+`terminal-sessions: not supported on Linux yet`, `terminal-containment` (`available` when every
+containment prerequisite of terminal sessions is present, otherwise `unavailable: <the first
+missing one>`; see [design/linux-support.md](design/linux-support.md#area-3-session-containment))
+and `os-user` (whether `pidfd_open` works on this kernel). On Linux `setup` checks the config and then fails, because there is no device
+key yet; `gateinto uri register` registers the handler on its own.
 
 ## Uninstall
 

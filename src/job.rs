@@ -49,6 +49,11 @@ impl Job {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn terminal_containment() -> String {
+    linux::Host::current().availability()
+}
+
 #[derive(Debug)]
 pub enum SpawnError {
     Job(io::Error),
