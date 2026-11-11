@@ -392,8 +392,10 @@ Linux implements `Owners` (`src/proxy/os_user.rs:32-34`) from `/proc`:
    `/proc/<pid>/fd`. Only processes of the agent's own uid are searched: in
    scope mode (Area 3), the pids listed in the session scope's
    `cgroup.procs` and its descendants; otherwise the pids whose
-   `/proc/<pid>/status` has our uid. A process whose fd directory cannot be
-   read is skipped and the skip is remembered.
+   `/proc/<pid>/status` has our uid in any of its four `Uid:` fields. A
+   process whose fd directory or status cannot be read, or whose status is
+   malformed, is skipped and the skip is remembered; one that disappears
+   during the scan (`ENOENT`, or `ESRCH` from `pidfd_open`) is ignored.
 3. **Liveness.** For the candidate, open a pidfd (`pidfd_open`) before
    reading its fd links, `/proc/<pid>/status` and `/proc/<pid>/cgroup`, then
    `poll` the pidfd with a zero timeout: if it is readable the process has
@@ -415,16 +417,26 @@ second `Uid:` or `0::` line is malformed rather than ignored, so a process
 or cgroup name containing a newline cannot add one.
 
 The connection is accepted only when a readable, live holder with our uid
-(and, in scope mode, inside the scope) is positively found. Otherwise it is
-denied: `Lookup` if any process was skipped as unreadable, `NotFound` if
-none was. `pidfd_open` needs Linux 5.3; on `ENOSYS` the check is a `Lookup`
+(and, in scope mode, inside the scope) is positively found; the scan stops
+at the first. Otherwise it is denied: `OtherUser` if a live holder had
+another uid in one of its four fields, else `Lookup` if any process was
+skipped as unreadable, `NotFound` if none was. `/proc/net/tcp` is always
+read and `/proc/net/tcp6` only for an IPv6 client or an IPv4 client with no
+IPv4 row, as on Windows; a table that is needed and cannot be read or
+parsed is a `Lookup` denial. `pidfd_open` needs Linux 5.3; on `ENOSYS` the check is a `Lookup`
 denial, so `os_user` refuses every connection on older kernels and `status`
 says so.
 
-The retries for a row that is not yet visible follow the Windows values. The
-handshake deadline is passed into the scan, which checks it between
-processes, so the blocking task of `src/proxy/local_auth.rs:84-100` stops
-soon after `TimedOut` instead of running on.
+The retries for a row that is not yet visible follow the Windows values
+(five reads, 5 ms apart, shared with the Windows code). The handshake
+deadline is passed into the check as an `Instant` through `Owners::check`,
+and the scan checks it before each process, so the blocking task of
+`src/proxy/local_auth.rs:84-100` stops soon after `TimedOut` instead of
+running on; a `TimedOut` returned by the check is answered like the outer
+timeout (`408`). The row retries do not check it; they take at most 20 ms.
+The `/proc` root is a parameter of the Linux `System`, so the selection
+logic runs over a fake tree in tests while the pidfds are opened for real
+processes.
 
 Reading another process's fd links needs ptrace read access. A non-dumpable
 process (setuid programs, processes that called `prctl(PR_SET_DUMPABLE, 0)`,
@@ -450,7 +462,9 @@ optimisation, not part of the first version.
   never an acceptance.
 - `os_user` remains unavailable in browser sessions on Linux until a
   containment unit exists for browsers (open question); it is never enabled
-  on the uid check alone where Windows also requires the job.
+  on the uid check alone where Windows also requires the job. Until Area 3,
+  binding a proxy that asks for `os_user` with a containment unit fails on
+  Linux.
 
 ### CI on `ubuntu-latest`
 
@@ -468,8 +482,10 @@ optimisation, not part of the first version.
   (`LocalAuth::check` returns `Status::Forbidden` when there is no verifier,
   `src/proxy/local_auth.rs:126-141`); 407 is only expected when session
   credentials are also enabled. `OtherUser` appears only in the log, which
-  the test checks. The `sudo` part runs only when an environment variable
-  set by the CI job is present and is required there.
+  the test checks. The `sudo` part runs only when
+  `GATEINTO_TEST_SUDO_NOBODY=1`, which the `ubuntu-latest` job sets on its
+  test step, and is required there; the client is a `bash` `/dev/tcp`
+  redirection, so the test needs no helper binary readable by `nobody`.
 - The existing `binding_with_os_user_fails_outside_windows` becomes
   `..._outside_windows_and_linux`.
 
