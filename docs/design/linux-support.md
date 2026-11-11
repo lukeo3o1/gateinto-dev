@@ -516,11 +516,55 @@ to a transient scope:
   `/bin/systemd-run`). It is never looked up on `PATH` and never resolved
   against the current directory. Any failure is `Unsupported` with a message
   naming the missing piece, before the listener is bound, as `Job::new` is
-  called today in the Windows `console_terminal`. Gateinto's own cgroup is
-  not checked: a terminal opened over SSH, on a VT or from a desktop runs in
-  a `session-<n>.scope` outside `user@<uid>.service`, and the scope is still
-  created by the user manager. The post-spawn check below is the real
-  guarantee.
+  called today in the Windows `console_terminal`. Where Gateinto's own
+  cgroup is in the hierarchy is not checked: a terminal opened over SSH, on
+  a VT or from a desktop runs in a `session-<n>.scope` outside
+  `user@<uid>.service`, and the scope is still created by the user manager.
+  The post-spawn check below is the real guarantee.
+
+  Where this list is silent, the checks fail closed as follows. The uid is
+  the effective uid. Every type and owner check is an `lstat` except the
+  one for `systemd-run`, so a symbolic link never stands in for a
+  directory, socket or file.
+  - cgroup v2: `/sys/fs/cgroup/cgroup.controllers` is a regular file, so a
+    hybrid layout with the unified hierarchy at `/sys/fs/cgroup/unified` is
+    refused.
+  - Own cgroup visible: the single `0::` path of `/proc/self/cgroup`
+    (parsed as in Area 2) has only plain components after its leading `/`,
+    and names a directory under `/sys/fs/cgroup`. A `..` component (a cgroup
+    namespace rooted below the process's cgroup), a deleted cgroup
+    (`... (deleted)`) and a path that names no directory under
+    `/sys/fs/cgroup` are refused. This does not detect a mount from another
+    cgroup namespace: a process at the root of its own cgroup namespace sees
+    `0::/`, which passes whatever is mounted at `/sys/fs/cgroup` (for
+    example after `unshare -C` without a remount). So every
+    `/proc/<pid>/cgroup` path that a later step joins to the mount is
+    validated the same way (plain components, an existing directory).
+  - `XDG_RUNTIME_DIR`: set, absolute, and a directory of the uid with no
+    group or other permission bits (the same mode rule `src/ipc.rs` applies
+    to its own directory). A relative
+    or unset value is refused, never resolved against the current
+    directory.
+  - User manager: each of `bus` and `systemd` that exists must be the
+    right type (a socket, a directory) and belong to the uid, or the check
+    fails even if the other one is fine; at least one must exist. Only a
+    missing entry is tolerated; any other error refuses.
+  - Delegated cgroup: a directory, owned by the uid.
+  - `systemd-run`: the fixed candidates are followed through symbolic links
+    (merged `/usr` links `/bin` to `/usr/bin`). A missing candidate falls
+    through to the next. A candidate that exists but is not a regular file,
+    belongs to neither root nor the uid, is writable by group or others, has
+    no execute bit, or cannot be inspected refuses at once, without
+    falling through to `/bin/systemd-run`. The parent directories are not
+    inspected, and step 9 runs `systemd-run` by path, so a window between
+    the check and the exec remains; opening the file once and executing
+    from that descriptor (`fexecve`) is an option for step 9.
+  - The checks run in the order above and the first failure is reported
+    with a fixed message; no path, uid or environment value is
+    interpolated. The chosen `systemd-run` path is returned by the check
+    and is not kept until the spawn of step 9 needs it. Until steps 9 to
+    13, nothing on Linux calls `Job::new` (terminals and browser jobs are
+    Windows only), so a passing check starts nothing.
 - **Spawn.** The shell is started as
   `systemd-run --user --scope --quiet --collect
   --unit=gateinto-terminal-<agent pid>-<start time>-<random> -- <shell>
@@ -588,7 +632,11 @@ is an open decision.
 
 - Unit tests for the unit name, the `systemd-run` argument vector, the
   prerequisite checks against a fake `/sys/fs/cgroup` and `/proc/self/cgroup`,
-  and the stale-scope selection.
+  and the stale-scope selection. The `/proc` and cgroup roots, the runtime
+  directory, the uid and the `systemd-run` candidates are parameters of the
+  check, so its tests build fake trees in temporary directories and do not
+  depend on the host; one test only requires that the real host either
+  passes or fails with one of the fixed messages.
 - A dedicated `linux-systemd` job runs `sudo loginctl enable-linger runner`,
   sets `XDG_RUNTIME_DIR=/run/user/$(id -u)` and runs the scope tests with
   `GATEINTO_TEST_SYSTEMD_SCOPE=1`, which makes them required instead of

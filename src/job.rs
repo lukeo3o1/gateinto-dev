@@ -5,6 +5,9 @@ use std::io;
 #[cfg(windows)]
 pub use windows::{Process, SpawnOptions};
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 pub struct Job {
     #[cfg(windows)]
     handle: crate::token::Handle,
@@ -22,7 +25,12 @@ impl Job {
         windows::create().map(|handle| Self { handle })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    pub fn new() -> io::Result<Self> {
+        linux::Host::current().check().map(|_| Self {})
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub fn new() -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -791,9 +799,9 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     #[test]
-    fn jobs_are_unavailable_outside_windows() {
+    fn jobs_are_unavailable_outside_windows_and_linux() {
         assert_eq!(Job::new().unwrap_err().kind(), io::ErrorKind::Unsupported);
     }
 }
