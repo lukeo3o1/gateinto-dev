@@ -33,6 +33,10 @@ meant to protect, against whom, and what it does not protect.
   session credentials; a denied connection gets `403` (or `408` when the
   owner lookup times out) and is closed, never a `407` challenge. If the job
   cannot be created or the shell cannot be put in it, nothing is started.
+  On Linux no session offers `os_user` yet; a proxy bound with it alone
+  accepts a connection only when a live process whose four uids are the
+  effective uid running Gateinto holds the client's socket, and denies it
+  with `403` otherwise.
   There is no shared session and no setting that removes authentication.
   The credentials are shown to the user, who types them into
   the browser's proxy sign-in dialog; a program running as the user can get
@@ -82,6 +86,7 @@ meant to protect, against whom, and what it does not protect.
 | An attacker on the network, or a misconfigured upstream, downgrades the key exchange to classical `X25519`. | `hybrid_required` offers only `X25519MLKEM768`, so the handshake fails (`502`) instead of downgrading, and every tunnel is also checked after the handshake and refused unless the negotiated group is one the mode offers. TLS 1.3 signs the handshake transcript, so an attacker without the server key cannot alter the negotiated group in the other modes either; `hybrid_preferred` still accepts `X25519` from an upstream that only offers it. `check-upstream` shows which group an upstream negotiates. |
 | Another local program uses a browser session's port. | `session_credentials`: the session accepts only the fixed user name `gateinto` with the password generated for it from the system CSPRNG (about 59.4 bits); any other credential gets `407` and is never learned, however early it arrives. The check is an HMAC-SHA-256 under a per-session key compared in constant time, and it runs before any DNS lookup, routing decision, upstream connection or device key signature. Failures beyond 10 a minute get `429`. Closing the session revokes the credentials: the port closes, its tunnels end, and a new session has new credentials. |
 | Another user of the machine, or a service under another account, uses a session's port on Windows with `os_user`. | Gateinto finds the process that owns the client's end of the connection in the TCP connection table, opens it, checks the row again while it holds the handle, and requires the user SID of its token to equal that of Gateinto's own token (`EqualSid`). Any failure denies: `403` and close, or the `Basic` challenge when `session_credentials` is offered. The check runs before the request is read and within the connect timeout, so before any DNS lookup, routing decision, upstream connection or device key signature. Denials do not count toward the `session_credentials` failure limit. |
+| Another user of the machine uses a port bound with `os_user` on Linux. | Gateinto takes the client's row from `/proc/net/tcp` (and `/proc/net/tcp6` for IPv6 and IPv4-mapped clients) and denies it as another user when the row's uid is not its effective uid. Otherwise it accepts only a live holder of the socket inode among the processes of its uid: each candidate's pidfd is opened before its fd links and status are read and polled afterwards, so an exited or zombie process is discarded; all four `Uid:` fields must equal Gateinto's effective uid; and the row is read again and must keep its inode. Unreadable tables, unreadable processes without a holder, and kernels without `pidfd_open` deny. The scan checks the handshake deadline between processes. A socket passed to another user's process is accepted while a live process of our uid still holds it. |
 | Another program of the same user uses a browser or terminal session's port on Windows with `os_user`. | The browser is started inside an unnamed, non-inheritable job object created for the session (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, or created suspended and assigned to the job before it runs), and the session also requires `IsProcessInJob`, so a process outside the job is denied. A browser that cannot be put in a job gets a session that accepts only `session_credentials`. A terminal session's shell is started in its job the same way, and if that fails the command fails and nothing is started; there is no session without the job. Not a boundary: see residual risks. |
 | A website phishes the session credentials with a page or dialog that imitates the browser's proxy sign-in. | The prompt that shows the credentials names the proxy address and says to enter them only in the proxy sign-in prompt for it, never in a website; whether the browser's prompt shows that address is not yet verified on Windows. Credentials typed into a page are useful only from this machine, because the port listens on loopback, and only until the session closes. Not prevented technically (see residual risks). |
 | A website uses a `gateinto://` link to add a trust anchor or TLS setting, inject a credential, change a known gateway, open an arbitrary page or run a command. | The URI has no field for a CA, TLS mode, client certificate, server name, listen address, credential or command; `auth` is only `session_credentials`, and the removed `basic_tofu` is refused. A link that disagrees with the host, port or portal of a known gateway is refused, and the configuration file is never written. `url` must have the origin of the gateway's portal. Strict parser (allowed characters, no duplicates or unknown fields, 8192 bytes), applied by `open` and again by the agent. The handler passes the URI after `--` as one argument and nothing in link handling starts a shell; a link cannot ask for a terminal session. Only the local `terminal` IPC request starts one; any process of the same user can send it over the per-user pipe or socket (`gateinto session terminal --agent` and the GUI's Open terminal button are the intended senders; the GUI sends only a gateway name from its configuration file and `route=saved`, never a shell, command, argument or variable, and only while the agent is already running), subject to the shared launch rate limit and the terminal cap. |
@@ -122,6 +127,12 @@ meant to protect, against whom, and what it does not protect.
   accepted too.
 - The owner is checked once per connection; an open tunnel is not
   re-checked.
+- On Linux `os_user` is a uid check only: any process of the same uid is
+  accepted, a socket passed to another user's process is accepted while a
+  process of our uid still holds it, and root is outside the model. A
+  non-dumpable holder of our uid cannot be read and is denied. Containers,
+  kernels without `pidfd_open` and the scan's cost on a busy desktop have
+  not been verified.
 - A Gateinto that is not elevated may fail to open the process of an
   elevated client of the same user under a real UAC split token; the check
   then fails closed (`403`, or the `Basic` challenge). This, domain-joined
@@ -232,7 +243,9 @@ meant to protect, against whom, and what it does not protect.
   attacks on an unlocked machine.
 - Proving which local program is connecting. `os_user` checks the Windows
   account of the owning process and, in browser and terminal sessions,
-  membership in the session's job, not the program itself.
+  membership in the session's job, not the program itself. On Linux it
+  checks only the uid; no session uses it there until session containment
+  exists.
 - Acting as a general-purpose HTTP proxy (only `CONNECT` is supported).
 - Post-quantum authentication.
 - Forcing system-wide traffic through the proxy; only clients configured to

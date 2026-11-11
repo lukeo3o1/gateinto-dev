@@ -3,7 +3,7 @@ use std::mem::offset_of;
 use std::net::SocketAddr;
 use std::ptr::null_mut;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -17,12 +17,10 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use super::{Denial, Family, Owners, Row, entries, lookup, v4, v6};
+use super::{Denial, Family, LOOKUP_ATTEMPTS, LOOKUP_DELAY, Owners, Row, entries, lookup, v4, v6};
 use crate::job::Job;
 use crate::token::{Handle, TokenUserInfo};
 
-const LOOKUP_ATTEMPTS: u32 = 5;
-const LOOKUP_DELAY: Duration = Duration::from_millis(5);
 const TABLE_ATTEMPTS: u32 = 8;
 
 pub(super) struct System {
@@ -56,7 +54,7 @@ impl System {
 }
 
 impl Owners for System {
-    fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), Denial> {
+    fn check(&self, peer: SocketAddr, local: SocketAddr, _: Instant) -> Result<(), Denial> {
         let lookup = |error: io::Error| Denial::Lookup(error.to_string());
         let pid = self.find(peer, local)?;
         // SAFETY: OpenProcess returns an owned handle or null.

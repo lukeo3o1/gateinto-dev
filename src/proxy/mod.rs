@@ -823,9 +823,9 @@ mod tests {
         assert_eq!(upstream.address(), "[::1]:443");
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     #[tokio::test]
-    async fn binding_with_os_user_fails_outside_windows() {
+    async fn binding_with_os_user_fails_outside_windows_and_linux() {
         for local_auth in [
             LocalAuth::OS_USER,
             LocalAuth {
@@ -839,9 +839,16 @@ mod tests {
                     assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{error}");
                 }
                 Err(other) => panic!("unexpected error: {other}"),
-                Ok(_) => panic!("os_user was accepted outside Windows"),
+                Ok(_) => panic!("os_user was accepted outside Windows and Linux"),
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn binding_with_os_user_succeeds_on_linux() {
+        let config = config(LocalAuth::OS_USER, Duration::from_secs(5)).await;
+        assert!(Proxy::bind(config).await.is_ok());
     }
 
     async fn exchange(proxy: Proxy, request: &[u8]) -> (String, TcpStream) {

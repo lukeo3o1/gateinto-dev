@@ -47,6 +47,7 @@ pub(super) fn uids(status: &str) -> io::Result<[u32; 4]> {
         .ok_or_else(|| invalid("malformed Uid line in the process status"))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn cgroup(text: &str) -> io::Result<&str> {
     let mut unified = None;
     for line in text.lines() {
@@ -106,7 +107,7 @@ fn hex(text: &str, len: usize) -> Option<&str> {
     (text.len() == len && text.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(text)
 }
 
-fn decimal<T: FromStr>(text: &str) -> Option<T> {
+pub(super) fn decimal<T: FromStr>(text: &str) -> Option<T> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
