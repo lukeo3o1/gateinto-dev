@@ -52,9 +52,13 @@ runtime DLL (see [static C runtime](docs/compatibility.md#static-c-runtime)).
 [packaging/wix](packaging/wix/README.md): install, first run with
 `gateinto setup`, `gateinto status`, uninstall (which keeps the device key and
 the config file), reinstall with the same device identity, and the explicit
-purge. The MSI can also be built with `packaging/wix/build.ps1`. There is no
-WinGet package; `winget install` does not install Gateinto. `packaging/winget`
-holds manifest templates that have not been submitted.
+purge. It also covers the Linux tarball, not yet verified on a real Linux
+desktop: `install.sh`, `uninstall.sh` (which keeps the config file and the
+gateways added from links), upgrades, and what `setup`, `status` and `reset`
+do on Linux, which has no device key yet. The MSI can also be built with
+`packaging/wix/build.ps1`. There is no WinGet package; `winget install` does
+not install Gateinto. `packaging/winget` holds manifest templates that have
+not been submitted.
 
 The MSI installs `gateinto.exe` and the GUI, `gateinto-gui.exe`, side by
 side in `%LOCALAPPDATA%\Programs\Gateinto`, and adds a per-user Start Menu
@@ -107,16 +111,18 @@ be uninstalled before a release MSI is installed.
 | `gateinto session verification <id>` | Show the pending gateway verification of one of the agent's sessions (link, origin, pairing code, targets, remaining time) on standard error, only when it is a terminal; never on standard output and never in a browser. See [interactive verification](docs/design/interactive-auth.md). |
 | `gateinto stop` | Close all of the agent's sessions and stop it, saying how many terminal sessions it closed. It waits until the agent process has exited (at most 15 seconds). With `--remove-stale-profiles` (used by the uninstaller) it also succeeds when no agent runs and deletes Gateinto browser profiles left behind. |
 | `gateinto gateway list`, `gateinto gateway forget <name>` | List the gateways with their default route and their source (the config file, or a `gateinto://` link the user approved), or remove one added from a link. |
-| `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows and Linux, development use). On Linux, `uri register` and `setup` warn when run as root and refuse when the per-user config or data directory belongs to another user, as under `sudo` without a new `HOME`. |
+| `gateinto uri register`, `gateinto uri unregister` | Register or remove the per-user `gateinto://` handler (Windows and Linux; on Windows for development, on Linux run by `install.sh` and `uninstall.sh`). On Linux, `uri register` and `setup` warn when run as root and refuse when the per-user config or data directory belongs to another user, as under `sudo` without a new `HOME`. |
 | `gateinto key init` | Open the device key, creating it only if none exists. |
 | `gateinto key info` | Show the existing device key and its client certificate without creating anything. |
 | `gateinto setup` | First run as the key's user: refuse service accounts, check the config, create or reuse the device key, report the `gateinto://` handler. See [docs/install.md](docs/install.md#first-run-gateinto-setup). On Linux it checks the config and then fails, because Linux has no device key yet; `gateinto uri register` registers the handler on its own. |
 | `gateinto status` | Show the key provider and SPKI, gateways, the agent's sessions and the handler, without changing anything. On Linux it reports that there is no device key, warns when another default overrides the registered handler, says that terminal sessions are not supported yet and whether their containment prerequisites are present, and says whether `pidfd_open` (needed by `os_user`) is available. |
-| `gateinto reset --purge-device-identity` | Delete the device key after the SPKI is confirmed (and with `--purge-config` the config file and the gateways added from links). Does not revoke the device at any gateway. See [docs/install.md](docs/install.md#purge-gateinto-reset---purge-device-identity). |
+| `gateinto reset --purge-device-identity` | Delete the device key after the SPKI is confirmed (and with `--purge-config` the config file and the gateways added from links). Does not revoke the device at any gateway. See [docs/install.md](docs/install.md#purge-gateinto-reset---purge-device-identity). On Linux, which has no device key, it deletes nothing and fails. |
 
 All commands that read the configuration accept `--config <file>`; flags
 override the file key by key. Without `--config` they read
-`%APPDATA%\Gateinto\gateinto.toml` if that file exists.
+`%APPDATA%\Gateinto\gateinto.toml` on Windows, or
+`$XDG_CONFIG_HOME/gateinto/gateinto.toml` (default
+`~/.config/gateinto/gateinto.toml`) on Linux, if that file exists.
 `gateinto <command> --help` lists every flag with its default.
 
 ### Upstream options

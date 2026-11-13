@@ -1,11 +1,12 @@
 # Design: Linux support
 
-Status: proposed
+Status: partly implemented
 
-Nothing here is implemented. Names and line numbers refer to `master` at
-a0f46b4, the base of `feat/linux`. The behaviour described for desktops,
-systemd, browsers, TPMs and gateways is not verified; what must be checked is
-listed under [Needs verification](#needs-verification).
+Steps 1 to 8 and 14 to 17 of the [Implementation plan](#implementation-plan)
+are implemented on `feat/linux`; steps 9 to 13 and 18 are not. Names and line
+numbers refer to `master` at a0f46b4, the base of `feat/linux`. The behaviour
+described for desktops, systemd, browsers, TPMs and gateways is not verified;
+what must be checked is listed under [Needs verification](#needs-verification).
 
 ## Summary
 
