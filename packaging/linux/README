@@ -53,27 +53,49 @@ Uninstall, from the directory that holds gateinto-tarball:
 
     cd gateinto-tarball && ./uninstall.sh
 
-If ~/.config/systemd/user/gateinto-agent.service exists and systemctl is on
-PATH, uninstall.sh first runs
+If ~/.config/systemd/user/gateinto-agent.service exists and systemctl is
+on PATH, uninstall.sh first runs
 `systemctl --user disable --now gateinto-agent.service`. It then runs
-`~/.local/bin/gateinto stop --remove-stale-profiles`,
-which stops a running agent with its sessions and deletes the Gateinto
-browser profiles left behind, then `~/.local/bin/gateinto uri unregister`,
-then removes the unit file (followed by `systemctl --user daemon-reload`)
-and ~/.local/bin/gateinto. If disabling, stopping or unregistering fails,
-it stops and keeps the binary, so running it again retries; a failed
-daemon-reload only prints a warning. It keeps the configuration and the
+`~/.local/bin/gateinto stop`, which stops a running agent it can reach
+with its sessions; a failure there, such as no agent running, does not
+stop the uninstall. If a process of yours still runs ~/.local/bin/gateinto
+(or the earlier binary that install.sh replaced there), it prints the
+error of `gateinto stop`, if any, and stops before deleting browser
+profiles, unregistering the gateinto:// handler or removing the unit file
+and ~/.local/bin/gateinto; a unit is already disabled by then. Otherwise
+it runs `~/.local/bin/gateinto stop --remove-stale-profiles`, which
+deletes the Gateinto browser profiles left behind, then
+`~/.local/bin/gateinto uri unregister`, then removes the unit file
+(followed by `systemctl --user daemon-reload`) and ~/.local/bin/gateinto.
+A normal uninstall that stops an agent prints "stopped the agent (process
+N)" and then "no agent is running". If disabling, removing the profiles or
+unregistering fails, it stops and keeps the binary, so running it again
+retries; a failed daemon-reload only prints a warning. It needs a readlink
+on PATH that can read /proc/<pid>/exe. It keeps the configuration and the
 gateways added from links in ~/.config/gateinto (or
 $XDG_CONFIG_HOME/gateinto).
 
-With the unit installed, run uninstall.sh from your own login session:
+Run uninstall.sh from your own login session. With the unit installed,
 under `su -`, `sudo -u` or without a user manager,
 `systemctl --user disable --now` fails to reach your user manager (the
-enablement link may already be gone) and uninstall.sh stops. If the unit
-file is a symbolic link to a missing file (as `systemctl --user link`
-leaves after the linked file is deleted), uninstall.sh changes nothing
-and asks you to run `systemctl --user stop gateinto-agent` if it is
-running, to remove by hand that link and, if present,
+enablement link may already be gone) and uninstall.sh stops. Without the
+unit, `gateinto stop` there may not reach an agent started in your login
+session. If that agent runs ~/.local/bin/gateinto, or the earlier binary
+that install.sh replaced there, uninstall.sh refuses, as above, until you
+stop it from the session that started it. The check compares the paths in
+/proc/<pid>/exe of your processes in the same PID namespace, so it misses
+an agent started from another path (a build tree, a copy or a hard link),
+through a ~/.local/bin/gateinto that is itself a symbolic link (install.sh
+replaces such a link with a file, so only a manual setup has one), or in
+another PID namespace. If such an agent is out of reach, uninstall.sh goes
+on, deletes the profiles of its open browser sessions and removes
+~/.local/bin/gateinto while it keeps running.
+
+If the unit file is a symbolic link to a missing file (as
+`systemctl --user link` leaves after the linked file is deleted),
+uninstall.sh changes nothing and asks you to run
+`systemctl --user stop gateinto-agent` if it is running, to remove by hand
+that link and, if present,
 ~/.config/systemd/user/graphical-session.target.wants/gateinto-agent.service,
 and to run it again.
 
