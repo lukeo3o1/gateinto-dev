@@ -703,19 +703,31 @@ cd gateinto-tarball && ./uninstall.sh
    you to remove it by hand.
 3. If `~/.config/systemd/user/gateinto-agent.service` is a symbolic link to a missing file, it
    exits with an error without changing anything (see below).
-4. If `~/.config/systemd/user/gateinto-agent.service` exists and `systemctl` is on `PATH`, it
+4. If `readlink` is not on `PATH` or cannot read `/proc/<pid>/exe`, for example without
+   `/proc`, it exits with an error without changing anything.
+5. If `~/.config/systemd/user/gateinto-agent.service` exists and `systemctl` is on `PATH`, it
    runs `systemctl --user disable --now gateinto-agent.service`.
-5. It runs `~/.local/bin/gateinto stop --remove-stale-profiles`, which stops a running agent with
-   its sessions and their browsers, waits up to 15 seconds for the agent to exit, and then
-   deletes the Gateinto-marked browser profiles left behind. Only directories that Gateinto
-   created and marked are deleted.
-6. It runs `~/.local/bin/gateinto uri unregister`.
-7. If there is a unit file, it removes it and, when `systemctl` is on `PATH`, runs
-   `systemctl --user daemon-reload` (a failure there only prints a warning); then it removes
-   `~/.local/bin/gateinto`.
+6. It runs `~/.local/bin/gateinto stop`, which stops a running agent that it can reach, with
+   its sessions and their browsers, and waits up to 15 seconds for the agent to exit. A failure
+   here, such as no agent running, does not stop the uninstall, and its error message is shown
+   only if step 7 refuses. When this step stops an agent it prints
+   `stopped the agent (process N)`, and step 8 then prints `no agent is running`, because that
+   agent is gone.
+7. If a process of yours still runs `~/.local/bin/gateinto`, or the earlier binary that
+   `install.sh` replaced at that path, it prints the error message of step 6, if there was one,
+   and exits with an error before deleting browser profiles, unregistering the handler or
+   removing the unit file and the binary (see below). A unit was already disabled and stopped
+   in step 5.
+8. It runs `~/.local/bin/gateinto stop --remove-stale-profiles`, which deletes the
+   Gateinto-marked browser profiles left behind. Only directories that Gateinto created and
+   marked are deleted.
+9. It runs `~/.local/bin/gateinto uri unregister`.
+10. If there is a unit file, it removes it and, when `systemctl` is on `PATH`, runs
+    `systemctl --user daemon-reload` (a failure there only prints a warning); then it removes
+    `~/.local/bin/gateinto`.
 
-If step 4, 5 or 6 fails, it keeps the binary and exits with an error, so it can be run again
-after fixing the cause. A failure in step 6 comes after step 5, so the agent is already
+If step 5, 8 or 9 fails, it keeps the binary and exits with an error, so it can be run again
+after fixing the cause. A failure in step 9 comes after step 8, so the agent is already
 stopped; `uri unregister` fails, for example, when `gateinto.desktop` or the `mimeapps.list`
 default was changed to another program, which it leaves for you to remove. At the end it says
 that it kept the configuration and the gateways added from links in the `gateinto` directory
@@ -726,10 +738,20 @@ Run `uninstall.sh` from your own login session. With the unit installed, under `
 manager (the enablement link may already be gone) and `uninstall.sh` stops. Without the unit,
 `gateinto stop` finds the agent only through `$XDG_RUNTIME_DIR/gateinto/agent.sock`, or
 `~/.local/state/gateinto/agent.sock` when `XDG_RUNTIME_DIR` is not an absolute path. Where
-`XDG_RUNTIME_DIR` differs from the agent's, as under `su -` without a session from `pam_systemd`,
-it reports that no agent is running and `uninstall.sh` goes on: it can delete the profiles of the
-agent's open browser sessions, and it removes the binary while the agent keeps running. This
-follows from the code and is not tested.
+`XDG_RUNTIME_DIR` differs from the agent's, as under `su -` without a session from
+`pam_systemd`, it cannot reach the agent. If that agent runs `~/.local/bin/gateinto`, or the
+earlier binary that `install.sh` replaced there, `uninstall.sh` finds its process through
+`/proc/<pid>/exe` and refuses as in step 7, with
+`a gateinto process is still running from ~/.local/bin/gateinto after "gateinto stop"`; stop
+the agent from the session that started it, for example with `gateinto stop` there, and run
+`uninstall.sh` again. It refuses the same way while any other `gateinto` command started from
+that path still runs. The check compares paths and sees only the processes of the same user in
+the same PID namespace. It misses an agent started from another path (a build tree, a copy or a
+hard link), an agent started through `~/.local/bin/gateinto` when that is itself a symbolic
+link (`install.sh` replaces such a link with a file, so only a manual setup has one), and an
+agent in another PID namespace, such as a container. If such an agent is out of reach of
+`gateinto stop`, `uninstall.sh` goes on: it deletes the profiles of the agent's open browser
+sessions and removes `~/.local/bin/gateinto` while the agent keeps running.
 
 If the unit file is a symbolic link to a missing file, as `systemctl --user link` leaves after
 the linked file is deleted, `uninstall.sh` changes nothing and asks you to run
@@ -813,10 +835,13 @@ and starts no agent or browser. The `release-scripts` job runs `shellcheck` on
 `packaging/linux/*.sh` and runs
 [.github/scripts/release-test.sh](../.github/scripts/release-test.sh), which runs `install.sh`
 and `uninstall.sh` against a stub `gateinto` and a stub `systemctl`, with and without the unit,
-including failures of each step, a unit that is a symbolic link to a missing file and, where
-root or passwordless `sudo` is available, the refusal to run as root. The registration code is
-covered by unit tests and by `tests/uri_registration_linux.rs`, which registers and unregisters
-a test scheme in a temporary home directory and checks the desktop file and the `mimeapps.list`
+including failures of each step, a unit that is a symbolic link to a missing file, a process of
+the user still running `~/.local/bin/gateinto` (as a copy of `sleep`, also after the stub was
+renamed over it) that `gateinto stop` cannot reach, a missing `readlink` or one that cannot
+read `/proc` and, where root or passwordless `sudo` is available, the refusal to run as root.
+No test runs a real agent that `gateinto stop` cannot reach. The registration code is covered
+by unit tests and by `tests/uri_registration_linux.rs`, which registers and unregisters a test
+scheme in a temporary home directory and checks the desktop file and the `mimeapps.list`
 contents. The `linux` job of the release workflow runs the same install check on the release
 tarball on `ubuntu-24.04` before publishing; it has not run yet (see
 [verification.md](verification.md)).

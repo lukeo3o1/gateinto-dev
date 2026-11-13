@@ -41,10 +41,30 @@ case $systemctl in
   /*) ;;
   *) systemctl= ;;
 esac
+readlink=$(command -v readlink || true)
+case $readlink in
+  /*) self=$("$readlink" -- "/proc/$$/exe" 2> /dev/null || true) ;;
+  *) self= ;;
+esac
+if [ -z "$self" ]; then
+  echo 'uninstall.sh: no readlink on PATH can read /proc/<pid>/exe, so nothing was changed; uninstall.sh needs it to check that no gateinto process is still running from ~/.local/bin/gateinto' >&2
+  exit 1
+fi
 if "$has_unit" && [ -n "$systemctl" ] && ! "$systemctl" --user disable --now gateinto-agent.service; then
   echo 'uninstall.sh: "systemctl --user disable --now gateinto-agent.service" failed, so nothing was removed; run uninstall.sh again after fixing the error above' >&2
   exit 1
 fi
+{ stop_error=$("$target" stop 2>&1 1>&3 3>&-) || true; } 3>&1
+resolved=$(cd -P -- "$HOME/.local/bin" && pwd -P)/gateinto
+for exe in /proc/[0-9]*/exe; do
+  case $("$readlink" -- "$exe" 2> /dev/null || true) in
+    "$resolved" | "$resolved (deleted)")
+      [ -z "$stop_error" ] || printf '%s\n' "$stop_error" >&2
+      echo 'uninstall.sh: a gateinto process is still running from ~/.local/bin/gateinto after "gateinto stop", so uninstall.sh stopped before deleting browser profiles, unregistering the gateinto:// handler or removing the unit file and ~/.local/bin/gateinto; stop it, for example with "gateinto stop" in the session that started it, then run uninstall.sh again' >&2
+      exit 1
+      ;;
+  esac
+done
 if ! "$target" stop --remove-stale-profiles; then
   echo 'uninstall.sh: "gateinto stop --remove-stale-profiles" failed, so nothing was removed; run uninstall.sh again after fixing the error above' >&2
   exit 1

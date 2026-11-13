@@ -9,7 +9,8 @@ sha256="$here/write-sha256.sh"
 packaging=$here/../../packaging/linux
 licenses=$here/../..
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+running=()
+trap 'kill "${running[@]}" 2> /dev/null || true; rm -rf "$work"' EXIT
 failures=0
 sha=0123456789abcdef0123456789abcdef01234567
 short=0123456789ab
@@ -167,6 +168,26 @@ as_user() {
     "$@"
   fi
 }
+start_as_user() {
+  local exe=$1 resolved
+  resolved=$(cd -P "$(dirname "$exe")" && pwd -P)/${exe##*/}
+  if (( euid == 0 )); then
+    setpriv --reuid=65534 --regid=65534 --clear-groups "$@" < /dev/null > /dev/null 2>&1 &
+  else
+    "$@" < /dev/null > /dev/null 2>&1 &
+  fi
+  running+=("$!")
+  for _ in $(seq 100); do
+    [[ "$(readlink "/proc/$!/exe" 2> /dev/null)" != "$resolved" ]] || return 0
+    sleep 0.05
+  done
+  return 1
+}
+stop_running() {
+  kill "${running[@]}" 2> /dev/null || true
+  wait "${running[@]}" 2> /dev/null || true
+  running=()
+}
 as_root() {
   if (( euid == 0 )); then
     "$@"
@@ -185,6 +206,10 @@ cat > "$stub" <<STUB
 #!/bin/sh
 printf '%s\n' "\$0 \$*" >> '$area/calls'
 if [ -e '$area/fail-'"\$1" ]; then exit 3; fi
+if [ "\$*" = stop ] && [ -e '$area/stop-prints' ]; then
+  echo 'gateinto stop: standard output'
+  echo 'gateinto stop: standard error' >&2
+fi
 if [ "\$1" = status ]; then printf 'uri-handler: gateinto: "%s" open -- %%u\n' "\$0"; fi
 STUB
 chmod 0755 "$stub"
@@ -274,7 +299,7 @@ new_home() {
   printf 'name = "corp"\n' > "$home/.config/gateinto/gateways/corp.toml"
   printf 'profile\n' > "$home/.local/state/gateinto/profiles/kept/file"
   owned "$home"
-  rm -f "$area"/fail-*
+  rm -f "$area"/fail-* "$area/stop-prints"
   : > "$area/calls"
   owned "$area/calls"
   printf '%s' "$home"
@@ -329,11 +354,16 @@ else
 fi
 
 : > "$area/calls"
+: > "$area/stop-prints"
 if ! run_script user "$home" "$system_path" "$decoy" "$pkg/uninstall.sh"; then
   fail 'uninstall' "exited with an error: $(cat "$work/stderr")"
+elif [[ -s $work/stderr ]]; then
+  fail 'uninstall' "printed on stderr: $(cat "$work/stderr")"
+elif ! grep -qxF 'gateinto stop: standard output' "$work/stdout"; then
+  fail 'uninstall' "stdout lacks what gateinto stop printed: $(cat "$work/stdout")"
 elif [[ ! -d $bin || -n "$(ls -A "$bin")" ]]; then
   fail 'uninstall' "the bin directory is missing or holds $(ls -A "$bin")"
-elif [[ "$(cat "$area/calls")" != "$bin/gateinto stop --remove-stale-profiles"$'\n'"$bin/gateinto uri unregister" ]]; then
+elif [[ "$(cat "$area/calls")" != "$bin/gateinto stop"$'\n'"$bin/gateinto stop --remove-stale-profiles"$'\n'"$bin/gateinto uri unregister" ]]; then
   fail 'uninstall' "ran $(cat "$area/calls")"
 elif [[ "$(snapshot "$home")" != "$before" ]]; then
   fail 'uninstall' 'changed files outside ~/.local/bin'
@@ -365,13 +395,9 @@ bin=$home/.local/bin
 mkdir -m 0755 "$bin"
 cp "$(command -v sleep)" "$bin/gateinto"
 owned "$bin"
-"$bin/gateinto" 60 &
-running=$!
-for _ in $(seq 100); do
-  [[ "$(readlink "/proc/$running/exe" 2> /dev/null)" != "$bin/gateinto" ]] || break
-  sleep 0.05
-done
-if ! run_script user "$home" "$system_path" "$pkg" ./install.sh; then
+if ! start_as_user "$bin/gateinto" 60; then
+  fail 'install over a running gateinto' 'the copy of sleep did not start within 5 seconds'
+elif ! run_script user "$home" "$system_path" "$pkg" ./install.sh; then
   fail 'install over a running gateinto' "exited with an error: $(cat "$work/stderr")"
 elif ! cmp -s "$bin/gateinto" "$stub"; then
   fail 'install over a running gateinto' 'the installed gateinto is not the packaged one'
@@ -380,8 +406,7 @@ elif [[ "$(ls -A "$bin")" != gateinto ]]; then
 else
   pass 'install over a running gateinto'
 fi
-kill "$running"
-wait "$running" 2> /dev/null || true
+stop_running
 
 home=$(new_home)
 bin=$home/.local/bin
@@ -453,7 +478,7 @@ if run_script user "$home" "$system_path" "$pkg" ./uninstall.sh; then
   fail 'uninstall when stopping the agent fails' 'succeeded'
 elif ! cmp -s "$bin/gateinto" "$stub"; then
   fail 'uninstall when stopping the agent fails' 'removed ~/.local/bin/gateinto'
-elif [[ "$(cat "$area/calls")" != "$bin/gateinto stop --remove-stale-profiles" ]]; then
+elif [[ "$(cat "$area/calls")" != "$bin/gateinto stop"$'\n'"$bin/gateinto stop --remove-stale-profiles" ]]; then
   fail 'uninstall when stopping the agent fails' "ran $(cat "$area/calls")"
 elif ! grep -qxF 'uninstall.sh: "gateinto stop --remove-stale-profiles" failed, so nothing was removed; run uninstall.sh again after fixing the error above' "$work/stderr"; then
   fail 'uninstall when stopping the agent fails' "stderr lacks the message: $(cat "$work/stderr")"
@@ -484,9 +509,14 @@ if [ "\$2" = disable ] && [ ! -e "\$HOME/.config/systemd/user/gateinto-agent.ser
   exit 1
 fi
 STUB
+no_readlink=$(mktemp -d "$area/no-readlink.XXXXXX")
+ln -s "$(command -v id)" "$(command -v rm)" "$no_readlink/"
 plain=$(mktemp -d "$area/plain.XXXXXX")
-ln -s "$(command -v id)" "$(command -v rm)" "$plain/"
-chmod 0755 "$tools" "$tools/systemctl" "$plain"
+ln -s "$(command -v id)" "$(command -v rm)" "$(command -v readlink)" "$plain/"
+failing_readlink=$(mktemp -d "$area/failing-readlink.XXXXXX")
+ln -s "$(command -v id)" "$(command -v rm)" "$failing_readlink/"
+printf '#!/bin/sh\nexit 1\n' > "$failing_readlink/readlink"
+chmod 0755 "$tools" "$tools/systemctl" "$no_readlink" "$failing_readlink" "$failing_readlink/readlink" "$plain"
 mkdir "$decoy/bin"
 cp "$tools/systemctl" "$decoy/bin/systemctl"
 owned "$decoy/bin"
@@ -515,7 +545,7 @@ unit_home() {
 }
 
 gateinto_calls() {
-  printf '%s\n%s' "$1/gateinto stop --remove-stale-profiles" "$1/gateinto uri unregister"
+  printf '%s\n%s\n%s' "$1/gateinto stop" "$1/gateinto stop --remove-stale-profiles" "$1/gateinto uri unregister"
 }
 
 expect_unit_uninstall() {
@@ -595,6 +625,100 @@ elif [[ "$(cat "$work/stderr")" != 'uninstall.sh: warning: "systemctl --user dae
 else
   pass 'uninstall when reloading the user manager fails'
 fi
+
+still_running_message='uninstall.sh: a gateinto process is still running from ~/.local/bin/gateinto after "gateinto stop", so uninstall.sh stopped before deleting browser profiles, unregistering the gateinto:// handler or removing the unit file and ~/.local/bin/gateinto; stop it, for example with "gateinto stop" in the session that started it, then run uninstall.sh again'
+not_started='the copy of sleep did not start within 5 seconds'
+
+home=$(new_home)
+bin=$home/.local/bin
+mkdir -m 0755 "$bin"
+cp "$(command -v sleep)" "$bin/gateinto"
+owned "$bin"
+before=$(snapshot "$home")
+sleep_error=$(as_user env -i HOME="$home" PATH="$system_path" "$bin/gateinto" stop 2>&1 > /dev/null || true)
+name='uninstall while an agent out of reach runs ~/.local/bin/gateinto'
+if ! start_as_user "$bin/gateinto" 600; then
+  fail "$name" "$not_started"
+elif [[ -z $sleep_error ]]; then
+  fail "$name" 'the copy of sleep printed no error for stop'
+elif run_script user "$home" "$system_path" "$pkg" ./uninstall.sh; then
+  fail "$name" 'succeeded'
+elif [[ "$(cat "$work/stderr")" != "$sleep_error"$'\n'"$still_running_message" ]]; then
+  fail "$name" "stderr is $(cat "$work/stderr")"
+elif [[ -s $work/stdout ]]; then
+  fail "$name" "printed on stdout: $(cat "$work/stdout")"
+elif ! cmp -s "$bin/gateinto" "$(command -v sleep)" || [[ "$(snapshot "$home")" != "$before" ]]; then
+  fail "$name" 'changed something'
+else
+  pass "$name"
+fi
+stop_running
+
+home=$(unit_home file)
+bin=$home/.local/bin
+mv "$bin/gateinto" "$bin/.stub"
+cp "$(command -v sleep)" "$bin/gateinto"
+owned "$bin"
+: > "$area/stop-prints"
+before=$(snapshot "$home")
+name='uninstall while an agent out of reach runs a replaced ~/.local/bin/gateinto'
+if ! start_as_user "$bin/gateinto" 600; then
+  fail "$name" "$not_started"
+elif ! mv -f "$bin/.stub" "$bin/gateinto"; then
+  fail "$name" 'could not put the stub over the running copy of sleep'
+elif run_script user "$home" "$tools:$system_path" "$decoy" "$pkg/uninstall.sh"; then
+  fail "$name" 'succeeded'
+elif [[ "$(cat "$work/stderr")" != 'gateinto stop: standard error'$'\n'"$still_running_message" ]]; then
+  fail "$name" "stderr is $(cat "$work/stderr")"
+elif [[ "$(cat "$work/stdout")" != 'gateinto stop: standard output' ]]; then
+  fail "$name" "stdout is $(cat "$work/stdout")"
+elif [[ "$(cat "$area/calls")" != "$disable"$'\n'"$bin/gateinto stop" ]]; then
+  fail "$name" "ran $(cat "$area/calls")"
+elif ! cmp -s "$bin/gateinto" "$stub" || [[ "$(ls -A "$bin")" != gateinto || "$(snapshot "$home")" != "$before" ]]; then
+  fail "$name" 'changed something'
+else
+  pass "$name"
+fi
+stop_running
+
+home=$(installed_home)
+bin=$home/.local/bin
+cp "$(command -v sleep)" "$bin/gateinto-old"
+owned "$bin"
+name='uninstall while another copy of gateinto runs'
+if ! start_as_user "$bin/gateinto-old" 600; then
+  fail "$name" "$not_started"
+elif ! run_script user "$home" "$system_path" "$pkg" ./uninstall.sh; then
+  fail "$name" "exited with an error: $(cat "$work/stderr")"
+elif [[ "$(cat "$area/calls")" != "$(gateinto_calls "$bin")" ]]; then
+  fail "$name" "ran $(cat "$area/calls")"
+elif [[ "$(ls -A "$bin")" != gateinto-old ]]; then
+  fail "$name" "the bin directory holds $(ls -A "$bin")"
+else
+  pass "$name"
+fi
+stop_running
+
+no_proc_message='uninstall.sh: no readlink on PATH can read /proc/<pid>/exe, so nothing was changed; uninstall.sh needs it to check that no gateinto process is still running from ~/.local/bin/gateinto'
+for readlink_dir in "$no_readlink" "$failing_readlink"; do
+  home=$(installed_home)
+  bin=$home/.local/bin
+  before=$(snapshot "$home")
+  if [[ $readlink_dir == "$no_readlink" ]]; then
+    name='uninstall without readlink'
+  else
+    name='uninstall with a readlink that cannot read /proc'
+  fi
+  if run_script user "$home" "$readlink_dir" "$pkg" ./uninstall.sh; then
+    fail "$name" 'succeeded'
+  elif [[ "$(cat "$work/stderr")" != "$no_proc_message" ]]; then
+    fail "$name" "stderr is $(cat "$work/stderr")"
+  elif [[ -s $area/calls ]] || ! cmp -s "$bin/gateinto" "$stub" || [[ "$(snapshot "$home")" != "$before" ]]; then
+    fail "$name" 'changed something'
+  else
+    pass "$name"
+  fi
+done
 
 home=$(new_home)
 bin=$home/.local/bin

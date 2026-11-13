@@ -860,15 +860,17 @@ None beyond Areas 1 and 3.
     success. The documentation says to run `gateinto stop` first, which
     ends the running agent's sessions, or to expect the unit to stay
     failed until it is started again, for example at the next login.
-- **Uninstall:** `systemctl --user disable --now gateinto-agent` when the
-  unit is installed, then `gateinto stop --remove-stale-profiles` (as the
-  MSI does, [install.md](../install.md), section on uninstall), which
-  closes sessions, ends their browsers and deletes Gateinto browser
+- **Uninstall:** `systemctl --user disable --now gateinto-agent` when
+  the unit is installed, then `gateinto stop`, a refusal while a process
+  of the user still runs the installed binary, then
+  `gateinto stop --remove-stale-profiles` (as the MSI does,
+  [install.md](../install.md), section on uninstall); together they
+  close sessions, end their browsers and delete Gateinto browser
   profiles under `$XDG_STATE_HOME/gateinto` (or
   `~/.local/state/gateinto`); then `gateinto uri unregister`, and remove
   the unit and the binary. The configuration, the link store and any
-  device key are kept, as the MSI keeps them; removing them is a separate,
-  explicit step.
+  device key are kept, as the MSI keeps them; removing them is a
+  separate, explicit step.
 - XDG autostart (`~/.config/autostart`) is an alternative to the unit for
   desktops without a user manager; it is not shipped in the first version.
 
@@ -920,14 +922,41 @@ As implemented in step 15:
 - `uninstall.sh` does nothing when `~/.local/bin/gateinto` does not
   exist and is not a symbolic link. When it is a symbolic link to a
   missing file, it exits non-zero before running anything and asks the
-  user to remove the link by hand. Otherwise it runs
-  `~/.local/bin/gateinto stop --remove-stale-profiles` (with no agent
-  running this prints `no agent is
-  running` and still removes stale profiles), then `~/.local/bin/gateinto
-  uri unregister`, then removes the binary. If either command fails it
-  stops, keeps the binary, so that running it again can retry, and exits
-  non-zero. It prints that the configuration and the linked gateways
-  were kept. There is no purge.
+  user to remove the link by hand. It takes `readlink` from `PATH` (an
+  absolute path, like `systemctl` below) and refuses with a fixed
+  message before running anything when there is none or when it cannot
+  read `/proc/<pid>/exe` of the script's own process, as without
+  `/proc`. Otherwise it runs `~/.local/bin/gateinto stop`, whose stdout
+  it passes through and whose stderr it keeps; its failure is ignored,
+  since with no agent running it fails with `no agent is running`. It
+  then reads `/proc/<pid>/exe` of every process. If one is
+  `~/.local/bin/gateinto`, with `~/.local/bin` resolved by `pwd -P`, or
+  that path followed by ` (deleted)`, as an agent shows after
+  `install.sh` renamed a new binary over its own, it prints the kept
+  stderr of `gateinto stop`, if any, then a fixed message, and exits
+  non-zero before deleting profiles, unregistering the handler or
+  removing the unit file and the binary. That happens when
+  `gateinto stop` could not reach the agent, as when `XDG_RUNTIME_DIR`
+  differs from the agent's; without the check
+  `stop --remove-stale-profiles` would report that no agent runs and
+  delete the profiles of its open browsers, since `browser::sweep`
+  deletes every marked profile. On the normal path the stderr of
+  `gateinto stop` is not shown. `readlink` fails for other users'
+  processes, which limits the check to the user's own, and only
+  processes in the same PID namespace are listed. The check compares
+  paths, so it misses an agent started from another path (a build tree,
+  a copy or a hard link) or through a `~/.local/bin/gateinto` that is
+  itself a symbolic link, which only a manual setup has, since
+  `install.sh` replaces such a link with a file; for such an agent out
+  of reach of `gateinto stop`, the profiles of its open browsers are
+  deleted and the binary is removed while it runs. It then runs
+  `~/.local/bin/gateinto stop --remove-stale-profiles` (which now prints
+  `no agent is running` and removes stale profiles), then
+  `~/.local/bin/gateinto uri unregister`, then removes the binary. If
+  `gateinto stop --remove-stale-profiles` or `gateinto uri unregister`
+  fails it stops, keeps the binary, so that running it again can retry,
+  and exits non-zero. It prints that the configuration and the linked
+  gateways were kept. There is no purge.
 - `release-test.sh` runs both scripts against a stub `gateinto` in a
   temporary `HOME`, as uid 65534 through `setpriv` when the tests run as
   root, and as root through `sudo -n` (or directly) to check the refusal;
@@ -956,25 +985,25 @@ As implemented in step 16:
   user to run `systemctl --user stop gateinto-agent` if it is running,
   to remove by hand that link and, if present,
   `~/.config/systemd/user/graphical-session.target.wants/gateinto-agent.service`,
-  and to run `uninstall.sh` again; like the dangling binary, the
-  script does not delete links it cannot account for. When the unit is
-  there and `systemctl` is found, it runs
-  `systemctl --user disable --now gateinto-agent.service` before `gateinto
-  stop --remove-stale-profiles`, so the user manager stops the agent and
-  does not start it again. If that fails, it stops with a fixed message,
-  removes nothing, and running it again retries. After `gateinto uri
-  unregister` it removes the unit file, says so, and runs `systemctl
-  --user daemon-reload`; a failed reload only prints a fixed warning,
-  because the unit is already disabled, stopped and removed and a rerun
-  would no longer see it. It removes no other file in
-  `~/.config/systemd/user` itself; `systemctl --user disable` removes the
-  enablement link. A unit placed only under another `XDG_CONFIG_HOME` is
-  not seen. `systemctl --user` needs the user's own manager and bus, so
-  with the unit installed, `uninstall.sh` must run in the user's own
-  login session: under `su -`, `sudo -u` or in a container without a
-  user manager, `disable --now` fails to reach the user manager (the
-  enablement link may already be gone, since only the stop needs the
-  bus) and the script stops as above.
+  and to run `uninstall.sh` again; like the dangling binary, the script
+  does not delete links it cannot account for. When the unit is there
+  and `systemctl` is found, it runs
+  `systemctl --user disable --now gateinto-agent.service` before
+  `gateinto stop`, so the user manager stops the agent and does not
+  start it again. If that fails, it stops with a fixed message, removes
+  nothing, and running it again retries. After `gateinto uri unregister`
+  it removes the unit file, says so, and runs
+  `systemctl --user daemon-reload`; a failed reload only prints a fixed
+  warning, because the unit is already disabled, stopped and removed and
+  a rerun would no longer see it. It removes no other file in
+  `~/.config/systemd/user` itself; `systemctl --user disable` removes
+  the enablement link. A unit placed only under another
+  `XDG_CONFIG_HOME` is not seen. `systemctl --user` needs the user's own
+  manager and bus, so with the unit installed, `uninstall.sh` must run
+  in the user's own login session: under `su -`, `sudo -u` or in a
+  container without a user manager, `disable --now` fails to reach the
+  user manager (the enablement link may already be gone, since only the
+  stop needs the bus) and the script stops as above.
 - `uninstall.sh` finds `systemctl` with `command -v`, through `PATH`, and
   uses the result only when it is an absolute path; a result from an
   empty or relative `PATH` entry, which would resolve against the working
@@ -1001,16 +1030,27 @@ As implemented in step 16:
   target in `WantedBy=`, `PartOf=` or `After=` is not detected.
 - `release-test.sh` checks the unit's exact text, the tarball entry, the
   line `install.sh` prints, and `uninstall.sh` with the unit as a file
-  and as a link that resolves, with a stub `systemctl` on `PATH`, without
-  `systemctl`, with `systemctl` only on a relative `PATH` entry, and with
-  `disable` or `daemon-reload` failing; and that it refuses a dangling
-  linked unit without calling anything or changing the home. The stub
+  and as a link that resolves, with a stub `systemctl` on `PATH`,
+  without `systemctl`, with `systemctl` only on a relative `PATH` entry,
+  and with `disable` or `daemon-reload` failing; and that it refuses a
+  dangling linked unit without calling anything or changing the home. It
+  also checks that `uninstall.sh` refuses, without deleting profiles or
+  removing anything, while a process of the user runs a copy of `sleep`
+  installed as `~/.local/bin/gateinto`, and while one runs such a copy
+  after the stub was renamed over it, so `/proc/<pid>/exe` ends in
+  ` (deleted)`; that on such a refusal stderr holds exactly the stderr
+  of `gateinto stop` followed by the fixed message, while stdout still
+  shows what `gateinto stop` printed there; that a normal uninstall
+  shows no stderr of `gateinto stop`; that a copy running from another
+  path does not block it; and that it refuses without `readlink` on
+  `PATH` and with a `readlink` that cannot read `/proc`. The stub
   `systemctl` fails `disable` when the unit does not resolve, as systemd
-  255 does. It runs `linux-install-check.sh` without `systemd-analyze` on
-  `PATH` and expects the fixed message, and, as the user, on tarballs of
-  the stub `gateinto` with the shipped unit, with a misspelt key and with
-  a missing `ExecStart` binary, expecting only the first to pass; it
-  skips those three when `systemd-analyze` is not installed and says so.
+  255 does. It runs `linux-install-check.sh` without `systemd-analyze`
+  on `PATH` and expects the fixed message, and, as the user, on tarballs
+  of the stub `gateinto` with the shipped unit, with a misspelt key and
+  with a missing `ExecStart` binary, expecting only the first to pass;
+  it skips those three when `systemd-analyze` is not installed and says
+  so.
 
 ### Security
 
@@ -1019,9 +1059,9 @@ The tarball gets a SHA-256 file like the Windows assets
 `write-sha256.sh` for the tarball). The checksum proves only that a
 download matches the published file; nothing is signed. The installer is
 shipped only inside the tarball, so it is covered by the same checksum,
-and nothing is piped from the network into a shell. The
-unit runs as the user, carries no credentials and does not set
-`NoNewPrivileges` (Decision 11). `uninstall.sh` runs `systemctl` only from
+and nothing is piped from the network into a shell. The unit runs as the
+user, carries no credentials and does not set `NoNewPrivileges`
+(Decision 11). `uninstall.sh` runs `systemctl` and `readlink` only from
 an absolute path found on `PATH`, never from the working directory. No
 step of install or uninstall replaces, exports or deletes a key.
 
