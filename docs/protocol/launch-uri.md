@@ -467,11 +467,12 @@ linked entry is ignored.
   directory (sessions that are open stay open until closed). If several
   files carry the name, for example a valid and a damaged one, it deletes
   nothing and lists them all. A damaged file is removed by deleting it.
-  `gateinto reset --purge-device-identity --purge-config` deletes the
-  regular `*.toml` files of the directory and
+  On Windows, `gateinto reset --purge-device-identity --purge-config`
+  deletes the regular `*.toml` files of the directory and
   Gateinto's own leftover temporary files, and the directory if it is then
   empty, together with the configuration file. Its messages count the
-  gateway files and the temporary files separately.
+  gateway files and the temporary files separately. On Linux, `reset`
+  deletes nothing ([install.md](../install.md#reset-on-linux)).
 
 ## What a gateway added from a link gets
 

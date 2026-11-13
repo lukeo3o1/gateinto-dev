@@ -674,7 +674,8 @@ Non-guarantees:
   header; header size limit, timeouts, idle timeout and a connection limit.
   HTTP/2 adds decoded header limits, bounded flow-control windows and
   per-stream cancellation; peer SETTINGS limits do not replace the local
-  connection limit. Details are in the [README](../README.md#proxy) and
+  connection limit. Details are in the
+  [README](../README.md#local-proxy-behaviour) and
   [upstream protocol](protocol/http-connect.md).
 
 ### The device identity
