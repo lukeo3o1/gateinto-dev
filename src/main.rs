@@ -73,17 +73,32 @@ enum Command {
     /// List the gateways, or remove one that was added from a gateinto:// link
     #[command(subcommand)]
     Gateway(GatewayCommand),
-    /// Register or remove the per-user gateinto:// URI handler (development use)
+    #[cfg_attr(
+        windows,
+        doc = "Register or remove the per-user gateinto:// URI handler (development use)"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Register or remove the per-user gateinto:// URI handler"
+    )]
     #[command(subcommand)]
     Uri(UriCommand),
     /// Prepare Gateinto for the current Windows user: check the config, create or reuse the
-    /// device key and report the gateinto:// handler; on Linux it checks the config and fails,
-    /// because there is no device key yet, so register the handler with `gateinto uri register`
+    /// device key and report the gateinto:// handler; on Linux, where install.sh registers the
+    /// gateinto:// handler, it checks the config and fails because there is no device key yet
     Setup(KeyInitArgs),
     /// Show the device key, gateways, agent sessions and gateinto:// handler, and on Linux
     /// the prerequisites of terminal sessions and os_user, without changing anything
     Status(StatusArgs),
-    /// Permanently delete Gateinto data that an uninstall keeps
+    #[cfg_attr(
+        windows,
+        doc = "Permanently delete Gateinto data that an uninstall keeps"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Permanently delete Gateinto data that an uninstall keeps; on this platform there",
+        doc = "is no device key, so it deletes nothing"
+    )]
     Reset(ResetArgs),
 }
 
@@ -129,14 +144,30 @@ struct ResetArgs {
     #[arg(long, required = true)]
     purge_device_identity: bool,
 
-    /// Also delete the config file named with --config, or else the default
-    /// %APPDATA%\Gateinto\gateinto.toml, and the gateways added from gateinto:// links
-    /// (the *.toml files in %APPDATA%\Gateinto\gateways)
+    #[cfg_attr(
+        windows,
+        doc = "Also delete the config file named with --config, or else the default",
+        doc = r"%APPDATA%\Gateinto\gateinto.toml, and the gateways added from gateinto:// links",
+        doc = r"(the *.toml files in %APPDATA%\Gateinto\gateways)"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Deletes nothing on this platform; delete gateinto.toml and the gateways directory",
+        doc = "in $XDG_CONFIG_HOME/gateinto (default ~/.config/gateinto) yourself"
+    )]
     #[arg(long)]
     purge_config: bool,
 
-    /// Confirm deleting the config file without a prompt when no device key exists; an
-    /// existing key always needs its SPKI confirmed
+    #[cfg_attr(
+        windows,
+        doc = "Confirm deleting the config file without a prompt when no device key exists; an",
+        doc = "existing key always needs its SPKI confirmed"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Skip the prompt that confirms a config purge when no device key exists; reset",
+        doc = "deletes nothing on this platform"
+    )]
     #[arg(long, requires = "purge_config")]
     yes: bool,
 

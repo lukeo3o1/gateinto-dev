@@ -222,7 +222,7 @@ fn help(args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) {
+fn flag_entry(help: &str, flag: &str) -> String {
     let lines: Vec<&str> = help.lines().map(str::trim_start).collect();
     let start = lines
         .iter()
@@ -234,8 +234,12 @@ fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) 
         .take_while(|(i, line)| *i == 0 || !line.starts_with('-'))
         .map(|(_, line)| *line)
         .collect();
+    entry.join(" ")
+}
+
+fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) {
     assert!(
-        entry.join(" ").contains(&format!("[default: {default}]")),
+        flag_entry(help, flag).contains(&format!("[default: {default}]")),
         "{flag} should document [default: {default}]:\n{help}"
     );
 }
@@ -591,6 +595,7 @@ fn reset_yes_only_works_together_with_purge_config() {
     assert!(stderr.contains("--purge-config"), "{stderr}");
 }
 
+#[cfg(windows)]
 #[test]
 fn reset_help_says_which_config_file_is_deleted() {
     let help = help(&["reset"]);
@@ -598,6 +603,63 @@ fn reset_help_says_which_config_file_is_deleted() {
         help.contains("Also delete the config file named with --config, or else the default"),
         "{help}"
     );
+    assert!(
+        flag_entry(&help, "--purge-config").contains(r"%APPDATA%\Gateinto\gateways"),
+        "{help}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn reset_help_says_that_nothing_is_deleted_without_a_device_key() {
+    let reset = help(&["reset"]);
+    assert!(
+        reset.starts_with(
+            "Permanently delete Gateinto data that an uninstall keeps; on this platform there is \
+             no device key, so it deletes nothing"
+        ),
+        "{reset}"
+    );
+    let purge_config = flag_entry(&reset, "--purge-config");
+    assert!(!purge_config.contains("%APPDATA%"), "{purge_config}");
+    assert!(
+        purge_config.contains(
+            "Deletes nothing on this platform; delete gateinto.toml and the gateways directory in \
+             $XDG_CONFIG_HOME/gateinto (default ~/.config/gateinto) yourself"
+        ),
+        "{purge_config}"
+    );
+    let yes = flag_entry(&reset, "--yes");
+    assert!(!yes.contains("deleting the config file"), "{yes}");
+    let overview = help(&[]);
+    assert!(
+        overview.contains("there is no device key, so it deletes nothing"),
+        "{overview}"
+    );
+}
+
+#[test]
+fn uri_help_says_development_use_only_on_windows() {
+    for help in [help(&[]), help(&["uri"])] {
+        assert!(
+            help.contains("Register or remove the per-user gateinto:// URI handler"),
+            "{help}"
+        );
+        assert_eq!(help.contains("(development use)"), cfg!(windows), "{help}");
+    }
+}
+
+#[test]
+fn setup_help_says_install_sh_registers_the_handler_on_linux() {
+    for help in [help(&[]), help(&["setup"])] {
+        assert!(
+            help.contains(
+                "on Linux, where install.sh registers the gateinto:// handler, it checks the \
+                 config and fails because there is no device key yet"
+            ),
+            "{help}"
+        );
+    }
 }
 
 #[cfg(windows)]
