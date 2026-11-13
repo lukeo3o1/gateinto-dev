@@ -226,7 +226,7 @@ jobs:
           mkdir dist
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) .github/scripts/linux-tarball.sh "target/$LINUX_TARGET/release/gateinto" "$tarball"
           .github/scripts/write-sha256.sh "$tarball"
-      - name: Install and uninstall the tarball
+      - name: Install the tarball, verify its user unit and uninstall it
         run: .github/scripts/linux-install-check.sh "dist/gateinto-$SHORT_SHA-$LINUX_TARGET.tar.gz"
       - uses: actions/upload-artifact@v7
         with:

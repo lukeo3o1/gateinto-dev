@@ -53,3 +53,4 @@ case ":${PATH:-}:" in
   *) echo 'install.sh: warning: ~/.local/bin is not on PATH; add it to PATH or run ~/.local/bin/gateinto' >&2 ;;
 esac
 echo 'install.sh: installed ~/.local/bin/gateinto and registered the gateinto:// handler'
+echo 'install.sh: optional: to start the agent with the graphical session, copy gateinto-agent.service to ~/.config/systemd/user/ and run "systemctl --user enable --now gateinto-agent"'

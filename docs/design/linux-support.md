@@ -817,45 +817,57 @@ None beyond Areas 1 and 3.
   `~/.config/systemd/user/` and `systemctl --user enable --now
   gateinto-agent`. Key creation is separate from installation, as on
   Windows: nothing in the package creates or touches a device key.
-- **Unit.**
+- **Unit** (`packaging/linux/gateinto-agent.service`).
 
   ```ini
   [Unit]
   Description=Gateinto agent
+  PartOf=graphical-session.target
+  After=graphical-session.target
 
   [Service]
   ExecStart=%h/.local/bin/gateinto agent
   Restart=on-failure
-  NoNewPrivileges=true
 
   [Install]
-  WantedBy=default.target
+  WantedBy=graphical-session.target
   ```
 
   No credentials in `Environment=`; the configuration file is read from its
   default location. Hardening options that would hide `/proc` or the user
   cgroup tree (`ProtectProc=`, `PrivateUsers=`) are not used, because Areas
-  2 and 3 need them. Consequences that need verification before the unit
-  ships:
-  - `NoNewPrivileges=true` is inherited by browsers the agent starts, which
-    disables Chrome's setuid sandbox fallback on systems without
-    unprivileged user namespaces;
-  - the user manager's environment may lack `DISPLAY` and `WAYLAND_DISPLAY`,
-    so the agent cannot open a browser window until the desktop imports
-    them;
-  - `WantedBy=default.target` starts the agent with the user manager, also
-    without a graphical session; `graphical-session.target` is the
-    alternative;
-  - the default `KillMode=control-group` kills the browsers started by the
-    agent when the unit stops.
-- **Uninstall:** `gateinto stop --remove-stale-profiles` (as the MSI does,
-  [install.md](../install.md), section on uninstall), which closes sessions,
-  ends their browsers and deletes Gateinto browser profiles under
-  `$XDG_STATE_HOME/gateinto` (or `~/.local/state/gateinto`); then
-  `systemctl --user disable --now gateinto-agent`, `gateinto uri
-  unregister`, and remove the binary and the unit. The configuration, the
-  link store and any device key are kept, as the MSI keeps them; removing
-  them is a separate, explicit step.
+  2 and 3 need them, and `NoNewPrivileges=` is not used (Decision 11).
+  - The unit starts and stops with `graphical-session.target` (Decision
+    12). Desktops that import `DISPLAY` and `WAYLAND_DISPLAY` into the user
+    manager before reaching that target give the agent a display; desktops
+    without the target never start the unit, and the agent then starts on
+    demand as without the unit.
+  - `gateinto agent` runs in the foreground and returns from
+    `Agent::serve` on `SIGTERM`, `SIGINT` (`shutdown_signal`,
+    `src/main.rs:961`) or a stop request (`src/agent.rs:330-331`), so it
+    exits with status 0 (`src/main.rs:1121`, `src/main.rs:589`), checked
+    by hand with `kill -TERM` and `gateinto stop` on a debug build.
+    `Restart=on-failure` therefore does not restart it after `systemctl
+    --user stop` or `gateinto stop`, only after a crash or an error exit.
+  - The default `KillMode=control-group` ends the browsers the agent
+    started when the unit stops, as `gateinto stop` ends them.
+  - Only one agent runs per user. When an agent started on demand is
+    already running, the unit's agent fails in `Server::bind` with
+    `AlreadyRunning` (`src/ipc.rs:872-874`, `src/main.rs:1105`),
+    `Restart=on-failure` retries it until the start limit, and the unit
+    ends failed although `systemctl --user enable --now` reported
+    success. The documentation says to run `gateinto stop` first, which
+    ends the running agent's sessions, or to expect the unit to stay
+    failed until it is started again, for example at the next login.
+- **Uninstall:** `systemctl --user disable --now gateinto-agent` when the
+  unit is installed, then `gateinto stop --remove-stale-profiles` (as the
+  MSI does, [install.md](../install.md), section on uninstall), which
+  closes sessions, ends their browsers and deletes Gateinto browser
+  profiles under `$XDG_STATE_HOME/gateinto` (or
+  `~/.local/state/gateinto`); then `gateinto uri unregister`, and remove
+  the unit and the binary. The configuration, the link store and any
+  device key are kept, as the MSI keeps them; removing them is a separate,
+  explicit step.
 - XDG autostart (`~/.config/autostart`) is an alternative to the unit for
   desktops without a user manager; it is not shipped in the first version.
 
@@ -867,7 +879,7 @@ As implemented in step 15:
   `gateinto`, `install.sh` and `uninstall.sh` (mode 0755), `README`,
   `LICENSE-APACHE` and `LICENSE-MIT` (mode 0644), and nothing else. The
   project is dual-licensed and has no single `LICENSE`, so both license
-  files ship. There is no unit file yet; step 16 adds it.
+  files ship. Step 16 adds the unit file.
 - The archive is deterministic: entries sorted by name, owner and group
   0, numeric ids, every mtime `SOURCE_DATE_EPOCH` (0 when unset; the
   release job passes the commit time), GNU format and `gzip -n`. The same
@@ -925,6 +937,80 @@ As implemented in step 15:
   registered handler runs `~/.local/bin/gateinto` and that uninstall
   removes the binary and the desktop file.
 
+As implemented in step 16:
+
+- The tarball also holds `gateinto-agent.service` (mode 0644), the unit
+  above. `install.sh` neither installs nor enables it and still takes no
+  arguments; it prints one fixed line saying how: copy
+  `gateinto-agent.service` to `~/.config/systemd/user/` and run
+  `systemctl --user enable --now gateinto-agent`.
+- `uninstall.sh` looks only at
+  `~/.config/systemd/user/gateinto-agent.service`, a file or a symbolic
+  link to one. When that is a symbolic link to a missing file, as
+  `systemctl --user link` leaves after the linked file is deleted, it
+  refuses before calling `systemctl` or `gateinto` and removes nothing:
+  systemd 255 fails `systemctl --user disable` for such a unit with
+  `Failed to disable unit, unit gateinto-agent.service does not exist.`,
+  so every rerun would fail the same way. Its fixed message tells the
+  user to run `systemctl --user stop gateinto-agent` if it is running,
+  to remove by hand that link and, if present,
+  `~/.config/systemd/user/graphical-session.target.wants/gateinto-agent.service`,
+  and to run `uninstall.sh` again; like the dangling binary, the
+  script does not delete links it cannot account for. When the unit is
+  there and `systemctl` is found, it runs
+  `systemctl --user disable --now gateinto-agent.service` before `gateinto
+  stop --remove-stale-profiles`, so the user manager stops the agent and
+  does not start it again. If that fails, it stops with a fixed message,
+  removes nothing, and running it again retries. After `gateinto uri
+  unregister` it removes the unit file, says so, and runs `systemctl
+  --user daemon-reload`; a failed reload only prints a fixed warning,
+  because the unit is already disabled, stopped and removed and a rerun
+  would no longer see it. It removes no other file in
+  `~/.config/systemd/user` itself; `systemctl --user disable` removes the
+  enablement link. A unit placed only under another `XDG_CONFIG_HOME` is
+  not seen. `systemctl --user` needs the user's own manager and bus, so
+  with the unit installed, `uninstall.sh` must run in the user's own
+  login session: under `su -`, `sudo -u` or in a container without a
+  user manager, `disable --now` fails to reach the user manager (the
+  enablement link may already be gone, since only the stop needs the
+  bus) and the script stops as above.
+- `uninstall.sh` finds `systemctl` with `command -v`, through `PATH`, and
+  uses the result only when it is an absolute path; a result from an
+  empty or relative `PATH` entry, which would resolve against the working
+  directory, counts as no `systemctl`. The scripts already take `id`, `rm`
+  and the other tools from the user's `PATH`; `systemctl` is not at a
+  fixed path on every system (NixOS has it under
+  `/run/current-system/sw/bin`), where fixed paths would skip the disable
+  silently; and a stub on `PATH` lets `release-test.sh` test the script
+  without an override that the environment could also use. Without
+  `systemctl` the unit file is removed without `disable` or
+  `daemon-reload`; an enablement link left in
+  `graphical-session.target.wants` then points to a missing unit.
+- `linux-install-check.sh` runs `systemd-analyze --user verify` on the
+  `gateinto-agent.service` of the tarball after `install.sh`, with the
+  temporary `HOME`, so `%h/.local/bin/gateinto` is the installed binary,
+  and a temporary `XDG_RUNTIME_DIR`, without which `systemd-analyze
+  --user` fails with `Failed to lookup RuntimeDirectory path`. It needs
+  no running user manager or user bus. Before extracting anything it
+  stops with a fixed message when `systemd-analyze` is not on `PATH`.
+  The check fails when `systemd-analyze` exits
+  non-zero, which it does when `ExecStart` is missing or not executable,
+  and also when its output names the unit, because unknown keys and
+  unparsable values are only warnings with exit status 0. A misspelt
+  target in `WantedBy=`, `PartOf=` or `After=` is not detected.
+- `release-test.sh` checks the unit's exact text, the tarball entry, the
+  line `install.sh` prints, and `uninstall.sh` with the unit as a file
+  and as a link that resolves, with a stub `systemctl` on `PATH`, without
+  `systemctl`, with `systemctl` only on a relative `PATH` entry, and with
+  `disable` or `daemon-reload` failing; and that it refuses a dangling
+  linked unit without calling anything or changing the home. The stub
+  `systemctl` fails `disable` when the unit does not resolve, as systemd
+  255 does. It runs `linux-install-check.sh` without `systemd-analyze` on
+  `PATH` and expects the fixed message, and, as the user, on tarballs of
+  the stub `gateinto` with the shipped unit, with a misspelt key and with
+  a missing `ExecStart` binary, expecting only the first to pass; it
+  skips those three when `systemd-analyze` is not installed and says so.
+
 ### Security
 
 The tarball gets a SHA-256 file like the Windows assets
@@ -933,25 +1019,34 @@ The tarball gets a SHA-256 file like the Windows assets
 download matches the published file; nothing is signed. The installer is
 shipped only inside the tarball, so it is covered by the same checksum,
 and nothing is piped from the network into a shell. The
-unit runs as the user with `NoNewPrivileges`. No step of install
-or uninstall replaces, exports or deletes a key.
+unit runs as the user, carries no credentials and does not set
+`NoNewPrivileges` (Decision 11). `uninstall.sh` runs `systemctl` only from
+an absolute path found on `PATH`, never from the working directory. No
+step of install or uninstall replaces, exports or deletes a key.
 
 ### CI on `ubuntu-latest`
 
 Build the tarball in `release-scripts`, check its contents, and shellcheck
 any new script (done in step 15, together with the install and uninstall
-checks described above). `systemd-analyze --user verify` checks that `ExecStart`
-exists, so the job first installs the built binary at
-`$HOME/.local/bin/gateinto` and then verifies the unit.
+checks described above). `systemd-analyze --user verify` checks that
+`ExecStart` exists, so `linux-install-check.sh` verifies the unit after
+`install.sh` has put the built binary at `$HOME/.local/bin/gateinto` in its
+temporary home. It runs in the Linux `check` job of CI with the debug
+build and in the `linux` release job with the release build (step 16).
 
 ### Manual and unverified
 
 Install, upgrade and uninstall on a real desktop, including the
 `gateinto://` handler that `install.sh` registers opening links in real
-browsers; the unit starting at login
-and restarting after a crash; and the four unit consequences listed above
-(Chrome's sandbox under `NoNewPrivileges`, the display variables, the start
-target, browsers killed on stop).
+browsers; the unit starting with the graphical session, getting
+`DISPLAY` or `WAYLAND_DISPLAY`, restarting after a crash, not restarting
+after `gateinto stop`, and ending its browsers on stop; the unit failing
+when an agent started on demand already runs; `systemctl --user disable
+--now` from `uninstall.sh` against a real user manager (only its failure
+on a dangling linked unit was reproduced, offline with systemd 255, which
+is why `uninstall.sh` refuses that case); and `systemd-analyze --user
+verify` on the hosted runners (it was run only locally with systemd
+255).
 
 ## Area 7: device identity (open decision)
 
@@ -1009,7 +1104,9 @@ The constraints that hold on Windows hold on Linux without exception:
 - Credentials are never placed in environment variables, including the
   unit's `Environment=` and the scope's environment.
 - The shell and every helper (`systemd-run`, `systemctl`) are never resolved
-  against the current directory; helpers use fixed absolute paths.
+  against the current directory; the agent's helpers use fixed absolute
+  paths, and `uninstall.sh` uses `systemctl` from `PATH` only as an
+  absolute path (Area 6).
 - No real-gateway, browser, desktop or TPM behaviour is claimed until it has
   been verified.
 
@@ -1072,6 +1169,15 @@ The constraints that hold on Windows hold on Linux without exception:
     verifies the SHA-256, extracts the tarball and runs `install.sh`
     locally; uninstall is `uninstall.sh` from the same tarball. Nothing is
     hosted for `curl | sh`.
+11. **The user unit does not set `NoNewPrivileges=true`.** It would be
+    inherited by the browsers the agent starts and disable Chrome's setuid
+    sandbox fallback on systems that restrict unprivileged user namespaces
+    (for example Ubuntu 24.04 with AppArmor).
+12. **The user unit belongs to `graphical-session.target`**
+    (`WantedBy=`, `PartOf=`, `After=`), not `default.target`, so the agent
+    runs only in a graphical session and after desktops that import the
+    display variables before that target have done so. Desktops without
+    the target do not start it.
 
 ## Implementation plan
 
@@ -1160,10 +1266,14 @@ to 17 still ship and terminals stay unavailable on Linux.
 - The holder scan in containers and its cost on a busy desktop.
 - tty foreground handoff and restore, and signal behaviour, in real terminal
   emulators.
-- The user unit at login and after a crash; Chrome's sandbox under
-  `NoNewPrivileges=true`; `DISPLAY` and `WAYLAND_DISPLAY` in the user
-  manager's environment; `default.target` vs `graphical-session.target`;
-  browsers killed by `KillMode=control-group` on stop.
+- The user unit with `graphical-session.target` on GNOME, KDE and other
+  desktops: whether they reach that target and import `DISPLAY` and
+  `WAYLAND_DISPLAY` before it; Chrome's sandbox when started from the unit
+  on systems that restrict unprivileged user namespaces; restart after a
+  crash; browsers ended by `KillMode=control-group` on stop; the unit
+  failing at the start limit when an on-demand agent already runs;
+  `systemctl --user disable --now` from `uninstall.sh` against a real
+  user manager.
 - Every TPM behaviour named in Area 7.
 - The gateway outcomes listed in [Running without a device
   certificate](#running-without-a-device-certificate) against a real gateway.

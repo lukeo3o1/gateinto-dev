@@ -25,16 +25,57 @@ if needed), replaces an earlier copy there, runs
 and warns when ~/.local/bin is not on PATH. It creates no device key and
 writes no configuration.
 
+Optional systemd user unit: gateinto-agent.service runs
+`~/.local/bin/gateinto agent` while a graphical session is running
+(graphical-session.target). install.sh does not install it. To enable it,
+from gateinto-tarball:
+
+    mkdir -p ~/.config/systemd/user &&
+      cp gateinto-agent.service ~/.config/systemd/user/ &&
+      systemctl --user enable --now gateinto-agent
+
+Only one agent runs per user. If one started on demand is already
+running, run `gateinto stop` first (it ends that agent's sessions and
+their browsers); otherwise the unit's agent fails, is retried until the
+start limit, and the unit stays failed until it is started again, for
+example at the next login, although `enable --now` reported success.
+
+Desktops that do not start graphical-session.target never start it.
+Stopping the unit ends the browsers the agent started, as `gateinto stop`
+does. After installing a newer gateinto, run
+`systemctl --user restart gateinto-agent`. To disable it without
+uninstalling Gateinto:
+
+    systemctl --user disable --now gateinto-agent &&
+      rm ~/.config/systemd/user/gateinto-agent.service
+
 Uninstall, from the directory that holds gateinto-tarball:
 
     cd gateinto-tarball && ./uninstall.sh
 
-uninstall.sh runs `~/.local/bin/gateinto stop --remove-stale-profiles`,
+If ~/.config/systemd/user/gateinto-agent.service exists and systemctl is on
+PATH, uninstall.sh first runs
+`systemctl --user disable --now gateinto-agent.service`. It then runs
+`~/.local/bin/gateinto stop --remove-stale-profiles`,
 which stops a running agent with its sessions and deletes the Gateinto
 browser profiles left behind, then `~/.local/bin/gateinto uri unregister`,
-then removes ~/.local/bin/gateinto. If either command fails, it stops and
-keeps the binary. It keeps the configuration and the gateways added from
-links in ~/.config/gateinto (or $XDG_CONFIG_HOME/gateinto).
+then removes the unit file (followed by `systemctl --user daemon-reload`)
+and ~/.local/bin/gateinto. If disabling, stopping or unregistering fails,
+it stops and keeps the binary, so running it again retries; a failed
+daemon-reload only prints a warning. It keeps the configuration and the
+gateways added from links in ~/.config/gateinto (or
+$XDG_CONFIG_HOME/gateinto).
+
+With the unit installed, run uninstall.sh from your own login session:
+under `su -`, `sudo -u` or without a user manager,
+`systemctl --user disable --now` fails to reach your user manager (the
+enablement link may already be gone) and uninstall.sh stops. If the unit
+file is a symbolic link to a missing file (as `systemctl --user link`
+leaves after the linked file is deleted), uninstall.sh changes nothing
+and asks you to run `systemctl --user stop gateinto-agent` if it is
+running, to remove by hand that link and, if present,
+~/.config/systemd/user/graphical-session.target.wants/gateinto-agent.service,
+and to run it again.
 
 LICENSE-APACHE and LICENSE-MIT: Gateinto is licensed under either license,
 at your option.

@@ -6,6 +6,10 @@ if (( $# != 1 )); then
   exit 2
 fi
 tarball=$1
+if ! analyze=$(command -v systemd-analyze); then
+  echo 'systemd-analyze is not on PATH; it is needed to verify gateinto-agent.service' >&2
+  exit 1
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -26,6 +30,14 @@ run() {
 }
 
 run "${package[0]}/install.sh"
+mkdir -m 0700 "$work/runtime"
+if ! env -i HOME="$home" XDG_RUNTIME_DIR="$work/runtime" PATH=/usr/bin:/bin \
+  "$analyze" --user verify "${package[0]}/gateinto-agent.service" > "$work/verify" 2>&1 \
+  || grep -qF gateinto-agent.service "$work/verify"; then
+  cat "$work/verify" >&2
+  echo 'systemd-analyze --user verify reports a problem with gateinto-agent.service' >&2
+  exit 1
+fi
 run "$installed" status | tee "$work/status"
 if ! grep -qxF "uri-handler: gateinto: \"$installed\" open -- %u" "$work/status"; then
   echo 'the installed gateinto:// handler does not run ~/.local/bin/gateinto' >&2

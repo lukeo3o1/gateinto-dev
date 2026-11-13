@@ -26,9 +26,10 @@ dir=$stage/$package
 mkdir "$dir"
 cp -- "$binary" "$dir/gateinto"
 cp -- "$root/packaging/linux/install.sh" "$root/packaging/linux/uninstall.sh" \
-  "$root/packaging/linux/README" "$root/LICENSE-APACHE" "$root/LICENSE-MIT" "$dir/"
+  "$root/packaging/linux/gateinto-agent.service" "$root/packaging/linux/README" \
+  "$root/LICENSE-APACHE" "$root/LICENSE-MIT" "$dir/"
 chmod 0755 "$dir" "$dir/gateinto" "$dir/install.sh" "$dir/uninstall.sh"
-chmod 0644 "$dir/README" "$dir/LICENSE-APACHE" "$dir/LICENSE-MIT"
+chmod 0644 "$dir/gateinto-agent.service" "$dir/README" "$dir/LICENSE-APACHE" "$dir/LICENSE-MIT"
 
 tar --create --format=gnu --sort=name --owner=0 --group=0 --numeric-owner \
   --mtime="@${SOURCE_DATE_EPOCH:-0}" --directory="$stage" -- "$package" \

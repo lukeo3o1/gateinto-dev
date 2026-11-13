@@ -80,11 +80,11 @@ security reviewed.":
 - `latest`: replaced by hand the same way.
 
 Every release has the x64 and x86 MSIs, the x64 and i686 executables and
-the `x86_64-unknown-linux-gnu` tarball with `install.sh` and `uninstall.sh`
-(glibc 2.38 or newer, not yet verified on a real Linux desktop;
-[details](docs/install.md#linux-tarball)); `alpha` and `beta` also have the
-experimental Windows 7 executable for `i686-win7-windows-msvc`. Each file is
-attached
+the `x86_64-unknown-linux-gnu` tarball (glibc 2.38 or newer, not yet
+verified on a real Linux desktop; [details](docs/install.md#linux-tarball))
+with `install.sh`, `uninstall.sh` and an optional systemd user unit;
+`alpha` and `beta` also have the experimental Windows 7 executable for
+`i686-win7-windows-msvc`. Each file is attached
 with the short commit in its name and as a copy without it, each with a
 `.sha256`, so a URL such as
 `https://github.com/lukeo3o1/gateinto-dev/releases/download/latest/gateinto-x86_64-pc-windows-msvc.exe`

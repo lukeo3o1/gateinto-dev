@@ -185,6 +185,7 @@ cat > "$stub" <<STUB
 #!/bin/sh
 printf '%s\n' "\$0 \$*" >> '$area/calls'
 if [ -e '$area/fail-'"\$1" ]; then exit 3; fi
+if [ "\$1" = status ]; then printf 'uri-handler: gateinto: "%s" open -- %%u\n' "\$0"; fi
 STUB
 chmod 0755 "$stub"
 package=gateinto-$short-x86_64-unknown-linux-gnu
@@ -201,6 +202,7 @@ else
     -rw-r--r-- "$package/LICENSE-MIT" \
     -rw-r--r-- "$package/README" \
     -rwxr-xr-x "$package/gateinto" \
+    -rw-r--r-- "$package/gateinto-agent.service" \
     -rwxr-xr-x "$package/install.sh" \
     -rwxr-xr-x "$package/uninstall.sh")
   actual=$(TZ=UTC tar --numeric-owner --full-time -tvzf "$area/a/$package.tar.gz" | awk '{ print $1, $2, $4, $5, $6 }')
@@ -216,12 +218,30 @@ else
     || ! cmp -s "$area/x/$package/install.sh" "$packaging/install.sh" \
     || ! cmp -s "$area/x/$package/uninstall.sh" "$packaging/uninstall.sh" \
     || ! cmp -s "$area/x/$package/README" "$packaging/README" \
+    || ! cmp -s "$area/x/$package/gateinto-agent.service" "$packaging/gateinto-agent.service" \
     || ! cmp -s "$area/x/$package/LICENSE-APACHE" "$licenses/LICENSE-APACHE" \
     || ! cmp -s "$area/x/$package/LICENSE-MIT" "$licenses/LICENSE-MIT"; then
     fail 'Linux tarball' 'a file differs from its source'
   else
     pass 'Linux tarball'
   fi
+fi
+
+expected_unit='[Unit]
+Description=Gateinto agent
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/gateinto agent
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target'
+if [[ "$(cat "$packaging/gateinto-agent.service" 2> /dev/null)" != "$expected_unit" ]]; then
+  fail 'user unit' "packaging/linux/gateinto-agent.service is not"$'\n'"$expected_unit"
+else
+  pass 'user unit'
 fi
 
 expect_tarball_fail() {
@@ -243,6 +263,7 @@ expect_tarball_fail 'Linux tarball without .tar.gz' 'must end in .tar.gz' "$stub
 pkg=$area/x/$package
 system_path=/usr/bin:/bin
 install_root_message='install.sh: refusing to run as root: Gateinto installs for one user into ~/.local/bin, and as root or through sudo it would leave root-owned files there; run it as the user who uses Gateinto'
+unit_hint='install.sh: optional: to start the agent with the graphical session, copy gateinto-agent.service to ~/.config/systemd/user/ and run "systemctl --user enable --now gateinto-agent"'
 uninstall_root_message='uninstall.sh: refusing to run as root: Gateinto is installed for one user in ~/.local/bin; run it as that user, not as root or through sudo'
 
 new_home() {
@@ -301,6 +322,8 @@ elif [[ "$(snapshot "$home")" != "$before" ]]; then
   fail 'install' 'changed files outside ~/.local/bin'
 elif ! grep -qxF 'install.sh: warning: ~/.local/bin is not on PATH; add it to PATH or run ~/.local/bin/gateinto' "$work/stderr"; then
   fail 'install' "stderr lacks the PATH warning: $(cat "$work/stderr")"
+elif ! grep -qxF "$unit_hint" "$work/stdout"; then
+  fail 'install' "stdout lacks how to enable the user unit: $(cat "$work/stdout")"
 else
   pass 'install'
 fi
@@ -451,6 +474,128 @@ else
   pass 'uninstall when unregistering fails'
 fi
 
+tools=$(mktemp -d "$area/tools.XXXXXX")
+cat > "$tools/systemctl" <<STUB
+#!/bin/sh
+printf '%s\n' "\$0 \$*" >> '$area/calls'
+if [ -e '$area/fail-systemctl-'"\$2" ]; then exit 4; fi
+if [ "\$2" = disable ] && [ ! -e "\$HOME/.config/systemd/user/gateinto-agent.service" ]; then
+  echo 'Failed to disable unit, unit gateinto-agent.service does not exist.' >&2
+  exit 1
+fi
+STUB
+plain=$(mktemp -d "$area/plain.XXXXXX")
+ln -s "$(command -v id)" "$(command -v rm)" "$plain/"
+chmod 0755 "$tools" "$tools/systemctl" "$plain"
+mkdir "$decoy/bin"
+cp "$tools/systemctl" "$decoy/bin/systemctl"
+owned "$decoy/bin"
+disable="$tools/systemctl --user disable --now gateinto-agent.service"
+reload="$tools/systemctl --user daemon-reload"
+
+unit_home() {
+  local home units
+  home=$(installed_home)
+  units=$home/.config/systemd/user
+  mkdir -p "$units"
+  if [[ $1 == file ]]; then
+    cp "$packaging/gateinto-agent.service" "$units/"
+  else
+    if [[ $1 == link ]]; then
+      mkdir "$home/gateinto-tarball"
+      cp "$packaging/gateinto-agent.service" "$home/gateinto-tarball/"
+    fi
+    ln -s ../../../gateinto-tarball/gateinto-agent.service "$units/gateinto-agent.service"
+    mkdir "$units/graphical-session.target.wants"
+    ln -s "$units/gateinto-agent.service" "$units/graphical-session.target.wants/"
+  fi
+  printf '[Unit]\n' > "$units/other.service"
+  owned "$home/.config/systemd"
+  printf '%s' "$home"
+}
+
+gateinto_calls() {
+  printf '%s\n%s' "$1/gateinto stop --remove-stale-profiles" "$1/gateinto uri unregister"
+}
+
+expect_unit_uninstall() {
+  local name=$1 kind=$2 path=$3 systemctl=$4 home bin units calls before
+  home=$(unit_home "$kind")
+  bin=$home/.local/bin
+  units=$home/.config/systemd/user
+  calls=$(gateinto_calls "$bin")
+  if [[ $systemctl == systemctl ]]; then
+    calls=$disable$'\n'$calls$'\n'$reload
+  fi
+  before=$(snapshot "$home" | grep -vF gateinto-agent.service)
+  if ! run_script user "$home" "$path" "$decoy" "$pkg/uninstall.sh"; then
+    fail "$name" "exited with an error: $(cat "$work/stderr")"
+  elif [[ "$(cat "$area/calls")" != "$calls" ]]; then
+    fail "$name" "ran $(cat "$area/calls")"
+  elif [[ -e $units/gateinto-agent.service || -L $units/gateinto-agent.service || -n "$(ls -A "$bin")" ]]; then
+    fail "$name" 'left the unit or ~/.local/bin/gateinto'
+  elif [[ $kind == link ]] && ! cmp -s "$home/gateinto-tarball/gateinto-agent.service" "$packaging/gateinto-agent.service"; then
+    fail "$name" 'changed the target of the link'
+  elif [[ "$(snapshot "$home" | grep -vF gateinto-agent.service)" != "$before" ]]; then
+    fail "$name" 'changed other files'
+  elif ! grep -qxF 'uninstall.sh: removed ~/.config/systemd/user/gateinto-agent.service' "$work/stdout"; then
+    fail "$name" "stdout does not say that the unit was removed: $(cat "$work/stdout")"
+  elif [[ -s $work/stderr ]]; then
+    fail "$name" "printed on stderr: $(cat "$work/stderr")"
+  else
+    pass "$name"
+  fi
+}
+
+expect_unit_uninstall 'uninstall with the user unit' file "$tools:$system_path" systemctl
+expect_unit_uninstall 'uninstall with a linked user unit' link "$tools:$system_path" systemctl
+expect_unit_uninstall 'uninstall with the user unit without systemctl' file "$plain" none
+expect_unit_uninstall 'uninstall with the user unit and systemctl only on a relative PATH entry' file "bin:$plain" none
+
+home=$(unit_home dangling)
+before=$(snapshot "$home")
+if run_script user "$home" "$tools:$system_path" "$decoy" "$pkg/uninstall.sh"; then
+  fail 'uninstall with a dangling linked user unit' 'succeeded'
+elif [[ "$(cat "$work/stderr")" != 'uninstall.sh: ~/.config/systemd/user/gateinto-agent.service is a symbolic link to a missing file; run "systemctl --user stop gateinto-agent" if it is running, remove by hand that link and, if present, ~/.config/systemd/user/graphical-session.target.wants/gateinto-agent.service, then run uninstall.sh again' ]]; then
+  fail 'uninstall with a dangling linked user unit' "stderr is $(cat "$work/stderr")"
+elif [[ -s $work/stdout || -s $area/calls ]]; then
+  fail 'uninstall with a dangling linked user unit' 'printed on stdout or ran systemctl or gateinto'
+elif [[ "$(snapshot "$home")" != "$before" ]] || ! cmp -s "$home/.local/bin/gateinto" "$stub"; then
+  fail 'uninstall with a dangling linked user unit' 'changed something'
+else
+  pass 'uninstall with a dangling linked user unit'
+fi
+
+home=$(unit_home file)
+bin=$home/.local/bin
+fail_on systemctl-disable
+if run_script user "$home" "$tools:$system_path" "$decoy" "$pkg/uninstall.sh"; then
+  fail 'uninstall when disabling the user unit fails' 'succeeded'
+elif [[ "$(cat "$area/calls")" != "$disable" ]]; then
+  fail 'uninstall when disabling the user unit fails' "ran $(cat "$area/calls")"
+elif ! cmp -s "$bin/gateinto" "$stub" || ! cmp -s "$home/.config/systemd/user/gateinto-agent.service" "$packaging/gateinto-agent.service"; then
+  fail 'uninstall when disabling the user unit fails' 'removed ~/.local/bin/gateinto or the unit'
+elif [[ "$(cat "$work/stderr")" != 'uninstall.sh: "systemctl --user disable --now gateinto-agent.service" failed, so nothing was removed; run uninstall.sh again after fixing the error above' ]]; then
+  fail 'uninstall when disabling the user unit fails' "stderr is $(cat "$work/stderr")"
+else
+  pass 'uninstall when disabling the user unit fails'
+fi
+
+home=$(unit_home file)
+bin=$home/.local/bin
+fail_on systemctl-daemon-reload
+if ! run_script user "$home" "$tools:$system_path" "$decoy" "$pkg/uninstall.sh"; then
+  fail 'uninstall when reloading the user manager fails' "exited with an error: $(cat "$work/stderr")"
+elif [[ "$(cat "$area/calls")" != "$disable"$'\n'"$(gateinto_calls "$bin")"$'\n'"$reload" ]]; then
+  fail 'uninstall when reloading the user manager fails' "ran $(cat "$area/calls")"
+elif [[ -e $home/.config/systemd/user/gateinto-agent.service || -n "$(ls -A "$bin")" ]]; then
+  fail 'uninstall when reloading the user manager fails' 'left the unit or ~/.local/bin/gateinto'
+elif [[ "$(cat "$work/stderr")" != 'uninstall.sh: warning: "systemctl --user daemon-reload" failed after the unit was removed; run it after fixing the error above' ]]; then
+  fail 'uninstall when reloading the user manager fails' "stderr is $(cat "$work/stderr")"
+else
+  pass 'uninstall when reloading the user manager fails'
+fi
+
 home=$(new_home)
 bin=$home/.local/bin
 mkdir -p "$bin"
@@ -523,6 +668,62 @@ for layout in two file; do
     pass "install check of a tarball with layout $layout"
   fi
 done
+
+no_analyze=$(mktemp -d "$area/no-analyze.XXXXXX")
+for tool in /usr/bin/* /bin/*; do
+  if [[ ${tool##*/} != systemd-analyze && ! -e $no_analyze/${tool##*/} ]]; then
+    ln -s "$tool" "$no_analyze/"
+  fi
+done
+chmod 0755 "$no_analyze"
+shipped=$(mktemp -d "$area/shipped.XXXXXX")
+cp "$area/a/$package.tar.gz" "$shipped/"
+chmod 0711 "$shipped"
+chmod 0644 "$shipped/$package.tar.gz"
+: > "$area/calls"
+if as_user env PATH="$no_analyze" "$install_check" "$shipped/$package.tar.gz" > "$work/stdout" 2> "$work/stderr"; then
+  fail 'install check without systemd-analyze' 'succeeded'
+elif [[ "$(cat "$work/stderr")" != 'systemd-analyze is not on PATH; it is needed to verify gateinto-agent.service' ]]; then
+  fail 'install check without systemd-analyze' "stderr is $(cat "$work/stderr")"
+elif [[ -s $area/calls ]]; then
+  fail 'install check without systemd-analyze' "ran $(cat "$area/calls")"
+else
+  pass 'install check without systemd-analyze'
+fi
+
+unit_problem='systemd-analyze --user verify reports a problem with gateinto-agent.service'
+if ! command -v systemd-analyze > /dev/null; then
+  echo 'skip install check of the user unit: needs systemd-analyze'
+else
+  chmod 0711 "$layouts"
+  for unit in shipped misspelt unexecutable; do
+    mkdir "$layouts/$unit"
+    cp -r "$pkg" "$layouts/$unit/"
+    case $unit in
+      misspelt) sed -i 's/^Restart=/Restrt=/' "$layouts/$unit/$package/gateinto-agent.service" ;;
+      unexecutable) sed -i 's|/gateinto agent$|/missing agent|' "$layouts/$unit/$package/gateinto-agent.service" ;;
+    esac
+    tar -czf "$layouts/$unit.tar.gz" -C "$layouts/$unit" "$package"
+    chmod 0644 "$layouts/$unit.tar.gz"
+    : > "$area/calls"
+    name="install check of the $unit unit"
+    if as_user "$install_check" "$layouts/$unit.tar.gz" > "$work/stdout" 2> "$work/stderr"; then
+      if [[ $unit != shipped ]]; then
+        fail "$name" 'succeeded'
+      elif [[ "$(tail -n 1 "$work/stdout")" != 'installed and uninstalled' ]]; then
+        fail "$name" "stdout is $(cat "$work/stdout")"
+      else
+        pass "$name"
+      fi
+    elif [[ $unit == shipped ]]; then
+      fail "$name" "exited with an error: $(cat "$work/stderr")"
+    elif ! grep -qxF "$unit_problem" "$work/stderr"; then
+      fail "$name" "stderr lacks '$unit_problem': $(cat "$work/stderr")"
+    else
+      pass "$name"
+    fi
+  done
+fi
 
 if ! can_root; then
   echo 'skip install and uninstall as root: needs root or passwordless sudo'

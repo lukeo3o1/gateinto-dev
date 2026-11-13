@@ -458,7 +458,8 @@ so they stop at the first failure: nothing is extracted or run when the checksum
 and nothing is extracted into or run from an existing `gateinto-tarball`, because `mkdir` then
 fails. Files of an earlier tarball are therefore not mixed in by these commands. The tarball
 holds one directory with the commit in its name, `gateinto-<commit>-x86_64-unknown-linux-gnu/`,
-with `gateinto`, `install.sh`, `uninstall.sh`, a `README` and the license files;
+with `gateinto`, `install.sh`, `uninstall.sh`, the optional systemd user unit
+`gateinto-agent.service`, a `README` and the license files;
 `--strip-components=1` puts them directly in `gateinto-tarball`. No script is published for
 piping into a shell.
 
@@ -467,24 +468,60 @@ replacing an earlier copy, runs `~/.local/bin/gateinto uri register` and warns w
 `~/.local/bin` is not on `PATH`. It creates no device key and writes no configuration. Running it
 from a newer tarball upgrades the binary in place.
 
+### Optional user unit
+
+`gateinto-agent.service` runs `~/.local/bin/gateinto agent` as a systemd user service while a
+graphical session is running (`graphical-session.target`). `install.sh` does not install or
+enable it; to use it, from `gateinto-tarball`:
+
+```sh
+mkdir -p ~/.config/systemd/user &&
+  cp gateinto-agent.service ~/.config/systemd/user/ &&
+  systemctl --user enable --now gateinto-agent
+```
+
+Only one agent runs per user: if one started on demand is already running, run `gateinto stop`
+first (it ends that agent's sessions and their browsers), or the unit's agent fails, is retried
+until the start limit and the unit stays failed until it is started again, for example at the
+next login, although `enable --now` reported success.
+
+Desktops that do not start `graphical-session.target` never start the unit; the agent then
+starts on demand as without it. Stopping the unit ends the browsers the agent started, as
+`gateinto stop` does. The unit carries no credentials and does not set `NoNewPrivileges`, which
+browsers would inherit. After an upgrade, `systemctl --user restart gateinto-agent` runs the new
+binary. Not yet verified on a real desktop.
+
 To uninstall, run `uninstall.sh` in the directory the tarball was extracted to:
 
 ```sh
 cd gateinto-tarball && ./uninstall.sh
 ```
 
-It runs `~/.local/bin/gateinto stop --remove-stale-profiles`, which stops a running agent with
+If `~/.config/systemd/user/gateinto-agent.service` exists and `systemctl` is on `PATH`, it first
+runs `systemctl --user disable --now gateinto-agent.service`. It then runs
+`~/.local/bin/gateinto stop --remove-stale-profiles`, which stops a running agent with
 its sessions and deletes leftover Gateinto browser profiles, then
-`~/.local/bin/gateinto uri unregister`, then removes `~/.local/bin/gateinto`. If either command
-fails, it keeps the binary and exits with an error, so it can be run again. It keeps the
-configuration and the gateways added from links in `~/.config/gateinto` (or
+`~/.local/bin/gateinto uri unregister`, then removes the unit file (and runs
+`systemctl --user daemon-reload`) and `~/.local/bin/gateinto`. If disabling, stopping or
+unregistering fails, it keeps the binary and exits with an error, so it can be run again. It
+keeps the configuration and the gateways added from links in `~/.config/gateinto` (or
 `$XDG_CONFIG_HOME/gateinto`).
+
+With the unit installed, run `uninstall.sh` from your own login session: under `su -`,
+`sudo -u` or without a user manager, `systemctl --user disable --now` fails to reach your user
+manager (the enablement link may already be gone) and `uninstall.sh` stops. If the unit file is
+a symbolic link to a missing file, as `systemctl --user link` leaves after the linked file is
+deleted, `uninstall.sh` changes nothing and asks you to run
+`systemctl --user stop gateinto-agent` if it is running, to remove by hand that link and, if
+present, `~/.config/systemd/user/graphical-session.target.wants/gateinto-agent.service`, and to
+run it again.
 
 CI installs and uninstalls a tarball of the debug build on `ubuntu-latest`, and the release
 workflow does the same with the release tarball on `ubuntu-24.04` before publishing, each in a
-temporary home directory
+temporary home directory, and checks the user unit with `systemd-analyze --user verify`
+against the installed binary
 ([.github/scripts/linux-install-check.sh](../.github/scripts/linux-install-check.sh)). Neither
-opens a `gateinto://` link in a browser.
+opens a `gateinto://` link in a browser or starts the unit.
 
 ## Verification
 
