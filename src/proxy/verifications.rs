@@ -230,9 +230,10 @@ impl Verifications {
                 announce(&pending);
             }
             if serials.changed().await.is_err() {
-                return std::future::pending().await;
+                break;
             }
         }
+        std::future::pending().await
     }
 
     pub fn pending(&self) -> bool {

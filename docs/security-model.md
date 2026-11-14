@@ -150,7 +150,7 @@ certificate or Gateinto outer TLS/key-exchange policy.
 ### Launch URIs and the agent
 
 Any website, e-mail or document can open a `gateinto://` link, and with the
-handler registered Windows passes it to `gateinto open` without further
+handler registered Windows or the Linux desktop passes it to `gateinto open` without further
 checks. Gateinto therefore treats the URI as attacker-controlled. The exact
 format is in [protocol/launch-uri.md](protocol/launch-uri.md).
 
@@ -226,7 +226,21 @@ How that is bounded:
 - **Registration.** `gateinto uri register` writes only the current user's
   `HKCU\Software\Classes\gateinto`, with quoted absolute paths that cannot
   contain quotes or `%`, and neither registration nor removal changes a
-  handler that does not run Gateinto.
+  handler that does not run Gateinto. On Linux it writes only
+  `gateinto.desktop` in the user's applications directory and the
+  `x-scheme-handler/gateinto` line of the user's `mimeapps.list`. Like
+  HKCU, these files are writable by every program of the same user, which is
+  trusted; the boundary is against other users and other applications'
+  handlers. A desktop file that is not Gateinto's own, or a default that
+  names another application, is reported and left unchanged, never replaced
+  or removed. Symlinked or non-regular files are refused, and every directory
+  level must be owned by the effective uid, so `sudo gateinto uri register`
+  with a preserved `HOME` is refused instead of writing root-owned files into
+  the user's home. No executable (`update-desktop-database`, `xdg-mime`) is
+  run to register. When a higher-priority setting may still send links to
+  another application, Gateinto prints a warning rather than changing it.
+  Directories are opened `O_RDONLY` for these checks, so a directory of the
+  user's own without read permission fails with "Permission denied".
 
 ### Gateways added from links
 
@@ -418,10 +432,12 @@ Non-guarantees:
 
 ### Local proxy authentication (`os_user`)
 
-`os_user` is available on Windows only. It is offered by browser sessions on
-Windows, next to `session_credentials`, and by terminal sessions, alone. The
-client sends nothing for it: Gateinto identifies the process at the other end
-of the connection.
+`os_user` is available on Windows and Linux. It is offered by browser
+sessions on Windows, next to `session_credentials`, and by terminal sessions,
+alone. On Linux a proxy can be bound with it, but no session offers it yet:
+browser sessions there accept only `session_credentials`, and terminal
+sessions do not exist. The client sends nothing for it: Gateinto identifies
+the process at the other end of the connection.
 
 Guarantees:
 
@@ -439,6 +455,37 @@ Guarantees:
   reads the table again while it holds the process handle and requires the
   same row to still name the same process ID. A process that exited in
   between, and a process ID that was reused, are denied.
+- **Linux: only the same uid.** Gateinto reads `/proc/net/tcp` and, for an
+  IPv6 client or an IPv4 client with no IPv4 row, `/proc/net/tcp6` (an
+  IPv4 client is also matched as an IPv4-mapped row), and takes the row
+  whose local end is the client and whose remote end is the listener; rows
+  with inode 0 are skipped. If the row's uid is not Gateinto's effective uid,
+  the connection is denied as another user. Otherwise it scans the
+  processes whose `/proc/<pid>/status` lists that uid. For each, it opens a
+  pidfd (`pidfd_open`) first, then looks for `socket:[<inode>]` among the
+  links in `/proc/<pid>/fd`, reads the status again and polls the pidfd
+  with a zero timeout; a readable pidfd means the process has exited or is
+  a zombie, and it is discarded. A live holder whose four `Uid:` fields all
+  equal Gateinto's effective uid is accepted, after the table row is read
+  again and still has the same inode. Without such a holder, a live holder
+  with another uid in any of the four fields is denied as another user. The connection is accepted
+  only on this positive finding: a process of our uid whose fd links or
+  status cannot be read is skipped, and without a holder the denial is a
+  lookup failure if any process was skipped and "no owner" otherwise.
+- **Linux: no session containment yet.** There is no equivalent of the job
+  object: binding a proxy that asks for `os_user` with a session's
+  containment fails on Linux, so `os_user` there is never the same-user
+  check alone where Windows also requires the job. `Job::new` on Linux
+  only checks the prerequisites of a systemd user scope (the cgroup v2
+  hierarchy at `/sys/fs/cgroup`, with the path of Gateinto's own cgroup
+  naming a directory in it, a private `XDG_RUNTIME_DIR` of the effective
+  uid with the user manager's bus or directory, the user manager's
+  delegated cgroup owned by that uid, and
+  `systemd-run` at `/usr/bin/systemd-run` or `/bin/systemd-run`, owned by
+  root or that uid and writable by no one else) and fails with a fixed
+  message naming the first missing piece. `systemd-run` is never looked up
+  on `PATH` or in the current directory. Nothing on Linux calls it yet and
+  no process is placed in a scope.
 - **Browser sessions: only the browser's job.** Agent-launched browsers on
   Windows start through `CreateProcessW` with
   `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so the browser is in a job object created
@@ -485,13 +532,18 @@ Guarantees:
   stopped, the job is terminated and the wait continues in the background.
 - **Fail closed.** No matching row after a few short retries, a process or
   token that cannot be opened, a different user SID, a process outside the
-  job and any error from Windows all deny the connection.
+  job and any error from Windows all deny the connection. On Linux a
+  connection table that cannot be read or parsed, a different uid, no live
+  holder found, unreadable processes of our uid, and a kernel without
+  `pidfd_open` (before Linux 5.3) all deny it.
 - **Before anything else.** The check runs right after the connection is
   accepted, before the request is read, and therefore before any DNS lookup,
   routing decision, upstream connection or use of the device key. It runs on
   the blocking thread pool, not on the async runtime, and shares the connect
   timeout with reading the request; a check that does not finish in time
-  gets `408` and is logged with its reason.
+  gets `408` and is logged with its reason. On Linux the deadline is also
+  passed into the process scan, which stops between processes once it has
+  passed.
 - **Clear fallback in browser sessions.** Browser sessions always offer
   `session_credentials` too, so a denied connection is handled exactly like
   a request without credentials (`407` with the `Basic` challenge), and the
@@ -519,6 +571,13 @@ Non-guarantees:
   and are accepted as well. `os_user` keeps out other users
   of the machine and, in browser sessions, ordinary programs of the same
   user; it does not keep out malware running as the user.
+- **Linux: the boundary is the uid.** The uid in the connection table is the
+  socket's creator. A socket passed to another user's process is refused
+  only if no live process of our uid still holds it. Root is outside the
+  model, and a holder that is not dumpable (setuid programs, processes that
+  called `prctl(PR_SET_DUMPABLE, 0)`, some browser sandboxes) cannot be
+  read even by its own user, so it is denied. Containers that hide
+  `/proc/net` or mount a `/proc` of another pid namespace are not verified.
 - **A point-in-time check.** The owner is checked once per connection. Every
   answer other than an established tunnel closes the connection, so every new
   connection is checked again, but an open tunnel is not re-checked.
@@ -534,7 +593,9 @@ Non-guarantees:
   domain-joined machines, Chrome inside the job,
   browsers launched by Gateinto itself rather than by a test probe, a run on
   Windows CI, and the suspended-and-assign fallback and the launch without a
-  job on real Windows 7 and 8.1.
+  job on real Windows 7 and 8.1. On Linux: containers, kernels without
+  `pidfd_open`, non-dumpable clients, and the cost of the scan on a desktop
+  with many processes.
 
 ### Interactive verification
 
@@ -613,7 +674,8 @@ Non-guarantees:
   header; header size limit, timeouts, idle timeout and a connection limit.
   HTTP/2 adds decoded header limits, bounded flow-control windows and
   per-stream cancellation; peer SETTINGS limits do not replace the local
-  connection limit. Details are in the [README](../README.md#proxy) and
+  connection limit. Details are in the
+  [README](../README.md#local-proxy-behaviour) and
   [upstream protocol](protocol/http-connect.md).
 
 ### The device identity

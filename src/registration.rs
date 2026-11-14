@@ -1,5 +1,20 @@
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[cfg(target_os = "linux")]
+mod files;
+#[cfg(target_os = "linux")]
+mod handler;
+#[cfg(target_os = "linux")]
+mod keyfile;
+#[cfg(target_os = "linux")]
+mod lookup;
+#[cfg(target_os = "linux")]
+mod mimeapps;
+#[cfg(all(test, target_os = "linux"))]
+mod testing;
+#[cfg(target_os = "linux")]
+mod xdg;
 
 pub const SCHEME: &str = "gateinto";
 
@@ -11,6 +26,13 @@ pub enum RegistrationError {
         scheme: String,
         command: Option<String>,
     },
+    ForeignDefault {
+        scheme: String,
+        list: PathBuf,
+        ids: Vec<String>,
+    },
+    NotAHandlerCommand(String),
+    File(String),
     Registry {
         operation: &'static str,
         code: u32,
@@ -24,31 +46,29 @@ impl fmt::Display for RegistrationError {
             Self::UnsafePath(path) => write!(
                 f,
                 "cannot use {path:?} in a URI handler command: it must be an absolute path \
-                 without quotes, percent signs or control characters that does not end with \
-                 a separator"
+                 without {REFUSED_DESCRIPTION} that does not end with a separator"
             ),
             Self::InvalidScheme(scheme) => write!(f, "invalid URI scheme name {scheme:?}"),
-            Self::ForeignHandler {
-                scheme,
-                command: Some(command),
-            } => write!(
+            Self::ForeignHandler { scheme, command } => {
+                foreign_handler(f, scheme, command.as_deref())
+            }
+            Self::ForeignDefault { scheme, list, ids } => write!(
                 f,
-                "HKCU\\Software\\Classes\\{scheme} runs {command:?}, which is not a Gateinto \
-                 handler; leaving it unchanged"
+                "{} sets {ids:?} as the default for x-scheme-handler/{scheme}, which is not only \
+                 the Gateinto desktop file; leaving it unchanged",
+                list.display()
             ),
-            Self::ForeignHandler {
-                scheme,
-                command: None,
-            } => write!(
+            Self::NotAHandlerCommand(command) => write!(
                 f,
-                "HKCU\\Software\\Classes\\{scheme} exists without a Gateinto handler command; \
-                 leaving it unchanged"
+                "refusing to register {command:?}: it is not a Gateinto handler command, which \
+                 runs an executable named gateinto by an absolute path; nothing was written"
             ),
+            Self::File(message) => f.write_str(message),
             Self::Registry { operation, code } => {
                 write!(f, "{operation} failed with Windows error {code}")
             }
             Self::Unsupported => {
-                f.write_str("URI handler registration is only supported on Windows")
+                f.write_str("URI handler registration is only supported on Windows and Linux")
             }
         }
     }
@@ -56,7 +76,77 @@ impl fmt::Display for RegistrationError {
 
 impl std::error::Error for RegistrationError {}
 
+#[cfg(target_os = "linux")]
+fn foreign_handler(f: &mut fmt::Formatter<'_>, scheme: &str, command: Option<&str>) -> fmt::Result {
+    match command {
+        Some(command) => write!(
+            f,
+            "{scheme}.desktop in the user's applications directory runs {command:?} and is not a \
+             Gateinto handler entry; leaving it unchanged"
+        ),
+        None => write!(
+            f,
+            "{scheme}.desktop in the user's applications directory exists without a Gateinto \
+             handler command; leaving it unchanged"
+        ),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn foreign_handler(f: &mut fmt::Formatter<'_>, scheme: &str, command: Option<&str>) -> fmt::Result {
+    match command {
+        Some(command) => write!(
+            f,
+            "HKCU\\Software\\Classes\\{scheme} runs {command:?}, which is not a Gateinto \
+             handler; leaving it unchanged"
+        ),
+        None => write!(
+            f,
+            "HKCU\\Software\\Classes\\{scheme} exists without a Gateinto handler command; \
+             leaving it unchanged"
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overridden {
+    scheme: String,
+    by: Option<(String, PathBuf)>,
+}
+
+impl fmt::Display for Overridden {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scheme = &self.scheme;
+        match &self.by {
+            Some((id, list)) => write!(
+                f,
+                "{} sets {id:?} as the default for x-scheme-handler/{scheme}, so {scheme}:// \
+                 links may open that application instead of Gateinto",
+                list.display()
+            ),
+            None => write!(
+                f,
+                "no installed default for x-scheme-handler/{scheme} was found that is the \
+                 Gateinto desktop file, so {scheme}:// links may open another application or none"
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+const URI_ARGUMENT: &str = " -- %u";
+#[cfg(not(target_os = "linux"))]
 const URI_ARGUMENT: &str = " -- \"%1\"";
+
+#[cfg(target_os = "linux")]
+const REFUSED: &[char] = &['"', '%', '`', '$', '\\'];
+#[cfg(not(target_os = "linux"))]
+const REFUSED: &[char] = &['"', '%'];
+#[cfg(target_os = "linux")]
+const REFUSED_DESCRIPTION: &str =
+    "quotes, backticks, dollar signs, backslashes, percent signs or control characters";
+#[cfg(not(target_os = "linux"))]
+const REFUSED_DESCRIPTION: &str = "quotes, percent signs or control characters";
 
 pub fn handler_command(
     executable: &Path,
@@ -75,7 +165,7 @@ fn quotable(path: &Path) -> Result<&str, RegistrationError> {
     let text = path.to_str().ok_or_else(unsafe_path)?;
     let safe = path.is_absolute()
         && !text.ends_with(['\\', '/'])
-        && !text.chars().any(|c| c == '"' || c == '%' || c.is_control());
+        && !text.chars().any(|c| REFUSED.contains(&c) || c.is_control());
     if safe { Ok(text) } else { Err(unsafe_path()) }
 }
 
@@ -86,23 +176,38 @@ pub fn is_handler_command(command: &str) -> bool {
     else {
         return false;
     };
+    let arguments = arguments
+        .strip_prefix(" open")
+        .and_then(|rest| rest.strip_suffix(URI_ARGUMENT));
+    let config = match arguments {
+        Some("") => None,
+        Some(rest) => match rest
+            .strip_prefix(" --config \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            Some(config) if !config.is_empty() && !config.contains('"') => Some(config),
+            _ => return false,
+        },
+        None => return false,
+    };
+    is_our_executable(executable, config)
+}
+
+#[cfg(target_os = "linux")]
+fn is_our_executable(executable: &str, config: Option<&str>) -> bool {
+    executable.rsplit('/').next() == Some("gateinto")
+        && quotable(Path::new(executable)).is_ok()
+        && config.is_none_or(|config| quotable(Path::new(config)).is_ok())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_our_executable(executable: &str, _config: Option<&str>) -> bool {
     let file_name = executable
         .rsplit(['\\', '/'])
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let arguments = arguments
-        .strip_prefix(" open")
-        .and_then(|rest| rest.strip_suffix(URI_ARGUMENT));
-    let arguments_valid = match arguments {
-        Some("") => true,
-        Some(rest) => rest
-            .strip_prefix(" --config \"")
-            .and_then(|rest| rest.strip_suffix('"'))
-            .is_some_and(|config| !config.is_empty() && !config.contains('"')),
-        None => false,
-    };
-    matches!(file_name.as_str(), "gateinto.exe" | "gateinto") && arguments_valid
+    matches!(file_name.as_str(), "gateinto.exe" | "gateinto")
 }
 
 pub fn validate_scheme(scheme: &str) -> Result<(), RegistrationError> {
@@ -118,17 +223,57 @@ pub fn validate_scheme(scheme: &str) -> Result<(), RegistrationError> {
     }
 }
 
-#[cfg(not(windows))]
-pub fn register(_scheme: &str, _command: &str) -> Result<(), RegistrationError> {
+#[cfg(target_os = "linux")]
+pub fn register(scheme: &str, command: &str) -> Result<Option<Overridden>, RegistrationError> {
+    handler::register(
+        &handler::Target::from_env(|name| std::env::var_os(name)),
+        scheme,
+        command,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn unregister(scheme: &str) -> Result<bool, RegistrationError> {
+    handler::unregister(
+        &handler::Target::from_env(|name| std::env::var_os(name)),
+        scheme,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn check_owner() -> Result<(), RegistrationError> {
+    handler::check_owner(
+        &handler::Target::from_env(|name| std::env::var_os(name)),
+        SCHEME,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn overridden(scheme: &str) -> Option<Overridden> {
+    handler::installed_override(
+        &handler::Target::from_env(|name| std::env::var_os(name)),
+        scheme,
+    )
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn register(_scheme: &str, _command: &str) -> Result<Option<Overridden>, RegistrationError> {
     Err(RegistrationError::Unsupported)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn unregister(_scheme: &str) -> Result<bool, RegistrationError> {
     Err(RegistrationError::Unsupported)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn registered_command(scheme: &str) -> Result<Option<String>, RegistrationError> {
+    validate_scheme(scheme)?;
+    let roots = xdg::Roots::from_env(|name| std::env::var_os(name));
+    Ok(lookup::registered_command(&roots, scheme))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn registered_command(_scheme: &str) -> Result<Option<String>, RegistrationError> {
     Err(RegistrationError::Unsupported)
 }
@@ -138,7 +283,7 @@ pub use windows::{register, registered_command, unregister};
 
 #[cfg(windows)]
 mod windows {
-    use super::{RegistrationError, is_handler_command, validate_scheme};
+    use super::{Overridden, RegistrationError, is_handler_command, validate_scheme};
     use crate::registry::{Key, delete_tree, key_exists, read_string};
     use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
 
@@ -168,7 +313,7 @@ mod windows {
         }
     }
 
-    pub fn register(scheme: &str, command: &str) -> Result<(), RegistrationError> {
+    pub fn register(scheme: &str, command: &str) -> Result<Option<Overridden>, RegistrationError> {
         if !is_handler_command(command) {
             return Err(RegistrationError::ForeignHandler {
                 scheme: scheme.to_owned(),
@@ -187,7 +332,7 @@ mod windows {
         if result.is_err() && !existed {
             let _ = delete_tree(HKEY_CURRENT_USER, &path);
         }
-        result
+        result.map(|()| None)
     }
 
     pub fn unregister(scheme: &str) -> Result<bool, RegistrationError> {
@@ -211,12 +356,16 @@ mod tests {
     const CONFIG: &str = r"C:\Users\me\gateinto.toml";
     #[cfg(not(windows))]
     const CONFIG: &str = "/home/me/gateinto.toml";
+    #[cfg(target_os = "linux")]
+    const URI: &str = "%u";
+    #[cfg(not(target_os = "linux"))]
+    const URI: &str = "\"%1\"";
 
     #[test]
     fn the_command_quotes_the_executable_and_the_uri_after_an_end_of_options_marker() {
         assert_eq!(
             handler_command(Path::new(EXE), None).unwrap(),
-            format!("\"{EXE}\" open -- \"%1\"")
+            format!("\"{EXE}\" open -- {URI}")
         );
     }
 
@@ -224,7 +373,7 @@ mod tests {
     fn the_command_passes_the_config_file_quoted() {
         assert_eq!(
             handler_command(Path::new(EXE), Some(Path::new(CONFIG))).unwrap(),
-            format!("\"{EXE}\" open --config \"{CONFIG}\" -- \"%1\"")
+            format!("\"{EXE}\" open --config \"{CONFIG}\" -- {URI}")
         );
     }
 
@@ -255,6 +404,35 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn paths_that_a_desktop_entry_would_interpret_are_refused() {
+        for path in [
+            "/opt/a`b/gateinto",
+            "/opt/$HOME/gateinto",
+            "/opt/a\\b/gateinto",
+            "/opt/a\u{7f}b/gateinto",
+        ] {
+            assert!(handler_command(Path::new(path), None).is_err(), "{path:?}");
+            assert!(
+                handler_command(Path::new(EXE), Some(Path::new(path))).is_err(),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_refusal_names_the_characters_refused_on_linux() {
+        let error = handler_command(Path::new("/opt/$X/gateinto"), None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot use \"/opt/$X/gateinto\" in a URI handler command: it must be an absolute \
+             path without quotes, backticks, dollar signs, backslashes, percent signs or control \
+             characters that does not end with a separator"
+        );
+    }
+
     #[test]
     fn scheme_names_are_restricted() {
         for scheme in ["gateinto", "gateinto-test-123", "a"] {
@@ -275,14 +453,63 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_lookup_refuses_invalid_schemes() {
+        assert_eq!(
+            registered_command("../gateinto"),
+            Err(RegistrationError::InvalidScheme("../gateinto".to_owned()))
+        );
+    }
+
     #[test]
     fn built_commands_are_recognised_as_gateinto_handlers() {
         for command in [
             handler_command(Path::new(EXE), None).unwrap(),
             handler_command(Path::new(EXE), Some(Path::new(CONFIG))).unwrap(),
-            r#""C:\dev\target\debug\GATEINTO.EXE" open -- "%1""#.to_owned(),
         ] {
             assert!(is_handler_command(&command), "{command}");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_windows_executable_name_is_matched_case_insensitively() {
+        assert!(is_handler_command(
+            r#""C:\dev\target\debug\GATEINTO.EXE" open -- "%1""#
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_commands_must_be_ones_handler_command_would_build() {
+        for command in [
+            r#""/opt/gateinto/gateinto" open -- "%1""#,
+            r#""/opt/gateinto/gateinto" open -- %u %f"#,
+            r#""/opt/gateinto/gateinto" open -- %U"#,
+            r#""/opt/gateinto/gateinto" open %u"#,
+            r#""/opt/gateinto/GATEINTO" open -- %u"#,
+            r#""/opt/gateinto/gateinto.exe" open -- %u"#,
+            r#""/opt/gateinto/other" open -- %u"#,
+            r#""gateinto" open -- %u"#,
+            r#""bin/gateinto" open -- %u"#,
+            r#""/opt/$X/gateinto" open -- %u"#,
+            r#""/opt/a`id`/gateinto" open -- %u"#,
+            r#""/opt/a\b/gateinto" open -- %u"#,
+            r#""/opt/100%/gateinto" open -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "$HOME/g.toml" -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "/a`id`.toml" -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "/a\b.toml" -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "/a%%.toml" -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "g.toml" -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "/etc/" -- %u"#,
+            r#""/opt/gateinto/gateinto" open --config "" -- %u"#,
+            "\"/opt/gateinto/gateinto\" open --config \"/a\tb.toml\" -- %u",
+            r#""/opt/gateinto/gateinto" open -- %u & calc"#,
+            r#""/opt/gateinto/gateinto" open -- %u "#,
+            r#""/opt/gateinto/gateinto" open --config "/a" "/b" -- %u"#,
+        ] {
+            assert!(!is_handler_command(command), "{command}");
         }
     }
 
@@ -303,6 +530,48 @@ mod tests {
             r#""C:\Gateinto\gateinto.exe"#,
         ] {
             assert!(!is_handler_command(command), "{command}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_errors_name_the_desktop_file_only_when_one_was_read() {
+        let command = "\"/opt/x/other\" open -- %u";
+        for (error, text) in [
+            (
+                RegistrationError::ForeignHandler {
+                    scheme: "gateinto".to_owned(),
+                    command: Some(command.to_owned()),
+                },
+                "gateinto.desktop in the user's applications directory runs \"\\\"/opt/x/other\\\" \
+                 open -- %u\" and is not a Gateinto handler entry; leaving it unchanged",
+            ),
+            (
+                RegistrationError::ForeignHandler {
+                    scheme: "gateinto".to_owned(),
+                    command: None,
+                },
+                "gateinto.desktop in the user's applications directory exists without a Gateinto \
+                 handler command; leaving it unchanged",
+            ),
+            (
+                RegistrationError::ForeignDefault {
+                    scheme: "gateinto".to_owned(),
+                    list: PathBuf::from("/home/me/.config/mimeapps.list"),
+                    ids: vec!["other.desktop".to_owned()],
+                },
+                "/home/me/.config/mimeapps.list sets [\"other.desktop\"] as the default for \
+                 x-scheme-handler/gateinto, which is not only the Gateinto desktop file; leaving \
+                 it unchanged",
+            ),
+            (
+                RegistrationError::NotAHandlerCommand(command.to_owned()),
+                "refusing to register \"\\\"/opt/x/other\\\" open -- %u\": it is not a Gateinto \
+                 handler command, which runs an executable named gateinto by an absolute path; \
+                 nothing was written",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
         }
     }
 }

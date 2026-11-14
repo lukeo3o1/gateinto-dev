@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub fn no_config_home() -> PathBuf {
-    std::env::temp_dir().join(format!("gateinto-no-config-{}", std::process::id()))
+pub fn isolated_root() -> PathBuf {
+    std::env::temp_dir().join(format!("gateinto-isolated-{}", std::process::id()))
 }
 
 fn credentials_prompt() -> PathBuf {
@@ -18,8 +18,12 @@ fn credentials_prompt() -> PathBuf {
 pub fn gateinto() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_gateinto"));
     command
-        .env("XDG_CONFIG_HOME", no_config_home())
-        .env("APPDATA", no_config_home())
+        .env("XDG_CONFIG_HOME", isolated_root())
+        .env("XDG_CONFIG_DIRS", isolated_root())
+        .env("XDG_DATA_HOME", isolated_root())
+        .env("XDG_DATA_DIRS", isolated_root())
+        .env_remove("XDG_CURRENT_DESKTOP")
+        .env("APPDATA", isolated_root())
         .env("GATEINTO_TEST_CREDENTIALS_FILE", credentials_prompt());
     command
 }

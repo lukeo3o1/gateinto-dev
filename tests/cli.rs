@@ -1,7 +1,7 @@
 mod isolated;
 use std::path::PathBuf;
 
-use isolated::{gateinto as gateinto_command, no_config_home};
+use isolated::{gateinto as gateinto_command, isolated_root};
 
 #[test]
 fn prints_version() {
@@ -222,7 +222,7 @@ fn help(args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) {
+fn flag_entry(help: &str, flag: &str) -> String {
     let lines: Vec<&str> = help.lines().map(str::trim_start).collect();
     let start = lines
         .iter()
@@ -234,8 +234,12 @@ fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) 
         .take_while(|(i, line)| *i == 0 || !line.starts_with('-'))
         .map(|(_, line)| *line)
         .collect();
+    entry.join(" ")
+}
+
+fn assert_flag_default(help: &str, flag: &str, default: impl std::fmt::Display) {
     assert!(
-        entry.join(" ").contains(&format!("[default: {default}]")),
+        flag_entry(help, flag).contains(&format!("[default: {default}]")),
         "{flag} should document [default: {default}]:\n{help}"
     );
 }
@@ -350,7 +354,7 @@ fn reset_deletes_a_config_file_only_when_named_or_at_the_default_location() {
         stderr.contains(&format!(
             "--purge-config found no config file named with --config or at {}, and no gateways \
              added from links; nothing was deleted",
-            default_config(&no_config_home()).display()
+            default_config(&isolated_root()).display()
         )),
         "{stderr}"
     );
@@ -394,7 +398,7 @@ fn setup_and_status_check_the_config_before_touching_the_key() {
     let _ = std::fs::remove_file(&path);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn setup_requires_windows() {
     let (success, _, stderr) = gateinto_without_terminal(&["setup"]);
@@ -405,7 +409,45 @@ fn setup_requires_windows() {
     );
 }
 
+#[cfg(target_os = "linux")]
+const LINUX_SETUP: &str = "setup is not available on Linux yet: it creates the device key, and \
+                           no device key backend for Linux has been decided; run `gateinto uri \
+                           register` to register the gateinto:// handler on its own";
+
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_on_linux_points_to_uri_register() {
+    let (success, stdout, stderr) = gateinto_without_terminal(&["setup"]);
+    assert!(!success);
+    assert!(stdout.starts_with("config: none (no file at "), "{stdout}");
+    assert!(!stdout.contains("device-key"), "{stdout}");
+    assert!(stderr.ends_with(&format!("{LINUX_SETUP}\n")), "{stderr}");
+    assert!(!stderr.contains("only supported on Windows"), "{stderr}");
+}
+
 #[cfg(not(windows))]
+#[test]
+fn commands_never_read_host_xdg_directories() {
+    use std::ffi::OsStr;
+
+    let command = gateinto_command();
+    let envs: Vec<_> = command.get_envs().collect();
+    let root = isolated_root();
+    for name in [
+        "XDG_CONFIG_HOME",
+        "XDG_CONFIG_DIRS",
+        "XDG_DATA_HOME",
+        "XDG_DATA_DIRS",
+    ] {
+        assert!(
+            envs.contains(&(OsStr::new(name), Some(root.as_os_str()))),
+            "{name}"
+        );
+    }
+    assert!(envs.contains(&(OsStr::new("XDG_CURRENT_DESKTOP"), None)));
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn status_is_read_only_and_reports_what_it_can() {
     let (success, stdout, stderr) = gateinto_without_terminal(&["status"]);
@@ -419,11 +461,62 @@ fn status_is_read_only_and_reports_what_it_can() {
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
              uri-handler: not supported on this platform\n",
-            default_config(&no_config_home()).display(),
-            default_config(&no_config_home())
+            default_config(&isolated_root()).display(),
+            default_config(&isolated_root())
                 .with_file_name("gateways")
-                .display()
+                .display(),
         )
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_on_linux_reports_the_device_key_terminals_and_os_user_as_they_are() {
+    let (success, stdout, stderr) = gateinto_without_terminal(&["status"]);
+    assert!(success, "{stdout}{stderr}");
+    let (containment, rest): (Vec<&str>, Vec<&str>) = stdout
+        .lines()
+        .partition(|line| line.starts_with("terminal-containment: "));
+    assert_eq!(
+        rest.join("\n"),
+        format!(
+            "key-name: gateinto-device-v1\n\
+             device-key: unavailable: no device key backend on Linux; connections are \
+             unauthenticated\n\
+             config: none (no file at {}; pass --config to use another file)\n\
+             linked-gateways: none (no directory at {})\n\
+             agent: not running\n\
+             uri-handler: not registered\n\
+             terminal-sessions: not supported on Linux yet\n\
+             os-user: not offered by any session on Linux yet; pidfd_open is available",
+            default_config(&isolated_root()).display(),
+            default_config(&isolated_root())
+                .with_file_name("gateways")
+                .display(),
+        )
+    );
+    let [containment] = containment[..] else {
+        panic!("{stdout}");
+    };
+    assert!(
+        containment == "terminal-containment: available"
+            || containment
+                .starts_with("terminal-containment: unavailable: terminal sessions need "),
+        "{containment}"
+    );
+    let order: Vec<&str> = stdout
+        .lines()
+        .map(|line| line.split_once(':').unwrap().0)
+        .skip(5)
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "uri-handler",
+            "terminal-sessions",
+            "terminal-containment",
+            "os-user"
+        ]
     );
 }
 
@@ -502,6 +595,7 @@ fn reset_yes_only_works_together_with_purge_config() {
     assert!(stderr.contains("--purge-config"), "{stderr}");
 }
 
+#[cfg(windows)]
 #[test]
 fn reset_help_says_which_config_file_is_deleted() {
     let help = help(&["reset"]);
@@ -509,6 +603,63 @@ fn reset_help_says_which_config_file_is_deleted() {
         help.contains("Also delete the config file named with --config, or else the default"),
         "{help}"
     );
+    assert!(
+        flag_entry(&help, "--purge-config").contains(r"%APPDATA%\Gateinto\gateways"),
+        "{help}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn reset_help_says_that_nothing_is_deleted_without_a_device_key() {
+    let reset = help(&["reset"]);
+    assert!(
+        reset.starts_with(
+            "Permanently delete Gateinto data that an uninstall keeps; on this platform there is \
+             no device key, so it deletes nothing"
+        ),
+        "{reset}"
+    );
+    let purge_config = flag_entry(&reset, "--purge-config");
+    assert!(!purge_config.contains("%APPDATA%"), "{purge_config}");
+    assert!(
+        purge_config.contains(
+            "Deletes nothing on this platform; delete gateinto.toml and the gateways directory in \
+             $XDG_CONFIG_HOME/gateinto (default ~/.config/gateinto) yourself"
+        ),
+        "{purge_config}"
+    );
+    let yes = flag_entry(&reset, "--yes");
+    assert!(!yes.contains("deleting the config file"), "{yes}");
+    let overview = help(&[]);
+    assert!(
+        overview.contains("there is no device key, so it deletes nothing"),
+        "{overview}"
+    );
+}
+
+#[test]
+fn uri_help_says_development_use_only_on_windows() {
+    for help in [help(&[]), help(&["uri"])] {
+        assert!(
+            help.contains("Register or remove the per-user gateinto:// URI handler"),
+            "{help}"
+        );
+        assert_eq!(help.contains("(development use)"), cfg!(windows), "{help}");
+    }
+}
+
+#[test]
+fn setup_help_says_install_sh_registers_the_handler_on_linux() {
+    for help in [help(&[]), help(&["setup"])] {
+        assert!(
+            help.contains(
+                "on Linux, where install.sh registers the gateinto:// handler, it checks the \
+                 config and fails because there is no device key yet"
+            ),
+            "{help}"
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -798,10 +949,12 @@ fn setup_reports_a_damaged_gateway_file_and_continues() {
     let (success, stdout, stderr) = home.run(&["setup"]);
     assert!(stdout.contains("linked-gateway: error: "), "{stdout}");
     assert!(!success);
-    assert!(
-        stderr.contains("device keys are only supported on Windows"),
-        "{stderr}"
-    );
+    let expected = if cfg!(target_os = "linux") {
+        "setup is not available on Linux yet"
+    } else {
+        "device keys are only supported on Windows"
+    };
+    assert!(stderr.contains(expected), "{stderr}");
 }
 
 #[cfg(unix)]

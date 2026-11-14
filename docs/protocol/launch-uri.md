@@ -467,11 +467,12 @@ linked entry is ignored.
   directory (sessions that are open stay open until closed). If several
   files carry the name, for example a valid and a damaged one, it deletes
   nothing and lists them all. A damaged file is removed by deleting it.
-  `gateinto reset --purge-device-identity --purge-config` deletes the
-  regular `*.toml` files of the directory and
+  On Windows, `gateinto reset --purge-device-identity --purge-config`
+  deletes the regular `*.toml` files of the directory and
   Gateinto's own leftover temporary files, and the directory if it is then
   empty, together with the configuration file. Its messages count the
-  gateway files and the temporary files separately.
+  gateway files and the temporary files separately. On Linux, `reset`
+  deletes nothing ([install.md](../install.md#reset-on-linux)).
 
 ## What a gateway added from a link gets
 
@@ -714,9 +715,10 @@ Limitations:
   proxy until it is closed, and its profile is removed at the next agent
   start.
 
-## URI handler registration (Windows, development use)
+## URI handler registration
 
-`gateinto uri register [--config FILE]` writes, for the current user only:
+On Windows, for development, `gateinto uri register [--config FILE]` writes,
+for the current user only:
 
 ```text
 HKCU\Software\Classes\gateinto
@@ -743,7 +745,11 @@ reports when nothing is registered and refuses to touch a foreign handler.
 `gateinto.exe` is a console program, so Windows may show a console window
 for as long as `gateinto open` runs; the agent it starts has no console.
 
-Both commands report an error on other platforms. Machine-wide registration,
+On Linux, `install.sh` runs `gateinto uri register` and `uninstall.sh` runs
+`gateinto uri unregister`; they write and remove a desktop file and a
+`mimeapps.list` default for the current user, as described in
+[install.md](../install.md#uri-register-and-uri-unregister-on-linux). On
+other platforms both commands report an error. Machine-wide registration,
 an installer and code signing are out of scope. Chrome and Edge normally ask for
 confirmation before they hand a `gateinto://` link to Windows; whether and
 how they do is not verified.
