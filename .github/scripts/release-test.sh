@@ -820,9 +820,25 @@ if ! command -v systemd-analyze > /dev/null; then
   echo 'skip install check of the user unit: needs systemd-analyze'
 else
   chmod 0711 "$layouts"
+  registering=$area/registering
+  cat > "$registering" <<STUB
+#!/bin/sh
+printf '%s\n' "\$0 \$*" >> '$area/calls'
+if [ -e '$area/fail-'"\$2" ]; then exit 3; fi
+list=\$HOME/.config/mimeapps.list
+case \$* in
+  'uri register') mkdir -p "\$HOME/.config" && printf '[Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop\n' > "\$list" ;;
+  'uri unregister') sed -i -f '$area/unregister.sed' "\$list" ;;
+  status) printf 'uri-handler: gateinto: "%s" open -- %%u\n' "\$0" ;;
+esac
+STUB
+  chmod 0755 "$registering"
+  unregister_ours='s/=gateinto\.desktop;/=/'
+  printf '%s\n' "$unregister_ours" > "$area/unregister.sed"
   for unit in shipped misspelt unexecutable; do
     mkdir "$layouts/$unit"
     cp -r "$pkg" "$layouts/$unit/"
+    cp "$registering" "$layouts/$unit/$package/gateinto"
     case $unit in
       misspelt) sed -i 's/^Restart=/Restrt=/' "$layouts/$unit/$package/gateinto-agent.service" ;;
       unexecutable) sed -i 's|/gateinto agent$|/missing agent|' "$layouts/$unit/$package/gateinto-agent.service" ;;
@@ -847,6 +863,29 @@ else
       pass "$name"
     fi
   done
+
+  for broken in refuses drops; do
+    rm -f "$area"/fail-*
+    if [[ $broken == refuses ]]; then
+      : > "$area/fail-unregister"
+      name='install check when uninstall refuses a shared x-scheme-handler/gateinto line'
+      message='uninstall.sh: "gateinto uri unregister" failed, so ~/.local/bin/gateinto was kept; run uninstall.sh again after fixing the error above'
+    else
+      printf '%s\n' '/^x-scheme-handler\/gateinto=/d' > "$area/unregister.sed"
+      name='install check when uninstall drops the other ids of a shared x-scheme-handler/gateinto line'
+      message='uninstall.sh did not leave exactly other.desktop on the shared x-scheme-handler/gateinto line'
+    fi
+    : > "$area/calls"
+    if as_user "$install_check" "$layouts/shipped.tar.gz" > "$work/stdout" 2> "$work/stderr"; then
+      fail "$name" 'succeeded'
+    elif ! grep -qxF "$message" "$work/stderr"; then
+      fail "$name" "stderr lacks '$message': $(cat "$work/stderr")"
+    else
+      pass "$name"
+    fi
+  done
+  rm -f "$area"/fail-*
+  printf '%s\n' "$unregister_ours" > "$area/unregister.sed"
 fi
 
 if ! can_root; then

@@ -1,4 +1,5 @@
 use super::keyfile;
+use std::borrow::Cow;
 
 const GROUP: &str = "Default Applications";
 
@@ -47,17 +48,42 @@ pub(crate) fn with_handler(text: &str, scheme: &str) -> String {
 }
 
 pub(crate) fn without_handler(text: &str, scheme: &str) -> Option<String> {
-    let lines = lines(text, scheme);
-    lines
+    let ours = desktop_id(scheme);
+    let mut changed = false;
+    let out = lines(text, scheme)
         .iter()
-        .any(|line| line.kind == Kind::Handler)
-        .then(|| {
-            lines
-                .iter()
-                .filter(|line| line.kind != Kind::Handler)
-                .map(|line| line.text)
-                .collect()
+        .map(|line| {
+            let kept = match line.kind {
+                Kind::Handler => without_id(line.text, &ours),
+                _ => Cow::Borrowed(line.text),
+            };
+            changed |= kept != line.text;
+            kept
         })
+        .collect();
+    changed.then_some(out)
+}
+
+fn without_id<'a>(line: &'a str, id: &str) -> Cow<'a, str> {
+    let body = line.trim_end_matches(['\r', '\n']);
+    let Some((_, value)) = body.split_once('=') else {
+        return Cow::Borrowed(line);
+    };
+    let value = value.trim_start_matches(keyfile::is_space);
+    let pieces: Vec<&str> = pieces(value).collect();
+    let kept: Vec<&str> = pieces
+        .iter()
+        .copied()
+        .filter(|piece| keyfile::trim(piece) != id)
+        .collect();
+    if kept.len() == pieces.len() {
+        Cow::Borrowed(line)
+    } else if kept.iter().all(|piece| keyfile::trim(piece).is_empty()) {
+        Cow::Borrowed("")
+    } else {
+        let head = &body[..body.len() - value.len()];
+        Cow::Owned(format!("{head}{}{}", kept.join(";"), &line[body.len()..]))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,15 +163,16 @@ fn values<'a>(text: &'a str, scheme: &str) -> impl Iterator<Item = &'a str> {
 }
 
 fn ids(value: &str) -> impl Iterator<Item = &str> {
+    pieces(value).map(keyfile::trim).filter(|id| !id.is_empty())
+}
+
+fn pieces(value: &str) -> impl Iterator<Item = &str> {
     let mut escaped = false;
-    value
-        .split(move |c| {
-            let separator = c == ';' && !escaped;
-            escaped = c == '\\' && !escaped;
-            separator
-        })
-        .map(keyfile::trim)
-        .filter(|id| !id.is_empty())
+    value.split(move |c| {
+        let separator = c == ';' && !escaped;
+        escaped = c == '\\' && !escaped;
+        separator
+    })
 }
 
 fn ending(line: &str) -> &str {
@@ -267,9 +294,19 @@ text/html=firefox.desktop
              x-scheme-handler/gateinto=gateinto.desktop\n\
              text/html=firefox.desktop\n"
         );
+        assert_eq!(without_handler(text, "gateinto"), None);
         assert_eq!(
-            without_handler(text, "gateinto").as_deref(),
-            Some("[Default Applications]\ntext/html=firefox.desktop\n")
+            without_handler(
+                &text
+                    .replace("=a.desktop", "=a.desktop;gateinto.desktop")
+                    .replace("=b.desktop", "=gateinto.desktop"),
+                "gateinto"
+            )
+            .as_deref(),
+            Some(
+                "[Default Applications]\nX-Scheme-Handler/gateinto=a.desktop\n\
+                 text/html=firefox.desktop\n"
+            )
         );
         let dotless = "[Default Applications]\nx-scheme-handler/gateİnto=a.desktop\n";
         assert_eq!(default_ids(dotless, "gateinto"), Vec::<&str>::new());
@@ -284,7 +321,8 @@ text/html=firefox.desktop
             "\u{feff}[Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop\n"
         );
         assert_eq!(
-            without_handler(text, "gateinto").as_deref(),
+            without_handler(&text.replace("=a.desktop", "=gateinto.desktop"), "gateinto")
+                .as_deref(),
             Some("\u{feff}[Default Applications]\n")
         );
         assert_eq!(
@@ -441,8 +479,8 @@ x-scheme-handler/gateinto=gateinto.desktop"
         );
         assert_eq!(
             without_handler(
-                "[Default Applications]\nx-scheme-handler/gateinto=a\n[Default Applications]\n\
-                 x-scheme-handler/gateinto=b",
+                "[Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop\n\
+                 [Default Applications]\nx-scheme-handler/gateinto=gateinto.desktop;",
                 "gateinto"
             )
             .as_deref(),
@@ -454,5 +492,12 @@ x-scheme-handler/gateinto=gateinto.desktop"
     fn removing_an_absent_handler_reports_no_change() {
         assert_eq!(without_handler(UNRELATED, "gateinto"), None);
         assert_eq!(without_handler("", "gateinto"), None);
+        assert_eq!(
+            without_handler(
+                "[Default Applications]\nx-scheme-handler/gateinto=a.desktop\n",
+                "gateinto"
+            ),
+            None
+        );
     }
 }

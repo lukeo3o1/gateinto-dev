@@ -47,7 +47,7 @@ pub(crate) fn trim(text: &str) -> &str {
     text.trim_matches(is_space)
 }
 
-fn is_space(c: char) -> bool {
+pub(crate) fn is_space(c: char) -> bool {
     c.is_ascii_whitespace()
 }
 

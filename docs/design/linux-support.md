@@ -274,13 +274,19 @@ and a shared parser, not a second implementation. The executable is
   fails on Linux (Area 5), so it prints no override warning; `status` prints
   the same text as `uri-handler-warning` when our desktop file is installed
   (Area 5).
-- `unregister(scheme)` reads and checks both files before changing anything.
-  It removes our `mimeapps.list` line only when every id on the scheme's
-  lines is `<scheme>.desktop` and there is at least one, then our desktop
-  file. It returns `ForeignHandler` or `ForeignDefault` if either is foreign,
-  `Ok(true)` if it removed anything and `Ok(false)` otherwise, and never
-  creates a directory. If the line was removed but the desktop file removal
-  fails, running it again removes the desktop file.
+- `unregister(scheme)` checks both anchors (below), reads both files and
+  checks the desktop file before changing anything, and returns
+  `ForeignHandler` if it is foreign. A missing anchor is not an error here,
+  since nothing can be registered under it. From every line of the scheme's
+  key in `[Default Applications]` it removes each id `<scheme>.desktop` and
+  keeps the other ids in order with their separators; a line left without
+  ids is removed. A line without our id,
+  such as another program's default, is kept byte for byte and is not an
+  error, so `ForeignDefault` is only returned by `register`. It then removes
+  our desktop file. It returns `Ok(true)` if it removed anything and
+  `Ok(false)` otherwise, and never creates a directory. If the line was
+  changed but the desktop file removal fails, running it again removes the
+  desktop file.
 
 `gateinto uri register` and `uri unregister` take a hidden `--scheme`
 option, restricted to `gateinto` and `gateinto-test-<name>`, for the
@@ -296,15 +302,16 @@ moment can lose its update or ours (the last rename wins). Gateinto re-reads
 the file just before writing to keep the window small, and the race is
 documented. `mimeapps.list` is parsed as an INI-like file and only the
 `x-scheme-handler/<scheme>` key in `[Default Applications]` is added or
-removed; every other line, comment and
-section is kept byte for byte. The one exception is a
-`[Default Applications]` header that `register` added to a list without
-one: `unregister` removes only the key line and leaves that header. A `mimeapps.list` or desktop file that is a
-symlink or not a regular file is refused rather than followed or replaced.
+removed; every other line, comment and section is kept byte for byte. The
+one exception is a `[Default Applications]` header that `register` added to
+a list without one: `unregister` removes only our id or the key line and
+leaves that header. A `mimeapps.list` or desktop file that is a symlink or
+not a regular file is refused rather than followed or replaced.
 Every write and removal is anchored at a directory that must contain the
 target lexically (the home directory, or the XDG root when it is not under
 it). Both anchors are checked before anything is written: an anchor is never
-created, and a missing one fails with "directory `<anchor>` does not exist".
+created, and a missing one fails `register` with "directory `<anchor>` does
+not exist".
 The anchor must be a directory owned by the effective uid, which refuses
 `sudo gateinto uri register` with a preserved `HOME`. Each level between the
 anchor and the target directory is then checked in turn: symlinks are
@@ -330,7 +337,8 @@ example mode `0o300`) fails with "Permission denied" instead of being used.
   Windows. What a link may carry is unchanged: never credentials, CA or TLS
   settings or commands, and a link never starts a terminal.
 - Only the scheme's own `mimeapps.list` key and the scheme's own desktop file
-  are touched; a foreign handler is reported, not replaced.
+  are touched; a foreign handler is reported, not replaced, and other ids on
+  the key's line are kept.
 - Any process of the same user can rewrite these files; that is the same
   boundary as `HKCU\Software\Classes` on Windows and is stated in the
   security model.
@@ -345,8 +353,10 @@ environment):
   refused; built commands are recognised by `is_handler_command`;
 - register, re-register (idempotent), unregister, unregister twice
   (`Ok(false)`);
-- foreign desktop file, foreign default in `mimeapps.list`, and a
-  desktop-specific override, each with the expected result;
+- foreign desktop file, foreign default in `mimeapps.list` (refused by
+  `register`, kept by `unregister`), a line shared with other ids from which
+  `unregister` removes only `<scheme>.desktop`, and a desktop-specific
+  override, each with the expected result;
 - `mimeapps.list` round trip keeps unrelated lines, comments, sections and
   other keys;
 - symlinked `mimeapps.list` and a foreign-owned anchor, level or symlinked
@@ -364,6 +374,10 @@ GIO treats a desktop file whose `Exec` binary does not exist as invalid, so
 the test registers the built `gateinto` binary. It then unregisters and
 checks that `gio` reports no default. `gio` is present locally at
 `/usr/bin/gio`; whether it is on the runner image still needs verification.
+
+A second test registers, rewrites the line to also name `other.desktop`,
+unregisters, and compares the file contents, without `gio`: the line must
+then name only `other.desktop`.
 
 ### Manual and unverified
 
@@ -964,8 +978,11 @@ As implemented in step 15:
   `packaging/linux/*.sh` and installs and uninstalls a tarball of the
   debug `gateinto` with `linux-install-check.sh`, which refuses a tarball
   without exactly one top-level directory and checks that the
-  registered handler runs `~/.local/bin/gateinto` and that uninstall
-  removes the binary and the desktop file.
+  registered handler runs `~/.local/bin/gateinto`, that install makes
+  `gateinto.desktop` the default in `~/.config/mimeapps.list`, and that,
+  after `other.desktop;` is appended to that line, uninstall removes the
+  binary and the desktop file and leaves exactly
+  `x-scheme-handler/gateinto=other.desktop;`.
 
 As implemented in step 16:
 
@@ -1048,9 +1065,12 @@ As implemented in step 16:
   255 does. It runs `linux-install-check.sh` without `systemd-analyze`
   on `PATH` and expects the fixed message, and, as the user, on tarballs
   of the stub `gateinto` with the shipped unit, with a misspelt key and
-  with a missing `ExecStart` binary, expecting only the first to pass;
-  it skips those three when `systemd-analyze` is not installed and says
-  so.
+  with a missing `ExecStart` binary, expecting only the first to pass.
+  That stub writes and edits `mimeapps.list` as `uri register` and
+  `uri unregister` do; with the shipped unit it is also run with a
+  `uri unregister` that fails and with one that drops the whole line,
+  and the check must fail with the matching message. It skips these
+  cases when `systemd-analyze` is not installed and says so.
 
 ### Security
 
