@@ -24,6 +24,7 @@ if (( ${#package[@]} != 1 )) || [[ ! -d ${package[0]} || -L ${package[0]} ]]; th
 fi
 installed=$home/.local/bin/gateinto
 desktop=$home/.local/share/applications/gateinto.desktop
+list=$home/.config/mimeapps.list
 
 run() {
   env -i HOME="$home" PATH=/usr/bin:/bin "$@"
@@ -43,9 +44,18 @@ if ! grep -qxF "uri-handler: gateinto: \"$installed\" open -- %u" "$work/status"
   echo 'the installed gateinto:// handler does not run ~/.local/bin/gateinto' >&2
   exit 1
 fi
+if ! grep -qsxF 'x-scheme-handler/gateinto=gateinto.desktop' "$list"; then
+  echo 'install.sh did not make gateinto.desktop the default in ~/.config/mimeapps.list' >&2
+  exit 1
+fi
+sed -i 's|^x-scheme-handler/gateinto=gateinto\.desktop$|&;other.desktop;|' "$list"
 run "${package[0]}/uninstall.sh"
 if [[ -e $installed || -e $desktop ]]; then
   echo 'uninstall.sh left ~/.local/bin/gateinto or the desktop file' >&2
+  exit 1
+fi
+if [[ "$(grep '^x-scheme-handler/gateinto=' "$list" || true)" != 'x-scheme-handler/gateinto=other.desktop;' ]]; then
+  echo 'uninstall.sh did not leave exactly other.desktop on the shared x-scheme-handler/gateinto line' >&2
   exit 1
 fi
 echo 'installed and uninstalled'

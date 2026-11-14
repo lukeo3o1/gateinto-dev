@@ -177,6 +177,35 @@ fn registering_a_test_scheme_writes_a_handler_that_unregistering_removes() {
 }
 
 #[test]
+fn unregistering_keeps_the_ids_of_other_programs_on_a_shared_line() {
+    let home = Home::new();
+    stdout(&home.gateinto(&["uri", "register"]));
+    std::fs::write(
+        home.list(),
+        format!(
+            "[Default Applications]\nx-scheme-handler/{0}={0}.desktop;other.desktop;\n",
+            home.scheme
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        stdout(&home.gateinto(&["uri", "unregister"])),
+        format!(
+            "removed the {}:// handler of the current user\n",
+            home.scheme
+        )
+    );
+    assert!(!home.entry().exists());
+    assert_eq!(
+        std::fs::read_to_string(home.list()).unwrap(),
+        format!(
+            "[Default Applications]\nx-scheme-handler/{}=other.desktop;\n",
+            home.scheme
+        )
+    );
+}
+
+#[test]
 fn status_reports_the_registered_handler_and_a_default_that_overrides_it() {
     let home = Home::new();
     let mut command = isolated::gateinto();

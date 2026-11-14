@@ -562,11 +562,15 @@ open that application instead of Gateinto`, and `status` shows the same text as
 `uri-handler-warning`. Gateinto does not lock `mimeapps.list`: a desktop tool that writes it at
 the same moment can lose its change or Gateinto's.
 
-`uri unregister` removes the `x-scheme-handler/gateinto` line from that `mimeapps.list` and the
+`uri unregister` removes `gateinto.desktop` from the `x-scheme-handler/gateinto` lines in the
+`[Default Applications]` section of that `mimeapps.list`, keeping any other desktop file named
+there in its order, and removes a line that named only `gateinto.desktop`. It then removes the
 desktop file, and prints `removed the gateinto:// handler of the current user`, or `no
 gateinto:// handler is registered for the current user` when there is nothing to remove. It
-keeps the rest of `mimeapps.list`, including a `[Default Applications]` header that `register`
-added, and it refuses the same foreign entries as `register`.
+keeps the rest of `mimeapps.list`, including a line that names only other programs and a
+`[Default Applications]` header that `register` added. It refuses, and changes nothing, when
+`gateinto.desktop` is not Gateinto's handler entry, and refuses symbolic links, files that are
+not regular and directories of another user as `register` does.
 
 Not verified: that a `gateinto://` link clicked in Firefox, Chrome or Chromium on a real GNOME
 or KDE desktop opens Gateinto, that `NoDisplay=true` keeps the entry out of menus while still
@@ -679,7 +683,7 @@ cd gateinto-tarball && ./uninstall.sh
 |---|---|
 | `~/.local/bin/gateinto` | removed |
 | `gateinto.desktop` in `~/.local/share/applications` (or `$XDG_DATA_HOME/applications`) | removed |
-| The line `x-scheme-handler/gateinto=gateinto.desktop` in `~/.config/mimeapps.list` (or `$XDG_CONFIG_HOME/mimeapps.list`) | removed; the file, its other lines and a `[Default Applications]` header that `install.sh` added are kept |
+| `gateinto.desktop` on the `x-scheme-handler/gateinto` line in `~/.config/mimeapps.list` (or `$XDG_CONFIG_HOME/mimeapps.list`) | removed, with the line when it names no other desktop file; the file, its other lines, other desktop files on that line and a `[Default Applications]` header that `install.sh` added are kept |
 | The user unit `~/.config/systemd/user/gateinto-agent.service` and its enablement | disabled and stopped when `systemctl` is on `PATH`, then the unit file is removed; without `systemctl` only the unit file is removed |
 | Running agent, its listeners, tunnels and sessions, and the browsers it started | closed (see below) |
 | Gateinto browser profiles in `~/.local/state/gateinto/profiles` (or `$XDG_STATE_HOME/gateinto/profiles`) | deleted; the directory itself is kept |
@@ -728,8 +732,9 @@ cd gateinto-tarball && ./uninstall.sh
 
 If step 5, 8 or 9 fails, it keeps the binary and exits with an error, so it can be run again
 after fixing the cause. A failure in step 9 comes after step 8, so the agent is already
-stopped; `uri unregister` fails, for example, when `gateinto.desktop` or the `mimeapps.list`
-default was changed to another program, which it leaves for you to remove. At the end it says
+stopped; `uri unregister` fails, for example, when `gateinto.desktop` was replaced by another
+program's file, which it leaves for you to remove. Another program named next to or instead of
+`gateinto.desktop` in `mimeapps.list` does not make it fail. At the end it says
 that it kept the configuration and the gateways added from links in the `gateinto` directory
 under `XDG_CONFIG_HOME` (by default `~/.config/gateinto`).
 
@@ -827,12 +832,14 @@ temporary home directory, with `env -i` and only `HOME` and `PATH` set, that scr
   temporary `XDG_RUNTIME_DIR` set for that check only;
 - runs `~/.local/bin/gateinto status` and requires exactly the line
   `uri-handler: gateinto: "<home>/.local/bin/gateinto" open -- %u`;
+- requires the line `x-scheme-handler/gateinto=gateinto.desktop` in `~/.config/mimeapps.list`
+  and appends `;other.desktop;` to it, as if another program shared the default;
 - runs `uninstall.sh` and checks that `~/.local/bin/gateinto` and
-  `~/.local/share/applications/gateinto.desktop` are gone.
+  `~/.local/share/applications/gateinto.desktop` are gone and that the line is exactly
+  `x-scheme-handler/gateinto=other.desktop;`.
 
-It does not check that the `mimeapps.list` line is removed, does not install or start the unit,
-and starts no agent or browser. The `release-scripts` job runs `shellcheck` on
-`packaging/linux/*.sh` and runs
+It does not install or start the unit, and starts no agent or browser. The `release-scripts`
+job runs `shellcheck` on `packaging/linux/*.sh` and runs
 [.github/scripts/release-test.sh](../.github/scripts/release-test.sh), which runs `install.sh`
 and `uninstall.sh` against a stub `gateinto` and a stub `systemctl`, with and without the unit,
 including failures of each step, a unit that is a symbolic link to a missing file, a process of

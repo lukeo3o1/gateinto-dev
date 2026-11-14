@@ -126,12 +126,18 @@ fn set_default(
 pub(crate) fn unregister(target: &Target, scheme: &str) -> Result<bool, RegistrationError> {
     validate_scheme(scheme)?;
     let places = Places::new(target, scheme)?;
+    for anchor in [&places.data_anchor, &places.config_anchor] {
+        match files::check_anchor(anchor) {
+            Ok(()) | Err(FileError::MissingAnchor(_)) => {}
+            Err(error) => return Err(file(error)),
+        }
+    }
     let entry = read_entry(&places.entry, scheme)?;
-    let list = read_list(&places.list, scheme)?;
+    let list = read(&places.list)?;
     let mut removed = false;
-    if let Some(text) = list
-        && !mimeapps::listed_ids(&text, scheme).is_empty()
-        && let Some(updated) = mimeapps::without_handler(&text, scheme)
+    if let Some(updated) = list
+        .as_deref()
+        .and_then(|text| mimeapps::without_handler(text, scheme))
     {
         files::write(
             &places.config_anchor,
@@ -546,7 +552,7 @@ X-Gateinto-Handler=1
     }
 
     #[test]
-    fn a_foreign_default_is_neither_replaced_nor_removed() {
+    fn a_foreign_default_is_not_replaced() {
         for (list, ids) in [
             (default_line("other.desktop"), &["other.desktop"][..]),
             (
@@ -581,24 +587,160 @@ X-Gateinto-Handler=1
                     put(&scratch.entry(), ENTRY);
                 }
                 let before = scratch.snapshot();
-                let foreign = Err(RegistrationError::ForeignDefault {
-                    scheme: SCHEME.to_owned(),
-                    list: scratch.list(),
-                    ids: ids.iter().map(|id| (*id).to_owned()).collect(),
-                });
                 assert_eq!(
                     register(&target, SCHEME, COMMAND),
-                    foreign.clone(),
-                    "{list}"
-                );
-                assert_eq!(
-                    unregister(&target, SCHEME),
-                    foreign.map(|_| false),
+                    Err(RegistrationError::ForeignDefault {
+                        scheme: SCHEME.to_owned(),
+                        list: scratch.list(),
+                        ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+                    }),
                     "{list}"
                 );
                 assert_eq!(scratch.snapshot(), before, "{list}");
             }
         }
+    }
+
+    #[test]
+    fn unregistering_removes_only_our_id_from_a_shared_line() {
+        for (value, kept) in [
+            ("gateinto.desktop;other.desktop;", "other.desktop;"),
+            ("other.desktop;gateinto.desktop;", "other.desktop;"),
+            ("other.desktop;gateinto.desktop", "other.desktop"),
+            (
+                "a.desktop;gateinto.desktop;b.desktop",
+                "a.desktop;b.desktop",
+            ),
+            (
+                "a.desktop ; gateinto.desktop ; b.desktop",
+                "a.desktop ; b.desktop",
+            ),
+            (
+                "gateinto.desktop;gateinto.desktop;other.desktop",
+                "other.desktop",
+            ),
+            (
+                "gateinto.desktop;a\\;gateinto.desktop;",
+                "a\\;gateinto.desktop;",
+            ),
+        ] {
+            for ours in [false, true] {
+                let scratch = Scratch::new();
+                let target = scratch.target(&[]);
+                put(&scratch.list(), &default_line(value));
+                chmod(&scratch.list(), 0o640);
+                if ours {
+                    put(&scratch.entry(), ENTRY);
+                }
+                assert_eq!(unregister(&target, SCHEME), Ok(true), "{value}");
+                assert_eq!(text(&scratch.list()), default_line(kept), "{value}");
+                assert_eq!(mode(&scratch.list()), 0o640, "{value}");
+                assert!(!scratch.entry().exists(), "{value}");
+                let after = scratch.snapshot();
+                assert_eq!(unregister(&target, SCHEME), Ok(false), "{value}");
+                assert_eq!(scratch.snapshot(), after, "{value}");
+            }
+        }
+    }
+
+    #[test]
+    fn unregistering_leaves_a_line_without_our_id_unchanged() {
+        for value in [
+            "other.desktop",
+            "other.desktop;;",
+            "a\\;gateinto.desktop",
+            "gateinto\\s.desktop",
+            "gateinto.desktop.other;",
+        ] {
+            let scratch = Scratch::new();
+            let target = scratch.target(&[]);
+            put(&scratch.list(), &default_line(value));
+            let before = scratch.snapshot();
+            assert_eq!(unregister(&target, SCHEME), Ok(false), "{value}");
+            assert_eq!(scratch.snapshot(), before, "{value}");
+
+            put(&scratch.entry(), ENTRY);
+            assert_eq!(unregister(&target, SCHEME), Ok(true), "{value}");
+            assert_eq!(text(&scratch.list()), default_line(value), "{value}");
+            assert!(!scratch.entry().exists(), "{value}");
+        }
+    }
+
+    #[test]
+    fn unregistering_removes_our_id_from_every_line_of_the_default_group() {
+        let original = "\
+[Default Applications]
+x-scheme-handler/gateinto=other.desktop;gateinto.desktop;
+x-scheme-handler/gateinto=gateinto.desktop
+text/html=gateinto.desktop;
+[Added Associations]
+x-scheme-handler/gateinto=gateinto.desktop;added.desktop;
+[Default Applications]
+X-Scheme-Handler/gateinto=gateinto.desktop;third.desktop
+x-scheme-handler/gateinto=fourth.desktop
+[Removed Associations]
+x-scheme-handler/gateinto=gateinto.desktop;removed.desktop";
+        let expected = "\
+[Default Applications]
+x-scheme-handler/gateinto=other.desktop;
+text/html=gateinto.desktop;
+[Added Associations]
+x-scheme-handler/gateinto=gateinto.desktop;added.desktop;
+[Default Applications]
+X-Scheme-Handler/gateinto=third.desktop
+x-scheme-handler/gateinto=fourth.desktop
+[Removed Associations]
+x-scheme-handler/gateinto=gateinto.desktop;removed.desktop";
+        for newline in ["\n", "\r\n"] {
+            let scratch = Scratch::new();
+            let target = scratch.target(&[]);
+            put(&scratch.list(), &original.replace('\n', newline));
+            chmod(&scratch.list(), 0o640);
+            put(&scratch.entry(), ENTRY);
+            assert_eq!(unregister(&target, SCHEME), Ok(true), "{newline:?}");
+            assert_eq!(
+                text(&scratch.list()),
+                expected.replace('\n', newline),
+                "{newline:?}"
+            );
+            assert_eq!(mode(&scratch.list()), 0o640, "{newline:?}");
+            assert!(!scratch.entry().exists(), "{newline:?}");
+        }
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_keeps_its_other_ids() {
+        let scratch = Scratch::new();
+        let target = scratch.target(&[]);
+        put(
+            &scratch.list(),
+            "[Default Applications]\r\nx-scheme-handler/gateinto=gateinto.desktop;other.desktop",
+        );
+        assert_eq!(unregister(&target, SCHEME), Ok(true));
+        assert_eq!(
+            text(&scratch.list()),
+            "[Default Applications]\r\nx-scheme-handler/gateinto=other.desktop"
+        );
+    }
+
+    #[test]
+    fn a_foreign_desktop_file_keeps_a_shared_line_unchanged() {
+        let scratch = Scratch::new();
+        let target = scratch.target(&[]);
+        put(&scratch.entry(), "[Desktop Entry]\nExec=other %u\n");
+        put(
+            &scratch.list(),
+            &default_line("gateinto.desktop;other.desktop;"),
+        );
+        let before = scratch.snapshot();
+        assert_eq!(
+            unregister(&target, SCHEME),
+            Err(RegistrationError::ForeignHandler {
+                scheme: SCHEME.to_owned(),
+                command: Some("other %u".to_owned()),
+            })
+        );
+        assert_eq!(scratch.snapshot(), before);
     }
 
     #[test]
@@ -832,6 +974,46 @@ X-Gateinto-Handler=1
         );
         assert!(!unique("config").exists());
         assert!(!unique("data").exists());
+    }
+
+    #[test]
+    fn unregistering_checks_both_anchors_before_changing_anything() {
+        let scratch = Scratch::new();
+        let home = foreign_dir(&scratch.0);
+        let uid = std::fs::metadata(&home).unwrap().uid();
+        for (config, data) in [(true, false), (false, true)] {
+            let root = |foreign: bool, name: &str| {
+                if foreign {
+                    home.clone()
+                } else {
+                    scratch.home().join(name)
+                }
+            };
+            let target = Target {
+                home: Some(scratch.home()),
+                roots: Roots {
+                    config_home: Some(root(config, ".config")),
+                    data_home: Some(root(data, ".local/share")),
+                    ..scratch.target(&[]).roots
+                },
+            };
+            if !config {
+                put(&scratch.list(), DEFAULT);
+            }
+            if !data {
+                put(&scratch.entry(), ENTRY);
+            }
+            let before = scratch.snapshot();
+            assert_eq!(
+                unregister(&target, SCHEME),
+                Err(RegistrationError::File(format!(
+                    "directory {} is owned by uid {uid}, not by the current user",
+                    home.display()
+                ))),
+                "{config} {data}"
+            );
+            assert_eq!(scratch.snapshot(), before, "{config} {data}");
+        }
     }
 
     #[test]
