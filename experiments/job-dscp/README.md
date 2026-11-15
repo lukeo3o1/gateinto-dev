@@ -36,7 +36,7 @@ Roles, run one after another in every case:
 |---|---|
 | `tagged-a` | client in a job with DSCP 10 |
 | `tagged-b` | client in a second job with DSCP 20 |
-| `tagged-child` | job with DSCP 10; the client respawns itself, so packets come from a grandchild |
+| `tagged-child` | job with DSCP 10; the first process in the job starts a child, which starts a grandchild; only the grandchild (depth 2 inside the job) sends |
 | `untagged` | client outside our jobs (negative control) |
 | `qos-policy` | `probe-qos.exe` outside our jobs, under a `New-NetQosPolicy` DSCP 30 policy (diagnostic control) |
 
@@ -58,15 +58,33 @@ External cases also try an in-box `pktmon` capture at the NIC to tell "not visib
 `ci.ps1` prints the aggregate between `=== JOB-DSCP AGGREGATE BEGIN ===` and `=== JOB-DSCP AGGREGATE END ===`
 and appends a verdict table to the job summary. Job verdicts per case:
 
-- `MARK_AT_FIRST_PACKET`: every job was set up and read back, every attempt of every tagged role has an
-  observed first packet, every observed tagged packet carries exactly its role's DSCP, and every `untagged`
-  packet has DSCP 0. `negative_control_observed` says whether any `untagged` packet was seen at all.
+- `MARK_AT_FIRST_PACKET`: every job was set up and read back; every attempt of every tagged role has an
+  observed first packet (initial SYN, or first UDP datagram) carrying its role's DSCP; every later observed
+  packet of every tagged flow (retransmitted SYNs, ACKs, FIN) carries exactly its role's DSCP too; every
+  `untagged` attempt has an observed first packet; and every observed `untagged` packet has DSCP 0.
+- `INCONCLUSIVE_NO_NEGATIVE_CONTROL`: everything above holds for the tagged roles and no `untagged` packet is
+  marked, but at least one `untagged` attempt has no observed first packet, so selectivity is unproven.
 - `NO_MARK`: jobs were set up, and no tagged packet carries a non-zero DSCP.
 - `PARTIAL_MARK`: anything in between; the per-role histograms (`first_packet_dscp`, `syn_dscp`, `all_dscp`,
-  flow counts) explain it.
+  flow counts) and `port_collisions` (local ports claimed by more than one role, which makes attribution
+  ambiguous) explain it.
 - `INCONCLUSIVE_JOB_SETUP_FAILED` (see `roles.*.job` for step booleans, Win32 error codes and read-back),
   `INCONCLUSIVE_NO_PACKETS`, `INCONCLUSIVE_TARGET_UNREACHABLE`, `INCONCLUSIVE_NO_IPV6`,
-  `INCONCLUSIVE_SNIFFER_ERROR`, `HARNESS_ERROR`.
+  `INCONCLUSIVE_SNIFFER_ERROR`, `HARNESS_ERROR`, and `SKIPPED_DEADLINE` (the harness ran out of its
+  11-minute budget before the case started).
+
+`first_packet_result` judges first packets only, ignoring every later packet of a flow, so "the SYN is marked
+but a later stack-generated ACK is not" reads as `PARTIAL_MARK` with `FIRST_PACKET_MARKED`:
+
+- `FIRST_PACKET_MARKED`: every tagged attempt has an observed first packet with its role's DSCP, every
+  `untagged` attempt has an observed first packet, and no `untagged` first packet is marked.
+- `FIRST_PACKET_NO_NEGATIVE_CONTROL`: as above, but some `untagged` attempt has no observed first packet.
+- `FIRST_PACKET_UNMARKED`: no tagged first packet carries a non-zero DSCP.
+- `FIRST_PACKET_PARTIAL`: anything in between.
+- `NOT_EVALUATED`: the job verdict is inconclusive for another reason (setup, sniffer, target, no packets).
+
+`client_error_lines` counts error lines the clients appended to their private log; the text itself is never
+published.
 
 The QoS control has its own verdict (`QOS_MARK_VISIBLE`, `QOS_NO_MARK`, `QOS_PARTIAL_MARK`, `QOS_NO_PACKETS`,
 `QOS_POLICY_UNAVAILABLE`) and never changes the job verdict. If the QoS mark is visible but the job mark is not,
@@ -74,8 +92,9 @@ the job tag is applied elsewhere or not at all; if neither is visible, WinDivert
 DSCP marker and the NIC histogram decides.
 
 The job goes red only when the harness malfunctions: build, unit or self-test failure, crash or timeout of a
-probe process, sniffer failure, harness exception, or a missing or invalid aggregate. A measured `NO_MARK` or
-`PARTIAL_MARK` is green.
+probe process, sniffer failure, harness exception, `SKIPPED_DEADLINE`, a failed cleanup, or a missing or
+invalid aggregate. Measured results (`MARK_AT_FIRST_PACKET`, `NO_MARK`, `PARTIAL_MARK`) and the
+`INCONCLUSIVE_*` verdicts other than `INCONCLUSIVE_SNIFFER_ERROR` are green.
 
 ## Privacy
 

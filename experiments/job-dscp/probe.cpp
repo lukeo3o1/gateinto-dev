@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <set>
@@ -33,6 +34,10 @@ Args parse_args(const std::vector<std::string>& args, const std::set<std::string
 std::string packet_json(const Packet& packet, const std::string& label, uint64_t seq, unsigned length,
                         bool loopback, bool outbound);
 int parse_int(const std::string& value, int low, int high);
+int spawn_depth(const Args& args);
+std::vector<std::string> respawn_args(const std::vector<std::string>& args, int depth);
+std::optional<std::string> option_value(const std::vector<std::string>& args, const std::string& name);
+bool append_line(const std::string& path, const std::string& line);
 
 int dscp_of(int tos) { return (tos & 0xFF) >> 2; }
 
@@ -199,6 +204,40 @@ int parse_int(const std::string& value, int low, int high) {
     return static_cast<int>(result);
 }
 
+int spawn_depth(const Args& args) {
+    const auto found = args.values.find("--spawn-depth");
+    return found == args.values.end() ? 0 : parse_int(found->second, 0, 4);
+}
+
+std::vector<std::string> respawn_args(const std::vector<std::string>& args, int depth) {
+    std::vector<std::string> result;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--spawn-depth" && i + 1 < args.size()) {
+            if (depth > 1) {
+                result.push_back(args[i]);
+                result.push_back(std::to_string(depth - 1));
+            }
+            ++i;
+        } else {
+            result.push_back(args[i]);
+        }
+    }
+    return result;
+}
+
+std::optional<std::string> option_value(const std::vector<std::string>& args, const std::string& name) {
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == name && args[i + 1].compare(0, 2, "--") != 0) return args[i + 1];
+    return std::nullopt;
+}
+
+bool append_line(const std::string& path, const std::string& line) {
+    std::ofstream out(path, std::ios::app);
+    out << line << '\n';
+    out.flush();
+    return static_cast<bool>(out);
+}
+
 static std::string json_port(int port) { return port < 0 ? "null" : std::to_string(port); }
 
 static const char* json_bool(bool value) { return value ? "true" : "false"; }
@@ -295,8 +334,8 @@ int self_test() {
     check(quote_arg("C:\\x\\y.exe") == "C:\\x\\y.exe", "unquoted backslashes");
     check(join_command({"a b", "c"}) == "\"a b\" c", "join command");
 
-    auto args = parse_args({"--dscp", "10", "--spawn-child", "--", "x", "--y"}, {"--spawn-child"});
-    check(args.values.at("--dscp") == "10" && args.flags.count("--spawn-child") == 1, "options");
+    auto args = parse_args({"--dscp", "10", "--flag", "--", "x", "--y"}, {"--flag"});
+    check(args.values.at("--dscp") == "10" && args.flags.count("--flag") == 1, "options");
     check((args.rest == std::vector<std::string>{"x", "--y"}), "rest after separator");
     bool rejected = false;
     try { parse_args({"--dscp"}, {}); } catch (const std::invalid_argument&) { rejected = true; }
@@ -314,6 +353,30 @@ int self_test() {
         try { parse_int(bad, 0, 63); } catch (const std::invalid_argument&) { rejected = true; }
         check(rejected, "int rejected");
     }
+
+    check(spawn_depth(parse_args({"--role", "x"}, {})) == 0, "default spawn depth");
+    check(spawn_depth(parse_args({"--spawn-depth", "2"}, {})) == 2, "spawn depth");
+    for (const char* bad : {"5", "-1", "x"}) {
+        rejected = false;
+        try { spawn_depth(parse_args({"--spawn-depth", bad}, {})); } catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "spawn depth rejected");
+    }
+    check((respawn_args({"--role", "x", "--spawn-depth", "2", "--log", "l"}, 2) ==
+           std::vector<std::string>{"--role", "x", "--spawn-depth", "1", "--log", "l"}), "respawn decrements depth");
+    check((respawn_args({"--spawn-depth", "1", "--role", "x"}, 1) == std::vector<std::string>{"--role", "x"}),
+          "last respawn sends");
+    check(option_value({"--a", "1", "--log", "f"}, "--log") == std::optional<std::string>("f"), "option value");
+    check(!option_value({"--a", "1"}, "--log") && !option_value({"--a", "--log"}, "--log"), "missing option value");
+    const std::string log_file = "job-dscp-self-test.log";
+    std::remove(log_file.c_str());
+    check(append_line(log_file, "one") && append_line(log_file, "two"), "append log");
+    std::ifstream log_stream(log_file);
+    std::string first_line, second_line;
+    std::getline(log_stream, first_line);
+    std::getline(log_stream, second_line);
+    log_stream.close();
+    std::remove(log_file.c_str());
+    check(first_line == "one" && second_line == "two", "log lines appended");
 
     parsed = parse_packet(syn.data(), syn.size());
     check(packet_json(*parsed, "observe", 7, 40, false, true) ==
@@ -694,13 +757,12 @@ static Attempt udp_attempt(const Target& target) {
     return attempt;
 }
 
-static int spawn_self(const std::vector<std::string>& args) {
+static int spawn_self(const std::vector<std::string>& args, int depth) {
     char path[MAX_PATH * 4];
     const DWORD length = GetModuleFileNameA(nullptr, path, static_cast<DWORD>(sizeof path));
     if (length == 0 || length >= sizeof path) throw std::runtime_error("module path");
     std::vector<std::string> child{path, "client"};
-    for (const auto& arg : args)
-        if (arg != "--spawn-child") child.push_back(arg);
+    for (const auto& arg : respawn_args(args, depth)) child.push_back(arg);
     std::string command = join_command(child);
     std::vector<char> buffer(command.begin(), command.end());
     buffer.push_back('\0');
@@ -708,17 +770,18 @@ static int spawn_self(const std::vector<std::string>& args) {
     startup.cb = sizeof startup;
     PROCESS_INFORMATION process{};
     if (!CreateProcessA(nullptr, buffer.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
-        throw std::runtime_error("spawn child");
+        throw std::runtime_error("spawn child failed with error " + std::to_string(GetLastError()));
     CloseHandle(process.hThread);
     WaitForSingleObject(process.hProcess, INFINITE);
     DWORD code = 2;
     if (!GetExitCodeProcess(process.hProcess, &code)) code = 2;
     CloseHandle(process.hProcess);
-    return static_cast<int>(code);
+    if (code != 0) throw std::runtime_error("spawned child exited with " + std::to_string(code));
+    return 0;
 }
 
 static int client_command(const std::vector<std::string>& raw) {
-    const Args args = parse_args(raw, {"--spawn-child"});
+    const Args args = parse_args(raw, {});
     if (!args.rest.empty()) throw std::invalid_argument("unexpected arguments");
     const std::string& role = required(args, "--role");
     const std::string& proto = required(args, "--proto");
@@ -728,7 +791,9 @@ static int client_command(const std::vector<std::string>& raw) {
     const int timeout_ms = parse_int(required(args, "--timeout-ms"), 1, 60000);
     const std::string& out_path = required(args, "--out");
     const std::string& target_text = required(args, "--target");
-    if (args.flags.count("--spawn-child")) return spawn_self(raw);
+    required(args, "--log");
+    const int depth = spawn_depth(args);
+    if (depth > 0) return spawn_self(raw, depth);
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) throw std::runtime_error("WSAStartup");
     const Target target = resolve_target(target_text, port);
@@ -743,7 +808,17 @@ static int client_command(const std::vector<std::string>& raw) {
         Sleep(100);
     }
     WSACleanup();
-    return out ? 0 : 2;
+    if (!out) throw std::runtime_error("client output write");
+    return 0;
+}
+
+static int logged_client_command(const std::vector<std::string>& raw) {
+    try {
+        return client_command(raw);
+    } catch (const std::exception& error) {
+        if (const auto log = option_value(raw, "--log")) append_line(*log, std::string("client error: ") + error.what());
+        throw;
+    }
 }
 
 class Sniffer {
@@ -863,7 +938,7 @@ static int dispatch(int argc, char** argv) {
     if (command == "self-test" && argc == 2) return windows_self_test();
     if (command == "env" && argc == 2) return env_command();
     if (command == "launch") return launch_command(parse_args(arguments(argc, argv, 2), {}));
-    if (command == "client") return client_command(arguments(argc, argv, 2));
+    if (command == "client") return logged_client_command(arguments(argc, argv, 2));
     if (command == "sniff") {
         Sniffer sniffer;
         const Args args = parse_args(arguments(argc, argv, 2), {});

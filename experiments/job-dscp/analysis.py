@@ -25,6 +25,9 @@ ENV_LABELS = ("image", "image_version", "runner_os")
 LABEL = re.compile(r"[A-Za-z0-9._-]{1,64}")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 FORBIDDEN_KEY_TOKENS = {"port", "ports", "pid", "addr", "address", "path", "src", "dst", "ip"}
+ALLOWED_KEYS = {"port_collisions"}
+HARNESS_FAULTS = ("HARNESS_ERROR", "SKIPPED_DEADLINE")
+EVALUATED = ("MARK_AT_FIRST_PACKET", "NO_MARK", "PARTIAL_MARK", "INCONCLUSIVE_NO_NEGATIVE_CONTROL")
 
 
 def dscp(tos):
@@ -72,6 +75,16 @@ def _attribute(packets, roles, proto, target_addr, target_port):
         else:
             unattributed.append(packet)
     return flows, unattributed
+
+
+def port_collisions(roles):
+    claims = collections.defaultdict(set)
+    for role in roles:
+        for attempt in role.get("attempts") or ():
+            port = _port(attempt.get("local_port"))
+            if port is not None:
+                claims[port].add(role["name"])
+    return sum(1 for names in claims.values() if len(names) > 1)
 
 
 def attribute(packets, roles, proto, target_addr, target_port):
@@ -147,7 +160,8 @@ def _role_stats(role, proto, flows, marked_flows):
                  attempts_bound=sum(1 for p in ports if p is not None),
                  outcomes=_histogram(a.get("outcome") if a.get("outcome") in OUTCOMES else "other" for a in attempts),
                  exit_ok=role.get("exit_ok") is True, flows_observed=len(flows), first_packets_observed=len(first),
-                 first_packet_every_attempt=complete, first_packet_dscp=_histogram(first), syn_packets=len(syn),
+                 first_packet_every_attempt=complete, first_packet_dscp=_histogram(first),
+                 first_packets_expected_dscp=sum(1 for v in first if v == expected), syn_packets=len(syn),
                  syn_dscp=_histogram(syn), packets=len(every), all_dscp=_histogram(every), flows_fully_marked=fully,
                  flows_unmarked=unmarked, flows_mixed=mixed, packets_unexpected_dscp=unexpected,
                  observe_missing_from_marked=missing,
@@ -156,7 +170,7 @@ def _role_stats(role, proto, flows, marked_flows):
         stats["job"] = _job_projection(role.get("launch"), expected)
     if role.get("skipped") in ("policy_unavailable",):
         stats["skipped"] = role["skipped"]
-    return stats, every
+    return stats, every, first
 
 
 def _sniffer_projection(sniffer):
@@ -230,16 +244,19 @@ def analyze_case(value):
     observe_flows, unattributed = _attribute(observe.get("packets") or [], roles, proto, target["addr"],
                                              target["port"])
     marked_flows, foreign = _attribute(marked.get("packets") or [], roles, proto, target["addr"], target["port"])
-    stats, values = {}, {}
+    stats, values, firsts = {}, {}, {}
     for role in roles:
         name = role["name"]
-        stats[name], values[name] = _role_stats(role, proto, observe_flows[name], marked_flows[name])
+        stats[name], values[name], firsts[name] = _role_stats(role, proto, observe_flows[name], marked_flows[name])
     tagged = [r for r in roles if r.get("kind") == "tagged"]
     untagged = [r for r in roles if r.get("kind") == "untagged"]
     qos = [r for r in roles if r.get("kind") == "qos"]
     sniffer_error = _sniffer_failed(observe) or _sniffer_failed(marked)
     tagged_values = [v for r in tagged for v in values[r["name"]]]
     connected = any(a.get("outcome") == "connected" for r in tagged + untagged for a in r.get("attempts") or [])
+    first_ok = all(stats[r["name"]]["first_packet_every_attempt"] and
+                   stats[r["name"]]["first_packets_expected_dscp"] == stats[r["name"]]["attempts"] for r in tagged)
+    control_complete = bool(untagged) and all(stats[r["name"]]["first_packet_every_attempt"] for r in untagged)
     precondition = value.get("precondition")
     if precondition in PRECONDITIONS:
         verdict = precondition
@@ -253,16 +270,25 @@ def analyze_case(value):
         verdict = "INCONCLUSIVE_NO_PACKETS"
     elif not any(tagged_values):
         verdict = "NO_MARK"
-    elif (all(stats[r["name"]]["first_packet_every_attempt"] and stats[r["name"]]["packets_unexpected_dscp"] == 0
-              for r in tagged) and not any(v for r in untagged for v in values[r["name"]])):
-        verdict = "MARK_AT_FIRST_PACKET"
+    elif first_ok and all(stats[r["name"]]["packets_unexpected_dscp"] == 0 for r in tagged) and not any(
+            v for r in untagged for v in values[r["name"]]):
+        verdict = "MARK_AT_FIRST_PACKET" if control_complete else "INCONCLUSIVE_NO_NEGATIVE_CONTROL"
     else:
         verdict = "PARTIAL_MARK"
+    if verdict not in EVALUATED:
+        first_result = "NOT_EVALUATED"
+    elif not any(v for r in tagged for v in firsts[r["name"]]):
+        first_result = "FIRST_PACKET_UNMARKED"
+    elif first_ok and not any(v for r in untagged for v in firsts[r["name"]]):
+        first_result = "FIRST_PACKET_MARKED" if control_complete else "FIRST_PACKET_NO_NEGATIVE_CONTROL"
+    else:
+        first_result = "FIRST_PACKET_PARTIAL"
     missing = sum(s["observe_missing_from_marked"] for s in stats.values())
     result = dict(case=_case_name(value.get("case")), proto=proto if proto in PROTOCOLS else "invalid",
-                  verdict=verdict, marked_filter_complete=missing == 0,
+                  verdict=verdict, first_packet_result=first_result, marked_filter_complete=missing == 0,
                   marked_filter_selective=all(stats[r["name"]]["marked_packets"] == 0 for r in untagged),
                   negative_control_observed=any(stats[r["name"]]["packets"] for r in untagged),
+                  port_collisions=port_collisions(roles), client_error_lines=_number(value.get("client_errors")),
                   unattributed_observe_packets=len(unattributed), foreign_marked_packets=len(foreign),
                   foreign_marked_dscp=_histogram(dscp(p.get("tos", 0)) for p in foreign),
                   sniffers=dict(observe=_sniffer_projection(observe), marked=_sniffer_projection(marked)),
@@ -276,6 +302,10 @@ def analyze_case(value):
     else:
         result["qos_control"] = dict(verdict="QOS_NOT_RUN")
     return result
+
+
+def skipped_case(name):
+    return dict(case=_case_name(name), verdict="SKIPPED_DEADLINE")
 
 
 def harness_error_case(name, error_type):
@@ -298,7 +328,7 @@ def validate_public(value):
             if not isinstance(key, str):
                 raise ValueError("non-string key")
             _check_string(key)
-            if FORBIDDEN_KEY_TOKENS & set(key.lower().split("_")):
+            if key not in ALLOWED_KEYS and FORBIDDEN_KEY_TOKENS & set(key.lower().split("_")):
                 raise ValueError("identifier key")
             validate_public(item)
     elif isinstance(value, list):
@@ -343,7 +373,9 @@ def build_aggregate(env, qos_policy, cases):
                      qos_policy=_qos_policy_projection(qos_policy),
                      verdicts={c["case"]: c["verdict"] for c in cases},
                      qos_verdicts={c["case"]: c["qos_control"]["verdict"] for c in cases if "qos_control" in c},
-                     harness_errors=[c["case"] for c in cases if c["verdict"] == "HARNESS_ERROR"],
+                     first_packet_results={c["case"]: c["first_packet_result"] for c in cases
+                                           if "first_packet_result" in c},
+                     harness_errors=[c["case"] for c in cases if c["verdict"] in HARNESS_FAULTS],
                      cases={c["case"]: c for c in cases})
     validate_public(aggregate)
     return aggregate
@@ -376,14 +408,15 @@ def markdown_summary(aggregate):
              f"{_cell(env.get('in_job'))}, FwpmConnectionPolicyAdd0 {_cell(env.get('connection_policy_api'))}, "
              f"QoS policy {aggregate.get('qos_policy', {}).get('status', '-')}",
              "",
-             "| Case | Job verdict | First-packet DSCP per role | Marked filter complete | Marked filter selective "
-             "| Foreign marked | QoS control | NIC |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| Case | Job verdict | First-packet result | First-packet DSCP per role | Marked filter complete "
+             "| Marked filter selective | Foreign marked | Port collisions | QoS control | NIC |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for name, case in aggregate.get("cases", {}).items():
         roles = case.get("roles", {})
         first = "; ".join(f"{role} {json.dumps(stats.get('first_packet_dscp', {}), separators=(',', ':'))}"
                           for role, stats in roles.items()) or "-"
-        lines.append(f"| {name} | {case['verdict']} | {first} | {_cell(case.get('marked_filter_complete'))} | "
-                     f"{_cell(case.get('marked_filter_selective'))} | {_cell(case.get('foreign_marked_packets'))} | "
+        lines.append(f"| {name} | {case['verdict']} | {case.get('first_packet_result', '-')} | {first} | "
+                     f"{_cell(case.get('marked_filter_complete'))} | {_cell(case.get('marked_filter_selective'))} | "
+                     f"{_cell(case.get('foreign_marked_packets'))} | {_cell(case.get('port_collisions'))} | "
                      f"{case.get('qos_control', {}).get('verdict', '-')} | {case.get('nic', {}).get('status', '-')} |")
     return "\n".join(lines) + "\n"

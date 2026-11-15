@@ -149,11 +149,13 @@ class RoleStatsTests(unittest.TestCase):
         self.assertEqual(0, stats["first_packets_observed"])
 
     def test_udp_first_datagram_counts_as_first_packet(self):
-        roles = [role("tagged-a", [1001], 10)]
-        for attempt in roles[0]["attempts"]:
-            attempt["proto"] = "udp"
-            attempt["outcome"] = "sent"
-        observe = [packet(1001, 40, proto=17, seq=1), packet(1001, 40, proto=17, seq=2)]
+        roles = [role("tagged-a", [1001], 10), role("untagged", [4001], 0, kind="untagged")]
+        for item in roles:
+            for attempt in item["attempts"]:
+                attempt["proto"] = "udp"
+                attempt["outcome"] = "sent"
+        observe = [packet(1001, 40, proto=17, seq=1), packet(1001, 40, proto=17, seq=2),
+                   packet(4001, 0, proto=17, seq=3)]
         result = analysis.analyze_case(case(roles, observe, proto="udp", case="udp-external"))
         stats = result["roles"]["tagged-a"]
         self.assertEqual(1, stats["first_packets_observed"])
@@ -217,6 +219,22 @@ class VerdictTests(unittest.TestCase):
         roles = [role("tagged-a", [1001], 10)]
         self.assertEqual("PARTIAL_MARK", self.verdict(case(roles, observe)))
 
+    def test_negative_control_requires_first_packet_for_every_untagged_attempt(self):
+        observe = [p for p in all_marked_packets() if p["sport"] != 4001]
+        self.assertEqual("INCONCLUSIVE_NO_NEGATIVE_CONTROL", self.verdict(case(standard_roles(), observe)))
+        roles = standard_roles()
+        roles[3]["attempts"].append(dict(roles[3]["attempts"][0], local_port=4002))
+        self.assertEqual("INCONCLUSIVE_NO_NEGATIVE_CONTROL", self.verdict(case(roles, all_marked_packets())))
+        self.assertEqual("INCONCLUSIVE_NO_NEGATIVE_CONTROL",
+                         self.verdict(case(standard_roles()[:3], all_marked_packets()[:5])))
+
+    def test_marked_untagged_packet_is_partial_even_without_full_negative_control(self):
+        roles = standard_roles()
+        roles[3]["attempts"].append(dict(roles[3]["attempts"][0], local_port=4002))
+        observe = all_marked_packets()
+        observe[5] = syn(4001, 10)
+        self.assertEqual("PARTIAL_MARK", self.verdict(case(roles, observe)))
+
     def test_no_mark(self):
         observe = [syn(p, 0) for p in (1001, 1002, 2001, 2002, 3001, 4001)]
         self.assertEqual("NO_MARK", self.verdict(case(standard_roles(), observe)))
@@ -265,10 +283,57 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(995, result["sniffers"]["observe"]["last_error"])
         self.assertTrue(result["sniffers"]["marked"]["ready"])
 
+    def test_skipped_deadline_verdict(self):
+        result = analysis.skipped_case("udp-loopback")
+        self.assertEqual(dict(case="udp-loopback", verdict="SKIPPED_DEADLINE"), result)
+
     def test_harness_error_verdict(self):
         result = analysis.harness_error_case("tcp-loopback", "TimeoutExpired")
         self.assertEqual("HARNESS_ERROR", result["verdict"])
         self.assertEqual("TimeoutExpired", result["error_type"])
+
+
+class FirstPacketResultTests(unittest.TestCase):
+    def result(self, value):
+        return analysis.analyze_case(value)["first_packet_result"]
+
+    def test_marked_syn_with_unmarked_later_ack_is_readable(self):
+        observe = all_marked_packets() + [packet(1001, 0, ack=True, seq=99)]
+        result = analysis.analyze_case(case(standard_roles(), observe))
+        self.assertEqual("PARTIAL_MARK", result["verdict"])
+        self.assertEqual("FIRST_PACKET_MARKED", result["first_packet_result"])
+        self.assertEqual(2, result["roles"]["tagged-a"]["first_packets_expected_dscp"])
+
+    def test_first_packet_results(self):
+        unmarked = [syn(p, 0) for p in (1001, 1002, 2001, 2002, 3001, 4001)]
+        self.assertEqual("FIRST_PACKET_UNMARKED", self.result(case(standard_roles(), unmarked)))
+        partial = all_marked_packets()
+        partial[0] = syn(1001, 0)
+        self.assertEqual("FIRST_PACKET_PARTIAL", self.result(case(standard_roles(), partial)))
+        missing = all_marked_packets()[1:]
+        self.assertEqual("FIRST_PACKET_PARTIAL", self.result(case(standard_roles(), missing)))
+        no_control = [p for p in all_marked_packets() if p["sport"] != 4001]
+        self.assertEqual("FIRST_PACKET_NO_NEGATIVE_CONTROL", self.result(case(standard_roles(), no_control)))
+        roles = standard_roles()
+        roles[0]["launch"]["dscp_set"] = False
+        self.assertEqual("NOT_EVALUATED", self.result(case(roles, all_marked_packets())))
+
+
+class CaseCountTests(unittest.TestCase):
+    def test_port_collisions_are_counted(self):
+        roles = standard_roles()
+        roles[3]["attempts"].append(dict(roles[3]["attempts"][0], local_port=1001))
+        roles[1]["attempts"].append(dict(roles[1]["attempts"][0], local_port=1001))
+        result = analysis.analyze_case(case(roles, all_marked_packets()))
+        self.assertEqual(1, result["port_collisions"])
+        analysis.validate_public(result)
+        self.assertEqual(0, analysis.analyze_case(case(standard_roles(), all_marked_packets()))["port_collisions"])
+
+    def test_client_error_lines_are_a_count(self):
+        result = analysis.analyze_case(case(standard_roles(), all_marked_packets(), client_errors=2))
+        self.assertEqual(2, result["client_error_lines"])
+        result = analysis.analyze_case(case(standard_roles(), all_marked_packets(), client_errors="C:\\x"))
+        self.assertIsNone(result["client_error_lines"])
 
 
 class QosControlTests(unittest.TestCase):
@@ -332,24 +397,28 @@ class PublicProjectionTests(unittest.TestCase):
                     {"a": "x" * 300}):
             with self.assertRaises(ValueError, msg=bad):
                 analysis.validate_public(bad)
+        with self.assertRaises(ValueError):
+            analysis.validate_public({"local_port_collisions": 1})
+        analysis.validate_public({"port_collisions": 1})
         analysis.validate_public({"build": 20348, "image_version": "20250105.1.0", "verdict": "NO_MARK",
                                   "dscp": {"10": 3}, "ok": True, "missing": None})
 
     def test_build_aggregate_and_compact_dump(self):
         cases = [analysis.analyze_case(case(standard_roles(), all_marked_packets())),
-                 analysis.harness_error_case("udp-loopback", "OSError")]
+                 analysis.harness_error_case("udp-loopback", "OSError"), analysis.skipped_case("tcp6-loopback")]
         env = dict(os_major=10, os_minor=0, os_build=20348, elevated=True, connection_policy_api=True,
                    in_job=True, image="win22", image_version="20250105.1.0", pid=99, path="C:\\x")
         aggregate = analysis.build_aggregate(env, dict(status="created"), cases)
         analysis.validate_public(aggregate)
         self.assertNotIn("pid", aggregate["env"])
         self.assertNotIn("path", aggregate["env"])
-        self.assertEqual({"tcp-external-syn": "MARK_AT_FIRST_PACKET", "udp-loopback": "HARNESS_ERROR"},
-                         aggregate["verdicts"])
-        self.assertTrue(aggregate["harness_errors"])
+        self.assertEqual({"tcp-external-syn": "MARK_AT_FIRST_PACKET", "udp-loopback": "HARNESS_ERROR",
+                          "tcp6-loopback": "SKIPPED_DEADLINE"}, aggregate["verdicts"])
+        self.assertEqual(["udp-loopback", "tcp6-loopback"], aggregate["harness_errors"])
+        self.assertEqual({"tcp-external-syn": "FIRST_PACKET_MARKED"}, aggregate["first_packet_results"])
         text = analysis.compact_dumps(aggregate)
         self.assertEqual(aggregate, json.loads(text))
-        self.assertLess(len(text.splitlines()), 60)
+        self.assertLess(len(text.splitlines()), 70)
         self.assertIn('  "tagged-a": {"expected_dscp":10,', text)
 
     def test_qos_policy_status_is_a_fixed_label(self):
@@ -363,7 +432,7 @@ class MarkdownTests(unittest.TestCase):
                  analysis.harness_error_case("udp-loopback", "OSError")]
         aggregate = analysis.build_aggregate(dict(os_build=26100), dict(status="unavailable"), cases)
         text = analysis.markdown_summary(aggregate)
-        self.assertIn("| tcp-external-syn | MARK_AT_FIRST_PACKET |", text)
+        self.assertIn("| tcp-external-syn | MARK_AT_FIRST_PACKET | FIRST_PACKET_MARKED |", text)
         self.assertIn("| udp-loopback | HARNESS_ERROR |", text)
         self.assertIn("26100", text)
 

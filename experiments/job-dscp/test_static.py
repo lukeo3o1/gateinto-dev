@@ -34,6 +34,23 @@ class CiScriptTests(unittest.TestCase):
         self.assertIn("finally", source)
         self.assertIn("GITHUB_STEP_SUMMARY", source)
 
+    def test_errors_print_only_type_names(self):
+        source = (ROOT / "ci.ps1").read_text()
+        self.assertNotIn("Exception.Message", source)
+        self.assertNotIn("throw \"Job DSCP harness failures", source)
+        self.assertIn("exit 1", source)
+
+    def test_directory_setup_runs_inside_try(self):
+        source = (ROOT / "ci.ps1").read_text()
+        body = source[source.index("\ntry {"):]
+        self.assertGreater(source.index("Restrict-Directory $OutDir"), source.index("\ntry {"))
+        self.assertIn("Restrict-Directory $privateDir", body)
+
+    def test_empty_qos_reason_is_not_passed(self):
+        source = (ROOT / "ci.ps1").read_text()
+        self.assertNotIn("--qos-policy-reason $qosReason", source)
+        self.assertIn("if ($qosReason) { $harnessArgs += @('--qos-policy-reason', $qosReason) }", source)
+
     def test_build_produces_identical_qos_copy(self):
         source = (ROOT / "build.ps1").read_text()
         self.assertIn("probe-qos.exe", source)
