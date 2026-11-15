@@ -102,8 +102,12 @@ class PktmonTests(unittest.TestCase):
                 self.assertEqual(dict(status="unavailable", step="exception"), harness.nic_start("192.0.2.1", private))
                 self.assertEqual(dict(status="unavailable", step="exception"), harness.nic_finish(private))
             with mock.patch.object(harness, "run_quiet", return_value=5):
-                self.assertEqual(dict(status="unavailable", step="filter_remove", exit_code=5),
+                self.assertEqual(dict(status="unavailable", step="filter_add", exit_code=5),
                                  harness.nic_start("192.0.2.1", private))
+            with mock.patch.object(harness, "run_quiet", side_effect=[1, 0, 0]):
+                self.assertIsNone(harness.nic_start("192.0.2.1", private))
+            with mock.patch.object(harness, "run_quiet", side_effect=[None, 0, 0]):
+                self.assertEqual(dict(status="unavailable", step="exception"), harness.nic_start("192.0.2.1", private))
 
 
 class CleanupTests(unittest.TestCase):
@@ -129,6 +133,24 @@ class DeadlineTests(unittest.TestCase):
                                   pathlib.Path("c"), pathlib.Path("l"), pathlib.Path("."))
         self.assertEqual("deadline", result["skipped"])
         self.assertTrue(ctx.deadline_hit)
+
+
+    def test_case_cut_short_by_the_deadline_is_skipped(self):
+        roles = {r["name"]: r for r in harness.ROLES}
+        case = dict(name="tcp-loopback", proto="tcp", require_connect=False)
+        sniffer = dict(ready=True, exit_code=0, packets=[], summary=dict(kind="summary"))
+        inputs = [harness.role_input(roles["tagged-a"], [], dict(returncode=0, stdout="")),
+                  harness.role_input(roles["tagged-b"], [], dict(returncode=None, stdout="", skipped="deadline"))]
+        result = harness.finish_case(case, "127.0.0.1", 5000, inputs, dict(observe=sniffer, marked=sniffer),
+                                     dict(status="not_applicable"), None, "created", 0)
+        self.assertEqual(dict(case="tcp-loopback", verdict="SKIPPED_DEADLINE"), result)
+        inputs[1] = harness.role_input(roles["tagged-b"], [], dict(returncode=0, stdout=""))
+        result = harness.finish_case(case, "127.0.0.1", 5000, inputs, dict(observe=sniffer, marked=sniffer),
+                                     dict(status="not_applicable"), None, "created", 0)
+        self.assertEqual("INCONCLUSIVE_JOB_SETUP_FAILED", result["verdict"])
+
+    def test_deadline_budget(self):
+        self.assertEqual(8 * 60, harness.HARNESS_DEADLINE_SECONDS)
 
 
 class MainTests(unittest.TestCase):
@@ -182,6 +204,15 @@ class MainTests(unittest.TestCase):
         self.assertEqual({"SKIPPED_DEADLINE"}, set(aggregate["verdicts"].values()))
         self.assertEqual(len(harness.CASES), len(json.loads(files["ci-summary.json"])["failed_cases"]))
         self.assert_private(output)
+
+    def test_deadline_clock_starts_before_setup_lookups(self):
+        run_case = mock.Mock(side_effect=AssertionError("must not run"))
+        code, _, files, _ = self.run_main(resolve_github=mock.Mock(side_effect=lambda: time.sleep(0.2)),
+                                          probe_env=mock.Mock(return_value={}), run_case=run_case,
+                                          HARNESS_DEADLINE_SECONDS=0.1)
+        self.assertEqual(1, code)
+        run_case.assert_not_called()
+        self.assertEqual({"SKIPPED_DEADLINE"}, set(json.loads(files["aggregate-evidence.json"])["verdicts"].values()))
 
     def test_case_exception_prints_only_the_type(self):
         run_case = mock.Mock(side_effect=OSError("C:\\secret"))

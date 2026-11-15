@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -367,7 +368,7 @@ int self_test() {
           "last respawn sends");
     check(option_value({"--a", "1", "--log", "f"}, "--log") == std::optional<std::string>("f"), "option value");
     check(!option_value({"--a", "1"}, "--log") && !option_value({"--a", "--log"}, "--log"), "missing option value");
-    const std::string log_file = "job-dscp-self-test.log";
+    const std::string log_file = (std::filesystem::temp_directory_path() / "job-dscp-self-test.log").string();
     std::remove(log_file.c_str());
     check(append_line(log_file, "one") && append_line(log_file, "two"), "append log");
     std::ifstream log_stream(log_file);

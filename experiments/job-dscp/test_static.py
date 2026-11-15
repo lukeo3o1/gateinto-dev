@@ -46,6 +46,12 @@ class CiScriptTests(unittest.TestCase):
         self.assertGreater(source.index("Restrict-Directory $OutDir"), source.index("\ntry {"))
         self.assertIn("Restrict-Directory $privateDir", body)
 
+    def test_success_path_exits_zero_explicitly(self):
+        lines = [line for line in (ROOT / "ci.ps1").read_text().splitlines() if line.strip()]
+        self.assertEqual("exit 0", lines[-1])
+        self.assertEqual(["if ($failures.Count) {", "  Write-Host \"Job DSCP harness failures: $($failures -join ', ')\"",
+                          "  exit 1", "}"], lines[-5:-1])
+
     def test_empty_qos_reason_is_not_passed(self):
         source = (ROOT / "ci.ps1").read_text()
         self.assertNotIn("--qos-policy-reason $qosReason", source)

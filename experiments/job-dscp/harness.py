@@ -21,7 +21,7 @@ READY_SECONDS = 20
 STOP_SECONDS = 25
 SNIFF_MAX_SECONDS = 900
 PKTMON_TIMEOUT_SECONDS = 30
-HARNESS_DEADLINE_SECONDS = 11 * 60
+HARNESS_DEADLINE_SECONDS = 8 * 60
 
 CASES = [
     dict(name="tcp-external-syn", proto="tcp", target="test-net", port=443, timeout_ms=1500, count=3, nic=True,
@@ -276,7 +276,7 @@ def nic_start(addr, private):
     log = private / "pktmon.log"
     for step, command in pktmon_start_steps(addr, private / "nic.etl"):
         code = run_quiet(command, log)
-        if code != 0:
+        if code is None or (code != 0 and step != "filter_remove"):
             return _nic_failure(step, code)
     return None
 
@@ -389,10 +389,16 @@ def run_case(ctx, case):
     roles = [role_input(role, attempts, runs.get(role["name"], dict(returncode=None, stdout="")))
              for role in ROLES]
     ctx.role_failures[case["name"]] = sum(1 for r in roles if not r["exit_ok"] and not r["skipped"])
-    return analysis.analyze_case(case_input(case, addr, port, roles,
-                                            dict(observe=results.get("observe", empty),
-                                                 marked=results.get("marked", empty)),
-                                            nic, precondition, ctx.qos_status, client_error_count(client_log)))
+    return finish_case(case, addr, port, roles,
+                       dict(observe=results.get("observe", empty), marked=results.get("marked", empty)),
+                       nic, precondition, ctx.qos_status, client_error_count(client_log))
+
+
+def finish_case(case, addr, port, roles, sniffers, nic, precondition, qos_policy, client_errors):
+    if any(r["skipped"] == "deadline" for r in roles):
+        return analysis.skipped_case(case["name"])
+    return analysis.analyze_case(case_input(case, addr, port, roles, sniffers, nic, precondition, qos_policy,
+                                            client_errors))
 
 
 def probe_env(probe, private):
@@ -417,11 +423,12 @@ def resolve_github():
 
 
 def run(args):
+    deadline = time.monotonic() + HARNESS_DEADLINE_SECONDS
     args.results.mkdir(parents=True, exist_ok=True)
     args.private.mkdir(parents=True, exist_ok=True)
     probe = (args.bin / "probe.exe").resolve()
     ctx = Context(probe, (args.bin / "probe-qos.exe").resolve(), args.private.resolve(), args.qos_policy_status,
-                  resolve_github(), deadline=time.monotonic() + HARNESS_DEADLINE_SECONDS)
+                  resolve_github(), deadline=deadline)
     faults = []
     try:
         env = probe_env(probe, ctx.private)

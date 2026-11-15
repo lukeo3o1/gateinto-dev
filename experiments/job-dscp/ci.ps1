@@ -155,3 +155,4 @@ if ($failures.Count) {
   Write-Host "Job DSCP harness failures: $($failures -join ', ')"
   exit 1
 }
+exit 0
