@@ -6,6 +6,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -498,17 +499,32 @@ class MainTests(unittest.TestCase):
     def test_each_case_gets_its_own_directory_and_budget(self):
         seen = []
 
+        start = 1000.0
+        clock = types.SimpleNamespace(monotonic=lambda: start, sleep=time.sleep)
+
         def record(name):
             def runner(ctx):
-                seen.append((name, ctx.private, ctx.deadline - time.monotonic()))
+                seen.append((name, ctx.private, ctx.deadline))
                 return dict(case=name, verdict="ROUTED_VIA_GATEWAY" if name == "https-external" else "NOT_ROUTED")
             return runner
 
-        self.run_main(runners=[(n, record(n)) for n in ["https-external"] + EXTENSIONS])
+        self.run_main(runners=[(n, record(n)) for n in ["https-external"] + EXTENSIONS], time=clock)
         self.assertEqual(len(set(path for _, path, _ in seen)), 5)
-        for name, path, remaining in seen:
+        for name, path, deadline in seen:
             self.assertEqual(name, path.name)
-            self.assertLessEqual(remaining, harness.CASE_BUDGETS[name])
+            self.assertEqual(start + harness.CASE_BUDGETS[name], deadline)
+
+    def test_case_deadline_never_exceeds_the_harness_deadline(self):
+        seen = []
+        start = 1000.0
+        clock = types.SimpleNamespace(monotonic=lambda: start, sleep=time.sleep)
+
+        def runner(ctx):
+            seen.append(ctx.deadline)
+            return dict(case="https-external", verdict="ROUTED_VIA_GATEWAY")
+
+        self.run_main(runners=[("https-external", runner)], time=clock, HARNESS_DEADLINE_SECONDS=60)
+        self.assertEqual([start + 60], seen)
 
     def test_extension_failures_never_touch_the_core_or_later_cases(self):
         def crash(ctx):
