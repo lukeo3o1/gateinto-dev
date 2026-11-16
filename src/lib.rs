@@ -3,6 +3,7 @@ pub mod browser;
 pub mod check;
 pub mod clock;
 pub mod config;
+pub mod divert;
 mod dns;
 pub mod http;
 pub mod identity;
