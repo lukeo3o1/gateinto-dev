@@ -1,0 +1,66 @@
+name: Job DSCP route
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - experiments/job-dscp-route/**
+      - .github/workflows/job-dscp-route.yml
+      - examples/wfp_lab.rs
+      - tests/fixture/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: job-dscp-route-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m unittest discover -s experiments/job-dscp-route -p 'test_*.py' -v
+      - name: Test portable route helpers
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror experiments/job-dscp-route/route.cpp -o /tmp/job-dscp-route-test
+          /tmp/job-dscp-route-test
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: windows-release
+          save-if: false
+      - name: Build Gateinto lab fixture
+        run: cargo build --release --locked --example wfp_lab
+      - name: Build route engine with official signed driver
+        run: experiments/job-dscp-route/build.ps1
+      - name: Route a job-tagged application through Gateinto
+        run: experiments/job-dscp-route/ci.ps1
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-dscp-route-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/job-dscp-route-results/aggregate-evidence.json
+            ${{ runner.temp }}/job-dscp-route-results/ci-summary.json
+            ${{ runner.temp }}/job-dscp-route-results/environment.json
+            ${{ runner.temp }}/job-dscp-route-bin/driver-manifest.json
+          if-no-files-found: warn
+          retention-days: 14
