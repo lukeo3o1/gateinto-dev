@@ -86,7 +86,8 @@ impl Authenticator {
         let checked = match (peer, local) {
             (Ok(peer), Ok(local)) => {
                 let owners = owners.clone();
-                let lookup = tokio::task::spawn_blocking(move || owners.check(peer, local));
+                let until = deadline.into_std();
+                let lookup = tokio::task::spawn_blocking(move || owners.check(peer, local, until));
                 match tokio::time::timeout_at(deadline, lookup).await {
                     Ok(joined) => joined.unwrap_or_else(|_| {
                         Err(Denial::Lookup("the lookup task failed".to_owned()))
@@ -103,6 +104,10 @@ impl Authenticator {
             Ok(()) => {
                 debug!("os_user accepted the connection");
                 Some(true)
+            }
+            Err(Denial::TimedOut) => {
+                self.report(&Denial::TimedOut);
+                None
             }
             Err(denial) => {
                 self.report(&denial);
@@ -300,6 +305,20 @@ mod tests {
             "{warnings:?}"
         );
         assert!(!warnings[0].contains("to auth"), "{warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_reports_its_deadline_is_a_timeout() {
+        let logs = crate::test_logs::capture();
+        let setup = setup(LocalAuth::OS_USER, Err(Denial::TimedOut));
+        let (peer, local) = addrs();
+        assert_eq!(setup.auth.os_user(Ok(peer), Ok(local), far()).await, None);
+        let warnings = logs.lines(" WARN ");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("did not finish within the handshake timeout"),
+            "{warnings:?}"
+        );
     }
 
     #[tokio::test]

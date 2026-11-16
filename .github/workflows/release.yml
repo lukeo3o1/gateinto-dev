@@ -191,11 +191,54 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  linux:
+    name: Build x86_64-unknown-linux-gnu
+    needs: resolve
+    if: needs.resolve.outputs.stale == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      LINUX_TARGET: x86_64-unknown-linux-gnu
+      SHORT_SHA: ${{ needs.resolve.outputs.short }}
+      GATEINTO_BUILD_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ env.LINUX_TARGET }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-ubuntu-24.04
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo test --all-targets --all-features --locked
+        env:
+          GATEINTO_TEST_SUDO_NOBODY: '1'
+      - run: cargo build --locked --release --target x86_64-unknown-linux-gnu --bin gateinto
+      - name: Check that gateinto prints the build version
+        shell: pwsh
+        run: .github/scripts/assert-version.ps1 -Path "target/$env:LINUX_TARGET/release/gateinto" -Version $env:GATEINTO_BUILD_VERSION
+      - name: Package the tarball
+        run: |
+          tarball="dist/gateinto-$SHORT_SHA-$LINUX_TARGET.tar.gz"
+          mkdir dist
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) .github/scripts/linux-tarball.sh "target/$LINUX_TARGET/release/gateinto" "$tarball"
+          .github/scripts/write-sha256.sh "$tarball"
+      - name: Install the tarball, verify its user unit and uninstall it
+        run: .github/scripts/linux-install-check.sh "dist/gateinto-$SHORT_SHA-$LINUX_TARGET.tar.gz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ env.LINUX_TARGET }}
+          path: dist/
+          if-no-files-found: error
+
   publish:
     name: Publish the ${{ needs.resolve.outputs.channel }} release
-    needs: [resolve, build, win7]
+    needs: [resolve, build, win7, linux]
     if: >-
-      !cancelled() && needs.build.result == 'success' &&
+      !cancelled() && needs.build.result == 'success' && needs.linux.result == 'success' &&
       (needs.win7.result == 'success' || (needs.resolve.outputs.channel == 'latest' && needs.win7.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 15

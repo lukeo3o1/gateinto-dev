@@ -52,8 +52,8 @@ fn registering_writes_a_url_protocol_handler_that_unregistering_removes() {
     let scheme = TestScheme::new("roundtrip");
     let command = command();
 
-    register(&scheme.0, &command).unwrap();
-    register(&scheme.0, &command).unwrap();
+    assert_eq!(register(&scheme.0, &command).unwrap(), None);
+    assert_eq!(register(&scheme.0, &command).unwrap(), None);
 
     assert_eq!(registered_command(&scheme.0).unwrap(), Some(command));
     assert!(scheme.reg(&["query", &scheme.key(), "/v", "URL Protocol"]));

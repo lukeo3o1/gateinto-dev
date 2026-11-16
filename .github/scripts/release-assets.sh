@@ -27,6 +27,7 @@ payloads=(
   "gateinto-$short-x86_64-pc-windows-msvc.msi"
   "gateinto-$short-i686-pc-windows-msvc.exe"
   "gateinto-$short-i686-pc-windows-msvc.msi"
+  "gateinto-$short-x86_64-unknown-linux-gnu.tar.gz"
 )
 if [[ $channel != latest ]]; then
   payloads+=("gateinto-$short-i686-win7-windows-msvc-experimental.exe")

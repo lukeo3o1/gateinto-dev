@@ -57,7 +57,7 @@ struct Cli {
 enum Command {
     /// Connect to the upstream once and print the negotiated TLS parameters
     CheckUpstream(CheckUpstreamArgs),
-    /// Manage the device key held by Windows CNG
+    /// Manage the device key held by Windows CNG; Linux has no device key yet
     #[command(subcommand)]
     Key(KeyCommand),
     /// Run or manage sessions
@@ -73,16 +73,32 @@ enum Command {
     /// List the gateways, or remove one that was added from a gateinto:// link
     #[command(subcommand)]
     Gateway(GatewayCommand),
-    /// Register or remove the per-user gateinto:// URI handler (Windows, development use)
+    #[cfg_attr(
+        windows,
+        doc = "Register or remove the per-user gateinto:// URI handler (development use)"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Register or remove the per-user gateinto:// URI handler"
+    )]
     #[command(subcommand)]
     Uri(UriCommand),
     /// Prepare Gateinto for the current Windows user: check the config, create or reuse the
-    /// device key and report the gateinto:// handler
+    /// device key and report the gateinto:// handler; on Linux, where install.sh registers the
+    /// gateinto:// handler, it checks the config and fails because there is no device key yet
     Setup(KeyInitArgs),
-    /// Show the device key, gateways, agent sessions and gateinto:// handler without changing
-    /// anything
+    /// Show the device key, gateways, agent sessions and gateinto:// handler, and on Linux
+    /// the prerequisites of terminal sessions and os_user, without changing anything
     Status(StatusArgs),
-    /// Permanently delete Gateinto data that an uninstall keeps
+    #[cfg_attr(
+        windows,
+        doc = "Permanently delete Gateinto data that an uninstall keeps"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Permanently delete Gateinto data that an uninstall keeps; on this platform there",
+        doc = "is no device key, so it deletes nothing"
+    )]
     Reset(ResetArgs),
 }
 
@@ -128,14 +144,30 @@ struct ResetArgs {
     #[arg(long, required = true)]
     purge_device_identity: bool,
 
-    /// Also delete the config file named with --config, or else the default
-    /// %APPDATA%\Gateinto\gateinto.toml, and the gateways added from gateinto:// links
-    /// (the *.toml files in %APPDATA%\Gateinto\gateways)
+    #[cfg_attr(
+        windows,
+        doc = "Also delete the config file named with --config, or else the default",
+        doc = r"%APPDATA%\Gateinto\gateinto.toml, and the gateways added from gateinto:// links",
+        doc = r"(the *.toml files in %APPDATA%\Gateinto\gateways)"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Deletes nothing on this platform; delete gateinto.toml and the gateways directory",
+        doc = "in $XDG_CONFIG_HOME/gateinto (default ~/.config/gateinto) yourself"
+    )]
     #[arg(long)]
     purge_config: bool,
 
-    /// Confirm deleting the config file without a prompt when no device key exists; an
-    /// existing key always needs its SPKI confirmed
+    #[cfg_attr(
+        windows,
+        doc = "Confirm deleting the config file without a prompt when no device key exists; an",
+        doc = "existing key always needs its SPKI confirmed"
+    )]
+    #[cfg_attr(
+        not(windows),
+        doc = "Skip the prompt that confirms a config purge when no device key exists; reset",
+        doc = "deletes nothing on this platform"
+    )]
     #[arg(long, requires = "purge_config")]
     yes: bool,
 
@@ -209,10 +241,40 @@ enum GatewayCommand {
 
 #[derive(Subcommand)]
 enum UriCommand {
-    /// Write HKCU\Software\Classes\gateinto so that gateinto:// links run `gateinto open`
-    Register(ConfigArg),
-    /// Remove HKCU\Software\Classes\gateinto if it runs a Gateinto executable
-    Unregister,
+    /// Make gateinto:// links run `gateinto open` for the current user: HKCU\Software\Classes
+    /// on Windows, a desktop file and the mimeapps.list default on Linux
+    Register(UriRegisterArgs),
+    /// Remove the current user's gateinto:// handler if it runs a Gateinto executable
+    Unregister(SchemeArg),
+}
+
+#[derive(Args)]
+struct UriRegisterArgs {
+    #[command(flatten)]
+    config: ConfigArg,
+
+    #[command(flatten)]
+    scheme: SchemeArg,
+}
+
+#[derive(Args)]
+struct SchemeArg {
+    #[arg(long, hide = true, default_value = registration::SCHEME, value_parser = test_scheme)]
+    scheme: String,
+}
+
+fn test_scheme(scheme: &str) -> std::result::Result<String, String> {
+    let allowed = scheme == registration::SCHEME
+        || scheme
+            .strip_prefix("gateinto-test-")
+            .is_some_and(|name| !name.is_empty());
+    match registration::validate_scheme(scheme) {
+        Ok(()) if allowed => Ok(scheme.to_owned()),
+        _ => Err(format!(
+            "expected {} or gateinto-test-<name>",
+            registration::SCHEME
+        )),
+    }
 }
 
 #[derive(Args)]
@@ -576,6 +638,7 @@ fn device_key_settings(config: &ConfigArg, name: Option<KeyName>) -> Result<Devi
 fn key(command: KeyCommand) -> Result {
     match command {
         KeyCommand::Init(args) => {
+            #[cfg(not(target_os = "linux"))]
             if let Some(note) = lifecycle::check_current_account()? {
                 eprintln!("{note}");
             }
@@ -1465,8 +1528,15 @@ async fn stop(args: StopArgs) -> Result {
 
 fn uri(command: UriCommand) -> Result {
     match command {
-        UriCommand::Register(args) => {
-            let config = args
+        UriCommand::Register(UriRegisterArgs {
+            config,
+            scheme: SchemeArg { scheme },
+        }) => {
+            #[cfg(target_os = "linux")]
+            if let Some(note) = lifecycle::check_current_account()? {
+                eprintln!("{note}");
+            }
+            let config = config
                 .config
                 .as_deref()
                 .map(std::path::absolute)
@@ -1476,14 +1546,17 @@ fn uri(command: UriCommand) -> Result {
             }
             let command =
                 registration::handler_command(&std::env::current_exe()?, config.as_deref())?;
-            registration::register(registration::SCHEME, &command)?;
-            println!("registered gateinto:// for the current user: {command}");
+            let overridden = registration::register(&scheme, &command)?;
+            println!("registered {scheme}:// for the current user: {command}");
+            if let Some(overridden) = overridden {
+                eprintln!("warning: {overridden}");
+            }
         }
-        UriCommand::Unregister => {
-            if registration::unregister(registration::SCHEME)? {
-                println!("removed the gateinto:// handler of the current user");
+        UriCommand::Unregister(SchemeArg { scheme }) => {
+            if registration::unregister(&scheme)? {
+                println!("removed the {scheme}:// handler of the current user");
             } else {
-                println!("no gateinto:// handler is registered for the current user");
+                println!("no {scheme}:// handler is registered for the current user");
             }
         }
     }
@@ -1602,6 +1675,16 @@ fn setup(args: KeyInitArgs) -> Result {
     let file = args.config.load()?;
     let settings = args.settings()?;
     print_config(&args.config, &file);
+    set_up_device_key(settings)
+}
+
+#[cfg(target_os = "linux")]
+fn set_up_device_key(_settings: DeviceKeySettings) -> Result {
+    Err(lifecycle::LINUX_SETUP.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_up_device_key(settings: DeviceKeySettings) -> Result {
     let store = gateinto::identity::system_store()?;
     let options = InitOptions {
         backend: settings.preferred,
@@ -1624,13 +1707,16 @@ fn setup(args: KeyInitArgs) -> Result {
     Ok(())
 }
 
-async fn status(args: StatusArgs) -> Result {
-    let file = args.config.load()?;
-    let name = device_key_settings(&args.config, args.name.clone())?.name;
-    println!("key-name: {name}");
+#[cfg(target_os = "linux")]
+fn print_device_key(_name: &KeyName) {
+    println!("device-key: {}", lifecycle::LINUX_DEVICE_KEY);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn print_device_key(name: &KeyName) {
     match gateinto::identity::system_store() {
         Err(error) => println!("device-key: unavailable: {error}"),
-        Ok(store) => match device_key::info(&store, &name) {
+        Ok(store) => match device_key::info(&store, name) {
             Ok((key, duplicate)) => {
                 if let Some(duplicate) = duplicate {
                     eprintln!("{}", duplicate.info_warning());
@@ -1645,6 +1731,13 @@ async fn status(args: StatusArgs) -> Result {
             Err(error) => println!("device-key: error: {error}"),
         },
     }
+}
+
+async fn status(args: StatusArgs) -> Result {
+    let file = args.config.load()?;
+    let name = device_key_settings(&args.config, args.name.clone())?.name;
+    println!("key-name: {name}");
+    print_device_key(&name);
     print_config(&args.config, &file);
     let agent = match Endpoint::for_current_user() {
         Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
@@ -1665,6 +1758,10 @@ async fn status(args: StatusArgs) -> Result {
         Err(error) => println!("agent: unknown: {error}"),
     }
     print_handler();
+    #[cfg(target_os = "linux")]
+    for line in lifecycle::current_linux_status() {
+        println!("{line}");
+    }
     Ok(())
 }
 

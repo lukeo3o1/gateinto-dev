@@ -33,6 +33,7 @@ Built: $built
 > [!WARNING]
 > - The executables and the MSI are not code-signed. Check each download against its \`.sha256\` file; SmartScreen may warn.
 > - TPM-backed keys, real browsers, physical Windows machines and Windows 7 are not yet verified on real hardware; see https://github.com/lukeo3o1/gateinto-dev/issues/23.
+> - The Linux tarball (\`gateinto-x86_64-unknown-linux-gnu.tar.gz\`) and its \`install.sh\` and \`uninstall.sh\` are not yet verified on a real Linux desktop. There is no device key on Linux yet, so Gateinto connects from Linux without a device certificate.
 NOTES
 
 if [[ $channel != latest ]]; then

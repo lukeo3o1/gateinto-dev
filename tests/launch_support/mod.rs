@@ -15,26 +15,35 @@ pub fn temp_dir(name: &str) -> PathBuf {
 }
 
 pub fn fake_browser() -> PathBuf {
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_owned();
+    let exe = std::env::current_exe().unwrap();
+    let own = exe.parent().unwrap();
+    // Cargo before 1.100 links every test executable into deps/; from 1.100 on
+    // each one gets its own build/<package>/<hash>/out/ directory.
+    let dirs: Vec<PathBuf> = match own.parent().and_then(Path::parent) {
+        Some(units) if own.file_name() == Some("out".as_ref()) => std::fs::read_dir(units)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|unit| unit.path().join("out"))
+            .collect(),
+        _ => vec![own.to_owned()],
+    };
     let is_fake_browser = |name: &str| {
         name.strip_prefix("fake_browser-")
             .and_then(|rest| rest.strip_suffix(std::env::consts::EXE_SUFFIX))
             .is_some_and(|hash| !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()))
     };
-    std::fs::read_dir(&deps)
-        .unwrap()
+    dirs.iter()
+        .flat_map(std::fs::read_dir)
+        .flatten()
         .flatten()
         .filter(|entry| entry.file_name().to_str().is_some_and(is_fake_browser))
         .max_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok())
         .map(|entry| entry.path())
         .unwrap_or_else(|| {
             panic!(
-                "no fake_browser test executable in {}; run the tests with cargo test",
-                deps.display()
+                "no fake_browser test executable found for {}; run cargo test including the fake_browser target",
+                exe.display()
             )
         })
 }

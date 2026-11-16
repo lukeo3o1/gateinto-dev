@@ -59,9 +59,78 @@ pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::erro
     )?)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::error::Error>> {
+    registration::check_owner()?;
+    // SAFETY: geteuid has no preconditions and always succeeds.
+    Ok(root_warning(unsafe { libc::geteuid() }))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn check_current_account() -> Result<Option<&'static str>, Box<dyn std::error::Error>> {
     Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+pub const LINUX_DEVICE_KEY: &str =
+    "unavailable: no device key backend on Linux; connections are unauthenticated";
+
+#[cfg(target_os = "linux")]
+pub const LINUX_SETUP: &str = "setup is not available on Linux yet: it creates the device key, \
+     and no device key backend for Linux has been decided; run `gateinto uri register` to \
+     register the gateinto:// handler on its own";
+
+#[cfg(target_os = "linux")]
+pub fn root_warning(euid: u32) -> Option<&'static str> {
+    (euid == 0).then_some(
+        "warning: running as root, which can bypass every check Gateinto makes and is outside \
+         its security model; run Gateinto as the user who uses it",
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn current_linux_status() -> Vec<String> {
+    linux_status(
+        registration::overridden(registration::SCHEME),
+        crate::job::terminal_containment(),
+        crate::proxy::pidfd_probe(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status(
+    overridden: Option<impl fmt::Display>,
+    containment: String,
+    pidfd: std::io::Result<()>,
+) -> Vec<String> {
+    overridden
+        .map(|overridden| {
+            format!(
+                "uri-handler-warning: {}",
+                printable(&overridden.to_string())
+            )
+        })
+        .into_iter()
+        .chain([
+            "terminal-sessions: not supported on Linux yet".to_owned(),
+            format!("terminal-containment: {containment}"),
+            format!("os-user: {}", os_user_state(pidfd)),
+        ])
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn os_user_state(pidfd: std::io::Result<()>) -> String {
+    let pidfd = match pidfd {
+        Ok(()) => "pidfd_open is available".to_owned(),
+        Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => {
+            "pidfd_open is unavailable (Linux 5.3 or later is needed), so os_user would refuse \
+             every connection"
+                .to_owned()
+        }
+        Err(error) => format!("pidfd_open failed ({error}), so os_user may refuse connections"),
+    };
+    format!("not offered by any session on Linux yet; {pidfd}")
 }
 
 #[cfg(windows)]
@@ -97,12 +166,46 @@ pub fn handler_state(registered: Result<Option<String>, RegistrationError>) -> S
     match registered {
         Ok(None) => "not registered".to_owned(),
         Ok(Some(command)) if registration::is_handler_command(&command) => {
-            format!("gateinto: {command}")
+            format!("gateinto: {}", printable(&command))
         }
-        Ok(Some(command)) => format!("another program: {command}"),
+        Ok(Some(command)) => format!("another program: {}", printable(&command)),
         Err(RegistrationError::Unsupported) => "not supported on this platform".to_owned(),
         Err(error) => format!("unknown: {error}"),
     }
+}
+
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else if is_format(c) {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61c}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 fn address_line(gateway: &KnownGateway) -> String {
@@ -330,8 +433,68 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_root_is_warned_about() {
+        assert!(root_warning(0).is_some());
+        for euid in [1, 1000, 65534] {
+            assert_eq!(root_warning(euid), None, "{euid}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_os_user_state_names_a_kernel_without_pidfd_open() {
+        assert_eq!(
+            os_user_state(Ok(())),
+            "not offered by any session on Linux yet; pidfd_open is available"
+        );
+        assert_eq!(
+            os_user_state(Err(std::io::Error::from_raw_os_error(libc::ENOSYS))),
+            "not offered by any session on Linux yet; pidfd_open is unavailable (Linux 5.3 or \
+             later is needed), so os_user would refuse every connection"
+        );
+        assert_eq!(
+            os_user_state(Err(std::io::Error::from_raw_os_error(libc::EPERM))),
+            "not offered by any session on Linux yet; pidfd_open failed (Operation not \
+             permitted (os error 1)), so os_user may refuse connections"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_status_puts_an_escaped_override_warning_before_the_terminal_and_os_user_lines() {
+        assert_eq!(
+            linux_status(None::<&str>, "available".to_owned(), Ok(())),
+            vec![
+                "terminal-sessions: not supported on Linux yet",
+                "terminal-containment: available",
+                "os-user: not offered by any session on Linux yet; pidfd_open is available",
+            ]
+        );
+        assert_eq!(
+            linux_status(
+                Some("a\nb\u{202e}c"),
+                "unavailable: terminal sessions need systemd-run".to_owned(),
+                Err(std::io::Error::from_raw_os_error(libc::ENOSYS)),
+            ),
+            vec![
+                "uri-handler-warning: a\\nb\\u{202e}c".to_owned(),
+                "terminal-sessions: not supported on Linux yet".to_owned(),
+                "terminal-containment: unavailable: terminal sessions need systemd-run".to_owned(),
+                format!(
+                    "os-user: {}",
+                    os_user_state(Err(std::io::Error::from_raw_os_error(libc::ENOSYS)))
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn handler_states_say_whose_handler_is_registered() {
+        #[cfg(target_os = "linux")]
+        let ours = r#""/home/me/.local/bin/gateinto" open -- %u"#;
+        #[cfg(not(target_os = "linux"))]
         let ours = r#""C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1""#;
         let foreign = r#""C:\Other\other.exe" "%1""#;
         assert_eq!(handler_state(Ok(None)), "not registered");
@@ -354,6 +517,31 @@ mod tests {
             })),
             "unknown: RegOpenKeyExW failed with Windows error 5"
         );
+    }
+
+    #[test]
+    fn foreign_handler_commands_cannot_inject_terminal_controls() {
+        assert_eq!(
+            handler_state(Ok(Some(
+                "\"C:\\x.exe\" \u{1b}]0;title\u{7}\r\n%u\u{9b}".to_owned()
+            ))),
+            "another program: \"C:\\x.exe\" \\u{1b}]0;title\\u{7}\\r\\n%u\\u{9b}"
+        );
+    }
+
+    #[test]
+    fn foreign_handler_commands_cannot_spoof_text_direction() {
+        let spoofing = [
+            '\u{61c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
+            '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}',
+            '\u{2069}', '\u{feff}',
+        ];
+        for c in spoofing {
+            assert_eq!(
+                handler_state(Ok(Some(format!("a{c}b")))),
+                format!("another program: a\\u{{{:x}}}b", u32::from(c))
+            );
+        }
     }
 
     fn known_gateways() -> Vec<KnownGateway> {

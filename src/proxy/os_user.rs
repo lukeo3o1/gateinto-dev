@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::job::Job;
 
@@ -30,8 +31,13 @@ impl fmt::Display for Denial {
 }
 
 pub(crate) trait Owners: Send + Sync {
-    fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), Denial>;
+    fn check(&self, peer: SocketAddr, local: SocketAddr, deadline: Instant) -> Result<(), Denial>;
 }
+
+#[cfg(any(windows, target_os = "linux"))]
+const LOOKUP_ATTEMPTS: u32 = 5;
+#[cfg(any(windows, target_os = "linux"))]
+const LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,25 +62,35 @@ fn port_of(port: u32) -> u16 {
     u16::from_be_bytes([high, low])
 }
 
+fn same(a: SocketAddr, b: SocketAddr) -> bool {
+    a.ip().to_canonical() == b.ip().to_canonical() && a.port() == b.port()
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn owner(
     rows: impl IntoIterator<Item = Row>,
     peer: SocketAddr,
     local: SocketAddr,
 ) -> Option<u32> {
-    let same = |a: SocketAddr, b: SocketAddr| {
-        a.ip().to_canonical() == b.ip().to_canonical() && a.port() == b.port()
-    };
     rows.into_iter()
         .find(|row| row.pid != 0 && same(row.local, peer) && same(row.remote, local))
         .map(|row| row.pid)
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
     V4,
     V6,
+}
+
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn families(peer: SocketAddr) -> &'static [Family] {
+    if peer.ip().to_canonical().is_ipv4() {
+        &[Family::V4, Family::V6]
+    } else {
+        &[Family::V6]
+    }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -83,13 +99,13 @@ pub(crate) fn lookup(
     local: SocketAddr,
     tables: impl Fn(Family) -> io::Result<Vec<Row>>,
 ) -> Result<Option<u32>, Denial> {
-    let read = |family| tables(family).map_err(|error| Denial::Lookup(error.to_string()));
-    if peer.ip().to_canonical().is_ipv4()
-        && let Some(pid) = owner(read(Family::V4)?, peer, local)
-    {
-        return Ok(Some(pid));
+    for &family in families(peer) {
+        let rows = tables(family).map_err(|error| Denial::Lookup(error.to_string()))?;
+        if let Some(pid) = owner(rows, peer, local) {
+            return Ok(Some(pid));
+        }
     }
-    Ok(owner(read(Family::V6)?, peer, local))
+    Ok(None)
 }
 
 /// # Safety
@@ -120,15 +136,37 @@ pub(crate) unsafe fn entries<R>(buffer: &[u64], offset: usize) -> io::Result<&[R
     })
 }
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) mod procfs;
 #[cfg(windows)]
 mod windows;
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::pidfd_probe;
 
 #[cfg(windows)]
 pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
     Ok(Arc::new(windows::System::new(job)?))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
+    #[cfg(test)]
+    if job.is_some() {
+        return Ok(tests::fake(Err(Denial::NotInJob)));
+    }
+    if job.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "os_user authentication cannot check session membership on Linux",
+        ));
+    }
+    Ok(Arc::new(linux::System::new()))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
     #[cfg(test)]
     if job.is_some() {
@@ -137,7 +175,7 @@ pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
     let _ = job;
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "os_user authentication is only available on Windows",
+        "os_user authentication is only available on Windows and Linux",
     ))
 }
 
@@ -168,7 +206,7 @@ pub(crate) mod tests {
     }
 
     impl Owners for Fake {
-        fn check(&self, peer: SocketAddr, local: SocketAddr) -> Result<(), Denial> {
+        fn check(&self, peer: SocketAddr, local: SocketAddr, _: Instant) -> Result<(), Denial> {
             self.seen.lock().unwrap().push((peer, local));
             std::thread::sleep(self.delay);
             self.verdict.clone()
@@ -352,12 +390,22 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     #[test]
-    fn the_system_lookup_is_unavailable_outside_windows() {
+    fn the_system_lookup_is_unavailable_outside_windows_and_linux() {
         let error = system(None).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("only available on Windows"));
+        assert!(
+            error
+                .to_string()
+                .contains("only available on Windows and Linux")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_system_lookup_loads_on_linux() {
+        assert!(system(None).is_ok());
     }
 
     #[cfg(not(windows))]
@@ -365,6 +413,7 @@ pub(crate) mod tests {
     fn a_test_job_stands_in_for_the_system_lookup_and_admits_nobody() {
         let owners = system(Some(Arc::new(Job::fake()))).unwrap();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
-        assert!(matches!(owners.check(addr, addr), Err(Denial::NotInJob)));
+        let checked = owners.check(addr, addr, Instant::now());
+        assert!(matches!(checked, Err(Denial::NotInJob)));
     }
 }
