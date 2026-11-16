@@ -1,8 +1,11 @@
 use std::error::Error;
 use std::fmt;
+use std::num::NonZeroU16;
 
 mod engine;
 mod flows;
+#[cfg(any(test, fuzzing))]
+pub mod fuzzing;
 mod packet;
 #[cfg(test)]
 mod testing;
@@ -51,7 +54,7 @@ impl fmt::Display for InvalidDscp {
 
 impl Error for InvalidDscp {}
 
-pub fn filter(listener_port: u16, dscp: Dscp) -> String {
+pub fn filter(listener_port: NonZeroU16, dscp: Dscp) -> String {
     let low = u16::from(dscp.0) << 2;
     let high = low + 3;
     let port = listener_port;
@@ -86,7 +89,7 @@ mod tests {
     #[test]
     fn the_filter_captures_the_tagged_packets_and_the_listener_traffic() {
         assert_eq!(
-            filter(8443, Dscp::DEFAULT),
+            filter(NonZeroU16::new(8443).unwrap(), Dscp::DEFAULT),
             "(outbound and !loopback and ((ip and ((ip.TOS >= 172 and ip.TOS <= 175) \
              or (tcp and tcp.SrcPort == 8443))) or (ipv6 and ipv6.TrafficClass >= 172 \
              and ipv6.TrafficClass <= 175))) or (inbound and !loopback and tcp and \
@@ -97,7 +100,7 @@ mod tests {
     #[test]
     fn the_filter_matches_every_ecn_value_of_the_lowest_and_highest_dscp() {
         for (dscp, low, high) in [(1, 4, 7), (63, 252, 255)] {
-            let filter = filter(1, Dscp::new(dscp).unwrap());
+            let filter = filter(NonZeroU16::MIN, Dscp::new(dscp).unwrap());
             assert!(
                 filter.contains(&format!("(ip.TOS >= {low} and ip.TOS <= {high})")),
                 "{filter}"

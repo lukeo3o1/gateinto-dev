@@ -6,21 +6,24 @@ pub(super) const FIN: u8 = 0x01;
 pub(super) const SYN: u8 = 0x02;
 pub(super) const RST: u8 = 0x04;
 pub(super) const ACK: u8 = 0x10;
-const ECN: u8 = 0x03;
+pub(super) const ECN: u8 = 0x03;
+pub(super) const IP_HEADER: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[derive(Clone, Copy)]
 pub(super) enum Packet {
     Tcp(Segment),
     Udp,
     Other,
     Ipv6,
     Fragment,
+    Options,
     Malformed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[derive(Clone, Copy)]
 pub(super) struct Segment {
-    ip_header: usize,
     total: usize,
     pub(super) source: Ipv4Addr,
     pub(super) destination: Ipv4Addr,
@@ -49,10 +52,10 @@ pub(super) fn parse(bytes: &[u8]) -> Packet {
 }
 
 fn parse_ipv4(bytes: &[u8]) -> Option<Packet> {
-    let header = bytes.get(..20)?;
+    let header = bytes.get(..IP_HEADER)?;
     let ip_header = usize::from(header[0] & 0x0f) * 4;
     let total = usize::from(u16::from_be_bytes([header[2], header[3]]));
-    if ip_header < 20 || total < ip_header || total > bytes.len() {
+    if ip_header < IP_HEADER || total < ip_header || total > bytes.len() {
         return None;
     }
     match header[9] {
@@ -63,13 +66,15 @@ fn parse_ipv4(bytes: &[u8]) -> Option<Packet> {
     if u16::from_be_bytes([header[6], header[7]]) & 0x3fff != 0 {
         return Some(Packet::Fragment);
     }
-    let tcp = bytes.get(ip_header..total)?.get(..20)?;
+    if ip_header != IP_HEADER {
+        return Some(Packet::Options);
+    }
+    let tcp = bytes.get(IP_HEADER..total)?.get(..20)?;
     let data_offset = usize::from(tcp[12] >> 4) * 4;
-    if data_offset < 20 || ip_header + data_offset > total {
+    if data_offset < 20 || IP_HEADER + data_offset > total {
         return None;
     }
     Some(Packet::Tcp(Segment {
-        ip_header,
         total,
         source: address(&header[12..16]),
         destination: address(&header[16..20]),
@@ -86,17 +91,15 @@ fn address(octets: &[u8]) -> Ipv4Addr {
 
 pub(super) fn reflect(packet: &mut [u8], segment: &Segment, listener_port: u16) {
     swap_addresses(packet, segment);
-    let tcp = segment.ip_header;
-    packet[tcp + 2..tcp + 4].copy_from_slice(&listener_port.to_be_bytes());
+    packet[IP_HEADER + 2..IP_HEADER + 4].copy_from_slice(&listener_port.to_be_bytes());
     packet[1] &= ECN;
-    fill_checksums(packet, segment.ip_header, segment.total);
+    fill_checksums(packet, IP_HEADER, segment.total);
 }
 
 pub(super) fn restore(packet: &mut [u8], segment: &Segment, remote_port: u16) {
     swap_addresses(packet, segment);
-    let tcp = segment.ip_header;
-    packet[tcp..tcp + 2].copy_from_slice(&remote_port.to_be_bytes());
-    fill_checksums(packet, segment.ip_header, segment.total);
+    packet[IP_HEADER..IP_HEADER + 2].copy_from_slice(&remote_port.to_be_bytes());
+    fill_checksums(packet, IP_HEADER, segment.total);
 }
 
 fn swap_addresses(packet: &mut [u8], segment: &Segment) {
@@ -141,14 +144,14 @@ fn checksum(data: &[u8], initial: u64) -> u16 {
     !(total as u16)
 }
 
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 pub(super) fn checksums_valid(packet: &[u8]) -> bool {
     let Packet::Tcp(segment) = parse(packet) else {
         return false;
     };
-    let tcp = &packet[segment.ip_header..segment.total];
-    checksum(&packet[..segment.ip_header], 0) == 0
-        && checksum(tcp, pseudo_header(packet, segment.ip_header, segment.total)) == 0
+    let tcp = &packet[IP_HEADER..segment.total];
+    checksum(&packet[..IP_HEADER], 0) == 0
+        && checksum(tcp, pseudo_header(packet, IP_HEADER, segment.total)) == 0
 }
 
 #[cfg(test)]
@@ -165,8 +168,8 @@ mod tests {
         }
     }
 
-    fn ports(packet: &[u8], ip_header: usize) -> (u16, u16) {
-        let tcp = &packet[ip_header..];
+    fn ports(packet: &[u8]) -> (u16, u16) {
+        let tcp = &packet[IP_HEADER..];
         (
             u16::from_be_bytes([tcp[0], tcp[1]]),
             u16::from_be_bytes([tcp[2], tcp[3]]),
@@ -176,6 +179,44 @@ mod tests {
     fn addresses(packet: &[u8]) -> (Ipv4Addr, Ipv4Addr) {
         let octets = |at: usize| Ipv4Addr::from(<[u8; 4]>::try_from(&packet[at..at + 4]).unwrap());
         (octets(12), octets(16))
+    }
+
+    const ODD_PAYLOAD: [u8; 43] = [
+        0x45, 0x00, 0x00, 0x2b, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0x32, 0x35, 0xc0, 0x00, 0x02,
+        0x0a, 0xc6, 0x33, 0x64, 0x14, 0xc0, 0x00, 0x01, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+        0x77, 0x88, 0x50, 0x18, 0x01, 0xf6, 0x2a, 0x0e, 0x00, 0x00, 0x61, 0x62, 0x63,
+    ];
+    const EVEN_PAYLOAD_WITH_OPTIONS: [u8; 58] = [
+        0x45, 0x00, 0x00, 0x3a, 0x00, 0x01, 0x40, 0x00, 0x80, 0x06, 0x0e, 0x6b, 0xc0, 0x00, 0x02,
+        0x0a, 0xc6, 0x33, 0x64, 0x14, 0xc0, 0x01, 0x00, 0x50, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00,
+        0x00, 0x00, 0x80, 0x02, 0xfa, 0xf0, 0xe5, 0xe4, 0x00, 0x00, 0x02, 0x04, 0x05, 0xb4, 0x01,
+        0x03, 0x03, 0x08, 0x01, 0x01, 0x04, 0x02, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x21,
+    ];
+    const ODD_PAYLOAD_WITH_OPTIONS_AND_ECN: [u8; 61] = [
+        0x45, 0xae, 0x00, 0x3d, 0xbe, 0xef, 0x00, 0x00, 0x39, 0x06, 0xd5, 0xcb, 0xc6, 0x33, 0x64,
+        0x14, 0xc0, 0x00, 0x02, 0x0a, 0x01, 0xbb, 0xc0, 0x00, 0x01, 0x02, 0x03, 0x04, 0xa0, 0xb0,
+        0xc0, 0xd0, 0x80, 0x10, 0x04, 0x00, 0xa4, 0x77, 0x00, 0x00, 0x01, 0x01, 0x08, 0x0a, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x47, 0x61, 0x74, 0x65, 0x69, 0x6e, 0x74, 0x6f,
+        0x21,
+    ];
+
+    #[test]
+    fn checksums_match_independently_computed_packets() {
+        for (name, expected) in [
+            ("odd payload", &ODD_PAYLOAD[..]),
+            ("even payload with options", &EVEN_PAYLOAD_WITH_OPTIONS[..]),
+            (
+                "odd payload with options",
+                &ODD_PAYLOAD_WITH_OPTIONS_AND_ECN[..],
+            ),
+        ] {
+            let mut packet = expected.to_vec();
+            packet[10..12].fill(0);
+            packet[IP_HEADER + 16..IP_HEADER + 18].fill(0);
+            fill_checksums(&mut packet, IP_HEADER, expected.len());
+            assert_eq!(packet, expected, "{name}");
+            assert!(checksums_valid(expected), "{name}");
+        }
     }
 
     #[test]
@@ -190,7 +231,6 @@ mod tests {
     #[test]
     fn a_tcp_segment_with_options_is_parsed() {
         let packet = TestPacket {
-            ip_options: 8,
             tcp_options: 12,
             payload: 5,
             flags: SYN | ACK,
@@ -198,7 +238,6 @@ mod tests {
         }
         .build();
         let parsed = segment(&packet);
-        assert_eq!(parsed.ip_header, 28);
         assert_eq!(parsed.total, packet.len());
         assert_eq!(parsed.source, CLIENT);
         assert_eq!(parsed.destination, REMOTE);
@@ -207,6 +246,64 @@ mod tests {
         assert_eq!(parsed.flags, SYN | ACK);
         assert_eq!(parsed.sequence, 0x0102_0304);
         assert!(checksums_valid(&packet));
+    }
+
+    #[test]
+    fn a_tcp_packet_with_ipv4_options_is_refused_and_other_kinds_are_kept() {
+        let with_options = |ip_options: usize, packet: TestPacket| {
+            TestPacket {
+                ip_options,
+                ..packet
+            }
+            .build()
+        };
+        for (name, packet, expected) in [
+            (
+                "tcp, 4 bytes",
+                with_options(4, TestPacket::client(SYN)),
+                Packet::Options,
+            ),
+            (
+                "tcp, 40 bytes",
+                with_options(40, TestPacket::reply(ACK)),
+                Packet::Options,
+            ),
+            (
+                "udp",
+                with_options(
+                    8,
+                    TestPacket {
+                        protocol: UDP,
+                        ..TestPacket::client(0)
+                    },
+                ),
+                Packet::Udp,
+            ),
+            (
+                "icmp",
+                with_options(
+                    8,
+                    TestPacket {
+                        protocol: 1,
+                        ..TestPacket::client(0)
+                    },
+                ),
+                Packet::Other,
+            ),
+            (
+                "fragment",
+                with_options(
+                    8,
+                    TestPacket {
+                        fragment: 0x2000,
+                        ..TestPacket::client(SYN)
+                    },
+                ),
+                Packet::Fragment,
+            ),
+        ] {
+            assert_eq!(parse(&packet), expected, "{name}");
+        }
     }
 
     #[test]
@@ -321,15 +418,14 @@ mod tests {
 
     #[test]
     fn reflecting_turns_a_client_packet_into_a_valid_one_to_the_listener() {
-        for (ip_options, tcp_options, payload, tos) in [
-            (0, 0, 0, TAGGED),
-            (0, 0, 1, TAGGED | 0x01),
-            (4, 0, 7, TAGGED | 0x02),
-            (0, 12, 100, TAGGED | 0x03),
-            (40, 40, 1_301, 0xff),
+        for (tcp_options, payload, tos) in [
+            (0, 0, TAGGED),
+            (0, 1, TAGGED | 0x01),
+            (4, 7, TAGGED | 0x02),
+            (12, 100, TAGGED | 0x03),
+            (40, 1_301, 0xff),
         ] {
             let mut packet = TestPacket {
-                ip_options,
                 tcp_options,
                 payload,
                 tos,
@@ -337,28 +433,23 @@ mod tests {
             }
             .build();
             let original = packet.clone();
-            let ip_header = 20 + ip_options;
             packet[10..12].copy_from_slice(&[0xde, 0xad]);
-            packet[ip_header + 16..ip_header + 18].copy_from_slice(&[0xbe, 0xef]);
+            packet[IP_HEADER + 16..IP_HEADER + 18].copy_from_slice(&[0xbe, 0xef]);
             let parsed = segment(&packet);
-            reflect(&mut packet, &parsed, LISTENER);
-            let case = (ip_options, tcp_options, payload, tos);
+            reflect(&mut packet, &parsed, LISTENER.get());
+            let case = (tcp_options, payload, tos);
             assert!(checksums_valid(&packet), "{case:?}");
             assert_eq!(packet[1], tos & 0x03, "{case:?}");
             assert_eq!(addresses(&packet), (REMOTE, CLIENT), "{case:?}");
+            assert_eq!(ports(&packet), (LOCAL_PORT, LISTENER.get()), "{case:?}");
             assert_eq!(
-                ports(&packet, ip_header),
-                (LOCAL_PORT, LISTENER),
+                packet[IP_HEADER + 4..IP_HEADER + 16],
+                original[IP_HEADER + 4..IP_HEADER + 16],
                 "{case:?}"
             );
             assert_eq!(
-                packet[ip_header + 4..ip_header + 16],
-                original[ip_header + 4..ip_header + 16],
-                "{case:?}"
-            );
-            assert_eq!(
-                packet[ip_header + 18..],
-                original[ip_header + 18..],
+                packet[IP_HEADER + 18..],
+                original[IP_HEADER + 18..],
                 "{case:?}"
             );
         }
@@ -366,29 +457,23 @@ mod tests {
 
     #[test]
     fn restoring_turns_a_listener_reply_into_a_valid_one_from_the_remote() {
-        for (ip_options, tcp_options, payload) in [(0, 0, 0), (0, 4, 1), (8, 0, 33)] {
+        for (tcp_options, payload) in [(0, 0), (4, 1), (0, 33)] {
             let mut packet = TestPacket {
-                ip_options,
                 tcp_options,
                 payload,
                 tos: 0x02,
                 ..TestPacket::reply(SYN | ACK)
             }
             .build();
-            let ip_header = 20 + ip_options;
             packet[10..12].copy_from_slice(&[0, 0]);
-            packet[ip_header + 16..ip_header + 18].copy_from_slice(&[0, 0]);
+            packet[IP_HEADER + 16..IP_HEADER + 18].copy_from_slice(&[0, 0]);
             let parsed = segment(&packet);
             restore(&mut packet, &parsed, REMOTE_PORT);
-            let case = (ip_options, tcp_options, payload);
+            let case = (tcp_options, payload);
             assert!(checksums_valid(&packet), "{case:?}");
             assert_eq!(packet[1], 0x02, "{case:?}");
             assert_eq!(addresses(&packet), (REMOTE, CLIENT), "{case:?}");
-            assert_eq!(
-                ports(&packet, ip_header),
-                (REMOTE_PORT, LOCAL_PORT),
-                "{case:?}"
-            );
+            assert_eq!(ports(&packet), (REMOTE_PORT, LOCAL_PORT), "{case:?}");
         }
     }
 

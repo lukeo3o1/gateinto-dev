@@ -1,3 +1,4 @@
+use std::num::NonZeroU16;
 use std::time::{Duration, Instant};
 
 use super::flows::{Admission, Flows};
@@ -27,6 +28,7 @@ pub struct Counters {
     pub unknown_replies_dropped: u64,
     pub fragments_dropped: u64,
     pub malformed_dropped: u64,
+    pub options_dropped: u64,
     pub table_full: u64,
     pub contained_udp: u64,
     pub contained_other: u64,
@@ -41,9 +43,9 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(listener_port: u16, capacity: usize, idle_timeout: Duration) -> Self {
+    pub fn new(listener_port: NonZeroU16, capacity: usize, idle_timeout: Duration) -> Self {
         Self {
-            listener_port,
+            listener_port: listener_port.get(),
             flows: Flows::new(capacity, idle_timeout),
             counters: Counters::default(),
         }
@@ -61,6 +63,7 @@ impl Engine {
             Packet::Other => return dropped(&mut counters.contained_other),
             Packet::Ipv6 => return dropped(&mut counters.contained_ipv6),
             Packet::Fragment => return dropped(&mut counters.fragments_dropped),
+            Packet::Options => return dropped(&mut counters.options_dropped),
             Packet::Malformed => return dropped(&mut counters.malformed_dropped),
         };
         if segment.source_port == self.listener_port {
@@ -99,6 +102,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
+    use crate::divert::flows::SWEEP_INTERVAL;
+    use crate::divert::fuzzing::Checker;
     use crate::divert::packet::{ACK, FIN, RST, SYN, TCP, UDP, checksums_valid};
     use crate::divert::testing::{
         CLIENT, LISTENER, LOCAL_PORT, REMOTE, REMOTE_PORT, TAGGED, TestPacket,
@@ -182,7 +187,7 @@ mod tests {
         assert!(checksums_valid(&packet));
         assert_eq!(
             header(&packet),
-            (REMOTE, CLIENT, LOCAL_PORT, LISTENER, 0x01)
+            (REMOTE, CLIENT, LOCAL_PORT, LISTENER.get(), 0x01)
         );
         assert_eq!(
             harness.counters(),
@@ -208,7 +213,7 @@ mod tests {
         );
         let (verdict, packet) = harness.send(TestPacket::client(ACK));
         assert_eq!(verdict, INJECT);
-        assert_eq!(header(&packet).3, LISTENER);
+        assert_eq!(header(&packet).3, LISTENER.get());
         assert_eq!(
             harness.counters(),
             Counters {
@@ -335,9 +340,9 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_bytes_never_panic_and_never_inject_an_invalid_packet() {
+    fn arbitrary_bytes_never_panic_and_only_inject_translated_packets() {
         let mut harness = Harness::new(4);
-        harness.verdict(syn(7));
+        let mut checker = Checker::new(LISTENER);
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = move || {
             state ^= state << 13;
@@ -345,27 +350,145 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let template = TestPacket::client(ACK).build();
+        let templates = [
+            syn(7).build(),
+            TestPacket::client(ACK).build(),
+            TestPacket::reply(SYN | ACK).build(),
+            TestPacket::client(FIN | ACK).build(),
+            TestPacket::reply(RST).build(),
+        ];
+        let mut injected = 0;
         for round in 0..20_000 {
+            if next() % 50 == 0 {
+                let step = Duration::from_secs(next() % 400);
+                let now = harness.now + step;
+                harness.at(now);
+            }
+            let template = &templates[(next() % templates.len() as u64) as usize];
             let length = (next() % 80) as usize;
             let mut bytes: Vec<u8> = (0..length).map(|_| next() as u8).collect();
-            if round % 2 == 0 {
-                for (byte, &valid) in bytes.iter_mut().zip(&template) {
-                    if next() % 4 != 0 {
-                        *byte = valid;
-                    }
+            if round % 4 != 0 {
+                bytes = template.clone();
+                for _ in 0..next() % 3 {
+                    let at = (next() % bytes.len() as u64) as usize;
+                    bytes[at] = next() as u8;
                 }
             }
-            let direction = if round % 3 == 0 {
+            let direction = if round % 7 == 0 {
                 Direction::Inbound
             } else {
                 Direction::Outbound
             };
-            if harness.process(&mut bytes, direction) == INJECT {
-                assert!(checksums_valid(&bytes), "{bytes:?}");
-            }
+            let before = bytes.clone();
+            let verdict = harness.process(&mut bytes, direction);
+            checker.check(&before, &bytes, verdict);
+            injected += u64::from(verdict == INJECT);
         }
-        assert_eq!(harness.counters().captured, 20_001);
+        let counters = harness.counters();
+        assert_eq!(counters.captured, 20_000);
+        assert_eq!(injected, counters.reflected + counters.replies_restored);
+        assert!(counters.reflected > 100 && counters.replies_restored > 100);
+    }
+
+    #[test]
+    fn tcp_packets_with_ipv4_options_are_dropped_unchanged_in_both_directions_of_a_flow() {
+        let mut harness = Harness::new(8);
+        harness.verdict(syn(7));
+        for packet in [
+            TestPacket::client(ACK),
+            TestPacket::reply(ACK),
+            syn(9),
+            TestPacket {
+                source_port: LOCAL_PORT + 1,
+                ..syn(9)
+            },
+        ] {
+            let mut bytes = TestPacket {
+                ip_options: 4,
+                ..packet
+            }
+            .build();
+            let original = bytes.clone();
+            assert_eq!(harness.process(&mut bytes, Direction::Outbound), DROP);
+            assert_eq!(bytes, original);
+        }
+        let udp = TestPacket {
+            protocol: UDP,
+            ip_options: 8,
+            ..TestPacket::client(0)
+        };
+        assert_eq!(harness.verdict(udp), DROP);
+        assert_eq!(
+            harness.counters(),
+            Counters {
+                captured: 6,
+                new_flows: 1,
+                reflected: 1,
+                options_dropped: 4,
+                contained_udp: 1,
+                ..Counters::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_syn_after_a_flow_ended_starts_a_new_flow_that_outlives_the_old_linger() {
+        let mut harness = Harness::new(8);
+        harness.verdict(syn(7));
+        harness.verdict(TestPacket::client(RST));
+        harness.at(Duration::from_secs(1));
+        assert_eq!(harness.verdict(syn(7)), INJECT);
+        let counters = harness.counters();
+        assert_eq!((counters.new_flows, counters.syn_retransmits), (2, 0));
+        harness.at(LINGER + Duration::from_secs(1));
+        assert_eq!(harness.verdict(TestPacket::client(ACK)), INJECT);
+        let (verdict, packet) = harness.send(TestPacket::reply(ACK));
+        assert_eq!(verdict, INJECT);
+        assert_eq!(header(&packet).2, REMOTE_PORT);
+    }
+
+    #[test]
+    fn a_tagged_packet_from_the_listener_port_takes_the_reply_path() {
+        let from_listener = TestPacket {
+            source_port: LISTENER.get(),
+            tos: TAGGED,
+            ..syn(7)
+        };
+        let mut harness = Harness::new(8);
+        assert_eq!(harness.verdict(from_listener), DROP);
+        assert_eq!(harness.counters().unknown_replies_dropped, 1);
+        assert_eq!(harness.counters().new_flows, 0);
+        harness.verdict(TestPacket {
+            source_port: REMOTE_PORT,
+            ..syn(7)
+        });
+        let (verdict, packet) = harness.send(from_listener);
+        assert_eq!(verdict, INJECT);
+        assert_eq!(
+            header(&packet),
+            (REMOTE, CLIENT, REMOTE_PORT, REMOTE_PORT, TAGGED)
+        );
+        let counters = harness.counters();
+        assert_eq!((counters.replies_restored, counters.reflected), (1, 1));
+    }
+
+    #[test]
+    fn listener_syn_ack_and_reset_are_translated_during_the_linger_without_extending_it() {
+        let mut harness = Harness::new(8);
+        harness.verdict(syn(7));
+        harness.verdict(TestPacket::client(FIN | ACK));
+        harness.verdict(TestPacket::reply(FIN | ACK));
+        harness.at(LINGER - Duration::from_secs(2));
+        assert_eq!(harness.verdict(TestPacket::reply(SYN | ACK)), INJECT);
+        harness.at(LINGER - Duration::from_secs(1));
+        assert_eq!(harness.verdict(TestPacket::reply(RST)), INJECT);
+        harness.at(LINGER);
+        assert_eq!(harness.verdict(TestPacket::reply(ACK)), DROP);
+        assert_eq!(harness.verdict(TestPacket::client(ACK)), DROP);
+        let counters = harness.counters();
+        assert_eq!(counters.replies_restored, 3);
+        assert_eq!(counters.unknown_replies_dropped, 1);
+        assert_eq!(counters.orphans_dropped, 1);
     }
 
     #[test]
@@ -553,6 +676,26 @@ mod tests {
         let counters = harness.counters();
         assert_eq!(counters.table_full, 4);
         assert_eq!(counters.new_flows, 4);
+    }
+
+    #[test]
+    fn a_full_table_is_swept_at_most_once_per_interval() {
+        let flow = |local_port: u16| TestPacket {
+            source_port: local_port,
+            ..syn(7)
+        };
+        let half = SWEEP_INTERVAL / 2;
+        let mut harness = Harness::new(1);
+        harness.verdict(flow(1));
+        harness.at(IDLE - half);
+        assert_eq!(harness.verdict(flow(2)), DROP);
+        harness.at(IDLE);
+        assert_eq!(harness.verdict(flow(2)), DROP);
+        harness.at(IDLE + half);
+        assert_eq!(harness.verdict(flow(2)), INJECT);
+        let counters = harness.counters();
+        assert_eq!((counters.table_full, counters.new_flows), (2, 2));
+        assert_eq!(SWEEP_INTERVAL, Duration::from_secs(1));
     }
 
     #[test]

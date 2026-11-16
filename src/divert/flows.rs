@@ -6,6 +6,7 @@ use super::packet::{FIN, RST, Segment};
 
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs((2 * 60 + 4) * 60);
 pub const LINGER: Duration = Duration::from_secs(120);
+pub(super) const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 type Key = (Ipv4Addr, u16);
 
@@ -66,6 +67,7 @@ pub(super) struct Flows {
     flows: HashMap<Key, Flow>,
     capacity: usize,
     idle_timeout: Duration,
+    last_sweep: Option<Instant>,
 }
 
 impl Flows {
@@ -74,6 +76,7 @@ impl Flows {
             flows: HashMap::new(),
             capacity,
             idle_timeout,
+            last_sweep: None,
         }
     }
 
@@ -125,9 +128,13 @@ impl Flows {
     }
 
     fn create(&mut self, key: Key, segment: &Segment, now: Instant) -> Admission {
-        if self.flows.len() >= self.capacity {
+        let swept_lately = self
+            .last_sweep
+            .is_some_and(|last| now.saturating_duration_since(last) < SWEEP_INTERVAL);
+        if self.flows.len() >= self.capacity && !swept_lately {
             let idle_timeout = self.idle_timeout;
             self.flows.retain(|_, flow| flow.live(now, idle_timeout));
+            self.last_sweep = Some(now);
         }
         if self.flows.len() >= self.capacity {
             return Admission::Full;

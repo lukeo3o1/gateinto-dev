@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use std::num::NonZeroU16;
 
 use super::packet::{TCP, fill_checksums};
 
@@ -6,7 +7,7 @@ pub(super) const CLIENT: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 pub(super) const REMOTE: Ipv4Addr = Ipv4Addr::new(140, 82, 112, 3);
 pub(super) const LOCAL_PORT: u16 = 50_000;
 pub(super) const REMOTE_PORT: u16 = 443;
-pub(super) const LISTENER: u16 = 8443;
+pub(super) const LISTENER: NonZeroU16 = NonZeroU16::new(8443).unwrap();
 pub(super) const TAGGED: u8 = 43 << 2;
 
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +48,7 @@ impl TestPacket {
         Self {
             source: CLIENT,
             destination: REMOTE,
-            source_port: LISTENER,
+            source_port: LISTENER.get(),
             destination_port: LOCAL_PORT,
             tos: 0,
             ..Self::client(flags)
