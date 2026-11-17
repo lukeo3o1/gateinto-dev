@@ -14,6 +14,10 @@ pub mod protocol;
 pub mod pump;
 #[cfg(test)]
 mod testing;
+#[cfg(any(windows, test))]
+mod windivert;
+#[cfg(windows)]
+pub mod windows;
 
 pub use engine::{Counters, Direction, Engine, Verdict};
 pub use flows::{DEFAULT_IDLE_TIMEOUT, LINGER};

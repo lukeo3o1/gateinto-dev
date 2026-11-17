@@ -19,7 +19,7 @@ pub fn delete_rule() -> NetshCommand {
 }
 
 pub fn add_rule(port: ListenerPort, program: &str) -> Result<NetshCommand, InvalidProgram> {
-    if !quotable(program) || !absolute(program) {
+    if !verbatim(program) || !absolute(program) {
         return Err(InvalidProgram);
     }
     Ok(NetshCommand(format!(
@@ -28,14 +28,17 @@ pub fn add_rule(port: ListenerPort, program: &str) -> Result<NetshCommand, Inval
     )))
 }
 
-// A backslash right before the closing quote would escape it.
-fn quotable(path: &str) -> bool {
-    !path.ends_with('\\') && !path.chars().any(|c| c == '"' || c.is_control())
+// A backslash right before the closing quote would escape it, and the firewall expands `%NAME%`.
+fn verbatim(path: &str) -> bool {
+    !path.ends_with('\\')
+        && !path
+            .chars()
+            .any(|c| matches!(c, '"' | '%') || c.is_control())
 }
 
 fn absolute(path: &str) -> bool {
-    match path.as_bytes() {
-        [b'\\', b'\\', b'?', b'\\', ..] => true,
+    let local = path.strip_prefix(r"\\?\").unwrap_or(path);
+    match local.as_bytes() {
         [drive, b':', b'\\', ..] => drive.is_ascii_alphabetic(),
         _ => false,
     }
@@ -118,6 +121,14 @@ mod tests {
             "C:\\Gate\tinto\\gateinto.exe",
             "C:\\Gate\u{7f}into\\gateinto.exe",
             "C:\\Gate\u{85}into\\gateinto.exe",
+            r"C:\Users\%USERNAME%\gateinto.exe",
+            r"C:\100%\gateinto.exe",
+            r"\\?\UNC\server\share\gateinto.exe",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume2\gateinto.exe",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\gateinto.exe",
+            r"\\?\C:gateinto.exe",
+            r"\\?\1:\gateinto.exe",
+            r"\\?\\C:\gateinto.exe",
         ] {
             assert_eq!(
                 add_rule(port(), refused),

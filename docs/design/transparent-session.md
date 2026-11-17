@@ -3,11 +3,13 @@
 Status: design decided; steps 1 and 2 of the [Implementation
 plan](#implementation-plan) are implemented (`Job::set_dscp_tag` in
 `src/job.rs`, the packet core in `src/divert.rs` and `src/divert/`), and so is
-the platform-independent part of step 3 (the pipe protocol, the engine loop,
-the helper sequence and the firewall command lines in `src/divert/`); its
-Windows bindings are not.
-`Job::set_dscp_tag` and its tests have only been type-checked from Linux
-until Windows CI runs them. The design rests on premises that have not been
+step 3, the `divert` helper: its platform-independent part (the pipe
+protocol, the engine loop, the helper sequence and the firewall command
+lines) and its Windows bindings (`src/divert/windows.rs`, the hidden
+`gateinto divert` subcommand). Nothing starts the helper yet.
+`Job::set_dscp_tag`, the helper's Windows bindings and their tests have only
+been type-checked from Linux until Windows CI runs them, and the helper has
+never opened a WinDivert handle. The design rests on premises that have not been
 verified: the evidence is two experiments on GitHub-hosted Windows Server
 images ([Evidence](#evidence)), and nothing has been tried on a client
 edition of Windows, unelevated, over IPv6, or next to a VPN or antivirus
@@ -25,7 +27,7 @@ terminal); transparent routing catches every connection that ignores them.
 The agent tags the session's job with a DSCP value through
 `SetInformationJobObject(JobObjectNetRateControlInformation)`; Windows then
 marks every IPv4 and IPv6 packet those processes send, from the first SYN
-on. A separate elevated helper, `gateinto divert` *(proposed)*, holds one
+on. A separate elevated helper, `gateinto divert`, holds one
 WinDivert handle that reflects tagged TCP packets to a listener of the agent
 and drops every other tagged packet. For each connection the agent accepts
 there, it finds the original connection in the system TCP tables, checks
@@ -130,12 +132,18 @@ not change.
   - the helper's argument types (`PipeName`, `ListenerPort`), exit codes and
     sequence (`divert::helper::run` over the `Platform` seam), and
     `sha256_matches`;
-  - the `netsh` command lines (`divert::firewall`).
+  - the `netsh` command lines (`divert::firewall`);
+  - the pinned WinDivert release (`helper::DRIVER_VERSION` 2.2, the file
+    digests in `src/divert/windivert.rs`) and the `WINDIVERT_ADDRESS`
+    layout (`windivert::Address`), compiled on Windows and in tests;
+  - the Windows implementation of the seams (`src/divert/windows.rs`) and
+    the hidden subcommand `gateinto divert` (`src/main.rs`), Windows only.
 
-  None of these is called yet: the Windows implementations of the seams and
-  the `divert` subcommand are the rest of step 3.
+  Nothing starts the helper yet: the agent side is step 5.
 - `windows-sys` 0.61.2 with `Win32_System_JobObjects`, enabled in
-  `Cargo.toml`, defines the net rate control types. `Win32_UI_Shell`
+  `Cargo.toml`, defines the net rate control types; `Win32_System_IO`,
+  `Win32_System_Pipes` and `Win32_System_SystemInformation` were added for
+  the helper. `Win32_UI_Shell`
   (`ShellExecuteExW`) is not enabled.
 - `os_user` (`src/proxy/os_user.rs`): `Row { local, remote, pid }`, `owner`
   (the row whose local end is the client's address and whose remote end is
@@ -467,8 +475,8 @@ could not be set, a system too old.
 
 ### The divert helper
 
-**Decision: a separate elevated process, `gateinto divert` *(proposed)*,
-a hidden subcommand of the same executable, started on demand through UAC.**
+**Decision: a separate elevated process, `gateinto divert`, a hidden
+subcommand of the same executable, started on demand through UAC.**
 
 The MSI is per-user, the agent runs unelevated, and there is no machine
 service, so opening a WinDivert handle (which needs administrator rights and
@@ -476,8 +484,13 @@ loads a kernel driver) needs an elevated process. The agent starts it with
 `ShellExecuteExW`, verb `runas`, `SEE_MASK_NOCLOSEPROCESS`, and keeps the
 returned process handle.
 
-- **Arguments:** `divert --port T --dscp N --pipe <name> --agent-pid <pid>`
-  *(proposed)*. They come from the unelevated agent, so the helper validates
+- **Arguments:** `divert --port T --dscp N --pipe <name> --agent-pid <pid>`.
+  The subcommand takes each as a raw `Option<OsString>`, accepts values that
+  start with `-`, and passes a missing or non-UTF-8 value on as empty, so
+  clap refuses nothing that the helper should report. It reads no
+  configuration, opens no device key, sets up no logging, touches no IPC,
+  and replaces the panic hook with one that prints nothing. They come from
+  the unelevated agent, so the helper validates
   them: the pipe name must match the fixed Gateinto pattern, N must be 1 to
   63, T must be in 49152 to 65535. An invalid pipe name cannot be reported
   on the pipe, because nothing is reported before the pipe is connected; the
@@ -500,8 +513,20 @@ returned process handle.
   6. load `WinDivert.dll`, open one NETWORK-layer handle with the static
      filter, read the driver version with `WinDivertGetParam`
      (`WINDIVERT_PARAM_VERSION_MAJOR`, `WINDIVERT_PARAM_VERSION_MINOR`) and
-     refuse any version other than the pinned one;
+     refuse any version other than the pinned one (`DRIVER_VERSION`, 2.2);
   7. send `ready` and run the engine loop.
+
+  A panic anywhere between a successful `add` and the final `delete` is
+  caught there: the handle closes while the stack unwinds, the rule is
+  deleted, and the helper ends with exit code 5 like a fatal engine error.
+  Inside the engine loop, a panic in the packet loop marks the loop ended
+  and a panic in the reporter shuts the port down, so neither leaves the
+  other thread waiting. A panic in the liveness wait counts as the agent
+  gone. Release builds unwind (no `panic = "abort"` in `Cargo.toml` or
+  `.cargo/config.toml`, and the Windows 7 build only builds the
+  `panic_abort` crate). Built with `panic = "abort"`, a panic would end the
+  process at once: Windows closes the handle and the mutex, the pipe breaks,
+  and the rule stays until the next helper start, as for a killed helper.
 - **What it never does:** see payload beyond the TCP and IP headers it
   rewrites, terminate TLS, hold a credential or a key. The mTLS key stays in
   the agent; this also matters when the UAC prompt is answered with a
@@ -516,8 +541,9 @@ returned process handle.
   line that could not be written), 4 after writing `error <code>`, 5 after a
   fatal engine error.
 - **One helper per machine**: the helper creates the named mutex
-  `Global\Gateinto-divert` *(proposed)* and answers `error another-helper`
-  if it exists. Two handles with overlapping filters would steal each
+  `Global\Gateinto-divert` (`CreateMutexW`, not owned, only its existence
+  matters) and answers `error another-helper` if it exists or cannot be
+  created. Two handles with overlapping filters would steal each
   other's packets: the first would divert another agent's sessions to its
   own listener, where attribution fails and the connections are closed. A
   second agent (another `GATEINTO_INSTANCE`, or another Windows user on the
@@ -532,13 +558,12 @@ returned process handle.
   its WinDivert handle open for a grace period of 5 s (`GRACE_PERIOD`) so
   that packets from processes still being killed are dropped or refused
   rather than leaked, then closes the handle, deletes the firewall rule and
-  exits. The 5 s is a margin, not a
-  measurement. Closing the handle restores normal networking; the driver
-  unloads when the last handle closes, or at reboot. A fatal engine error
-  (any receive error other than the shutdown) ends the helper the same way,
-  without the grace period. The helper closes the handle before it deletes
-  the rule, and releases the mutex only after that, because the next helper
-  adds a rule of the same name.
+  exits. The 5 s is a margin, not a measurement. Closing the handle restores
+  normal networking; the driver unloads when the last handle closes, or at
+  reboot. A fatal engine error (any receive error other than the shutdown)
+  ends the helper the same way, without the grace period. The helper closes
+  the handle before it deletes the rule, and releases the mutex only after
+  that, because the next helper adds a rule of the same name.
 
 #### Liveness pipe
 
@@ -550,10 +575,22 @@ returned process handle.
 - The helper opens the pipe with `SECURITY_SQOS_PRESENT |
   SECURITY_IDENTIFICATION`, so the pipe server can query the helper's
   identity but cannot act as the helper, and checks
-  `GetNamedPipeServerProcessId` against `--agent-pid`. The agent accepts
+  `GetNamedPipeServerProcessId` against `--agent-pid` before it opens the
+  agent process with `SYNCHRONIZE`. It opens the pipe with
+  `FILE_FLAG_OVERLAPPED` and no sharing: the reporter's writes wait for
+  their own completion, while the liveness wait keeps a one-byte overlapped
+  read pending and waits with `WaitForMultipleObjects` on that read's event
+  and the agent process handle. It returns when the read completes (any
+  byte, or an error such as a broken pipe) or the agent process ends, then
+  cancels the read and waits for it. On a handle opened without
+  `FILE_FLAG_OVERLAPPED`, Windows serializes I/O on the handle, so the
+  pending read would block every counter line. The agent accepts
   exactly one client and checks
   `GetNamedPipeClientProcessId` against the pid of the process handle
   `ShellExecuteExW` returned.
+- An agent that sees the helper process end drains the pipe before it
+  reports a generic exit: exit code 4 means the helper wrote an `error` line
+  just before it ended *(proposed, step 5)*.
 - **Protocol.** The helper's first and only status line is either `ready` or
   `error <code>` with `<code>` from a fixed list (`ErrorCode`):
   `invalid-arguments`, `another-helper`, `firewall-rule`, `files-missing`,
@@ -591,8 +628,20 @@ platform-independent core is `crate::divert`; the engine loop
 (`divert::pump`) receives each packet through the `DivertPort` seam, passes
 it to `Engine::process` with its `Direction`, and injects exactly the
 received length for `Verdict::InjectInbound`; a failed send is counted and
-the loop continues. A Windows binding *(proposed)* implements the seam with
-`WinDivertRecv` and `WinDivertSend`, turning the address inbound.
+the loop continues. `DivertPort::shutdown` is sticky: it can land between
+two `recv` calls, so every later `recv` returns `RecvError::Shutdown` once
+the queued packets are drained. The Windows binding
+(`src/divert/windows.rs`) implements the seam with `WinDivertRecv`,
+`WinDivertSend` and `WinDivertShutdown(WINDIVERT_SHUTDOWN_BOTH)`, which
+WinDivert documents as sticky in that way: after it, `WinDivertRecv` fails
+with `ERROR_NO_DATA` once the queue is empty, and that error, and only that
+one, becomes `RecvError::Shutdown`. Each packet is injected with a copy of
+the address it was received with: `Outbound` cleared, so it goes up the
+inbound path of the interface it was to leave on (`Network.IfIdx`,
+`SubIfIdx`), and `IPChecksum` and `TCPChecksum` set, as
+`WinDivertHelperCalcChecksums` does after recomputing checksums. WinDivert
+requires injected packets to carry correct checksums or the corresponding
+flag cleared, and the engine always writes both checksums in full.
 `Engine::process` does not check the DSCP itself: every outbound packet it
 receives is tagged or comes from port T, because the filter selects nothing
 else.
@@ -786,15 +835,42 @@ verification; gateway policies keyed on host names will not match.
   `WinDivert32.sys`) of one pinned WinDivert release are installed next to
   `gateinto.exe` by an optional MSI feature *(proposed)*. They are never
   linked into `gateinto.exe` and never loaded by the agent or the GUI.
-- The helper loads them by absolute path from the installation directory
-  after checking their SHA-256 digests against values pinned in the source
-  for that release *(proposed)*. The installation directory is writable by
-  the user, so the helper opens both files without write or delete sharing,
-  hashes them through those handles and keeps the handles open until the
-  driver is loaded and the DLL is mapped, so they cannot be swapped between
-  the check and the load (needs verification). `LoadLibraryExW` uses an
-  absolute path with `LOAD_WITH_ALTERED_SEARCH_PATH` or
-  `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`, never the default search order.
+- The pinned release is WinDivert 2.2.2, `WinDivert-2.2.2-A.zip` from the
+  upstream GitHub release (SHA-256
+  `63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15`; the
+  driver's Authenticode chain, a Sectigo EV certificate, was checked with
+  `osslsigncode`). The files and their SHA-256 digests, pinned in
+  `src/divert/windivert.rs`:
+
+  | Build | File | SHA-256 |
+  | --- | --- | --- |
+  | x64 | `WinDivert.dll` | `c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2` |
+  | x64 | `WinDivert64.sys` | `8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2` |
+  | x86 | `WinDivert.dll` | `a321649090c21aaa7529ce5d019d242b1d5f2a2aff04bc3224db409641604a83` |
+  | x86 | `WinDivert32.sys` | `2f43f4251be4d72dd56c91bf6cce475d379eb9ba6c4dda2be3022ea633d5e807` |
+  | x86 | `WinDivert64.sys` | `8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2` |
+
+  The x86 build needs all three files: under WOW64 on a 64-bit Windows the
+  64-bit driver is loaded. The release's `WinDivert.dll` imports only
+  `KERNEL32.dll` and `ADVAPI32.dll`, both KnownDLLs. Its exports are
+  `__cdecl` on x86 (no `WINAPI` in `windivert.h`, undecorated
+  `_WinDivertOpen` in the x86 import library, and a plain `ret` in every
+  export used), so the binding uses `extern "C"` on both builds.
+- The helper looks for them in the directory of its own image
+  (`std::env::current_exe`, that is `GetModuleFileNameW`) and loads them by
+  absolute path after checking their SHA-256 digests. The installation
+  directory is writable by the user, so the helper opens every file with
+  `GENERIC_READ` and `FILE_SHARE_READ` only (no write or delete sharing),
+  hashes it through that handle and keeps the handles open until the handle
+  is open and its driver version checked, so they cannot be swapped between
+  the check and the load (needs verification). A file that cannot be opened
+  is `files-missing`, one whose digest differs (or that cannot be read) is
+  `digest-mismatch`. `LoadLibraryExW` gets the absolute path with
+  `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, never
+  the default search order. The loaded module belongs to the WinDivert
+  handle, not to the held files, because the files are released while the
+  handle is live: the handle is closed first and the module freed after
+  it.
 - The digests do not decide which driver runs if another product's WinDivert
   driver is already loaded: `WinDivertOpen` then uses that driver. The
   helper therefore reads the driver version after opening the handle and
@@ -829,16 +905,21 @@ with `netsh`.**
   advfirewall firewall add rule name=Gateinto-transparent-listener dir=in action=allow protocol=TCP localport=<T> program="<image path>" enable=yes profile=any
   ```
 
-  An image path that is not absolute (a drive letter and `:\`, or `\\?\`),
-  or that contains `"` or a control character or ends with `\`, is refused
-  (`error firewall-rule`), so the quoted path cannot end early.
+  An image path that is not absolute on a drive (`X:\` or `\\?\X:\`; so
+  no `\\?\UNC\`, `\\?\GLOBALROOT\` or volume paths), or that contains `"`,
+  `%` or a control character, or ends with `\`, is refused
+  (`error firewall-rule`): the quoted path cannot end early, and the
+  firewall would expand `%NAME%`.
 - `netsh` is started by absolute path under the system directory
   (`GetSystemDirectoryW`), never through `PATH`, with fixed arguments apart
   from the validated port and the helper's own image path; only
-  its exit code is used, its output is not parsed. The exact syntax needs
-  verification. The Windows Firewall COM API (`INetFwPolicy2`) is the
-  alternative if `netsh` proves unreliable; it would add `ole32.dll` and
-  `oleaut32.dll` imports.
+  its exit code is used, its output is not parsed. Its standard handles are
+  null and it gets `CREATE_NO_WINDOW`. A `netsh` that has not ended after
+  10 s (`NETSH_TIMEOUT`) is killed and counts as failed, so a hung `netsh`
+  cannot hold the mutex past the agent's 60 s start timeout. The exact
+  syntax needs verification. The Windows Firewall COM API (`INetFwPolicy2`)
+  is the alternative if `netsh` proves unreliable; it would add `ole32.dll`
+  and `oleaut32.dll` imports.
 - A rule left by a killed helper stays until the next helper start. It
   allows inbound TCP to that port for the Gateinto executable only.
 - The firewall is not what protects the listener: genuine inbound packets
@@ -1075,6 +1156,9 @@ the IPv6 table.
   becomes its message, an exit before the first line becomes a generic
   message with the exit code, a second status line or a malformed counter
   line is treated as a broken pipe;
+- a helper that writes `error <code>` and exits at once is reported with
+  its code, not as a generic exit: the agent drains the pipe when the
+  process handle signals;
 - the helper stops between `ready` and registration: registration fails, the
   session is closed and no process is launched;
 - the pipe breaks while a terminal launch holds `terminals` and waits to
@@ -1117,6 +1201,18 @@ the IPv6 table.
   closed without one; closing the session aborts adopted tunnels; a
   challenge stores the verification offer and closes the stream; adopted
   tunnels log the target like proxy-mode tunnels and never the peer.
+
+**Helper tests on Windows** (`src/divert/windows.rs`, unelevated, without
+WinDivert; type-checked from Linux only): a missing file, a digest mismatch,
+held files that can be read but not written, renamed or deleted, and a
+directory of held files that cannot be renamed; a library that is not
+WinDivert refused with its Win32 error; the mutex held by a second lock;
+the pipe refused when another process serves it, lines written to the
+agent, and the liveness wait ending on a closed pipe, on a byte from the
+agent and on the end of the agent process; `netsh` taken from the system
+directory; a command killed after its timeout; the subcommand's raw
+arguments and its absence from the help. Opening WinDivert itself needs
+elevation and is left for the integration test.
 
 **Helper tests** (implemented in `src/divert/`, every platform):
 argument validation (DSCP 0 and 64, port 49151 and 0 are refused with
@@ -1261,14 +1357,16 @@ code to pass it, then a refactor.
 2. **Platform-independent packet core.** Parsing, rewrite, checksums, flow
    table, drop counters, `divert::filter` (implemented), the fuzz target
    `divert-engine`.
-3. **WinDivert runtime binding, engine loop, `divert` helper subcommand and
-   liveness pipe.** Argument validation, the pipe protocol with
-   `SECURITY_IDENTIFICATION`, digest check with held handles,
+3. **WinDivert runtime binding, engine loop, `divert` helper subcommand,
+   liveness pipe and firewall rule** (implemented; the Windows part
+   type-checked from Linux only). Argument validation, the pipe protocol
+   with `SECURITY_IDENTIFICATION`, digest check with held handles,
    `LoadLibraryExW`, `WinDivertOpen`, the driver version check, the
-   machine-wide mutex, the grace period, counters on the pipe. The first
-   new imports (for example `GetNamedPipeClientProcessId`,
-   `GetNamedPipeServerProcessId`) go into the Windows 7 import allow-list in
-   this step.
+   machine-wide mutex, the grace period, counters on the pipe, and the
+   `netsh` command lines with the delete, add and final delete of the rule.
+   The new imports (`CreateEventW`, `CreateMutexW`,
+   `GetNamedPipeServerProcessId`, `WaitForMultipleObjects`) are in the
+   Windows 7 import allow-list.
 4. **Session adoption and the transparent listener.** `Proxy::adopter`,
    `Shared::adopt`, `os_user::original`, `TransparentListener` with
    `SO_EXCLUSIVEADDRUSE` and the port range, the registry of transparent
@@ -1278,10 +1376,9 @@ code to pass it, then a refactor.
    mode, the GUI option, `SessionInfo::transparent` and the `status` lines;
    `Win32_UI_Shell` in `Cargo.toml` and `shell32.dll` in the Windows 7
    import allow-list.
-6. **Packaging, firewall rule and user documentation.** The optional MSI
-   feature with the WinDivert files and license, the `netsh` firewall rule,
-   and the security model, threat model, security boundaries, install and
-   compatibility pages.
+6. **Packaging and user documentation.** The optional MSI feature with the
+   WinDivert files and license, and the security model, threat model,
+   security boundaries, install and compatibility pages.
 7. **Windows CI integration test** on an elevated runner.
 
 ## Needs verification
@@ -1341,7 +1438,10 @@ would need a design change if they fail. Results go to
   flashes in the taskbar.
 - Holding the WinDivert files open without write or delete sharing prevents
   replacing them (and renaming their directory) until the driver and the
-  DLL are loaded.
+  DLL are loaded, and still lets `LoadLibraryExW` and the driver load open
+  them (unit tests for the first part exist and have not run on Windows).
+- `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` accepts the image
+  directory when the helper was started through a `\\?\` path.
 - That 120 s of linger is enough for late segments, compared with the
   Windows `TIME_WAIT` default.
 - Every row of the [compatibility table](#compatibility).

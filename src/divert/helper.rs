@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::io::{self, Read, Write};
 use std::num::{NonZeroU16, NonZeroU32};
+use std::panic::{self, AssertUnwindSafe};
 
 use aws_lc_rs::digest;
 
@@ -112,6 +113,8 @@ pub struct DriverVersion {
     pub minor: u64,
 }
 
+pub const DRIVER_VERSION: DriverVersion = DriverVersion { major: 2, minor: 2 };
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesError {
     Missing,
@@ -133,8 +136,6 @@ pub trait Platform {
     type Lock;
     type Files;
     type Port: DivertPort;
-
-    const DRIVER_VERSION: DriverVersion;
 
     fn connect(
         &mut self,
@@ -187,7 +188,10 @@ fn serve<P: Platform>(
     if !platform.netsh(&add) {
         return Err(ErrorCode::FirewallRule);
     }
-    let diverted = divert(platform, port, dscp, report, watch);
+    let diverted = panic::catch_unwind(AssertUnwindSafe(|| {
+        divert(platform, port, dscp, report, watch)
+    }))
+    .unwrap_or(Ok(EXIT_ENGINE_FAILED));
     platform.netsh(&firewall::delete_rule());
     diverted
 }
@@ -203,7 +207,7 @@ fn divert<P: Platform>(
     let handle = platform
         .open_port(&files, &filter(port.get(), dscp))
         .map_err(ErrorCode::DriverLoad)?;
-    if platform.driver_version(&handle) != Some(P::DRIVER_VERSION) {
+    if platform.driver_version(&handle) != Some(DRIVER_VERSION) {
         return Err(ErrorCode::DriverVersion);
     }
     // Held until the DLL and the driver are loaded, so neither can be swapped after its check.
@@ -464,6 +468,7 @@ mod tests {
         log: Log,
         packets: Mutex<Vec<Vec<u8>>>,
         fails: bool,
+        panics: bool,
         _closes: Closes,
     }
 
@@ -481,6 +486,7 @@ mod tests {
                         address: (),
                     })
                 }
+                None if self.panics => panic!("the port failed"),
                 None if self.fails => Err(RecvError::Failed(io::Error::other("failed"))),
                 None => Err(RecvError::Shutdown),
             }
@@ -513,11 +519,13 @@ mod tests {
         agent_gone: bool,
         packets: Vec<Vec<u8>>,
         receive_fails: bool,
+        receive_panics: bool,
+        version_panics: bool,
         agents: Vec<mpsc::Sender<()>>,
     }
 
     const IMAGE: &str = r"C:\Users\Jane Doe\AppData\Local\Programs\Gateinto\gateinto.exe";
-    const PINNED: DriverVersion = DriverVersion { major: 2, minor: 2 };
+    const PINNED: DriverVersion = DRIVER_VERSION;
 
     impl Default for Fake {
         fn default() -> Self {
@@ -535,6 +543,8 @@ mod tests {
                 agent_gone: false,
                 packets: Vec::new(),
                 receive_fails: false,
+                receive_panics: false,
+                version_panics: false,
                 agents: Vec::new(),
             }
         }
@@ -562,8 +572,6 @@ mod tests {
         type Lock = Closes;
         type Files = Closes;
         type Port = FakePort;
-
-        const DRIVER_VERSION: DriverVersion = PINNED;
 
         fn connect(
             &mut self,
@@ -619,12 +627,14 @@ mod tests {
                 log: Arc::clone(&self.log),
                 packets: Mutex::new(std::mem::take(&mut self.packets)),
                 fails: self.receive_fails,
+                panics: self.receive_panics,
                 _closes: Closes(Arc::clone(&self.log), Call::ClosePort),
             })
         }
 
         fn driver_version(&mut self, _: &FakePort) -> Option<DriverVersion> {
             record(&self.log, Call::DriverVersion);
+            assert!(!self.version_panics, "the version query failed");
             self.version
         }
     }
@@ -974,5 +984,49 @@ mod tests {
             [Call::ClosePort, delete(), Call::Unlock]
         );
         assert_eq!(fake.written()[0], Event::Ready.line());
+    }
+
+    #[test]
+    fn the_pinned_driver_version_is_2_2() {
+        assert_eq!(DRIVER_VERSION, DriverVersion { major: 2, minor: 2 });
+    }
+
+    #[test]
+    fn a_panic_in_the_engine_closes_the_handle_deletes_the_rule_and_fails() {
+        let mut fake = Fake {
+            receive_panics: true,
+            ..Fake::default()
+        };
+        assert_eq!(run_fake(&mut fake), EXIT_ENGINE_FAILED);
+        let calls = fake.calls();
+        assert_eq!(
+            calls[calls.len() - 3..],
+            [Call::ClosePort, delete(), Call::Unlock]
+        );
+        assert_eq!(fake.written()[0], Event::Ready.line());
+    }
+
+    #[test]
+    fn a_panic_after_the_rule_was_added_still_deletes_it() {
+        let mut fake = Fake {
+            version_panics: true,
+            ..Fake::default()
+        };
+        assert_eq!(run_fake(&mut fake), EXIT_ENGINE_FAILED);
+        assert_eq!(
+            fake.calls(),
+            joined(&[
+                &until_added(),
+                &[
+                    Call::OpenFiles,
+                    open_port(),
+                    Call::DriverVersion,
+                    Call::ClosePort,
+                    Call::CloseFiles,
+                    delete(),
+                    Call::Unlock,
+                ],
+            ])
+        );
     }
 }

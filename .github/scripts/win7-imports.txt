@@ -30,10 +30,12 @@ kernel32.dll CompareStringOrdinal
 kernel32.dll CompareStringW
 kernel32.dll ConnectNamedPipe
 kernel32.dll CreateDirectoryW
+kernel32.dll CreateEventW
 kernel32.dll CreateFileW
 kernel32.dll CreateIoCompletionPort
 kernel32.dll CreateJobObjectW
 kernel32.dll CreateMutexA
+kernel32.dll CreateMutexW
 kernel32.dll CreateNamedPipeW
 kernel32.dll CreateProcessW
 kernel32.dll CreateThread
@@ -86,6 +88,7 @@ kernel32.dll GetModuleFileNameW
 kernel32.dll GetModuleHandleA
 kernel32.dll GetModuleHandleExW
 kernel32.dll GetModuleHandleW
+kernel32.dll GetNamedPipeServerProcessId
 kernel32.dll GetOEMCP
 kernel32.dll GetOverlappedResult
 kernel32.dll GetProcAddress
@@ -181,6 +184,7 @@ kernel32.dll UnhandledExceptionFilter
 kernel32.dll UnregisterWaitEx
 kernel32.dll UpdateProcThreadAttribute
 kernel32.dll VirtualProtect
+kernel32.dll WaitForMultipleObjects
 kernel32.dll WaitForSingleObject
 kernel32.dll WaitForSingleObjectEx
 kernel32.dll WakeAllConditionVariable

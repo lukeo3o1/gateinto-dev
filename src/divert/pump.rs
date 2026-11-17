@@ -27,6 +27,7 @@ pub trait DivertPort: Sync {
 
     fn recv(&self, buffer: &mut [u8]) -> Result<Received<Self::Address>, RecvError>;
     fn inject_inbound(&self, packet: &[u8], address: &Self::Address) -> io::Result<()>;
+    // Sticky: once called, every later `recv` returns `RecvError::Shutdown` after the queued packets.
     fn shutdown(&self);
 }
 
@@ -115,17 +116,24 @@ where
     let watcher = Arc::clone(&shared);
     // Not joined: the wait cannot be interrupted, and the helper exits once the pump returns.
     thread::Builder::new().spawn(move || {
+        let _gone = OnDrop(|| watcher.signal(|state| state.gone = true));
         liveness.wait_until_gone();
-        watcher.signal(|state| state.gone = true);
     })?;
     let shared = &*shared;
     thread::scope(|scope| {
         thread::Builder::new()
             .spawn_scoped(scope, move || supervise(shared, port, report, clock))?;
-        let forwarded = forward(port, engine, shared, clock);
-        shared.signal(|state| state.ended = true);
-        forwarded
+        let _ended = OnDrop(|| shared.signal(|state| state.ended = true));
+        forward(port, engine, shared, clock)
     })
+}
+
+struct OnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
 }
 
 fn forward<P: DivertPort, C: Clock>(
@@ -168,6 +176,11 @@ fn supervise<P: DivertPort, W: Write, C: Clock>(
     report: &mut W,
     clock: &C,
 ) {
+    let _shutdown = OnDrop(|| {
+        if thread::panicking() {
+            port.shutdown();
+        }
+    });
     let mut reported = Snapshot::default();
     let mut next_report = clock.now() + REPORT_INTERVAL;
     let mut shutdown_at = None;
@@ -299,6 +312,7 @@ mod tests {
         Packet(Vec<u8>, Direction),
         Oversized,
         Fail,
+        Panic,
         Shutdown,
     }
 
@@ -350,6 +364,7 @@ mod tests {
                     address,
                 }),
                 Ok(Step::Fail) => Err(RecvError::Failed(io::Error::other("receive failed"))),
+                Ok(Step::Panic) => panic!("the port failed"),
                 Ok(Step::Shutdown) | Err(_) => Err(RecvError::Shutdown),
             }
         }
@@ -378,6 +393,18 @@ mod tests {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
             Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Panicking;
+
+    impl Write for Panicking {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            panic!("the report failed")
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -417,11 +444,13 @@ mod tests {
         }
     }
 
-    struct Gone(mpsc::Receiver<()>);
+    struct Gone(mpsc::Receiver<bool>);
 
     impl Liveness for Gone {
         fn wait_until_gone(self) {
-            let _ = self.0.recv();
+            if self.0.recv() == Ok(true) {
+                panic!("the watch failed");
+            }
         }
     }
 
@@ -429,7 +458,7 @@ mod tests {
         clock: Arc<ManualClock>,
         port: Arc<FakePort>,
         feed: mpsc::Sender<Step>,
-        gone: mpsc::Sender<()>,
+        gone: mpsc::Sender<bool>,
         lines: Lines,
         result: mpsc::Receiver<io::Result<()>>,
     }
@@ -483,7 +512,18 @@ mod tests {
         }
 
         fn agent_gone(&self) {
-            self.gone.send(()).unwrap();
+            self.gone.send(false).unwrap();
+        }
+
+        fn watch_panics(&self) {
+            self.gone.send(true).unwrap();
+        }
+
+        fn panicked(&self) -> bool {
+            matches!(
+                self.result.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            )
         }
 
         fn finished(&self) -> io::Result<()> {
@@ -740,5 +780,43 @@ mod tests {
         harness.send(Step::Shutdown);
         assert!(harness.finished().is_ok());
         assert_eq!(harness.captured(), [1, 3]);
+    }
+
+    #[test]
+    fn a_panic_in_the_packet_loop_ends_the_pump_instead_of_hanging() {
+        let harness = Harness::start();
+        harness.send(outbound(TestPacket::client(SYN)));
+        harness.processed(1);
+        harness.send(Step::Panic);
+        assert!(harness.panicked());
+        assert_eq!(harness.port.shut_down(), None);
+        assert_eq!(harness.captured(), [1]);
+    }
+
+    #[test]
+    fn a_panic_in_the_reporter_shuts_the_port_down_and_ends_the_pump() {
+        let harness = Harness::writing_to(Panicking, Lines::default());
+        harness.send(outbound(TestPacket::client(SYN)));
+        harness.processed(1);
+        harness.clock.advance_to(REPORT_INTERVAL);
+        assert!(harness.panicked());
+        assert_eq!(
+            harness.port.shut_down(),
+            Some(harness.clock.at(REPORT_INTERVAL))
+        );
+    }
+
+    #[test]
+    fn a_panic_while_watching_the_agent_counts_as_the_agent_gone() {
+        let harness = Harness::start();
+        harness.watch_panics();
+        harness.clock.wait_for_deadline(GRACE_PERIOD);
+        assert_eq!(harness.port.shut_down(), None);
+        harness.clock.advance_to(GRACE_PERIOD);
+        assert!(harness.finished().is_ok());
+        assert_eq!(
+            harness.port.shut_down(),
+            Some(harness.clock.at(GRACE_PERIOD))
+        );
     }
 }

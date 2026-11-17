@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU16;
@@ -100,6 +102,9 @@ enum Command {
         doc = "is no device key, so it deletes nothing"
     )]
     Reset(ResetArgs),
+    #[cfg(windows)]
+    #[command(hide = true)]
+    Divert(DivertArgs),
 }
 
 #[derive(Args)]
@@ -129,6 +134,19 @@ struct StatusArgs {
     /// Name of the persisted CNG key [default: gateinto-device-v1]
     #[arg(long)]
     name: Option<KeyName>,
+}
+
+#[cfg(windows)]
+#[derive(Args)]
+struct DivertArgs {
+    #[arg(long, allow_hyphen_values = true)]
+    pipe: Option<OsString>,
+    #[arg(long, allow_hyphen_values = true)]
+    agent_pid: Option<OsString>,
+    #[arg(long, allow_hyphen_values = true)]
+    port: Option<OsString>,
+    #[arg(long, allow_hyphen_values = true)]
+    dscp: Option<OsString>,
 }
 
 #[derive(Args)]
@@ -615,6 +633,8 @@ async fn run() -> ExitCode {
         Command::Setup(args) => setup(args),
         Command::Status(args) => status(args).await,
         Command::Reset(args) => reset(args).await,
+        #[cfg(windows)]
+        Command::Divert(args) => return divert(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -691,6 +711,27 @@ fn key_info<S: ClientIdentityStore>(store: &S, name: &KeyName, args: KeyInfoArgs
         )?
     );
     Ok(())
+}
+
+#[cfg(windows)]
+fn divert(args: &DivertArgs) -> ExitCode {
+    std::panic::set_hook(Box::new(|_| {}));
+    ExitCode::from(gateinto::divert::windows::run(&helper_arguments(args)))
+}
+
+#[cfg(windows)]
+fn helper_arguments(args: &DivertArgs) -> gateinto::divert::helper::Arguments<'_> {
+    gateinto::divert::helper::Arguments {
+        pipe: text_or_empty(args.pipe.as_deref()),
+        agent_pid: text_or_empty(args.agent_pid.as_deref()),
+        port: text_or_empty(args.port.as_deref()),
+        dscp: text_or_empty(args.dscp.as_deref()),
+    }
+}
+
+#[cfg(windows)]
+fn text_or_empty(value: Option<&OsStr>) -> &str {
+    value.and_then(OsStr::to_str).unwrap_or("")
 }
 
 fn init_logging(default_filter: &str) {
@@ -1904,6 +1945,63 @@ mod tests {
     use super::*;
 
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;
+
+    #[cfg(windows)]
+    fn divert_args<I: Into<std::ffi::OsString>>(flags: impl IntoIterator<Item = I>) -> DivertArgs {
+        let args = ["gateinto".into(), "divert".into()]
+            .into_iter()
+            .chain(flags.into_iter().map(Into::into));
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::Divert(args) => args,
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_divert_helper_gets_its_arguments_raw_and_empty_when_missing() {
+        use gateinto::divert::helper::Arguments;
+        use std::os::windows::ffi::OsStringExt;
+
+        let empty = Arguments {
+            pipe: "",
+            agent_pid: "",
+            port: "",
+            dscp: "",
+        };
+        assert_eq!(helper_arguments(&divert_args::<&str>([])), empty);
+        let given = divert_args([
+            "--pipe",
+            r"\\.\pipe\x",
+            "--agent-pid",
+            "+12",
+            "--port",
+            "-1",
+            "--dscp",
+            "043",
+        ]);
+        assert_eq!(
+            helper_arguments(&given),
+            Arguments {
+                pipe: r"\\.\pipe\x",
+                agent_pid: "+12",
+                port: "-1",
+                dscp: "043",
+            }
+        );
+        let unpaired = std::ffi::OsString::from_wide(&[0xD800]);
+        let wide = divert_args([std::ffi::OsString::from("--port"), unpaired]);
+        assert_eq!(helper_arguments(&wide), empty);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_divert_helper_is_not_listed_in_the_help() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("divert"), "{help}");
+    }
 
     #[test]
     fn only_the_session_table_is_followed_by_verification_notes() {
