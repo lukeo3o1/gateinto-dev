@@ -296,13 +296,43 @@ opt-in per agent-hosted browser or terminal session.**
 **Decision: one engine state and a per-session open/closing mark, each under
 a lock, so that no process starts in a job after the engine stopped.**
 
-- The agent keeps one engine state, `stopped`, `starting` or `running`
-  *(proposed)*, under a lock. Registering a transparent session takes that
-  lock and fails unless the state is `running`. The pipe-break handler takes
-  the same lock, sets `stopped` and takes a snapshot of the registered
-  transparent sessions. A session registered before the handler ran is in
-  the snapshot; a session registering after it finds `stopped`, is closed,
-  and no process is launched.
+- The agent keeps one engine state *(proposed)* under a lock: `stopped`,
+  `starting(g)` or `running(g)`. The generation `g` is a counter incremented
+  under the engine lock each time a start sets `starting`; it identifies
+  one start and the one helper that start launches. Every transition below
+  is checked and made under the engine lock.
+- **A start** moves `starting(g)` to `running(g)` on `ready`, or back to
+  `stopped` on failure, only if the state is still `starting(g)` with its
+  own generation. Otherwise it changes nothing, closes its own listener and
+  helper, and its request fails. Requests that wait for a start receive the
+  outcome of the generation they joined, never that of a later one.
+- **The pipe-break handler** belongs to one helper and carries that
+  helper's generation `g`. It acts only if the state is `starting(g)` or
+  `running(g)`: it sets `stopped`, takes a snapshot of the transparent
+  sessions registered under `g`, closes them as below, and closes that
+  helper's listener. In any other state it changes nothing.
+- **Registration** of a transparent session succeeds only when the state is
+  `running(g)` at the moment of registration, and the registry entry records
+  that current `g` (which may be newer than the generation the request saw
+  in step 1; the new helper then covers the session); the handler's
+  snapshot is exactly the entries recorded with its generation. A session
+  registering after the handler ran finds `stopped` (or a newer
+  generation's `starting`), is closed, and no process is launched.
+- **Why a late or repeated break changes nothing.** The state leaves
+  generation `g` in only two ways: the handler of `g`, which under the same
+  lock sets `stopped` and snapshots every session registered under
+  `running(g)`, or a failed start of `g`, which leaves `starting(g)` before
+  any session could register. After either, no session can register under
+  `g` again, because the state never returns to an old generation. So when
+  a break from an older helper arrives late, or the same helper's pipe break
+  and process exit both arrive, every session of that generation has
+  already been snapshotted and closed, and the newer generation is left
+  alone.
+- Sequence this rules out: start A receives `ready`; helper A dies and its
+  handler sets `stopped`; request B sets `starting(g+1)` and waits on helper
+  A's process handle; start A then finds `starting(g+1)`, not its own
+  `starting(g)`, changes nothing and fails. Neither A's hand-over nor A's
+  failure path can make B's start `running` or clear it.
 - Each transparent session has an `open` or `closing` mark *(proposed)*
   under its own lock. Every launch into the session's job holds that lock
   while it spawns and refuses when the mark is `closing`. The pipe-break
@@ -320,14 +350,14 @@ a lock, so that no process starts in a job after the engine stopped.**
   (`src/agent.rs:839-871`) take `Inner::browsers` or `Inner::terminals`,
   release it, and then take `Inner::sessions`. The new locks are
   innermost: launching, terminals, sessions, engine state, session mark.
-- **The pipe-break handler** holds the engine lock only to set `stopped` and
-  take the snapshot, and each session's mark only to set `closing` and
-  terminate that job. It releases both before it closes the sessions through
-  the existing close paths, which take `Inner::browsers` or
-  `Inner::terminals` and then `Inner::sessions`. It never waits for a lock
-  of the existing order while holding a new one, so a launch that holds
-  `terminals` or `sessions` while waiting for the engine lock cannot
-  deadlock with it.
+- **Lock scope of the handler.** It holds the engine lock only to check
+  its generation, set `stopped` and take the snapshot, and each session's
+  mark only to set `closing` and terminate that job. It releases both
+  before it closes the sessions through the existing close paths, which
+  take `Inner::browsers` or `Inner::terminals` and then `Inner::sessions`.
+  It never waits for a lock of the existing order while holding a new one,
+  so a launch that holds `terminals` or `sessions` while waiting for the
+  engine lock cannot deadlock with it.
 
 ### Order of operations
 
@@ -336,28 +366,51 @@ then processes.**
 
 For a transparent session request the agent:
 
-0. Pre-checks the launch rate limit. Today `Agent::allow_launch`
-   (`src/agent.rs:465-481`) locks `Inner::launches`, a `std::sync::Mutex`
-   around `LaunchLimiter`, and calls `LaunchLimiter::allow`, which drops
-   entries older than `launch_window` and, when fewer than `launches`
-   remain, records the request and returns true. `Agent::launch` and
-   `Agent::terminal` call it right after taking `launching`
-   (`src/agent.rs:416`, `486`). `allow` consumes a slot, so the pre-check
-   uses a read-only variant, `LaunchLimiter::would_allow` *(proposed)*,
-   under the same mutex, which drops expired entries but records nothing.
-   A request it refuses gets the existing rate-limit error and never raises
-   a UAC prompt. The check under `launching` stays as it is and still
-   records the request.
+0. Runs read-only pre-checks, which can refuse the request without side
+   effects, so that a request that would fail anyway raises no UAC prompt.
+   The authoritative checks under `launching` (and, for terminals, under
+   `terminals`) stay as they are and run again.
+   - **Rate limit.** Today `Agent::allow_launch`
+     (`src/agent.rs:465-481`) locks `Inner::launches`, a
+     `std::sync::Mutex` around `LaunchLimiter`, and calls
+     `LaunchLimiter::allow`, which drops entries older than `launch_window`
+     and, when fewer than `launches` remain, records the request and returns
+     true. `Agent::launch` and `Agent::terminal` call it right after taking
+     `launching` (`src/agent.rs:416`, `486`). `allow` consumes a slot, so the
+     pre-check uses a read-only variant, `LaunchLimiter::would_allow`
+     *(proposed)*, under the same mutex, which drops expired entries but
+     records nothing; the check under `launching` still records the request.
+   - **Platform (terminals).** `Agent::terminal` refuses when
+     `Launcher::terminals()` is false (`src/agent.rs:491-495`); the
+     pre-check asks the same.
+   - **Capacity.** Browsers: `Agent::check_capacity` (`src/agent.rs:657-665`,
+     called at `420`) compares `Inner::browsers` with
+     `AgentLimits::max_browser_sessions`. Terminals: `Agent::terminal`
+     compares `Inner::terminals` with `max_terminal_sessions` while holding
+     `terminals` (`src/agent.rs:500-505`). The pre-check reads the same
+     counts, taking each map's lock only for the read.
+   - **Gateway.** Terminals: `Profiles::terminal_session(&gateway)`, which
+     refuses a gateway that is not in the configuration file
+     (`src/agent.rs:507`). Browsers: `Profiles::known()` and `link::resolve`
+     with `Decision::Defer` (`src/agent.rs:421-423`), which reads only; a
+     result other than `Resolution::Launch`, that is a request that would
+     need a gateway confirmation, is refused for a transparent session,
+     because the transparent mode is never set by a link.
+
+   The pre-checks guarantee no UAC prompt only for the requests they refuse.
+   Several concurrent requests can pass them, share one prompt, and still be
+   refused under `launching` (rate limit, capacity) or later.
 1. Ensures the helper runs, before the request takes `launching`,
    `terminals` or `sessions`, so waiting for the UAC answer never blocks
    other launches or closes. The engine lock is not held while waiting: a
-   request that finds `stopped` sets `starting` under the lock and performs
-   the start; a request that finds `starting` waits for that same outcome,
-   so one start raises one UAC prompt; a request that finds `running`
-   continues. Before starting a new helper the agent waits on the previous
-   helper's process handle, which may still be in its 5 s grace period
-   holding the mutex, bounded by a timeout *(proposed: 10 s)*, and fails
-   with a clear error if the old helper does not end. The start:
+   request that finds `stopped` increments the generation, sets
+   `starting(g)` under the lock and performs the start; a request that finds
+   `starting(g)` waits for the outcome of generation `g`, so one start
+   raises one UAC prompt; a request that finds `running(g)` continues.
+   Before starting a new helper the agent waits on the previous helper's
+   process handle, which may still be in its 5 s grace period holding the
+   mutex, bounded by a timeout *(proposed: 10 s)*, and fails with a clear
+   error if the old helper does not end. The start:
    1. reserves the listener port T: it binds a socket to `0.0.0.0:0` with
       `SO_EXCLUSIVEADDRUSE`, without listening. If the system hands out a
       port below 49152 (a customised dynamic range), it binds explicit ports
@@ -372,15 +425,19 @@ For a transparent session request the agent:
       `ShellExecuteExW` returning, so time spent on the UAC prompt is not
       counted (whether the call blocks until the prompt is answered needs
       verification);
-   4. on `ready`, starts listening on T and sets the engine state to
-      `running`; on any failure it sets `stopped` again. Listening only
-      after the helper has added the firewall rule avoids
-      Windows Firewall's "allow this app" prompt for `gateinto.exe`, which
-      would create a rule for every port if the user accepted it (needs
-      verification).
+   4. on `ready`, starts listening on T and, under the engine lock, moves
+      the state from `starting(g)` to `running(g)` only if it is still
+      `starting(g)` with its own generation; otherwise its helper has
+      stopped meanwhile, it closes its listener and the request fails. On
+      any failure before that it sets `stopped`, again only from its own
+      `starting(g)`. Listening only after the helper has added the
+      firewall rule avoids Windows Firewall's "allow this app" prompt for
+      `gateinto.exe`, which would create a rule for every port if the user
+      accepted it (needs verification).
 2. Creates the job, sets and reads back the tag.
 3. Starts the session (`SessionManager::start`) and registers its job and
-   adoption channel with the transparent listener under the engine lock.
+   adoption channel with the transparent listener under the engine lock,
+   only if the state is `running(g)` then, recording that `g`.
 4. Starts the browser or shell in the job under the session's mark.
 
 Any failure closes what was opened and answers an error. There is no silent
@@ -484,11 +541,14 @@ returned process handle.
   generically with its exit code. Whether the unelevated agent can wait on
   and query that handle for an elevated child needs verification.
 - When the agent sees the pipe break, a protocol error, or the helper process
-  end, it runs the pipe-break handler: engine state `stopped`, every
-  transparent session marked `closing` and its job terminated (see [Engine
-  state](#engine-state-and-session-registration)), the sessions closed, the
-  transparent listener closed. `status` then reports the engine as stopped;
-  a new transparent session starts a new helper and asks UAC again.
+  end, it runs that helper's pipe-break handler with the helper's
+  generation: if the state is still that generation's, engine state
+  `stopped`, every transparent session of that generation marked `closing`
+  and its job terminated, the sessions closed, that helper's listener
+  closed (see [Engine state](#engine-state-and-session-registration)); in
+  any other state it changes nothing. `status` then reports the engine as
+  stopped; a new transparent session starts a new helper (a new generation)
+  and asks UAC again.
 
 #### Engine
 
@@ -973,10 +1033,25 @@ the IPv6 table.
 - the pipe breaks while a terminal launch holds `terminals` and waits to
   register: the handler completes without deadlock, registration fails, and
   the launch closes its session and starts nothing;
-- concurrent requests while the engine is `starting` raise one helper start
-  and share its outcome; a request waits for a previous helper still in its
-  grace period and fails with a clear error when it does not end in time;
+- concurrent requests while the engine is `starting(g)` raise one helper
+  start and share the outcome of generation `g`; a request waits for a
+  previous helper still in its grace period and fails with a clear error
+  when it does not end in time;
 - waiting for the helper blocks no other launch and no close;
+- the helper dies right after `ready`, before the start moves `starting(g)`
+  to `running(g)`: the state stays `stopped`, the request fails, and no
+  process is launched;
+- helper A dies after `ready`, request B begins a new start
+  (`starting(g+1)`) and waits on A's process handle, then A's hand-over
+  runs: it fails without making B's start `running` or clearing it, and no
+  process is launched for A's request; B's start completes on its own
+  outcome;
+- a late break from an older helper (and a second break from the same
+  helper, pipe break then process exit) changes nothing: the newer
+  generation stays `running`, its sessions stay open and registration
+  under it still succeeds;
+- each pre-check (rate limit, platform, capacity, gateway, a browser request
+  that would need a confirmation) refuses without starting a helper;
 - a rate-limited transparent request is refused by the pre-check with the
   existing rate-limit error and raises no helper start; the pre-check
   consumes no slot, so a request it lets through is counted once, under
@@ -1055,10 +1130,12 @@ tunnels are open, the agent killed while tunnels are open.
    adopted by the session's proxy.
 5. **Target naming.** `CONNECT <IP literal>:<port>`; SNI later.
 6. **Fail closed.** Helper ready, listener, tag, registration, processes; a
-   liveness pipe; one engine state (`stopped`, `starting`, `running`) and a
-   per-session open/closing mark under locks that are innermost in the
-   agent's lock order; the helper is ensured before any existing lock is
-   taken; pipe break closes every transparent session; no downgrade to proxy
+   liveness pipe; one engine state (`stopped`, `starting(g)`, `running(g)`,
+   with a generation per start) and a per-session open/closing mark under
+   locks that are innermost in the agent's lock order; every transition
+   checks its own generation; the helper is ensured before any existing
+   lock is taken; a pipe break closes every transparent session of its
+   generation; no downgrade to proxy
    mode; the residual window is documented.
 7. **WinDivert distribution.** Optional component, loaded at runtime by the
    helper only, pinned version, SHA-256 digests checked through held
