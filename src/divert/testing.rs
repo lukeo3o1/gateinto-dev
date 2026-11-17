@@ -4,7 +4,7 @@ use std::num::NonZeroU16;
 use super::packet::{TCP, fill_checksums};
 
 pub(super) const CLIENT: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
-pub(super) const REMOTE: Ipv4Addr = Ipv4Addr::new(140, 82, 112, 3);
+pub(super) const REMOTE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 20);
 pub(super) const LOCAL_PORT: u16 = 50_000;
 pub(super) const REMOTE_PORT: u16 = 443;
 pub(super) const LISTENER: NonZeroU16 = NonZeroU16::new(8443).unwrap();

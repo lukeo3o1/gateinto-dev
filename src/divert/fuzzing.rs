@@ -43,7 +43,8 @@ impl Checker {
             (address(after, 12), address(after, 16)) == (destination, source),
             "the addresses of an injected packet are not swapped"
         );
-        if source_port == self.listener {
+        let restored = source_port == self.listener;
+        if restored {
             let remote_port = self.remote_ports.get(&(destination, destination_port));
             assert!(
                 remote_port == Some(&port(after, IP_HEADER)),
@@ -66,6 +67,23 @@ impl Checker {
             self.remote_ports
                 .insert((destination, source_port), destination_port);
         }
+        let rewritten_port = if restored { IP_HEADER } else { IP_HEADER + 2 };
+        let mut expected = before.to_vec();
+        for at in (10..20).chain([
+            rewritten_port,
+            rewritten_port + 1,
+            IP_HEADER + 16,
+            IP_HEADER + 17,
+        ]) {
+            expected[at] = after[at];
+        }
+        if !restored {
+            expected[1] = before[1] & ECN;
+        }
+        assert!(
+            after == expected,
+            "an injected packet changed bytes it must keep"
+        );
     }
 }
 
@@ -192,5 +210,98 @@ mod tests {
     #[should_panic(expected = "a dropped packet was changed")]
     fn the_checker_refuses_a_changed_dropped_packet() {
         Checker::new(LISTENER).check(&[1], &[2], Verdict::Drop);
+    }
+
+    const KEPT: &str = "an injected packet changed bytes it must keep";
+
+    fn translated(before: &[u8], change: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+        let mut after = before.to_vec();
+        let Packet::Tcp(segment) = packet::parse(&after) else {
+            panic!("not a TCP segment");
+        };
+        let total = usize::from(u16::from_be_bytes([before[2], before[3]]));
+        if port(before, IP_HEADER) == LISTENER.get() {
+            packet::restore(&mut after, &segment, 443);
+        } else {
+            packet::reflect(&mut after, &segment, LISTENER.get());
+        }
+        change(&mut after);
+        packet::fill_checksums(&mut after, IP_HEADER, total);
+        after
+    }
+
+    fn refusal(checker: &mut Checker, before: &[u8], after: &[u8]) -> Option<String> {
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            checker.check(before, after, Verdict::InjectInbound)
+        }));
+        let message = checked.err()?;
+        message
+            .downcast_ref::<&str>()
+            .map(|text| text.to_string())
+            .or_else(|| message.downcast_ref::<String>().cloned())
+    }
+
+    #[test]
+    fn the_checker_refuses_any_other_change_to_a_translated_packet() {
+        let mut client = TestPacket {
+            tos: TAGGED | 0x02,
+            payload: 5,
+            ..TestPacket::client(ACK)
+        }
+        .build();
+        client.extend_from_slice(&[7, 7]);
+        let mut reply = TestPacket {
+            tos: 0x01,
+            payload: 5,
+            ..TestPacket::reply(ACK)
+        }
+        .build();
+        reply.extend_from_slice(&[7, 7]);
+        let total = client.len() - 2;
+        let mut checker = Checker::new(LISTENER);
+        assert_eq!(
+            refusal(&mut checker, &client, &translated(&client, |_| {})),
+            None
+        );
+        assert_eq!(
+            refusal(&mut checker, &reply, &translated(&reply, |_| {})),
+            None
+        );
+        let mut positions: Vec<usize> = (0..total)
+            .filter(|at| !matches!(at, 10..=19 | 36..=37))
+            .collect();
+        positions.push(total + 1);
+        for (name, before) in [("reflected", &client), ("restored", &reply)] {
+            let rewritten_port = if name == "reflected" {
+                22..=23
+            } else {
+                20..=21
+            };
+            for &at in positions.iter().filter(|at| !rewritten_port.contains(*at)) {
+                let after = translated(before, |after| after[at] ^= 0x01);
+                let refused = refusal(&mut checker, before, &after);
+                assert!(refused.is_some(), "{name} byte {at} changed unnoticed");
+                let checked_earlier = matches!(at, 0 | 2 | 3 | 6 | 7 | 9 | 20..=23)
+                    || (name == "reflected" && at == 1);
+                if !checked_earlier {
+                    assert_eq!(refused.as_deref(), Some(KEPT), "{name} byte {at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_checker_requires_the_ecn_bits_of_a_reflected_packet_to_be_kept() {
+        let before = TestPacket {
+            tos: TAGGED | 0x03,
+            ..TestPacket::client(SYN)
+        }
+        .build();
+        let after = translated(&before, |after| after[1] = 0x01);
+        let mut checker = Checker::new(LISTENER);
+        assert_eq!(
+            refusal(&mut checker, &before, &after).as_deref(),
+            Some(KEPT)
+        );
     }
 }
