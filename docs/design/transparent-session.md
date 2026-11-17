@@ -2,7 +2,10 @@
 
 Status: design decided; steps 1 and 2 of the [Implementation
 plan](#implementation-plan) are implemented (`Job::set_dscp_tag` in
-`src/job.rs`, the packet core in `src/divert.rs` and `src/divert/`).
+`src/job.rs`, the packet core in `src/divert.rs` and `src/divert/`), and so is
+the platform-independent part of step 3 (the pipe protocol, the engine loop,
+the helper sequence and the firewall command lines in `src/divert/`); its
+Windows bindings are not.
 `Job::set_dscp_tag` and its tests have only been type-checked from Linux
 until Windows CI runs them. The design rests on premises that have not been
 verified: the evidence is two experiments on GitHub-hosted Windows Server
@@ -115,7 +118,22 @@ not change.
   - parsing, `reflect`, `restore` and full checksum recomputation
     (`src/divert/packet.rs`);
   - `divert::fuzzing` (with `--cfg fuzzing`), a checker over
-    `Engine::process` for a fuzz target.
+    `Engine::process` for a fuzz target;
+  - `DEFAULT_CAPACITY` (16384 flows);
+  - the [liveness pipe](#liveness-pipe) protocol (`divert::protocol`):
+    `Event` (`Ready`, `Failed(ErrorCode)`, `Counters(Snapshot)`) and its
+    line encoding, and `StatusReader`, the agent-side reader, fuzzed by the
+    target `divert-status`;
+  - the engine loop (`divert::pump::run`) over the `DivertPort` and
+    `Liveness` seams, with `REPORT_INTERVAL` (10 s), `GRACE_PERIOD` (5 s) and
+    `PACKET_BUFFER_BYTES` (65575);
+  - the helper's argument types (`PipeName`, `ListenerPort`), exit codes and
+    sequence (`divert::helper::run` over the `Platform` seam), and
+    `sha256_matches`;
+  - the `netsh` command lines (`divert::firewall`).
+
+  None of these is called yet: the Windows implementations of the seams and
+  the `divert` subcommand are the rest of step 3.
 - `windows-sys` 0.61.2 with `Win32_System_JobObjects`, enabled in
   `Cargo.toml`, defines the net rate control types. `Win32_UI_Shell`
   (`ShellExecuteExW`) is not enabled.
@@ -493,6 +511,10 @@ returned process handle.
   run, not per session. With no transparent session open, no packet carries
   a job tag, but packets that other software marks with the same DSCP are
   still captured and dropped while the helper runs.
+- **Exit codes** (`divert::helper`): 0 after a normal end, 3 when it could
+  not report (invalid pipe name or agent pid, no connection, or a status
+  line that could not be written), 4 after writing `error <code>`, 5 after a
+  fatal engine error.
 - **One helper per machine**: the helper creates the named mutex
   `Global\Gateinto-divert` *(proposed)* and answers `error another-helper`
   if it exists. Two handles with overlapping filters would steal each
@@ -505,19 +527,24 @@ returned process handle.
   not a bypass. Per-instance code points are a possible later step.
 - **Agent death and pipe break:** when the agent ends, its job handles close
   and `KILL_ON_JOB_CLOSE` ends the session processes. The helper notices the
-  broken pipe or the agent's exit (it opens the agent process with
-  `SYNCHRONIZE` from `--agent-pid`), keeps its WinDivert handle open for a
-  grace period of 5 s *(proposed)* so that packets from processes still
-  being killed are dropped or refused rather than leaked, then closes the
-  handle, deletes the firewall rule and exits. The 5 s is a margin, not a
+  broken pipe, any byte from the agent, a failed write, or the agent's exit
+  (it opens the agent process with `SYNCHRONIZE` from `--agent-pid`), keeps
+  its WinDivert handle open for a grace period of 5 s (`GRACE_PERIOD`) so
+  that packets from processes still being killed are dropped or refused
+  rather than leaked, then closes the handle, deletes the firewall rule and
+  exits. The 5 s is a margin, not a
   measurement. Closing the handle restores normal networking; the driver
   unloads when the last handle closes, or at reboot. A fatal engine error
-  ends the helper the same way, without the grace period.
+  (any receive error other than the shutdown) ends the helper the same way,
+  without the grace period. The helper closes the handle before it deletes
+  the rule, and releases the mutex only after that, because the next helper
+  adds a rule of the same name.
 
 #### Liveness pipe
 
 - The agent creates a named pipe with a random name
-  (`\\.\pipe\gateinto-divert-<128-bit hex>` *(proposed)*), one instance,
+  (`\\.\pipe\gateinto-divert-` and 32 lowercase hex digits,
+  `PipeName::from_random`), one instance,
   `FILE_FLAG_FIRST_PIPE_INSTANCE`, remote clients rejected, and a DACL that
   allows the agent's user and the Administrators group.
 - The helper opens the pipe with `SECURITY_SQOS_PRESENT |
@@ -528,14 +555,21 @@ returned process handle.
   `GetNamedPipeClientProcessId` against the pid of the process handle
   `ShellExecuteExW` returned.
 - **Protocol.** The helper's first and only status line is either `ready` or
-  `error <code>` with `<code>` from a fixed list *(proposed spellings)*:
+  `error <code>` with `<code>` from a fixed list (`ErrorCode`):
   `invalid-arguments`, `another-helper`, `firewall-rule`, `files-missing`,
   `digest-mismatch`, `driver-load <win32 error>`, `driver-version`. After
-  `ready`, only counter lines follow: fixed field names and decimal
-  integers, a snapshot of the engine's `Counters`. These are the only data
-  the agent reads from the elevated side. Anything else, including a second
-  status line, is a protocol error and is treated as a broken pipe. The
-  agent sends nothing.
+  `ready`, only counter lines follow: `counters`, then ` name=value` for the
+  16 fields of `Counters` in their order and `receive_errors` and
+  `send_errors`, each value a decimal `u64` without sign or leading zeros.
+  The helper writes one every 10 s when a value changed since its last line
+  (all zero before the first), and a last one when the engine loop ends
+  while the agent is still there. These are the only data the agent reads
+  from the elevated side. Lines are printable ASCII ending in `\n`, at most
+  1024 bytes (`MAX_LINE_BYTES`). Anything else, including a second status
+  line, a line after `error`, counters before `ready`, an empty line or the
+  end of the stream inside a line, is a protocol error (`StatusReader`) and
+  is treated as a broken pipe. The agent sends nothing; a byte from the
+  agent means to the helper that the agent is gone.
 - A helper that ends before it connected, or before its first line, is
   detected through the process handle from `ShellExecuteExW` and reported
   generically with its exit code. Whether the unelevated agent can wait on
@@ -553,12 +587,15 @@ returned process handle.
 #### Engine
 
 The engine reflects packets as WinDivert's `streamdump.c` does. The pure,
-platform-independent core is `crate::divert`; a thin Windows-only loop
-*(proposed)* calls `WinDivertRecv`, passes each packet to `Engine::process`
-with its `Direction`, and calls `WinDivertSend` for
-`Verdict::InjectInbound`. `Engine::process` does not check the DSCP itself:
-every outbound packet it receives is tagged or comes from port T, because
-the filter selects nothing else.
+platform-independent core is `crate::divert`; the engine loop
+(`divert::pump`) receives each packet through the `DivertPort` seam, passes
+it to `Engine::process` with its `Direction`, and injects exactly the
+received length for `Verdict::InjectInbound`; a failed send is counted and
+the loop continues. A Windows binding *(proposed)* implements the seam with
+`WinDivertRecv` and `WinDivertSend`, turning the address inbound.
+`Engine::process` does not check the DSCP itself: every outbound packet it
+receives is tagged or comes from port T, because the filter selects nothing
+else.
 
 Filter (static, compiled once; `DSCP==N` written as the TOS or traffic
 class range `4N` to `4N+3`, so the ECN bits may be anything):
@@ -588,9 +625,9 @@ carry a partial or no checksum. The engine never injects a packet that
 carries IPv4 options: an IPv4 TCP packet with an IHL above 5 is dropped and
 counted in both the client and the listener path. A total length larger than
 the captured bytes is malformed; bytes after the total length are left
-alone. Whether large send offload hands the NETWORK layer packets whose
-total length differs from the captured length needs verification, and the
-helper step decides which length it injects.
+alone. The helper injects the captured length, as `streamdump.c` does.
+Whether large send offload hands the NETWORK layer packets whose total
+length differs from the captured length needs verification.
 
 Flow table:
 
@@ -610,9 +647,9 @@ Flow table:
   of all expired flows runs at most once per `SWEEP_INTERVAL` (1 s), so a
   tagged process cannot make the helper scan the table on every refused
   SYN.
-- Capacity 16384 flows, passed to `Engine::new` (the constant is
-  *(proposed)*); a SYN that finds the table full is dropped and counted, and
-  the client retransmits.
+- Capacity 16384 flows (`DEFAULT_CAPACITY`), passed to `Engine::new`; a SYN
+  that finds the table full is dropped and counted, and the client
+  retransmits.
 
 Dropped and counted, never injected:
 
@@ -634,8 +671,8 @@ Counters (`divert::Counters`, aggregate integers): `captured`, `new_flows`,
 (`orphans_dropped`, `key_collisions`, `unknown_replies_dropped`,
 `fragments_dropped`, `options_dropped`, `malformed_dropped`, `table_full`,
 `contained_udp`, `contained_other`, `contained_ipv6`, `inbound_dropped`).
-The Windows loop adds send and receive errors *(proposed)*. They go to the
-agent over the pipe and into the agent's log at `debug`.
+The engine loop adds `receive_errors` and `send_errors`. They go to the
+agent over the pipe and into the agent's log at `debug` *(proposed)*.
 
 ### Transparent listener and attribution
 
@@ -776,15 +813,25 @@ verification; gateway policies keyed on host names will not match.
 **Decision: the helper adds a scoped inbound allow rule for its lifetime
 with `netsh`.**
 
-- The rule has one fixed name, *proposed* `Gateinto transparent listener`
-  (`netsh advfirewall firewall add rule` has no group parameter as far as is
+- The rule has one fixed name without spaces,
+  `Gateinto-transparent-listener` (`divert::firewall::RULE_NAME`; `netsh
+  advfirewall firewall add rule` has no group parameter as far as is
   known).
 - At start the helper runs `netsh advfirewall firewall delete rule
   name=<name>` and ignores its exit code, because `delete rule` exits
   non-zero when nothing matches. It then adds one inbound TCP allow rule for
   local port T and the program `gateinto.exe` (the helper's own image path)
   with `add rule`; a failing `add` is fatal (`error firewall-rule`). It
-  deletes the rule on exit.
+  deletes the rule on exit. The arguments, passed verbatim:
+
+  ```text
+  advfirewall firewall delete rule name=Gateinto-transparent-listener
+  advfirewall firewall add rule name=Gateinto-transparent-listener dir=in action=allow protocol=TCP localport=<T> program="<image path>" enable=yes profile=any
+  ```
+
+  An image path that is not absolute (a drive letter and `:\`, or `\\?\`),
+  or that contains `"` or a control character or ends with `\`, is refused
+  (`error firewall-rule`), so the quoted path cannot end early.
 - `netsh` is started by absolute path under the system directory
   (`GetSystemDirectoryW`), never through `PATH`, with fixed arguments apart
   from the validated port and the helper's own image path; only
@@ -1071,10 +1118,14 @@ the IPv6 table.
   challenge stores the verification offer and closes the stream; adopted
   tunnels log the target like proxy-mode tunnels and never the peer.
 
-**Helper tests:** argument validation (DSCP 0 and 64, port 49151 and 0 are
-refused with `invalid-arguments`; a pipe name outside the pattern ends the
-helper with an exit code and nothing on any pipe); the
-`netsh` command lines; the protocol lines it writes.
+**Helper tests** (implemented in `src/divert/`, every platform):
+argument validation (DSCP 0 and 64, port 49151 and 0 are refused with
+`invalid-arguments`; a pipe name outside the pattern ends the helper with
+an exit code and nothing on any pipe); the `netsh` command lines; the
+protocol lines it writes and the agent-side reader, with a fuzz target
+`divert-status`; the engine loop with a fake port and a manual clock; the
+order of the helper sequence and its cleanup with a recording fake
+platform.
 
 **(c) Windows CI integration (elevated hosted runner, proposed
 `tests/transparent_windows.rs`, serialized):** a workflow setup step
@@ -1276,8 +1327,8 @@ would need a design change if they fail. Results go to
 - IPv6 drop falls back to IPv4 promptly; otherwise a RST reply to tagged
   IPv6 SYNs.
 - Under large send offload, whether an outbound packet captured at the
-  NETWORK layer has an IPv4 total length equal to the captured length, and
-  which length the helper injects.
+  NETWORK layer has an IPv4 total length equal to the captured length (the
+  helper injects the captured length).
 - The i686 build under WOW64 with the x86 `WinDivert.dll` and the 64-bit
   driver.
 - The pipe DACL when UAC is answered with a different administrator

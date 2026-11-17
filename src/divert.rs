@@ -1,17 +1,24 @@
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU16;
+use std::str::FromStr;
 
 mod engine;
+pub mod firewall;
 mod flows;
 #[cfg(any(test, fuzzing))]
 pub mod fuzzing;
+pub mod helper;
 mod packet;
+pub mod protocol;
+pub mod pump;
 #[cfg(test)]
 mod testing;
 
 pub use engine::{Counters, Direction, Engine, Verdict};
 pub use flows::{DEFAULT_IDLE_TIMEOUT, LINGER};
+
+pub const DEFAULT_CAPACITY: usize = 16384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Dscp(u8);
@@ -66,6 +73,15 @@ pub fn filter(listener_port: NonZeroU16, dscp: Dscp) -> String {
     )
 }
 
+fn decimal<T: FromStr>(text: &str) -> Option<T> {
+    let canonical = match text.as_bytes() {
+        [] => false,
+        [b'0', _, ..] => false,
+        digits => digits.iter().all(u8::is_ascii_digit),
+    };
+    canonical.then(|| text.parse().ok()).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +100,36 @@ mod tests {
             InvalidDscp.to_string(),
             "a DSCP value must be between 1 and 63"
         );
+    }
+
+    #[test]
+    fn a_decimal_is_canonical_digits_within_range() {
+        assert_eq!(decimal::<u64>("0"), Some(0));
+        assert_eq!(decimal::<u64>("10"), Some(10));
+        assert_eq!(decimal::<u64>("18446744073709551615"), Some(u64::MAX));
+        assert_eq!(decimal::<u8>("255"), Some(255));
+        for refused in [
+            "",
+            "+1",
+            "-1",
+            "00",
+            "01",
+            " 1",
+            "1 ",
+            "1_0",
+            "0x1",
+            "1e3",
+            "\u{661}",
+            "18446744073709551616",
+        ] {
+            assert_eq!(decimal::<u64>(refused), None, "{refused:?}");
+        }
+        assert_eq!(decimal::<u8>("256"), None);
+    }
+
+    #[test]
+    fn the_flow_table_holds_16384_flows_by_default() {
+        assert_eq!(DEFAULT_CAPACITY, 16384);
     }
 
     #[test]
