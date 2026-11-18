@@ -801,17 +801,22 @@ transparent listener, as IP literals.
 its tunnel limit, route, upstream pool, counters and lifetime.**
 
 `Proxy::run_until` owns the listener and the session keeps no handle to
-`Shared`, so a new entry point is needed *(proposed)*:
+`Shared`, so a new entry point is needed:
 
-- `Proxy::adopter() -> Adopter` before `run_until`; `Adopter` wraps an
-  `mpsc` sender of `(TcpStream, Authority)`. `run_until` selects on the
-  shutdown signal, the listener and the adoption receiver.
+- `Proxy::adopter() -> Adopter` before `run_until`; `Adopter` wraps a
+  bounded `mpsc` sender of `(TcpStream, Authority)` with capacity
+  `max_tunnels.max(1)`: a queued stream beyond the tunnel limit could
+  only be reset. `Adopter::adopt` uses `try_send` and never waits, so one
+  slow session cannot block the transparent listener; a full or closed
+  channel hands the stream back, and the caller resets it with
+  `proxy::reset` (zero linger). `run_until` selects on the shutdown
+  signal, the listener and the adoption receiver.
 - **Tunnel limit.** An adopted stream takes a permit from the same
   `Shared::tunnels` semaphore (`Limits::max_tunnels`) with
   `try_acquire_owned`, exactly like an accepted connection, and holds it
-  until its task ends. Without a permit it is closed at once (no `503`: the
+  until its task ends. Without a permit it is reset at once (no `503`: the
   application speaks TLS, not HTTP), and it never takes a `rejects` permit.
-- `Shared::adopt(stream, target)` *(proposed)* skips the `os_user` lookup
+- `Shared::adopt(stream, target, permit)` skips the `os_user` lookup
   (attribution already did it), `read_head` and `Authenticator::check`,
   calls `open_upstream(&target)` under `handshake_timeout`, writes no local
   status line, forwards the gateway's early bytes to the client, and relays
@@ -823,12 +828,15 @@ its tunnel limit, route, upstream pool, counters and lifetime.**
   raw TCP client.
 - **Lifetime.** The adopted stream's task is spawned into the same
   `connections` `JoinSet` as accepted connections. Closing the session sends
-  its close signal; `run_until` leaves its loop, drops the listener and the
-  adoption receiver, and `connections.shutdown()` aborts every task, adopted
-  tunnels included, before the session's task ends. `Session` gains the
-  adopter and its job *(proposed)*; the agent's registry of transparent
-  sessions maps each job to its adopter and drops the entry when the session
-  closes. A send to a closed receiver fails, and that stream is closed.
+  its close signal; `run_until` leaves its loop, drops the listener, closes
+  the adoption receiver and resets every stream still queued in it
+  (receiving until the channel reports its end, so a send that had already
+  reserved capacity is not lost), and `connections.shutdown()` aborts every
+  task, adopted tunnels included, before the session's task ends. `Session`
+  gains the adopter and its job *(proposed)*; the agent's registry of
+  transparent sessions maps each job to its adopter and drops the entry
+  when the session closes. A send after the close fails, and that stream is
+  handed back and reset.
 - `OpenTunnels` counts adopted tunnels like the others, so `session list`
   shows them.
 
@@ -1252,9 +1260,9 @@ tagged job dials a TEST-NET-1 address (`192.0.2.0/24`, RFC 5737), so the
 SYN never leaves the machine when the engine reflects it, and the
 in-process TLS upstream fixture on loopback serves `CONNECT 192.0.2.1:443`.
 The session uses the `gateway` route: on `mixed`, `routing::attempt` would
-dial 192.0.2.1 directly. `UpstreamProxy` already records request heads
-(`requests()`); the only new fixture behaviour is a tunnel to a loopback
-echo server whatever the target *(proposed)*. Cases:
+dial 192.0.2.1 directly. `UpstreamProxy` records request heads
+(`requests()`), and `Behavior::TunnelTo` tunnels to a loopback echo server
+whatever the target. Cases:
 
 - routed: the fixture records exactly one `CONNECT 192.0.2.1:443` and data
   round-trips;
@@ -1394,7 +1402,8 @@ code to pass it, then a refactor.
    `GetNamedPipeServerProcessId`, `WaitForMultipleObjects`) are in the
    Windows 7 import allow-list.
 4. **Session adoption and the transparent listener.** `Proxy::adopter`,
-   `Shared::adopt`, `os_user::original`, `TransparentListener` with
+   `Shared::adopt` (adoption implemented, with `Adopter` and
+   `proxy::reset`), `os_user::original`, `TransparentListener` with
    `SO_EXCLUSIVEADDRUSE` and the port range, the registry of transparent
    jobs, the engine state and session marks.
 5. **Agent wiring.** On-demand helper with `ShellExecuteExW`, the order of

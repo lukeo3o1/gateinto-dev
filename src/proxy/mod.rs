@@ -468,7 +468,7 @@ impl Proxy {
         }
         drop(listener);
         adoptions.close();
-        while let Ok((stream, _)) = adoptions.try_recv() {
+        while let Some((stream, _)) = adoptions.recv().await {
             reset(stream);
         }
         let aborted = connections.len();
@@ -1071,6 +1071,24 @@ mod tests {
             *owners.seen.lock().unwrap(),
             [(proxied.local_addr().unwrap(), proxied.peer_addr().unwrap())]
         );
+    }
+
+    #[tokio::test]
+    async fn a_stream_whose_send_completes_after_the_proxy_closed_is_reset() {
+        let (mut adopted, accepted) = pair().await;
+        let config = config(LocalAuth::NONE, Duration::from_secs(5)).await;
+        let proxy = Proxy::bind(config).await.unwrap();
+        let reserved = proxy.adopter.0.clone().try_reserve_owned().unwrap();
+        let closing = tokio::spawn(proxy.run_until(async {}));
+        tokio::task::yield_now().await;
+
+        reserved.send((accepted, ADOPTED.parse().unwrap()));
+        timeout(Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_reset(&mut adopted).await;
     }
 
     #[tokio::test]

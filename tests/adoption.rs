@@ -135,7 +135,10 @@ async fn an_adopted_tunnel_holds_a_tunnel_permit_until_it_ends() {
     let running = Running::start(config).await;
     let mut adopted = running.adopt().await;
     adopted.write_all(b"open").await.unwrap();
-    adopted.read_exact(&mut [0; 4]).await.unwrap();
+    timeout(CLOSE_WITHIN, adopted.read_exact(&mut [0; 4]))
+        .await
+        .unwrap()
+        .unwrap();
 
     let (_, response) = send(running.agent, &connect_request(TARGET)).await;
     assert_eq!(response.status, 503, "{}", response.head);
@@ -200,14 +203,14 @@ async fn an_adopted_stream_is_reset_when_the_gateway_fails() {
 async fn an_adopted_stream_is_reset_when_the_gateway_does_not_answer_in_time() {
     let gateway = Gateway::start(Behavior::Hang).await;
     let mut config = gateway.config();
-    config.limits.handshake_timeout = Duration::from_millis(200);
+    config.limits.handshake_timeout = Duration::from_millis(300);
     let running = Running::start(config).await;
 
     let started = tokio::time::Instant::now();
     let mut adopted = running.adopt().await;
     assert_reset(&mut adopted).await;
 
-    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(started.elapsed() >= Duration::from_millis(300));
     assert_eq!(gateway.upstream.requests(), [gateway_connect(TARGET)]);
 }
 
@@ -248,7 +251,10 @@ async fn an_adopted_tunnel_is_counted_while_it_is_open() {
 
     let mut adopted = running.adopt().await;
     adopted.write_all(b"open").await.unwrap();
-    adopted.read_exact(&mut [0; 4]).await.unwrap();
+    timeout(CLOSE_WITHIN, adopted.read_exact(&mut [0; 4]))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(running.open_tunnels.count(), 1);
 
     echo_to_end(&mut adopted, b"").await;
@@ -274,7 +280,10 @@ async fn closing_the_proxy_aborts_adopted_tunnels_and_hands_back_later_streams()
     let (mut adopted, accepted) = pair().await;
     adopter.adopt(accepted, target()).unwrap();
     adopted.write_all(b"open").await.unwrap();
-    adopted.read_exact(&mut [0; 4]).await.unwrap();
+    timeout(CLOSE_WITHIN, adopted.read_exact(&mut [0; 4]))
+        .await
+        .unwrap()
+        .unwrap();
 
     close.send(()).unwrap();
     timeout(CLOSE_WITHIN, task).await.unwrap().unwrap();
