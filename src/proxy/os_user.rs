@@ -61,10 +61,19 @@ const LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TcpState {
+    Established,
+    CloseWait,
+    Other,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Row {
     pub(crate) local: SocketAddr,
     pub(crate) remote: SocketAddr,
     pub(crate) pid: u32,
+    pub(crate) state: TcpState,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -151,10 +160,12 @@ pub(crate) fn original<K>(
     {
         return Err(Denial::SelfTarget);
     }
-    if !rows
-        .iter()
-        .any(|row| row.pid != 0 && same(row.local, local) && same(row.remote, peer))
-    {
+    if !rows.iter().any(|row| {
+        row.pid != 0
+            && matches!(row.state, TcpState::Established | TcpState::CloseWait)
+            && same(row.local, local)
+            && same(row.remote, peer)
+    }) {
         return Err(Denial::NotFound);
     }
     let client = SocketAddr::new(local.ip(), peer.port());
@@ -395,6 +406,21 @@ pub(crate) mod tests {
             local: local.parse().unwrap(),
             remote: remote.parse().unwrap(),
             pid,
+            state: TcpState::Established,
+        }
+    }
+
+    fn in_state(row: Row, state: TcpState) -> Row {
+        Row { state, ..row }
+    }
+
+    #[test]
+    fn the_owner_of_a_proxied_connection_is_found_whatever_the_state_of_its_row() {
+        let peer = "127.0.0.1:50000".parse().unwrap();
+        let local = "127.0.0.1:8080".parse().unwrap();
+        for state in [TcpState::Established, TcpState::CloseWait, TcpState::Other] {
+            let rows = [in_state(row("127.0.0.1:50000", "127.0.0.1:8080", 9), state)];
+            assert_eq!(owner(rows, peer, local), Some(9), "{state:?}");
         }
     }
 
@@ -856,6 +882,41 @@ pub(crate) mod tests {
             Err(Denial::NotFound)
         );
         assert!(owners.asked.is_empty());
+    }
+
+    #[test]
+    fn the_listener_row_counts_only_while_it_is_established_or_in_close_wait() {
+        for (state, expected) in [
+            (TcpState::Established, Ok(found(7, "session", DESTINATION))),
+            (TcpState::CloseWait, Ok(found(7, "session", DESTINATION))),
+            (TcpState::Other, Err(Denial::NotFound)),
+        ] {
+            let rows = [in_state(accepted(), state), row(CLIENT, DESTINATION, 7)];
+            let mut owners = admitting(&[(7, Ok("session"))]);
+            assert_eq!(
+                original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
+                expected,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialer_row_refuses_the_connection_in_any_state() {
+        let peer = "192.168.1.11:50000";
+        let in_job = row(CLIENT, "192.168.1.11:61000", 7);
+        for state in [TcpState::Established, TcpState::CloseWait, TcpState::Other] {
+            for pid in [0, 9] {
+                let dialer = in_state(row(peer, LISTENER, pid), state);
+                let rows = [row(LISTENER, peer, 1), in_job, dialer];
+                let mut owners = admitting(&[(7, Ok("session"))]);
+                assert_eq!(
+                    original(rows, addr(peer), addr(LISTENER), |pid| owners.admit(pid)),
+                    Err(Denial::SelfTarget),
+                    "{state:?} {pid}"
+                );
+            }
+        }
     }
 
     #[test]

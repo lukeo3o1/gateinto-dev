@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
-    MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_CONNECTIONS,
+    GetExtendedTcpTable, MIB_TCP_STATE_CLOSE_WAIT, MIB_TCP_STATE_ESTAB, MIB_TCP6ROW_OWNER_PID,
+    MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    TCP_TABLE_OWNER_PID_CONNECTIONS,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows_sys::Win32::Security::{EqualSid, TOKEN_QUERY};
@@ -19,8 +20,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::{
-    Denial, Family, LOOKUP_ATTEMPTS, LOOKUP_DELAY, Original, Owners, Row, all_rows, confirmed,
-    entries, lookup, one_session, original, retry, v4, v6,
+    Denial, Family, LOOKUP_ATTEMPTS, LOOKUP_DELAY, Original, Owners, Row, TcpState, all_rows,
+    confirmed, entries, lookup, one_session, original, retry, v4, v6,
 };
 use crate::job::Job;
 use crate::token::{Handle, TokenUserInfo};
@@ -200,6 +201,7 @@ fn rows(family: Family) -> io::Result<Vec<Row>> {
                     local: v4(row.dwLocalAddr, row.dwLocalPort),
                     remote: v4(row.dwRemoteAddr, row.dwRemotePort),
                     pid: row.dwOwningPid,
+                    state: tcp_state(row.dwState),
                 })
                 .collect())
         }
@@ -216,9 +218,18 @@ fn rows(family: Family) -> io::Result<Vec<Row>> {
                     local: v6(row.ucLocalAddr, row.dwLocalPort),
                     remote: v6(row.ucRemoteAddr, row.dwRemotePort),
                     pid: row.dwOwningPid,
+                    state: tcp_state(row.dwState),
                 })
                 .collect())
         }
+    }
+}
+
+fn tcp_state(state: u32) -> TcpState {
+    match state.cast_signed() {
+        MIB_TCP_STATE_ESTAB => TcpState::Established,
+        MIB_TCP_STATE_CLOSE_WAIT => TcpState::CloseWait,
+        _ => TcpState::Other,
     }
 }
 
@@ -288,6 +299,7 @@ mod tests {
                     local,
                     remote: peer,
                     pid: std::process::id(),
+                    state: TcpState::Established,
                 });
             }
             Ok(found)
@@ -490,6 +502,33 @@ mod tests {
             Err(Denial::NotFound)
         );
         client.process.kill().await.unwrap();
+    }
+
+    #[test]
+    fn table_states_map_to_the_states_the_matcher_tells_apart() {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            MIB_TCP_STATE_CLOSED, MIB_TCP_STATE_DELETE_TCB, MIB_TCP_STATE_FIN_WAIT2,
+            MIB_TCP_STATE_LAST_ACK, MIB_TCP_STATE_TIME_WAIT,
+        };
+
+        assert_eq!(
+            tcp_state(MIB_TCP_STATE_ESTAB.cast_unsigned()),
+            TcpState::Established
+        );
+        assert_eq!(
+            tcp_state(MIB_TCP_STATE_CLOSE_WAIT.cast_unsigned()),
+            TcpState::CloseWait
+        );
+        for other in [
+            MIB_TCP_STATE_CLOSED,
+            MIB_TCP_STATE_FIN_WAIT2,
+            MIB_TCP_STATE_LAST_ACK,
+            MIB_TCP_STATE_TIME_WAIT,
+            MIB_TCP_STATE_DELETE_TCB,
+        ] {
+            assert_eq!(tcp_state(other.cast_unsigned()), TcpState::Other, "{other}");
+        }
+        assert_eq!(tcp_state(u32::MAX), TcpState::Other);
     }
 
     #[test]

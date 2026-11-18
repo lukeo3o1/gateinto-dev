@@ -4,9 +4,11 @@ use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::warn;
 
+use crate::http::Authority;
 #[cfg(windows)]
 use crate::job::Job;
 use crate::proxy::Adopter;
@@ -193,19 +195,26 @@ impl<K: Ord + Clone, J> State<K, J> {
         removed.is_some()
     }
 
-    pub fn jobs(&self) -> Vec<(K, Arc<J>)> {
+    pub fn jobs(&self, generation: Generation) -> Vec<(K, Arc<J>)> {
         self.lock()
             .sessions
             .iter()
+            .filter(|(_, entry)| entry.generation == generation)
             .map(|(key, entry)| (key.clone(), entry.job.clone()))
             .collect()
     }
 
-    pub fn adopter(&self, key: &K) -> Option<Adopter> {
-        self.lock()
-            .sessions
-            .get(key)
-            .map(|entry| entry.adopter.clone())
+    pub fn adopt(
+        &self,
+        generation: Generation,
+        key: &K,
+        stream: TcpStream,
+        target: Authority,
+    ) -> Result<(), TcpStream> {
+        match self.lock().sessions.get(key) {
+            Some(entry) if entry.generation == generation => entry.adopter.adopt(stream, target),
+            _ => Err(stream),
+        }
     }
 
     pub fn stop(&self, generation: Generation) -> Vec<K>
@@ -399,8 +408,35 @@ mod tests {
         (job, mark)
     }
 
-    fn keys(state: &Fake) -> Vec<u32> {
-        state.jobs().into_iter().map(|(key, _)| key).collect()
+    fn keys(state: &Fake, generation: Generation) -> Vec<u32> {
+        state
+            .jobs(generation)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    type Adopted = tokio::sync::mpsc::Receiver<(TcpStream, Authority)>;
+
+    fn adopting(state: &Fake, key: u32, capacity: usize) -> (Arc<FakeJob>, Adopted) {
+        let job = Arc::new(FakeJob::default());
+        let (adopter, adopted) = Adopter::channel(capacity);
+        state.register(key, job.clone(), adopter).unwrap();
+        (job, adopted)
+    }
+
+    async fn stream() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        (client, listener.accept().await.unwrap().0)
+    }
+
+    fn target() -> Authority {
+        "203.0.113.7:443".parse().unwrap()
     }
 
     #[tokio::test]
@@ -536,19 +572,20 @@ mod tests {
         register(&state, 1);
         assert_eq!(state.stop(generation), [1]);
         assert_eq!(refused(&state), Some(Refusal::NotRunning));
-        let _next = start(&state);
+        let next = start(&state);
         assert_eq!(refused(&state), Some(Refusal::NotRunning));
-        assert!(keys(&state).is_empty());
+        assert!(keys(&state, generation).is_empty());
+        assert!(keys(&state, next.generation()).is_empty());
     }
 
     #[test]
     fn a_session_registers_once() {
         let state = Arc::new(Fake::new());
-        running(&state);
+        let generation = running(&state);
         let (job, _) = register(&state, 1);
         let again = state.register(1, Arc::new(FakeJob::default()), adopter());
         assert_eq!(again.err(), Some(Refusal::Registered));
-        let jobs = state.jobs();
+        let jobs = state.jobs(generation);
         assert_eq!(jobs.len(), 1);
         assert!(Arc::ptr_eq(&jobs[0].1, &job));
     }
@@ -559,16 +596,14 @@ mod tests {
         let generation = running(&state);
         let (first, first_mark) = register(&state, 1);
         let (second, second_mark) = register(&state, 2);
-        assert_eq!(keys(&state), [1, 2]);
-        assert!(state.adopter(&1).is_some());
+        assert_eq!(keys(&state, generation), [1, 2]);
         assert_eq!(state.stop(generation), [1, 2]);
         assert_eq!(state.phase(), Phase::Stopped);
         for (job, mark) in [(first, first_mark), (second, second_mark)] {
             assert_eq!(job.events(), [Event::Terminated]);
             assert_eq!(mark.launch().err(), Some(Closing));
         }
-        assert!(keys(&state).is_empty());
-        assert!(state.adopter(&1).is_none());
+        assert!(keys(&state, generation).is_empty());
     }
 
     #[test]
@@ -583,11 +618,12 @@ mod tests {
         let (new_job, new_mark) = register(&state, 2);
         assert!(state.stop(old).is_empty());
         assert_eq!(state.phase(), Phase::Running(new));
-        assert_eq!(keys(&state), [2]);
+        assert_eq!(keys(&state, new), [2]);
+        assert!(keys(&state, old).is_empty());
         assert!(new_job.events().is_empty());
         assert!(new_mark.launch().is_ok());
         register(&state, 3);
-        assert_eq!(keys(&state), [2, 3]);
+        assert_eq!(keys(&state, new), [2, 3]);
         assert_eq!(state.stop(new), [2, 3]);
         assert!(state.stop(new).is_empty());
         assert_eq!(new_job.events(), [Event::Terminated]);
@@ -620,9 +656,7 @@ mod tests {
         register(&state, 2);
         assert!(state.unregister(&1));
         assert!(!state.unregister(&1));
-        assert_eq!(keys(&state), [2]);
-        assert!(state.adopter(&1).is_none());
-        assert!(state.adopter(&2).is_some());
+        assert_eq!(keys(&state, generation), [2]);
         assert_eq!(state.stop(generation), [2]);
         assert!(first.events().is_empty());
     }
@@ -674,6 +708,69 @@ mod tests {
         }));
         assert_eq!(state.stop(generation), [1]);
         assert_eq!(job.events(), [Event::Terminated]);
+    }
+
+    #[tokio::test]
+    async fn a_stream_is_adopted_only_by_a_session_registered_under_the_given_generation() {
+        let state = Arc::new(Fake::new());
+        let old = running(&state);
+        let (_, mut old_adopted) = adopting(&state, 1, 4);
+        assert_eq!(state.stop(old), [1]);
+        let new = running(&state);
+        let (_, mut adopted) = adopting(&state, 2, 4);
+        let (_client, accepted) = stream().await;
+        let accepted = state.adopt(old, &2, accepted, target()).unwrap_err();
+        let accepted = state.adopt(new, &1, accepted, target()).unwrap_err();
+        assert!(old_adopted.try_recv().is_err());
+        assert!(adopted.try_recv().is_err());
+        state.adopt(new, &2, accepted, target()).unwrap();
+        assert_eq!(adopted.try_recv().unwrap().1, target());
+    }
+
+    #[tokio::test]
+    async fn a_full_session_hands_the_stream_back() {
+        let state = Arc::new(Fake::new());
+        let generation = running(&state);
+        let (_, mut adopted) = adopting(&state, 1, 1);
+        let (_first_client, first) = stream().await;
+        let (_second_client, second) = stream().await;
+        state.adopt(generation, &1, first, target()).unwrap();
+        state.adopt(generation, &1, second, target()).unwrap_err();
+        adopted.try_recv().unwrap();
+        assert!(adopted.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn no_stream_is_adopted_once_unregister_or_a_break_has_taken_the_session() {
+        let state = Arc::new(Fake::new());
+        let generation = running(&state);
+        let (_, mut unregistered) = adopting(&state, 1, 4);
+        assert!(state.unregister(&1));
+        let (_client, accepted) = stream().await;
+        let accepted = state.adopt(generation, &1, accepted, target()).unwrap_err();
+        assert!(unregistered.try_recv().is_err());
+
+        let (before_client, before) = stream().await;
+        let (job, mut adopted) = adopting(&state, 2, 4);
+        state.adopt(generation, &2, before, target()).unwrap();
+        let during = Arc::new(Mutex::new(None));
+        *job.during.lock().unwrap() = Some(Box::new({
+            let (state, during) = (state.clone(), during.clone());
+            move || {
+                let refused = state.adopt(generation, &2, accepted, target()).is_err();
+                *during.lock().unwrap() = Some(refused);
+            }
+        }));
+        assert_eq!(state.stop(generation), [2]);
+        assert_eq!(*during.lock().unwrap(), Some(true));
+        let (_after_client, after) = stream().await;
+        state.adopt(generation, &2, after, target()).unwrap_err();
+        let (queued, _) = adopted.try_recv().unwrap();
+        assert_eq!(
+            queued.peer_addr().unwrap(),
+            before_client.local_addr().unwrap()
+        );
+        assert!(adopted.try_recv().is_err());
     }
 
     #[test]

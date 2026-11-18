@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,13 +8,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
-use super::state::State;
+use super::state::{Generation, State};
 use crate::http::Authority;
 #[cfg(windows)]
 use crate::job::Job;
 #[cfg(windows)]
 use crate::proxy::Attribution;
-use crate::proxy::{self, Adopter, Denial, Original};
+use crate::proxy::{self, Denial, Original};
 
 pub(crate) const MAX_ATTRIBUTIONS: usize = 64;
 
@@ -48,8 +47,33 @@ impl<K: Clone + Send + Sync + 'static> Attribute<K, Job> for Attribution {
 pub(crate) async fn serve<K, J, A>(
     listener: TcpListener,
     state: Arc<State<K, J>>,
+    generation: Generation,
     attribution: Arc<A>,
     handshake_timeout: Duration,
+    shutdown: impl Future<Output = ()>,
+) where
+    K: Ord + Clone + Send + Sync + 'static,
+    J: Send + Sync + 'static,
+    A: Attribute<K, J>,
+{
+    let dispatcher = Arc::new(Dispatcher {
+        state,
+        generation,
+        attribution,
+        handshake_timeout,
+    });
+    run(listener, dispatcher, reflectable, shutdown).await;
+}
+
+fn reflectable(peer: SocketAddr, local: SocketAddr) -> bool {
+    let peer = peer.ip().to_canonical();
+    !peer.is_loopback() && peer != local.ip().to_canonical()
+}
+
+async fn run<K, J, A>(
+    listener: TcpListener,
+    dispatcher: Arc<Dispatcher<K, J, A>>,
+    reflectable: impl Fn(SocketAddr, SocketAddr) -> bool,
     shutdown: impl Future<Output = ()>,
 ) where
     K: Ord + Clone + Send + Sync + 'static,
@@ -66,18 +90,23 @@ pub(crate) async fn serve<K, J, A>(
             Some(_) = dispatches.join_next(), if !dispatches.is_empty() => {}
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    let local = match reflected(&stream, peer, &reflectable) {
+                        Ok(local) => local,
+                        Err(denial) => {
+                            refused(&denial);
+                            proxy::reset(stream);
+                            continue;
+                        }
+                    };
                     let Ok(permit) = attributions.clone().try_acquire_owned() else {
                         debug!("refused a transparent connection: too many attributions in flight");
                         proxy::reset(stream);
                         continue;
                     };
-                    let local = stream.local_addr();
-                    dispatches.spawn(dispatch(
+                    dispatches.spawn(dispatcher.clone().dispatch(
                         Unadopted(Some(stream)),
-                        (peer, local),
-                        state.clone(),
-                        attribution.clone(),
-                        handshake_timeout,
+                        peer,
+                        local,
                         permit,
                     ));
                 }
@@ -92,15 +121,39 @@ pub(crate) async fn serve<K, J, A>(
     dispatches.shutdown().await;
 }
 
+fn reflected(
+    stream: &TcpStream,
+    peer: SocketAddr,
+    reflectable: impl Fn(SocketAddr, SocketAddr) -> bool,
+) -> Result<SocketAddr, Denial> {
+    let local = stream
+        .local_addr()
+        .map_err(|error| Denial::Lookup(error.to_string()))?;
+    if !reflectable(peer, local) {
+        return Err(Denial::SelfTarget);
+    }
+    Ok(local)
+}
+
+fn refused(denial: &Denial) {
+    debug!(denial = denial.kind(), "refused a transparent connection");
+}
+
 struct Unadopted(Option<TcpStream>);
 
 impl Unadopted {
-    fn adopt(mut self, adopter: &Adopter, target: Authority) -> bool {
+    fn adopt<K: Ord + Clone, J>(
+        mut self,
+        state: &State<K, J>,
+        generation: Generation,
+        session: &K,
+        target: Authority,
+    ) -> bool {
         let Some(stream) = self.0.take() else {
             return false;
         };
-        adopter
-            .adopt(stream, target)
+        state
+            .adopt(generation, session, stream, target)
             .map_err(|stream| self.0 = Some(stream))
             .is_ok()
     }
@@ -114,69 +167,59 @@ impl Drop for Unadopted {
     }
 }
 
-async fn dispatch<K, J, A>(
-    stream: Unadopted,
-    (peer, local): (SocketAddr, io::Result<SocketAddr>),
+struct Dispatcher<K, J, A> {
     state: Arc<State<K, J>>,
+    generation: Generation,
     attribution: Arc<A>,
     handshake_timeout: Duration,
-    permit: OwnedSemaphorePermit,
-) where
+}
+
+impl<K, J, A> Dispatcher<K, J, A>
+where
     K: Ord + Clone + Send + Sync + 'static,
     J: Send + Sync + 'static,
     A: Attribute<K, J>,
 {
-    let found = match local {
-        Ok(local) => {
-            let jobs = state.jobs();
-            attribute(attribution, peer, local, jobs, handshake_timeout, permit).await
+    async fn dispatch(
+        self: Arc<Self>,
+        stream: Unadopted,
+        peer: SocketAddr,
+        local: SocketAddr,
+        permit: OwnedSemaphorePermit,
+    ) {
+        let Original {
+            session,
+            destination,
+            ..
+        } = match self.attribute(peer, local, permit).await {
+            Ok(found) => found,
+            Err(denial) => return refused(&denial),
+        };
+        let target = Authority::from(destination);
+        if !stream.adopt(&self.state, self.generation, &session, target) {
+            debug!("refused a transparent connection: its session has closed or cannot take it");
         }
-        Err(error) => Err(Denial::Lookup(error.to_string())),
-    };
-    let Original {
-        session,
-        destination,
-        ..
-    } = match found {
-        Ok(found) => found,
-        Err(denial) => {
-            debug!(denial = denial.kind(), "refused a transparent connection");
-            return;
-        }
-    };
-    match state.adopter(&session) {
-        Some(adopter) => {
-            if !stream.adopt(&adopter, Authority::from(destination)) {
-                debug!("refused a transparent connection: its session cannot take it");
-            }
-        }
-        None => debug!("refused a transparent connection: its session has closed"),
     }
-}
 
-async fn attribute<K, J, A>(
-    attribution: Arc<A>,
-    peer: SocketAddr,
-    local: SocketAddr,
-    jobs: Vec<(K, Arc<J>)>,
-    handshake_timeout: Duration,
-    permit: OwnedSemaphorePermit,
-) -> Result<Original<K>, Denial>
-where
-    K: Send + 'static,
-    J: Send + Sync + 'static,
-    A: Attribute<K, J>,
-{
-    let deadline = tokio::time::Instant::now() + handshake_timeout;
-    let until = deadline.into_std();
-    let lookup = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        attribution.attribute(peer, local, &jobs, until)
-    });
-    match tokio::time::timeout_at(deadline, lookup).await {
-        Ok(Ok(found)) => found,
-        Ok(Err(_)) => Err(Denial::Lookup("the attribution task failed".to_owned())),
-        Err(_) => Err(Denial::TimedOut),
+    async fn attribute(
+        &self,
+        peer: SocketAddr,
+        local: SocketAddr,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<Original<K>, Denial> {
+        let jobs = self.state.jobs(self.generation);
+        let attribution = self.attribution.clone();
+        let deadline = tokio::time::Instant::now() + self.handshake_timeout;
+        let until = deadline.into_std();
+        let lookup = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            attribution.attribute(peer, local, &jobs, until)
+        });
+        match tokio::time::timeout_at(deadline, lookup).await {
+            Ok(Ok(found)) => found,
+            Ok(Err(_)) => Err(Denial::Lookup("the attribution task failed".to_owned())),
+            Err(_) => Err(Denial::TimedOut),
+        }
     }
 }
 
@@ -188,7 +231,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::net::{TcpListener, TcpSocket, TcpStream};
     use tokio::sync::{mpsc, oneshot};
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
@@ -196,7 +239,7 @@ mod tests {
     use super::*;
     use crate::http::Authority;
     use crate::proxy::{Adopter, Denial, Original};
-    use crate::transparent::state::{Begin, State};
+    use crate::transparent::state::{Begin, Generation, Phase, State, Terminate};
 
     type Sessions = State<u32, ()>;
     type Adopted = mpsc::Receiver<(TcpStream, Authority)>;
@@ -204,6 +247,12 @@ mod tests {
     const PID: u32 = 987_654_321;
     const DESTINATION: &str = "203.0.113.7:443";
     const LONG: Duration = Duration::from_secs(30);
+
+    impl Terminate for () {
+        fn terminate(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct Fake<F>(F);
 
@@ -233,13 +282,26 @@ mod tests {
         })
     }
 
+    fn start(state: &Arc<Sessions>) -> Generation {
+        let Begin::Start(starter) = state.begin() else {
+            panic!("the engine state is not stopped");
+        };
+        let generation = starter.generation();
+        starter.finish(Ok(())).unwrap();
+        generation
+    }
+
     fn running() -> Arc<Sessions> {
         let state = Arc::new(State::new());
-        let Begin::Start(starter) = state.begin() else {
-            panic!("a new engine state is stopped");
-        };
-        starter.finish(Ok(())).unwrap();
+        start(&state);
         state
+    }
+
+    fn current(state: &Sessions) -> Generation {
+        let Phase::Running(generation) = state.phase() else {
+            panic!("the engine is not running");
+        };
+        generation
     }
 
     fn session(state: &Sessions, key: u32, capacity: usize) -> Adopted {
@@ -268,6 +330,48 @@ mod tests {
         }
     }
 
+    async fn listening<S>(start: impl FnOnce(TcpListener, oneshot::Receiver<()>) -> S) -> Served
+    where
+        S: Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let served = tokio::spawn(start(listener, stopped));
+        Served {
+            addr,
+            stop: Some(stop),
+            served,
+        }
+    }
+
+    async fn serve_in<F>(
+        state: &Arc<Sessions>,
+        generation: Generation,
+        attribution: F,
+        handshake: Duration,
+        reflectable: impl Fn(SocketAddr, SocketAddr) -> bool + Send + 'static,
+    ) -> Served
+    where
+        F: Fn(SocketAddr, SocketAddr, &[(u32, Arc<()>)]) -> Result<Original<u32>, Denial>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let dispatcher = Arc::new(Dispatcher {
+            state: state.clone(),
+            generation,
+            attribution: Arc::new(Fake(attribution)),
+            handshake_timeout: handshake,
+        });
+        listening(|listener, stopped| {
+            run(listener, dispatcher, reflectable, async {
+                let _ = stopped.await;
+            })
+        })
+        .await
+    }
+
     async fn serve_with<F>(state: &Arc<Sessions>, attribution: F, handshake: Duration) -> Served
     where
         F: Fn(SocketAddr, SocketAddr, &[(u32, Arc<()>)]) -> Result<Original<u32>, Denial>
@@ -275,23 +379,7 @@ mod tests {
             + Sync
             + 'static,
     {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (stop, stopped) = oneshot::channel();
-        let served = tokio::spawn(serve(
-            listener,
-            state.clone(),
-            Arc::new(Fake(attribution)),
-            handshake,
-            async {
-                let _ = stopped.await;
-            },
-        ));
-        Served {
-            addr,
-            stop: Some(stop),
-            served,
-        }
+        serve_in(state, current(state), attribution, handshake, |_, _| true).await
     }
 
     async fn assert_reset(client: &mut TcpStream) {
@@ -350,6 +438,156 @@ mod tests {
         fn drop(&mut self) {
             self.0.release();
         }
+    }
+
+    #[test]
+    fn only_a_remote_peer_other_than_the_local_address_can_be_reflected() {
+        let addr = |text: &str| text.parse::<SocketAddr>().unwrap();
+        let local = addr("192.168.1.10:50123");
+        for peer in [
+            "127.0.0.1:50000",
+            "127.45.6.7:50000",
+            "[::1]:50000",
+            "[::ffff:127.0.0.1]:50000",
+            "192.168.1.10:50000",
+            "192.168.1.10:50123",
+            "[::ffff:192.168.1.10]:50000",
+        ] {
+            assert!(!reflectable(addr(peer), local), "{peer}");
+        }
+        let mapped = addr("[::ffff:192.168.1.10]:50123");
+        assert!(!reflectable(addr("192.168.1.10:50000"), mapped));
+        for peer in [
+            "203.0.113.7:50000",
+            "203.0.113.7:50123",
+            "[::ffff:203.0.113.7]:50000",
+        ] {
+            assert!(reflectable(addr(peer), local), "{peer}");
+            assert!(reflectable(addr(peer), mapped), "{peer}");
+        }
+        let v6 = addr("[2001:db8::1]:50123");
+        assert!(reflectable(addr("[2001:db8::7]:50000"), v6));
+        assert!(!reflectable(addr("[2001:db8::1]:50000"), v6));
+    }
+
+    #[tokio::test]
+    async fn the_listener_resets_a_loopback_peer_without_attributing_it() {
+        let logs = crate::test_logs::capture();
+        let state = running();
+        let mut adopter = session(&state, 1, 4);
+        let called = Arc::new(AtomicUsize::new(0));
+        let generation = current(&state);
+        let attribution = Arc::new(Fake({
+            let called = called.clone();
+            move |_: SocketAddr, _: SocketAddr, _: &[(u32, Arc<()>)]| {
+                called.fetch_add(1, Ordering::SeqCst);
+                to(1)
+            }
+        }));
+        let served = listening({
+            let state = state.clone();
+            move |listener, stopped| {
+                serve(listener, state, generation, attribution, LONG, async {
+                    let _ = stopped.await;
+                })
+            }
+        })
+        .await;
+        let mut client = served.connect().await;
+        let addresses = [
+            client.local_addr().unwrap().to_string(),
+            served.addr.to_string(),
+        ];
+        assert_reset(&mut client).await;
+        served.stop().await;
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+        assert!(adopter.try_recv().is_err());
+        let refused = logs.lines(" DEBUG ");
+        assert_eq!(refused.len(), 1, "{:?}", logs.lines(""));
+        assert!(refused[0].contains("self-target"), "{refused:?}");
+        for address in addresses {
+            assert!(!refused[0].contains(&address), "{refused:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn peers_that_can_never_be_reflected_take_no_permit_and_reach_no_attribution() {
+        let state = running();
+        let mut adopter = session(&state, 1, 4);
+        let gate = Arc::new(Gate::default());
+        let _opened = gate.opened_on_drop();
+        let genuine = TcpSocket::new_v4().unwrap();
+        genuine
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let port = genuine.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let served = serve_in(
+            &state,
+            current(&state),
+            {
+                let (gate, seen) = (gate.clone(), seen.clone());
+                move |peer: SocketAddr, _, _| {
+                    seen.lock().unwrap().push(peer);
+                    if peer.port() == port {
+                        return to(1);
+                    }
+                    gate.pass();
+                    Err(Denial::NotFound)
+                }
+            },
+            LONG,
+            move |peer, local| peer.port() == port || reflectable(peer, local),
+        )
+        .await;
+        for _ in 0..=MAX_ATTRIBUTIONS {
+            let mut direct = served.connect().await;
+            assert_reset(&mut direct).await;
+        }
+        let client = genuine.connect(served.addr).await.unwrap();
+        let (stream, _) = adopted(&mut adopter).await;
+        assert_eq!(stream.peer_addr().unwrap(), client.local_addr().unwrap());
+        assert_eq!(*seen.lock().unwrap(), [client.local_addr().unwrap()]);
+        assert_eq!(gate.entered.load(Ordering::SeqCst), 0);
+        served.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_older_generations_listener_dispatches_into_no_newer_session() {
+        let state = Arc::new(State::new());
+        let old = start(&state);
+        let mut old_adopter = session(&state, 1, 4);
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let attribution = |snapshots: Arc<Mutex<Vec<Vec<u32>>>>| {
+            move |_: SocketAddr, _: SocketAddr, jobs: &[(u32, Arc<()>)]| {
+                let keys = jobs.iter().map(|(key, _)| *key).collect();
+                snapshots.lock().unwrap().push(keys);
+                to(2)
+            }
+        };
+        let old_served = serve_in(&state, old, attribution(snapshots.clone()), LONG, |_, _| {
+            true
+        })
+        .await;
+        assert_eq!(state.stop(old), [1]);
+        let new = start(&state);
+        let mut new_adopter = session(&state, 2, 4);
+
+        let mut stale = old_served.connect().await;
+        assert_reset(&mut stale).await;
+        assert_eq!(*snapshots.lock().unwrap(), [Vec::<u32>::new()]);
+        assert!(new_adopter.try_recv().is_err());
+
+        let new_served = serve_in(&state, new, attribution(snapshots.clone()), LONG, |_, _| {
+            true
+        })
+        .await;
+        let _client = new_served.connect().await;
+        adopted(&mut new_adopter).await;
+        assert_eq!(*snapshots.lock().unwrap(), [vec![], vec![2]]);
+        old_served.stop().await;
+        new_served.stop().await;
+        assert!(old_adopter.try_recv().is_err());
     }
 
     #[tokio::test]

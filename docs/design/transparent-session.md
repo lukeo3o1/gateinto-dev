@@ -191,8 +191,10 @@ not change.
   - `os_user::original`, `one_session`, `all_rows`, `confirmed` and `retry`
     (`src/proxy/os_user.rs`) and the Windows lookup `Attribution`
     (`src/proxy/os_user/windows.rs`), described under [Transparent listener
-    and attribution](#transparent-listener-and-attribution); `Denial::kind`
-    names a denial without its details;
+    and attribution](#transparent-listener-and-attribution); `Row` carries
+    the connection's TCP state (`TcpState`: `Established`, `CloseWait` or
+    `Other`, from `dwState`), which only the listener-row rule reads;
+    `Denial::kind` names a denial without its details;
   - `transparent::listener` (`src/transparent/listener.rs`,
     `src/transparent/listener/windows.rs`): `choose` over the `Bind` seam,
     `PORT_ATTEMPTS` (64), and on Windows `reserve` and `Reserved::listen`;
@@ -205,8 +207,9 @@ not change.
     `TerminateJobObject`); see [Engine state and session
     registration](#engine-state-and-session-registration);
   - `transparent::serve` (`src/transparent/serve.rs`): `serve`, the
-    listener's accept and dispatch loop over the `Attribute` seam, which
-    `Attribution` implements on Windows, and `MAX_ATTRIBUTIONS` (64).
+    accept and dispatch loop of one generation's listener over the
+    `Attribute` seam, which `Attribution` implements on Windows, and
+    `MAX_ATTRIBUTIONS` (64).
 - `SessionManager::start` (`src/sessions.rs`) binds the `Proxy` with
   `Proxy::bind_sharing` and moves it into a task running `run_until` with a
   close signal; `Session` keeps no handle to the proxy's `Shared`.
@@ -425,10 +428,15 @@ a lock, so that no process starts in a job after the engine stopped.**
     and returns the session's `Mark`; otherwise it refuses with
     `Refusal::NotRunning`, and a key already registered is refused with
     `Refusal::Registered`, so an entry is never replaced. `State::unregister`
-    drops the entry when the session closes. `State::jobs` is the snapshot
-    of keys and jobs for attribution, taken under the lock and released
-    before the lookup, and `State::adopter` looks up a registered session's
-    adopter afterwards.
+    drops the entry when the session closes. `State::jobs(g)` is the
+    snapshot of the keys and jobs registered under generation `g` for
+    attribution, taken under the lock and released before the lookup.
+    `State::adopt(g, key, stream, target)` looks up the session registered
+    under `g` and calls `Adopter::adopt` (`try_send`, which never waits)
+    under the same lock, so a `stop` or `unregister` cannot fall between
+    the lookup and the send: once either has taken the entry, every later
+    adopt hands the stream back. A stream adopted before them is in the
+    session's adoption channel, which the session's close resets.
   - `Mark::launch` returns a `Launch` guard, held while the process is
     spawned (inside the `spawn_blocking` closure that spawns it), or
     `Closing`.
@@ -840,11 +848,16 @@ agent over the pipe and into the agent's log at `debug` *(proposed)*.
   socket, so such a row is the dialer's own socket. A dialer that is still
   connected, or that closed with a FIN, leaves that row (in `TIME_WAIT`
   with pid 0 once it has closed). One that closes abortively (RST) leaves
-  none, but its reset also removes the listener's accepted socket from the
-  tables, so every reading must also contain the listener's own row, local
-  end `L:T`, remote end `R:p` and a pid other than 0; without it the
-  connection is not found (`NotFound`). A dialer that resets between the
-  two readings is caught by the second one. Without these rules a process
+  none, but its reset also ends the listener's accepted socket, so every
+  reading must also contain the listener's own row, local end `L:T`,
+  remote end `R:p`, a pid other than 0 and the state `ESTABLISHED` or
+  `CLOSE_WAIT` (`Row::state`, `TcpState`, read from the tables'
+  `dwState`); without it the connection is not found (`NotFound`). The
+  state matters in case Windows still lists a reset socket, as `CLOSED`
+  with the agent's pid; `CLOSE_WAIT` is kept so that a client that has
+  already sent its FIN is still attributed. The dialer's row, in contrast,
+  counts in any state. A dialer that resets between the two readings is
+  caught by the second one. Without these rules a process
   outside every job could take the local port of a client in a transparent
   job (`SO_REUSEADDR`), or the same port on a second local address, dial
   the listener, and be attributed to the client's session with the
@@ -885,21 +898,32 @@ agent over the pipe and into the agent's log at `debug` *(proposed)*.
   `owner`, so it is tested on every platform; `Attribution`
   (`src/proxy/os_user/windows.rs`) is its Windows lookup.
 - **Dispatch** (`transparent::serve::serve`, over the `Attribute` seam that
-  `Attribution` implements on Windows). For each accepted stream the loop
-  takes the registry snapshot (`State::jobs`), runs the attribution in
-  `spawn_blocking` with the handshake timeout as its deadline, and on a
-  match hands the stream with `Authority::from(destination)` to the adopter
-  that the registry holds for that session at that moment
-  (`Adopter::adopt`). A denial, the timeout, a failed (panicked) attribution
-  task, a session that is no longer registered, and an adopter that hands
-  the stream back (full or closed) each reset the stream (zero linger). At
-  most 64 attributions are in flight (`MAX_ATTRIBUTIONS`); each holds its
-  permit until the blocking lookup returns, also after its timeout, so
-  lookups that outlive their deadline still count, and a stream beyond the
-  bound is reset at once. The shutdown future given to `serve` ends the
-  loop: the listener is dropped and every dispatch in flight is aborted,
-  which resets its stream; a lookup already running finishes on its thread
-  and its result is discarded.
+  `Attribution` implements on Windows). `serve` is given the generation
+  whose listener it runs. A peer that can never be reflected, a loopback
+  peer (127.0.0.0/8 or `::1`, also IPv4-mapped) or one whose address is
+  the accepted socket's own local address, is reset at once, before it
+  takes an attribution permit or reads any table: any local process, of
+  any user, can dial the listener over loopback, where the firewall rule
+  does not apply, and would otherwise hold a permit for two table
+  readings. `original` keeps its own direct-dial checks behind it. For
+  every other stream the loop takes the snapshot of the sessions
+  registered under its generation (`State::jobs(g)`), runs the attribution
+  in `spawn_blocking` with the handshake timeout as its deadline, and on a
+  match hands the stream with `Authority::from(destination)` to that
+  session through `State::adopt(g, ..)`, which looks the session up and
+  sends under the state lock. A session registered under another
+  generation is in neither, so the listener of an older generation that is
+  still shutting down cannot dispatch into a newer generation's sessions.
+  A denial, the timeout, a failed (panicked) attribution task, a session
+  that is no longer registered under the generation, and an adopter that
+  hands the stream back (full or closed) each reset the stream (zero
+  linger). At most 64 attributions are in flight (`MAX_ATTRIBUTIONS`); each
+  holds its permit until the blocking lookup returns, also after its
+  timeout, so lookups that outlive their deadline still count, and a
+  stream beyond the bound is reset at once. The shutdown future given to
+  `serve` ends the loop: the listener is dropped and every dispatch in
+  flight is aborted, which resets its stream; a lookup already running
+  finishes on its thread and its result is discarded.
 
 **Decision: proxy settings are kept.** The session's own loopback listener
 stays as today, with `os_user` restricted to the job (terminal) or
@@ -1116,7 +1140,8 @@ All *(proposed)*; the exact spelling is decided in step 5 of the
 - The helper, the engine and the transparent listener's attribution log
   aggregate data only: counters, booleans, error codes. No addresses, ports,
   pids or paths. `serve` logs each refused stream at `debug` with the
-  denial's kind only (`Denial::kind`, such as `not-in-job`), or that the
+  denial's kind only (`Denial::kind`, such as `not-in-job`, and
+  `self-target` for a peer reset before any attribution), or that the
   session has closed or cannot take the stream, or that too many
   attributions are in flight; a denial's details, which may carry an OS
   error text, are not logged.
@@ -1229,7 +1254,7 @@ Threat-model additions *(to be made with the implementation)*:
 | Threat | Mitigation |
 | --- | --- |
 | A host on the network connects to the listener port. | The engine drops genuine inbound packets to T and the firewall rule is scoped to the port; if both fail, attribution is defence in depth only (a host R using a client's local port p can match). |
-| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no row, but neither does the listener's accepted socket, whose row both readings must contain. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
+| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A loopback peer or a peer with the listener's own address is reset before it takes an attribution permit or reads a table, so direct dials cannot exhaust the attributions in flight. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
 | A local process uses a transparent session by tagging its own job with N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
 | The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
 | The agent dies and its session processes are still sending. | `KILL_ON_JOB_CLOSE` ends them; the helper keeps dropping for 5 s before it exits. |
@@ -1296,9 +1321,11 @@ an owner that could not be inspected or is in two sessions' jobs next to an
 admitted row (in both row orders), the first refusal as the denial, a
 process in a job that dials the listener, a direct dial from a port shared
 with an in-job client, from the same port on a second local address and
-from a closed dialer row with pid 0, a dialer that reset (neither its row
-nor the listener's left, only the in-job row), a listener row with pid 0,
-a loopback peer, a reflected
+from a closed dialer row with pid 0, a dialer row in any state, a dialer
+that reset (neither its row nor the listener's left, only the in-job row),
+a listener row with pid 0, a listener row that counts only in
+`ESTABLISHED` or `CLOSE_WAIT`, the owner of a proxied connection found
+whatever the state of its row, a loopback peer, a reflected
 connection to a remote port equal to T that is still accepted, and ports 0,
 1 and 65535; the session of exactly one job; reading both tables; the
 second reading and the retries under a deadline; the listener's port choice
@@ -1326,9 +1353,25 @@ attribution:
   fake job records the spawn before the terminate) and one after it sees
   `closing`; and the break releases the engine lock before it terminates a
   job (a registration from another thread during the terminate completes
-  and is refused);
+  and is refused); the snapshot and the adoption see only the sessions of
+  the given generation; a full session hands the stream back; and no
+  stream is adopted once `unregister` or a break has taken the session,
+  also from within the break's terminate, while one adopted before it
+  stays in the session's channel. Because the adoption looks the session
+  up and sends under the state lock, those two orders are the only ones,
+  so there is no interleaving left for a test to provoke;
 - the dispatch loop (`src/transparent/serve.rs`), with real loopback
-  sockets: an attributed stream reaches its session's adopter with its
+  sockets: only a remote peer other than the local address is reflectable
+  (loopback, IPv4-mapped loopback and the local address refused); the
+  listener resets a loopback peer without attributing it and logs only
+  `self-target`; 65 such peers in a row take no permit and reach no
+  attribution, and a genuine stream after them is still attributed and
+  adopted (the loop tests other than the real `serve` one take a peer
+  check that lets loopback through, since a loopback test client cannot
+  have a non-loopback address on every platform); a listener of an older
+  generation dispatches into no session of a newer one, whose snapshot it
+  does not see, while the newer generation's listener does; an attributed
+  stream reaches its session's adopter with its
   destination as an IP-literal `Authority`, and the attribution sees the
   peer, the local address and the snapshot; a denial, a timeout and a
   panicking attribution each reset the stream within the timeout and reach
@@ -1354,7 +1397,8 @@ attribution:
   every job refused (`NotInJob`); a client that dials the listener address
   refused; a process outside the job that binds the client's port with
   `SO_REUSEADDR` and dials the reserved listener refused, and not found
-  once it has reset the connection; no row and a passed deadline. Without
+  once it has reset the connection; no row and a passed deadline; the
+  tables' `dwState` values mapped to `TcpState`. Without
   the engine no socket of the listener is connected to the peer, so the
   cases that expect an attribution or a job refusal add the row that
   reflection would give the listener's accepted socket to the real tables.
@@ -1632,6 +1676,11 @@ would need a design change if they fail. Results go to
   matches.
 - Listening only after the rule exists avoids the firewall's "allow this
   app" prompt.
+- A reset accepted socket leaves `ESTABLISHED` (its row disappears, or is
+  listed in another state such as `CLOSED`), so that the listener-row rule
+  refuses a dialer that resets. The Windows unit test
+  `a_process_outside_the_job_that_dials_from_a_client_port_and_resets_is_not_found`
+  is that check; it has not run yet.
 - TCP-table rows are visible at accept time and taking the original
   destination from them is reliable;
   fallback: a per-flow message from the helper.
