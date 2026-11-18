@@ -28,6 +28,7 @@ mod test_support;
 pub mod tls;
 #[cfg(windows)]
 mod token;
+pub mod transparent;
 pub mod uri;
 
 pub const VERSION: &str = match option_env!("GATEINTO_BUILD_VERSION") {
