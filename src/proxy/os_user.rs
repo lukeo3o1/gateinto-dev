@@ -18,6 +18,20 @@ pub(crate) enum Denial {
     TimedOut,
 }
 
+impl Denial {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::OtherUser => "other-user",
+            Self::NotInJob => "not-in-job",
+            Self::Ambiguous => "ambiguous",
+            Self::SelfTarget => "self-target",
+            Self::Lookup(_) => "lookup",
+            Self::TimedOut => "timed-out",
+        }
+    }
+}
+
 impl fmt::Display for Denial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -114,7 +128,6 @@ pub(crate) fn lookup(
     Ok(None)
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Original<K> {
     pub(crate) pid: u32,
@@ -137,6 +150,12 @@ pub(crate) fn original<K>(
             .any(|row| same(row.local, peer) && same(row.remote, local))
     {
         return Err(Denial::SelfTarget);
+    }
+    if !rows
+        .iter()
+        .any(|row| row.pid != 0 && same(row.local, local) && same(row.remote, peer))
+    {
+        return Err(Denial::NotFound);
     }
     let client = SocketAddr::new(local.ip(), peer.port());
     let mut seen = Vec::new();
@@ -275,6 +294,8 @@ mod windows;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pidfd_probe;
+#[cfg(windows)]
+pub(crate) use windows::Attribution;
 
 #[cfg(windows)]
 pub(crate) fn system(job: Option<Arc<Job>>) -> io::Result<Arc<dyn Owners>> {
@@ -540,10 +561,14 @@ pub(crate) mod tests {
         }
     }
 
+    fn accepted() -> Row {
+        row(LISTENER, PEER, 1)
+    }
+
     #[test]
     fn the_original_destination_is_the_remote_port_of_the_one_admitted_client_row() {
         let rows = [
-            row(LISTENER, PEER, 1),
+            accepted(),
             row("192.168.1.10:50001", DESTINATION, 2),
             row(CLIENT, DESTINATION, 7),
             row("192.168.1.10:443", PEER, 3),
@@ -564,10 +589,7 @@ pub(crate) mod tests {
             Err(Denial::NotFound)
         );
         let mut owners = admitting(&[]);
-        let rows = [
-            row(LISTENER, PEER, 1),
-            row("192.168.1.10:50001", DESTINATION, 2),
-        ];
+        let rows = [accepted(), row("192.168.1.10:50001", DESTINATION, 2)];
         assert_eq!(
             original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
             Err(Denial::NotFound)
@@ -578,6 +600,7 @@ pub(crate) mod tests {
     #[test]
     fn two_admitted_client_rows_are_ambiguous() {
         let rows = [
+            accepted(),
             row(CLIENT, DESTINATION, 7),
             row(CLIENT, "203.0.113.7:80", 8),
         ];
@@ -587,6 +610,7 @@ pub(crate) mod tests {
             Err(Denial::Ambiguous)
         );
         let rows = [
+            accepted(),
             row(CLIENT, DESTINATION, 7),
             row(CLIENT, "203.0.113.7:80", 7),
         ];
@@ -602,12 +626,13 @@ pub(crate) mod tests {
         let idle = row(CLIENT, "203.0.113.7:80", 0);
         let mut owners = admitting(&[(0, Ok("idle")), (7, Ok("session"))]);
         assert_eq!(
-            original([idle], addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
+            original([accepted(), idle], addr(PEER), addr(LISTENER), |pid| owners
+                .admit(pid)),
             Err(Denial::NotFound)
         );
         assert!(owners.asked.is_empty());
         let mut owners = admitting(&[(0, Ok("idle")), (7, Ok("session"))]);
-        let rows = [idle, row(CLIENT, DESTINATION, 7)];
+        let rows = [accepted(), idle, row(CLIENT, DESTINATION, 7)];
         assert_eq!(
             original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
             Ok(found(7, "session", DESTINATION))
@@ -619,8 +644,8 @@ pub(crate) mod tests {
         for refusal in [Denial::NotInJob, Denial::OtherUser] {
             let stale = row(CLIENT, "203.0.113.7:8443", 9);
             for rows in [
-                [stale, row(CLIENT, DESTINATION, 7)],
-                [row(CLIENT, DESTINATION, 7), stale],
+                [accepted(), stale, row(CLIENT, DESTINATION, 7)],
+                [row(CLIENT, DESTINATION, 7), stale, accepted()],
             ] {
                 let mut owners = admitting(&[(7, Ok("session")), (9, Err(refusal.clone()))]);
                 assert_eq!(
@@ -642,8 +667,8 @@ pub(crate) mod tests {
         ] {
             let unknown = row(CLIENT, "203.0.113.7:8443", 9);
             for rows in [
-                [unknown, row(CLIENT, DESTINATION, 7)],
-                [row(CLIENT, DESTINATION, 7), unknown],
+                [accepted(), unknown, row(CLIENT, DESTINATION, 7)],
+                [row(CLIENT, DESTINATION, 7), unknown, accepted()],
             ] {
                 let mut owners = admitting(&[(7, Ok("session")), (9, Err(failure.clone()))]);
                 assert_eq!(
@@ -661,7 +686,7 @@ pub(crate) mod tests {
             let mut owners = admitting(&[(7, Err(refusal.clone()))]);
             assert_eq!(
                 original(
-                    [row(CLIENT, DESTINATION, 7)],
+                    [accepted(), row(CLIENT, DESTINATION, 7)],
                     addr(PEER),
                     addr(LISTENER),
                     |pid| owners.admit(pid)
@@ -670,6 +695,7 @@ pub(crate) mod tests {
             );
         }
         let rows = [
+            accepted(),
             row(CLIENT, DESTINATION, 7),
             row(CLIENT, "203.0.113.7:80", 8),
         ];
@@ -683,16 +709,16 @@ pub(crate) mod tests {
     #[test]
     fn the_client_row_must_have_the_accepted_local_address_and_the_peer_address() {
         let mut owners = admitting(&[(7, Ok("session"))]);
-        let rows = [row(CLIENT, DESTINATION, 7)];
-        let elsewhere = addr("192.168.1.11:50123");
+        let elsewhere = "192.168.1.11:50123";
+        let rows = [row(elsewhere, PEER, 1), row(CLIENT, DESTINATION, 7)];
         assert_eq!(
-            original(rows, addr(PEER), elsewhere, |pid| owners.admit(pid)),
+            original(rows, addr(PEER), addr(elsewhere), |pid| owners.admit(pid)),
             Err(Denial::NotFound)
         );
         for rows in [
-            [row("192.168.1.11:50000", DESTINATION, 7)],
-            [row("192.168.1.10:50001", DESTINATION, 7)],
-            [row(CLIENT, "203.0.113.8:443", 7)],
+            [accepted(), row("192.168.1.11:50000", DESTINATION, 7)],
+            [accepted(), row("192.168.1.10:50001", DESTINATION, 7)],
+            [accepted(), row(CLIENT, "203.0.113.8:443", 7)],
         ] {
             let mut owners = admitting(&[(7, Ok("session"))]);
             assert_eq!(
@@ -711,8 +737,10 @@ pub(crate) mod tests {
             ("[::ffff:203.0.113.7]:50000", "[::ffff:192.168.1.10]:50123"),
         ] {
             let mut owners = admitting(&[(7, Ok("session"))]);
-            let matched =
-                original([mapped], addr(peer), addr(local), |pid| owners.admit(pid)).unwrap();
+            let matched = original([accepted(), mapped], addr(peer), addr(local), |pid| {
+                owners.admit(pid)
+            })
+            .unwrap();
             assert_eq!(matched.destination, addr(DESTINATION));
             assert!(matched.destination.is_ipv4());
         }
@@ -738,7 +766,7 @@ pub(crate) mod tests {
             let mut owners = admitting(&[(7, Ok("session"))]);
             assert_eq!(
                 original(
-                    [row(client, remote, 7)],
+                    [row(client, remote, 7), row(listener, peer, 1)],
                     addr(peer),
                     addr(listener),
                     |pid| owners.admit(pid)
@@ -748,7 +776,7 @@ pub(crate) mod tests {
             );
         }
         let mut owners = admitting(&[(7, Ok("session"))]);
-        let rows = [row(CLIENT, "203.0.113.7:50123", 7)];
+        let rows = [accepted(), row(CLIENT, "203.0.113.7:50123", 7)];
         assert_eq!(
             original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
             Ok(found(7, "session", "203.0.113.7:50123"))
@@ -787,13 +815,47 @@ pub(crate) mod tests {
             ),
         ] {
             let mut owners = admitting(&[(7, Ok("session"))]);
+            let listening = row(LISTENER, peer, 1);
             assert_eq!(
-                original(rows, addr(peer), addr(LISTENER), |pid| owners.admit(pid)),
+                original(
+                    rows.into_iter().chain([listening]),
+                    addr(peer),
+                    addr(LISTENER),
+                    |pid| owners.admit(pid)
+                ),
                 Err(Denial::SelfTarget),
                 "{rows:?}"
             );
             assert!(owners.asked.is_empty());
         }
+    }
+
+    #[test]
+    fn a_dialer_that_reset_its_connection_leaves_no_listener_row_and_is_refused() {
+        for (peer, in_job) in [
+            (CLIENT, row(CLIENT, "192.168.1.10:61000", 7)),
+            ("192.168.1.11:50000", row(CLIENT, "192.168.1.11:61000", 7)),
+        ] {
+            let mut owners = admitting(&[(7, Ok("session"))]);
+            assert_eq!(
+                original([in_job], addr(peer), addr(LISTENER), |pid| owners
+                    .admit(pid)),
+                Err(Denial::NotFound),
+                "{peer}"
+            );
+            assert!(owners.asked.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_listener_row_without_an_owning_process_is_not_the_accepted_socket() {
+        let rows = [row(LISTENER, PEER, 0), row(CLIENT, DESTINATION, 7)];
+        let mut owners = admitting(&[(7, Ok("session"))]);
+        assert_eq!(
+            original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
+            Err(Denial::NotFound)
+        );
+        assert!(owners.asked.is_empty());
     }
 
     #[test]
@@ -828,6 +890,7 @@ pub(crate) mod tests {
     #[test]
     fn the_same_socket_listed_in_both_tables_is_one_candidate() {
         let rows = [
+            accepted(),
             row(CLIENT, DESTINATION, 7),
             row("[::ffff:192.168.1.10]:50000", "[::ffff:203.0.113.7]:443", 7),
         ];
@@ -842,6 +905,7 @@ pub(crate) mod tests {
     #[test]
     fn ports_match_exactly_up_to_the_boundaries() {
         let rows = [
+            row(LISTENER, "203.0.113.7:65535", 1),
             row("192.168.1.10:0", "203.0.113.7:1", 5),
             row("192.168.1.10:65535", "203.0.113.7:65535", 7),
         ];
@@ -854,13 +918,19 @@ pub(crate) mod tests {
         assert_eq!(owners.asked, [7]);
         let lowest = addr("203.0.113.7:1");
         let mut owners = admitting(&[(7, Ok("session"))]);
-        let rows = [row("192.168.1.10:1", "203.0.113.7:1", 7)];
+        let rows = [
+            row(LISTENER, "203.0.113.7:1", 1),
+            row("192.168.1.10:1", "203.0.113.7:1", 7),
+        ];
         assert_eq!(
             original(rows, lowest, addr(LISTENER), |pid| owners.admit(pid)),
             Ok(found(7, "session", "203.0.113.7:1"))
         );
         let mut owners = admitting(&[(7, Ok("session"))]);
-        let rows = [row("192.168.1.10:1", "203.0.113.7:0", 7)];
+        let rows = [
+            row(LISTENER, "203.0.113.7:1", 1),
+            row("192.168.1.10:1", "203.0.113.7:0", 7),
+        ];
         assert_eq!(
             original(rows, lowest, addr(LISTENER), |pid| owners.admit(pid)),
             Err(Denial::NotFound)
@@ -900,7 +970,7 @@ pub(crate) mod tests {
         let tables = |family: Family| {
             asked.lock().unwrap().push(family);
             Ok(match family {
-                Family::V4 => vec![row("192.168.1.10:50001", DESTINATION, 2)],
+                Family::V4 => vec![accepted(), row("192.168.1.10:50001", DESTINATION, 2)],
                 Family::V6 => vec![row(
                     "[::ffff:192.168.1.10]:50000",
                     "[::ffff:203.0.113.7]:443",
@@ -912,6 +982,7 @@ pub(crate) mod tests {
         assert_eq!(
             rows,
             [
+                accepted(),
                 row("192.168.1.10:50001", DESTINATION, 2),
                 row("[::ffff:192.168.1.10]:50000", "[::ffff:203.0.113.7]:443", 7),
             ]
@@ -1036,6 +1107,34 @@ pub(crate) mod tests {
         ] {
             assert!(denial.to_string().contains(reason), "{denial}");
         }
+    }
+
+    #[test]
+    fn each_denial_has_a_fixed_kind_without_its_details() {
+        let kinds: Vec<_> = [
+            Denial::NotFound,
+            Denial::OtherUser,
+            Denial::NotInJob,
+            Denial::Ambiguous,
+            Denial::SelfTarget,
+            Denial::Lookup("access denied for 192.0.2.1:443".to_owned()),
+            Denial::TimedOut,
+        ]
+        .iter()
+        .map(Denial::kind)
+        .collect();
+        assert_eq!(
+            kinds,
+            [
+                "not-found",
+                "other-user",
+                "not-in-job",
+                "ambiguous",
+                "self-target",
+                "lookup",
+                "timed-out"
+            ]
+        );
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]

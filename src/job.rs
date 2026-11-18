@@ -551,7 +551,7 @@ mod windows {
             Ok(control)
         }
 
-        fn terminate(&self) -> io::Result<()> {
+        pub(crate) fn terminate(&self) -> io::Result<()> {
             // SAFETY: the job handle stays open while self lives.
             if unsafe { TerminateJobObject(self.handle(), TERMINATED) } == 0 {
                 return Err(io::Error::last_os_error());

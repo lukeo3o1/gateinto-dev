@@ -6,14 +6,20 @@ plan](#implementation-plan) are implemented (`Job::set_dscp_tag` in
 step 3, the `divert` helper: its platform-independent part (the pipe
 protocol, the engine loop, the helper sequence and the firewall command
 lines) and its Windows bindings (`src/divert/windows.rs`, the hidden
-`gateinto divert` subcommand). Nothing starts the helper yet.
-`Job::set_dscp_tag`, the helper's Windows bindings and their tests have only
-been type-checked from Linux until Windows CI runs them, and the helper has
-never opened a WinDivert handle. The design rests on premises that have not been
-verified: the evidence is two experiments on GitHub-hosted Windows Server
-images ([Evidence](#evidence)), and nothing has been tried on a client
-edition of Windows, unelevated, over IPv6, or next to a VPN or antivirus
-product. Those premises are listed under [Needs
+`gateinto divert` subcommand). Step 4 is implemented as parts of their own:
+adoption into a session's proxy (`Proxy::adopter`), the attribution
+(`os_user::original`, `Attribution`), the listener socket
+(`transparent::listener`), the engine state with the registry and the
+session marks (`transparent::state`) and the listener's dispatch loop
+(`transparent::serve`). Nothing starts the helper or uses these parts yet;
+the agent wiring is step 5. `Job::set_dscp_tag`, the helper's Windows
+bindings, the Windows attribution and listener socket, and their tests have
+only been type-checked from Linux until Windows CI runs them, and the helper
+has never opened a WinDivert handle. The design rests on premises that have
+not been verified: the evidence is two experiments on GitHub-hosted Windows
+Server images ([Evidence](#evidence)), and nothing has been tried on a
+client edition of Windows, unelevated, over IPv6, or next to a VPN or
+antivirus product. Those premises are listed under [Needs
 verification](#needs-verification). Names marked *(proposed)* do not exist in
 the code yet; every other name refers to the code at the time of writing.
 
@@ -170,14 +176,37 @@ not change.
   `Shared::open_upstream` under `handshake_timeout` (default 10 s), writes
   `HTTP/1.1 200 Connection Established`, and relays. On
   `UpstreamError::Challenge` it stores the verification offer
-  (`Verifications::offer`). There is no entry point for a connection
-  accepted elsewhere, and none without a `CONNECT` head.
+  (`Verifications::offer`). `Proxy::adopter` returns an `Adopter` through
+  which a stream accepted elsewhere is adopted without a `CONNECT` head
+  ([Adoption](#adoption-into-the-sessions-proxy)); `proxy::reset` closes a
+  stream with zero linger.
 - `Shared::open_upstream` calls `routing::attempt` (`src/proxy/routing.rs`):
   on `Route::Gateway` it returns at once; on `Route::Mixed` it resolves the
   target and the gateway, connects directly unless an address matches a
   gateway address, and otherwise falls back to `pool.open`. `Authority`
-  (`src/http.rs`) has `Host::Ipv4` and `Host::Ipv6` variants;
+  (`src/http.rs`) has `Host::Ipv4` and `Host::Ipv6` variants and converts
+  from a `SocketAddr` (`From<SocketAddr>`, an IP literal);
   `connect_request` writes `CONNECT {target}` with the literal.
+- The step 4 parts, which nothing uses yet:
+  - `os_user::original`, `one_session`, `all_rows`, `confirmed` and `retry`
+    (`src/proxy/os_user.rs`) and the Windows lookup `Attribution`
+    (`src/proxy/os_user/windows.rs`), described under [Transparent listener
+    and attribution](#transparent-listener-and-attribution); `Denial::kind`
+    names a denial without its details;
+  - `transparent::listener` (`src/transparent/listener.rs`,
+    `src/transparent/listener/windows.rs`): `choose` over the `Bind` seam,
+    `PORT_ATTEMPTS` (64), and on Windows `reserve` and `Reserved::listen`;
+  - `transparent::state` (`src/transparent/state.rs`): `State<K, J>`, the
+    engine state with the generation counter and the registry of
+    transparent sessions under one `std::sync::Mutex`, `Phase`, `Begin`,
+    `Starter`, `Joiner`, `Refusal`, the session mark `Mark` with its
+    `Launch` guard and `Closing`, and the `Terminate` seam over a job,
+    implemented by `Job` on Windows (`Job::terminate`,
+    `TerminateJobObject`); see [Engine state and session
+    registration](#engine-state-and-session-registration);
+  - `transparent::serve` (`src/transparent/serve.rs`): `serve`, the
+    listener's accept and dispatch loop over the `Attribute` seam, which
+    `Attribution` implements on Windows, and `MAX_ATTRIBUTIONS` (64).
 - `SessionManager::start` (`src/sessions.rs`) binds the `Proxy` with
   `Proxy::bind_sharing` and moves it into a task running `run_until` with a
   close signal; `Session` keeps no handle to the proxy's `Shared`.
@@ -322,8 +351,11 @@ opt-in per agent-hosted browser or terminal session.**
 **Decision: one engine state and a per-session open/closing mark, each under
 a lock, so that no process starts in a job after the engine stopped.**
 
-- The agent keeps one engine state *(proposed)* under a lock: `stopped`,
-  `starting(g)` or `running(g)`. The generation `g` is a counter incremented
+- The agent keeps one engine state under a lock (`transparent::state::State`;
+  step 5 gives the agent one): `stopped`, `starting(g)` or `running(g)`
+  (`Phase`). The same `std::sync::Mutex` guards the generation counter and
+  the registry of transparent sessions, so that registering only under
+  `running(g)` is one atomic step. The generation `g` is a counter incremented
   under the engine lock each time a start sets `starting`; it identifies
   one start and the one helper that start launches. Every transition below
   is checked and made under the engine lock.
@@ -359,12 +391,47 @@ a lock, so that no process starts in a job after the engine stopped.**
   A's process handle; start A then finds `starting(g+1)`, not its own
   `starting(g)`, changes nothing and fails. Neither A's hand-over nor A's
   failure path can make B's start `running` or clear it.
-- Each transparent session has an `open` or `closing` mark *(proposed)*
+- Each transparent session has an `open` or `closing` mark (`Mark`)
   under its own lock. Every launch into the session's job holds that lock
   while it spawns and refuses when the mark is `closing`. The pipe-break
   handler takes the same lock, sets `closing`, and then terminates the job.
   So a spawn either finishes before the terminate, and the terminate kills
   its process, or sees `closing` and refuses.
+- **In the code** (`src/transparent/state.rs`):
+  - `State::begin` returns `Begin::Start(Starter)` from `stopped` (after
+    incrementing the generation and setting `starting(g)`),
+    `Begin::Join(Joiner)` from `starting(g)` and `Begin::Running(g)` from
+    `running(g)`. `Starter::finish(result)` is the hand-over or the failure
+    path of start `g`: it moves `starting(g)` to `running(g)` on `Ok`, or to
+    `stopped` on `Err`, only from its own `starting(g)`; otherwise it
+    changes nothing and returns an error (a successful start then fails
+    with "the transparent engine stopped while it was starting"). Every
+    joiner of `g` receives exactly that result through `Joiner::outcome`,
+    a `tokio::sync::watch` channel of its own generation. A `Starter`
+    dropped without `finish`, for example because its request was
+    cancelled, finishes as a failure ("abandoned"), so neither the state
+    nor its joiners wait forever.
+  - `State::stop(g)` is the pipe-break handler. Under the state lock it
+    checks `starting(g)` or `running(g)`, sets `stopped` and removes the
+    registry entries recorded with `g`; after releasing it, it takes each
+    entry's mark, sets `closing`, terminates the job through the
+    `Terminate` seam (a failure is logged as a warning and the other jobs
+    are still terminated) and releases the mark. It returns the keys of
+    those sessions, which the caller then closes through the existing
+    close paths; in any other state it returns none. It blocks on each
+    mark while a launch holds it, so the agent calls it off the async
+    runtime (`spawn_blocking`).
+  - `State::register(key, job, adopter)` succeeds only under `running(g)`
+    and returns the session's `Mark`; otherwise it refuses with
+    `Refusal::NotRunning`, and a key already registered is refused with
+    `Refusal::Registered`, so an entry is never replaced. `State::unregister`
+    drops the entry when the session closes. `State::jobs` is the snapshot
+    of keys and jobs for attribution, taken under the lock and released
+    before the lookup, and `State::adopter` looks up a registered session's
+    adopter afterwards.
+  - `Mark::launch` returns a `Launch` guard, held while the process is
+    spawned (inside the `spawn_blocking` closure that spawns it), or
+    `Closing`.
 - **Lock order.** In the code today, a terminal launch takes `launching`
   (`Inner::launching`, `src/agent.rs:484`), then `Inner::terminals`
   (`src/agent.rs:500`), which it holds through job creation,
@@ -632,12 +699,13 @@ returned process handle.
   generically with its exit code. Whether the unelevated agent can wait on
   and query that handle for an elevated child needs verification.
 - When the agent sees the pipe break, a protocol error, or the helper process
-  end, it runs that helper's pipe-break handler with the helper's
-  generation: if the state is still that generation's, engine state
-  `stopped`, every transparent session of that generation marked `closing`
-  and its job terminated, the sessions closed, that helper's listener
-  closed (see [Engine state](#engine-state-and-session-registration)); in
-  any other state it changes nothing. `status` then reports the engine as
+  end, it runs that helper's pipe-break handler (`State::stop`) with the
+  helper's generation: if the state is still that generation's, engine
+  state `stopped`, every transparent session of that generation marked
+  `closing` and its job terminated, the sessions closed, that helper's
+  listener closed (the shutdown of its `serve` loop; see [Engine
+  state](#engine-state-and-session-registration)); in any other state it
+  changes nothing. `status` then reports the engine as
   stopped; a new transparent session starts a new helper (a new generation)
   and asks UAC again.
 
@@ -750,8 +818,11 @@ agent over the pipe and into the agent's log at `debug` *(proposed)*.
 **Decision: one agent-level listener on `0.0.0.0:T`, separate from
 `proxy::Proxy`.**
 
-- `TransparentListener` *(proposed)* is its own type. `Proxy::bind` keeps
-  its loopback-only invariant (`Error::NonLoopbackListen`) unchanged.
+- The transparent listener is its own code, not a `Proxy`:
+  `transparent::listener` reserves and later opens its socket, and
+  `transparent::serve::serve` runs its accept and dispatch loop.
+  `Proxy::bind` keeps its loopback-only invariant
+  (`Error::NonLoopbackListen`) unchanged.
 - A non-loopback bind is unavoidable: the reflected packets are addressed to
   the NIC address L that the application used, and WinDivert cannot turn a
   non-loopback packet into a loopback one. The port is chosen as in [Order
@@ -765,15 +836,20 @@ agent over the pipe and into the agent's log at `debug` *(proposed)*.
   (127.0.0.0/8 or `::1`, also IPv4-mapped) is refused at once: the filter
   excludes loopback, so a reflected peer never is one. So is a connection
   for which any row, whatever its pid or state, has local end `R:p` and
-  remote end `L:T`: a direct dial always leaves the dialer's own socket in
-  the tables (in `TIME_WAIT` with pid 0 once it has closed), while a
-  reflected peer R is a remote host, never a local socket. Without this
-  rule a process outside every job could take the local port of a client
-  in a transparent job (`SO_REUSEADDR`), or the same port on a second
-  local address, dial the listener, and be attributed to the client's
-  session with the client's destination. A process inside a job that dials
-  the listener, through L, another local address or loopback, is refused
-  the same way.
+  remote end `L:T`: a reflected peer R is a remote host, never a local
+  socket, so such a row is the dialer's own socket. A dialer that is still
+  connected, or that closed with a FIN, leaves that row (in `TIME_WAIT`
+  with pid 0 once it has closed). One that closes abortively (RST) leaves
+  none, but its reset also removes the listener's accepted socket from the
+  tables, so every reading must also contain the listener's own row, local
+  end `L:T`, remote end `R:p` and a pid other than 0; without it the
+  connection is not found (`NotFound`). A dialer that resets between the
+  two readings is caught by the second one. Without these rules a process
+  outside every job could take the local port of a client in a transparent
+  job (`SO_REUSEADDR`), or the same port on a second local address, dial
+  the listener, and be attributed to the client's session with the
+  client's destination. A process inside a job that dials the listener,
+  through L, another local address or loopback, is refused the same way.
 - Candidate rows are those whose local end is `L:p` and whose remote
   address is R. Rows with pid 0 (such as a `TIME_WAIT` row left by an
   earlier use of the port) or remote port 0 are not candidates, and the
@@ -808,6 +884,22 @@ agent over the pipe and into the agent's log at `debug` *(proposed)*.
 - The matcher is `os_user::original`, a pure function over `Row` next to
   `owner`, so it is tested on every platform; `Attribution`
   (`src/proxy/os_user/windows.rs`) is its Windows lookup.
+- **Dispatch** (`transparent::serve::serve`, over the `Attribute` seam that
+  `Attribution` implements on Windows). For each accepted stream the loop
+  takes the registry snapshot (`State::jobs`), runs the attribution in
+  `spawn_blocking` with the handshake timeout as its deadline, and on a
+  match hands the stream with `Authority::from(destination)` to the adopter
+  that the registry holds for that session at that moment
+  (`Adopter::adopt`). A denial, the timeout, a failed (panicked) attribution
+  task, a session that is no longer registered, and an adopter that hands
+  the stream back (full or closed) each reset the stream (zero linger). At
+  most 64 attributions are in flight (`MAX_ATTRIBUTIONS`); each holds its
+  permit until the blocking lookup returns, also after its timeout, so
+  lookups that outlive their deadline still count, and a stream beyond the
+  bound is reset at once. The shutdown future given to `serve` ends the
+  loop: the listener is dropped and every dispatch in flight is aborted,
+  which resets its stream; a lookup already running finishes on its thread
+  and its result is discarded.
 
 **Decision: proxy settings are kept.** The session's own loopback listener
 stays as today, with `os_user` restricted to the job (terminal) or
@@ -858,9 +950,10 @@ its tunnel limit, route, upstream pool, counters and lifetime.**
   (receiving until the channel reports its end, so a send that had already
   reserved capacity is not lost), and `connections.shutdown()` aborts every
   task, adopted tunnels included, before the session's task ends. `Session`
-  gains the adopter and its job *(proposed)*; the agent's registry of
-  transparent sessions maps each job to its adopter and drops the entry
-  when the session closes. A send after the close fails, and that stream is
+  gains the adopter and its job *(proposed, step 5)*; the agent's registry
+  of transparent sessions (`State::register`) maps each session to its job
+  and adopter, and the agent drops the entry (`State::unregister`) when the
+  session closes. A send after the close fails, and that stream is
   handed back and reset.
 - `OpenTunnels` counts adopted tunnels like the others, so `session list`
   shows them.
@@ -1022,7 +1115,11 @@ All *(proposed)*; the exact spelling is decided in step 5 of the
   local port, so the adoption path uses a span without it.
 - The helper, the engine and the transparent listener's attribution log
   aggregate data only: counters, booleans, error codes. No addresses, ports,
-  pids or paths.
+  pids or paths. `serve` logs each refused stream at `debug` with the
+  denial's kind only (`Denial::kind`, such as `not-in-job`), or that the
+  session has closed or cannot take the stream, or that too many
+  attributions are in flight; a denial's details, which may carry an OS
+  error text, are not logged.
 
 ## Limits of the first version
 
@@ -1132,7 +1229,7 @@ Threat-model additions *(to be made with the implementation)*:
 | Threat | Mitigation |
 | --- | --- |
 | A host on the network connects to the listener port. | The engine drops genuine inbound packets to T and the firewall rule is scoped to the port; if both fail, attribution is defence in depth only (a host R using a client's local port p can match). |
-| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket, so a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
+| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no row, but neither does the listener's accepted socket, whose row both readings must contain. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
 | A local process uses a transparent session by tagging its own job with N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
 | The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
 | The agent dies and its session processes are still sending. | `KILL_ON_JOB_CLOSE` ends them; the helper keeps dropping for 5 s before it exits. |
@@ -1199,13 +1296,49 @@ an owner that could not be inspected or is in two sessions' jobs next to an
 admitted row (in both row orders), the first refusal as the denial, a
 process in a job that dials the listener, a direct dial from a port shared
 with an in-job client, from the same port on a second local address and
-from a closed dialer row with pid 0, a loopback peer, a reflected
+from a closed dialer row with pid 0, a dialer that reset (neither its row
+nor the listener's left, only the in-job row), a listener row with pid 0,
+a loopback peer, a reflected
 connection to a remote port equal to T that is still accepted, and ports 0,
 1 and 65535; the session of exactly one job; reading both tables; the
 second reading and the retries under a deadline; the listener's port choice
 with a fake binder (an ephemeral port in range kept, one outside closed
 before the explicit draws, ports in use or excluded skipped, the attempt
 limit, other errors).
+
+Also implemented with step 4, on every platform with fake jobs and a fake
+attribution:
+
+- the engine state (`src/transparent/state.rs`): concurrent requests share
+  one start and its success or failure, and the next start is a new
+  generation; a joiner gets the outcome of the generation it joined, never
+  a later one; a helper that stops after `ready` but before the hand-over
+  leaves the engine `stopped`, fails the hand-over and refuses
+  registration; a stale start's hand-over, failure path or abandonment
+  neither completes nor clears a newer start; an abandoned start stops the
+  engine and fails its joiners; registration succeeds only under
+  `running(g)` and once per key; a break terminates every session of its
+  generation and marks it `closing`, and a late or repeated break changes
+  nothing, so a newer generation keeps running, keeps its sessions and
+  still accepts registrations; a failed terminate is logged and the other
+  jobs are still terminated; unregistered sessions leave the snapshot; a
+  launch that holds the mark before the break is terminated by it (the
+  fake job records the spawn before the terminate) and one after it sees
+  `closing`; and the break releases the engine lock before it terminates a
+  job (a registration from another thread during the terminate completes
+  and is refused);
+- the dispatch loop (`src/transparent/serve.rs`), with real loopback
+  sockets: an attributed stream reaches its session's adopter with its
+  destination as an IP-literal `Authority`, and the attribution sees the
+  peer, the local address and the snapshot; a denial, a timeout and a
+  panicking attribution each reset the stream within the timeout and reach
+  no session; a session that unregistered during the attribution resets
+  the stream; a full and a closed adopter hand the stream back and it is
+  reset; beyond 64 attributions in flight a stream is reset at once without
+  an attribution; shutdown ends the loop, closes the listener, resets the
+  stream of an attribution in flight and discards its result; refusals are
+  logged at `debug` by kind, with no address, port, pid or denial detail
+  in any line.
 
 **(b) Windows unit tests:**
 
@@ -1220,8 +1353,14 @@ limit, other errors).
   destination; a client in no given session's job and an owner outside
   every job refused (`NotInJob`); a client that dials the listener address
   refused; a process outside the job that binds the client's port with
-  `SO_REUSEADDR` and dials the reserved listener refused; no row and a
-  passed deadline.
+  `SO_REUSEADDR` and dials the reserved listener refused, and not found
+  once it has reset the connection; no row and a passed deadline. Without
+  the engine no socket of the listener is connected to the peer, so the
+  cases that expect an attribution or a job refusal add the row that
+  reflection would give the listener's accepted socket to the real tables.
+  These tests listen on the host's non-loopback address, so on a desktop
+  they may make Windows Defender Firewall ask whether to allow the test
+  executable; CI is unaffected.
 - The listener socket (`src/transparent/listener/windows.rs`, implemented,
   type-checked from Linux only): a reserved port in range with
   `SO_EXCLUSIVEADDRUSE` read back, other binds of the port refused (also
@@ -1452,14 +1591,15 @@ code to pass it, then a refactor.
    The new imports (`CreateEventW`, `CreateMutexW`,
    `GetNamedPipeServerProcessId`, `WaitForMultipleObjects`) are in the
    Windows 7 import allow-list.
-4. **Session adoption and the transparent listener.** `Proxy::adopter`,
-   `Shared::adopt` (adoption implemented, with `Adopter` and
-   `proxy::reset`), `os_user::original` and its Windows lookup
-   `Attribution` (implemented; the Windows part type-checked from Linux
-   only), `TransparentListener` with `SO_EXCLUSIVEADDRUSE` and the port
-   range (the socket and the port choice implemented in
-   `transparent::listener`, the Windows part type-checked from Linux only),
-   the registry of transparent jobs, the engine state and session marks.
+4. **Session adoption and the transparent listener** (implemented as parts
+   that nothing uses yet; the Windows parts type-checked from Linux only).
+   `Proxy::adopter`, `Shared::adopt`, `Adopter` and `proxy::reset`;
+   `os_user::original`, which also requires the listener's own row, and
+   its Windows lookup `Attribution`; the listener socket with
+   `SO_EXCLUSIVEADDRUSE` and the port range (`transparent::listener`); the
+   engine state with its generations, the registry of transparent sessions
+   and the session marks (`transparent::state`); and the listener's
+   dispatch loop with its in-flight bound (`transparent::serve`).
 5. **Agent wiring.** On-demand helper with `ShellExecuteExW`, the order of
    operations, fail-closed handling, `[transparent]`, the CLI flag, the IPC
    mode, the GUI option, `SessionInfo::transparent` and the `status` lines;

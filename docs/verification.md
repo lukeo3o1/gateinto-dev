@@ -171,6 +171,12 @@ Automated:
   returning outside one. A Windows unit test in `src/job.rs`: the
   suspended-and-assign fallback runs the process inside the job. They run in the
   `windows-latest` CI job and passed there on f4661ea.
+- Windows unit tests of the transparent attribution in
+  `src/proxy/os_user/windows.rs` (see the [design's test
+  plan](design/transparent-session.md#test-plan)), type-checked from Linux
+  only. They listen on the host's non-loopback address, so on a desktop they
+  may make Windows Defender Firewall ask whether to allow the test
+  executable; CI is unaffected.
 
 Manual, in Windows Sandbox with a local account (versions not recorded),
 using a probe that runs the same lookup. Windows Sandbox gives a limited

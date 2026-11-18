@@ -47,6 +47,17 @@ impl Attribution {
         jobs: &[(K, Arc<Job>)],
         deadline: Instant,
     ) -> Result<Original<K>, Denial> {
+        self.attribute(peer, local, jobs, deadline, rows)
+    }
+
+    fn attribute<K: Clone>(
+        &self,
+        peer: SocketAddr,
+        local: SocketAddr,
+        jobs: &[(K, Arc<Job>)],
+        deadline: Instant,
+        tables: impl Fn(Family) -> io::Result<Vec<Row>>,
+    ) -> Result<Original<K>, Denial> {
         retry(deadline, || {
             let mut owners = Admissions {
                 own: &self.own,
@@ -54,7 +65,7 @@ impl Attribution {
                 verdicts: HashMap::new(),
                 held: Vec::new(),
             };
-            confirmed(|| owners.read(peer, local))
+            confirmed(|| owners.read(peer, local, &tables))
         })
     }
 }
@@ -67,8 +78,13 @@ struct Admissions<'a, K> {
 }
 
 impl<K: Clone> Admissions<'_, K> {
-    fn read(&mut self, peer: SocketAddr, local: SocketAddr) -> Result<Original<K>, Denial> {
-        original(all_rows(peer, rows)?, peer, local, |pid| self.admit(pid))
+    fn read(
+        &mut self,
+        peer: SocketAddr,
+        local: SocketAddr,
+        tables: impl Fn(Family) -> io::Result<Vec<Row>>,
+    ) -> Result<Original<K>, Denial> {
+        original(all_rows(peer, tables)?, peer, local, |pid| self.admit(pid))
     }
 
     fn admit(&mut self, pid: u32) -> Result<K, Denial> {
@@ -259,6 +275,25 @@ mod tests {
         Instant::now() + Duration::from_secs(10)
     }
 
+    // Without the engine no socket of the listener is connected to the peer, so the tests add
+    // the row that reflection would give its accepted socket.
+    fn reflected_to(
+        peer: SocketAddr,
+        local: SocketAddr,
+    ) -> impl Fn(Family) -> io::Result<Vec<Row>> {
+        move |family| {
+            let mut found = rows(family)?;
+            if family == Family::V4 {
+                found.push(Row {
+                    local,
+                    remote: peer,
+                    pid: std::process::id(),
+                });
+            }
+            Ok(found)
+        }
+    }
+
     fn host() -> Ipv4Addr {
         let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         // Connecting a UDP socket sends nothing; it only picks the address of the outbound route.
@@ -323,9 +358,13 @@ mod tests {
         ];
         let mut client = Client::start(&job, mode).await;
         let (peer, local) = client.reflected(LISTENER_PORT);
-        let found = Attribution::new()
-            .unwrap()
-            .original(peer, local, &jobs, far());
+        let found = Attribution::new().unwrap().attribute(
+            peer,
+            local,
+            &jobs,
+            far(),
+            reflected_to(peer, local),
+        );
         assert_eq!(
             found,
             Ok(Original {
@@ -355,11 +394,11 @@ mod tests {
         let attribution = Attribution::new().unwrap();
         let other = [(SESSION, Arc::new(Job::new().unwrap()))];
         assert_eq!(
-            attribution.original(peer, local, &other, far()),
+            attribution.attribute(peer, local, &other, far(), reflected_to(peer, local)),
             Err(Denial::NotInJob)
         );
         assert_eq!(
-            attribution.original::<&str>(peer, local, &[], far()),
+            attribution.attribute::<&str>(peer, local, &[], far(), reflected_to(peer, local)),
             Err(Denial::NotInJob)
         );
         client.process.kill().await.unwrap();
@@ -372,11 +411,14 @@ mod tests {
         let _stream = TcpStream::connect(server).await.unwrap();
         let (_accepted, client) = listener.accept().await.unwrap();
         let jobs = [(SESSION, Arc::new(Job::new().unwrap()))];
-        let found = Attribution::new().unwrap().original(
-            SocketAddr::new(server.ip(), client.port()),
-            SocketAddr::new(client.ip(), LISTENER_PORT),
+        let peer = SocketAddr::new(server.ip(), client.port());
+        let local = SocketAddr::new(client.ip(), LISTENER_PORT);
+        let found = Attribution::new().unwrap().attribute(
+            peer,
+            local,
             &jobs,
             far(),
+            reflected_to(peer, local),
         );
         assert_eq!(found, Err(Denial::NotInJob));
     }
@@ -420,6 +462,36 @@ mod tests {
         client.process.kill().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_outside_the_job_that_dials_from_a_client_port_and_resets_is_not_found() {
+        let job = Arc::new(Job::new().unwrap());
+        let jobs = [(SESSION, job.clone())];
+        let mut client = Client::start(&job, IPV4).await;
+        let listener = reserve().unwrap().listen().unwrap();
+        let target = SocketAddr::new(client.peer.ip(), listener.local_addr().unwrap().port());
+        let dialer = TcpSocket::new_v4().unwrap();
+        dialer.set_reuseaddr(true).unwrap();
+        dialer.bind(client.peer).unwrap();
+        let (dialed, accepted) = tokio::join!(dialer.connect(target), listener.accept());
+        let (mut accepted, peer) = accepted.unwrap();
+        let local = accepted.local_addr().unwrap();
+        crate::proxy::reset(dialed.unwrap());
+        let read = tokio::time::timeout(Duration::from_secs(10), accepted.read(&mut [0; 1]))
+            .await
+            .expect("the reset did not arrive");
+        assert_eq!(
+            read.map_err(|error| error.kind()),
+            Err(io::ErrorKind::ConnectionReset)
+        );
+        assert_eq!(
+            Attribution::new()
+                .unwrap()
+                .original(peer, local, &jobs, far()),
+            Err(Denial::NotFound)
+        );
+        client.process.kill().await.unwrap();
+    }
+
     #[test]
     fn a_connection_without_a_row_is_not_found_and_a_late_lookup_times_out() {
         let idle = std::net::TcpListener::bind((host(), 0)).unwrap();
@@ -428,7 +500,7 @@ mod tests {
         let jobs = [(SESSION, Arc::new(Job::new().unwrap()))];
         let attribution = Attribution::new().unwrap();
         assert_eq!(
-            attribution.original(peer, local, &jobs, far()),
+            attribution.attribute(peer, local, &jobs, far(), reflected_to(peer, local)),
             Err(Denial::NotFound)
         );
         assert_eq!(

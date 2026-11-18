@@ -44,6 +44,9 @@ mod verifications;
 
 pub use challenge::VerificationOrigin;
 pub use local_auth::LocalAuth;
+#[cfg(windows)]
+pub(crate) use os_user::Attribution;
+pub(crate) use os_user::{Denial, Original};
 #[cfg(target_os = "linux")]
 pub(crate) use os_user::{pidfd_probe, procfs};
 pub use routing::Route;
@@ -176,6 +179,12 @@ pub struct Proxy {
 pub struct Adopter(mpsc::Sender<(TcpStream, Authority)>);
 
 impl Adopter {
+    #[cfg(test)]
+    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<(TcpStream, Authority)>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (Self(sender), receiver)
+    }
+
     pub fn adopt(&self, stream: TcpStream, target: Authority) -> Result<(), TcpStream> {
         self.0
             .try_send((stream, target))
