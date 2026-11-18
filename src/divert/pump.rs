@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -9,6 +10,7 @@ use super::{Direction, Engine, Verdict};
 pub const PACKET_BUFFER_BYTES: usize = 40 + 0xFFFF;
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
 pub const GRACE_PERIOD: Duration = Duration::from_secs(5);
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 
 pub struct Received<A> {
     pub length: usize,
@@ -35,13 +37,20 @@ pub trait Liveness: Send + 'static {
     fn wait_until_gone(self);
 }
 
-pub fn run<P, W, L>(port: &P, engine: Engine, report: &mut W, liveness: L) -> io::Result<()>
+pub fn run<P, W, L, S>(
+    port: &P,
+    engine: Engine,
+    report: &mut W,
+    liveness: L,
+    stuck: S,
+) -> io::Result<()>
 where
     P: DivertPort,
     W: Write + Send,
     L: Liveness,
+    S: FnOnce() + Send,
 {
-    run_with(port, engine, report, liveness, &SystemClock)
+    run_with(port, engine, report, liveness, stuck, &SystemClock)
 }
 
 #[derive(Default)]
@@ -65,6 +74,20 @@ impl Shared {
     fn signal(&self, change: impl FnOnce(&mut State)) {
         change(&mut self.lock());
         self.changed.notify_all();
+    }
+
+    fn ends_within<C: Clock>(&self, clock: &C, limit: Duration) -> bool {
+        let deadline = clock.now() + limit;
+        let mut state = self.lock();
+        loop {
+            if state.ended {
+                return true;
+            }
+            if clock.now() >= deadline {
+                return false;
+            }
+            state = clock.wait_until(&self.changed, state, deadline);
+        }
     }
 }
 
@@ -99,17 +122,19 @@ impl Clock for SystemClock {
     }
 }
 
-fn run_with<P, W, L, C>(
+fn run_with<P, W, L, S, C>(
     port: &P,
     engine: Engine,
     report: &mut W,
     liveness: L,
+    stuck: S,
     clock: &C,
 ) -> io::Result<()>
 where
     P: DivertPort,
     W: Write + Send,
     L: Liveness,
+    S: FnOnce() + Send,
     C: Clock,
 {
     let shared = Arc::new(Shared::default());
@@ -122,7 +147,7 @@ where
     let shared = &*shared;
     thread::scope(|scope| {
         thread::Builder::new()
-            .spawn_scoped(scope, move || supervise(shared, port, report, clock))?;
+            .spawn_scoped(scope, move || supervise(shared, port, report, stuck, clock))?;
         let _ended = OnDrop(|| shared.signal(|state| state.ended = true));
         forward(port, engine, shared, clock)
     })
@@ -170,15 +195,25 @@ fn forward<P: DivertPort, C: Clock>(
     Err(failure)
 }
 
-fn supervise<P: DivertPort, W: Write, C: Clock>(
+fn supervise<P: DivertPort, W: Write, S: FnOnce(), C: Clock>(
     shared: &Shared,
     port: &P,
     report: &mut W,
+    stuck: S,
     clock: &C,
 ) {
+    let stuck = Cell::new(Some(stuck));
+    let shut_down = || {
+        port.shutdown();
+        if !shared.ends_within(clock, SHUTDOWN_DEADLINE)
+            && let Some(stuck) = stuck.take()
+        {
+            stuck();
+        }
+    };
     let _shutdown = OnDrop(|| {
         if thread::panicking() {
-            port.shutdown();
+            shut_down();
         }
     });
     let mut reported = Snapshot::default();
@@ -194,7 +229,7 @@ fn supervise<P: DivertPort, W: Write, C: Clock>(
             let deadline = *shutdown_at.get_or_insert(now + GRACE_PERIOD);
             if now >= deadline {
                 drop(state);
-                port.shutdown();
+                shut_down();
                 return;
             }
             state = clock.wait_until(&shared.changed, state, deadline);
@@ -327,6 +362,7 @@ mod tests {
         receives: Mutex<Vec<usize>>,
         injected: Mutex<Vec<(Vec<u8>, usize)>>,
         failing: AtomicBool,
+        ignores_shutdown: AtomicBool,
         shut_down: Mutex<Option<Instant>>,
     }
 
@@ -382,7 +418,9 @@ mod tests {
 
         fn shutdown(&self) {
             *self.shut_down.lock().unwrap() = Some(self.clock.now());
-            let _ = self.shutdowns.send(Step::Shutdown);
+            if !self.ignores_shutdown.load(Ordering::SeqCst) {
+                let _ = self.shutdowns.send(Step::Shutdown);
+            }
         }
     }
 
@@ -460,6 +498,7 @@ mod tests {
         feed: mpsc::Sender<Step>,
         gone: mpsc::Sender<bool>,
         lines: Lines,
+        stuck: Arc<Mutex<Option<Instant>>>,
         result: mpsc::Receiver<io::Result<()>>,
     }
 
@@ -479,14 +518,25 @@ mod tests {
                 receives: Mutex::default(),
                 injected: Mutex::default(),
                 failing: AtomicBool::new(false),
+                ignores_shutdown: AtomicBool::new(false),
                 shut_down: Mutex::default(),
             });
             let (gone, agent) = mpsc::channel();
             let (done, result) = mpsc::channel();
             let engine = Engine::new(LISTENER, 8, DEFAULT_IDLE_TIMEOUT);
+            let stuck = Arc::new(Mutex::new(None));
+            let (stuck_at, stuck_clock) = (Arc::clone(&stuck), Arc::clone(&clock));
+            let give_up = move || *stuck_at.lock().unwrap() = Some(stuck_clock.now());
             let (pump_port, pump_clock) = (Arc::clone(&port), Arc::clone(&clock));
             thread::spawn(move || {
-                let result = run_with(&*pump_port, engine, &mut report, Gone(agent), &*pump_clock);
+                let result = run_with(
+                    &*pump_port,
+                    engine,
+                    &mut report,
+                    Gone(agent),
+                    give_up,
+                    &*pump_clock,
+                );
                 let _ = done.send(result);
             });
             clock.wait_for_deadline(REPORT_INTERVAL);
@@ -496,6 +546,7 @@ mod tests {
                 feed,
                 gone,
                 lines,
+                stuck,
                 result,
             }
         }
@@ -517,6 +568,14 @@ mod tests {
 
         fn watch_panics(&self) {
             self.gone.send(true).unwrap();
+        }
+
+        fn stuck(&self) -> Option<Instant> {
+            *self.stuck.lock().unwrap()
+        }
+
+        fn ignore_shutdown(&self) {
+            self.port.ignores_shutdown.store(true, Ordering::SeqCst);
         }
 
         fn panicked(&self) -> bool {
@@ -561,6 +620,7 @@ mod tests {
         assert_eq!(PACKET_BUFFER_BYTES, 40 + 0xFFFF);
         assert_eq!(REPORT_INTERVAL, Duration::from_secs(10));
         assert_eq!(GRACE_PERIOD, Duration::from_secs(5));
+        assert_eq!(SHUTDOWN_DEADLINE, Duration::from_secs(5));
         let harness = Harness::start();
         harness.send(outbound(TestPacket::client(SYN)));
         harness.send(Step::Shutdown);
@@ -721,6 +781,7 @@ mod tests {
         );
         assert_eq!(harness.port.injected().len(), 1);
         assert_eq!(harness.reports(), []);
+        assert_eq!(harness.stuck(), None);
     }
 
     #[test]
@@ -804,6 +865,7 @@ mod tests {
             harness.port.shut_down(),
             Some(harness.clock.at(REPORT_INTERVAL))
         );
+        assert_eq!(harness.stuck(), None);
     }
 
     #[test]
@@ -818,5 +880,57 @@ mod tests {
             harness.port.shut_down(),
             Some(harness.clock.at(GRACE_PERIOD))
         );
+    }
+
+    #[test]
+    fn a_port_still_receiving_after_its_shutdown_is_given_up_after_the_deadline() {
+        let harness = Harness::start();
+        harness.ignore_shutdown();
+        harness.agent_gone();
+        harness.clock.wait_for_deadline(GRACE_PERIOD);
+        harness.clock.advance_to(GRACE_PERIOD);
+        harness
+            .clock
+            .wait_for_deadline(GRACE_PERIOD + SHUTDOWN_DEADLINE);
+        assert_eq!(
+            harness.port.shut_down(),
+            Some(harness.clock.at(GRACE_PERIOD))
+        );
+        harness
+            .clock
+            .advance_to(GRACE_PERIOD + SHUTDOWN_DEADLINE - Duration::from_millis(1));
+        harness.clock.settle();
+        assert_eq!(harness.stuck(), None);
+        harness.clock.advance_to(GRACE_PERIOD + SHUTDOWN_DEADLINE);
+        eventually(|| harness.stuck().is_some(), "the pump was not given up");
+        assert_eq!(
+            harness.stuck(),
+            Some(harness.clock.at(GRACE_PERIOD + SHUTDOWN_DEADLINE))
+        );
+        harness.send(Step::Shutdown);
+        assert!(harness.finished().is_ok());
+    }
+
+    #[test]
+    fn a_port_still_receiving_after_a_reporter_panic_is_given_up_after_the_deadline() {
+        let harness = Harness::writing_to(Panicking, Lines::default());
+        harness.ignore_shutdown();
+        harness.send(outbound(TestPacket::client(SYN)));
+        harness.processed(1);
+        harness.clock.advance_to(REPORT_INTERVAL);
+        harness
+            .clock
+            .wait_for_deadline(REPORT_INTERVAL + SHUTDOWN_DEADLINE);
+        assert_eq!(harness.stuck(), None);
+        harness
+            .clock
+            .advance_to(REPORT_INTERVAL + SHUTDOWN_DEADLINE);
+        eventually(|| harness.stuck().is_some(), "the pump was not given up");
+        assert_eq!(
+            harness.stuck(),
+            Some(harness.clock.at(REPORT_INTERVAL + SHUTDOWN_DEADLINE))
+        );
+        harness.send(Step::Shutdown);
+        assert!(harness.panicked());
     }
 }

@@ -489,7 +489,9 @@ returned process handle.
   start with `-`, and passes a missing or non-UTF-8 value on as empty, so
   clap refuses nothing that the helper should report. It reads no
   configuration, opens no device key, sets up no logging, touches no IPC,
-  and replaces the panic hook with one that prints nothing. They come from
+  and replaces the panic hook with one that prints nothing. `main`
+  dispatches it before it builds the Tokio runtime, so the helper starts no
+  runtime worker threads. They come from
   the unelevated agent, so the helper validates
   them: the pipe name must match the fixed Gateinto pattern, N must be 1 to
   63, T must be in 49152 to 65535. An invalid pipe name cannot be reported
@@ -564,14 +566,29 @@ returned process handle.
   ends the helper the same way, without the grace period. The helper closes
   the handle before it deletes the rule, and releases the mutex only after
   that, because the next helper adds a rule of the same name.
+- **Shutdown watchdog:** WinDivert documents that a `WinDivertRecv` made
+  after `WinDivertShutdown` fails with `ERROR_NO_DATA` once the queue is
+  empty, but not that a receive already blocked on an idle handle wakes up.
+  The helper does not depend on it: once the engine loop has called
+  `shutdown()` (after the grace period, or after a panic in the reporter),
+  it waits at most `SHUTDOWN_DEADLINE` (5 s) for the packet loop to end.
+  If the loop has not ended by then, the helper deletes the firewall rule,
+  ignoring the result, and ends the process with exit code 5
+  (`Platform::abandon`; `std::process::exit` on Windows). Ending the
+  process closes the WinDivert handle and the mutex. When the receive does
+  return, nothing changes.
 
 #### Liveness pipe
 
 - The agent creates a named pipe with a random name
   (`\\.\pipe\gateinto-divert-` and 32 lowercase hex digits,
-  `PipeName::from_random`), one instance,
-  `FILE_FLAG_FIRST_PIPE_INSTANCE`, remote clients rejected, and a DACL that
-  allows the agent's user and the Administrators group.
+  `PipeName::from_random`), one instance, `PIPE_ACCESS_DUPLEX`,
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`, remote clients rejected, a server handle
+  that is not inheritable, and a DACL that allows the agent's user and the
+  Administrators group *(proposed, step 5)*. Duplex, because the helper
+  opens the pipe for reading and writing and keeps a read pending; not
+  inheritable, so that the agent's death breaks the pipe even while a
+  process the agent started is still running.
 - The helper opens the pipe with `SECURITY_SQOS_PRESENT |
   SECURITY_IDENTIFICATION`, so the pipe server can query the helper's
   identity but cannot act as the helper, and checks
@@ -624,24 +641,26 @@ returned process handle.
 #### Engine
 
 The engine reflects packets as WinDivert's `streamdump.c` does. The pure,
-platform-independent core is `crate::divert`; the engine loop
-(`divert::pump`) receives each packet through the `DivertPort` seam, passes
-it to `Engine::process` with its `Direction`, and injects exactly the
-received length for `Verdict::InjectInbound`; a failed send is counted and
-the loop continues. `DivertPort::shutdown` is sticky: it can land between
-two `recv` calls, so every later `recv` returns `RecvError::Shutdown` once
-the queued packets are drained. The Windows binding
-(`src/divert/windows.rs`) implements the seam with `WinDivertRecv`,
-`WinDivertSend` and `WinDivertShutdown(WINDIVERT_SHUTDOWN_BOTH)`, which
-WinDivert documents as sticky in that way: after it, `WinDivertRecv` fails
-with `ERROR_NO_DATA` once the queue is empty, and that error, and only that
-one, becomes `RecvError::Shutdown`. Each packet is injected with a copy of
-the address it was received with: `Outbound` cleared, so it goes up the
-inbound path of the interface it was to leave on (`Network.IfIdx`,
-`SubIfIdx`), and `IPChecksum` and `TCPChecksum` set, as
+platform-independent core is `crate::divert`; the engine loop (`divert::pump`)
+receives each packet through the `DivertPort` seam, passes it to
+`Engine::process` with its `Direction`, and injects exactly the received
+length for `Verdict::InjectInbound`; a failed send is counted and the loop
+continues. `DivertPort::shutdown` is sticky: it can land between two `recv`
+calls, so every later `recv` returns `RecvError::Shutdown` once the queued
+packets are drained. The Windows binding (`src/divert/windows.rs`) implements
+the seam with `WinDivertRecv`, `WinDivertSend` and
+`WinDivertShutdown(WINDIVERT_SHUTDOWN_BOTH)`, which WinDivert documents as
+sticky in that way: after it, `WinDivertRecv` fails with `ERROR_NO_DATA` once
+the queue is empty, and that error, and only that one, becomes
+`RecvError::Shutdown`. Whether `WinDivertShutdown` also wakes a
+`WinDivertRecv` already blocked on an idle handle is not documented; the
+[shutdown watchdog](#the-divert-helper) bounds that wait. Each packet is
+injected with a copy of the address it was received with: `Outbound` cleared,
+so it goes up the inbound path of the interface it was to leave on
+(`Network.IfIdx`, `SubIfIdx`), and `IPChecksum` and `TCPChecksum` set, as
 `WinDivertHelperCalcChecksums` does after recomputing checksums. WinDivert
-requires injected packets to carry correct checksums or the corresponding
-flag cleared, and the engine always writes both checksums in full.
+requires injected packets to carry correct checksums or the corresponding flag
+cleared, and the engine always writes both checksums in full.
 `Engine::process` does not check the DSCP itself: every outbound packet it
 receives is tagged or comes from port T, because the filter selects nothing
 else.
@@ -894,11 +913,13 @@ with `netsh`.**
   advfirewall firewall add rule` has no group parameter as far as is
   known).
 - At start the helper runs `netsh advfirewall firewall delete rule
-  name=<name>` and ignores its exit code, because `delete rule` exits
-  non-zero when nothing matches. It then adds one inbound TCP allow rule for
-  local port T and the program `gateinto.exe` (the helper's own image path)
-  with `add rule`; a failing `add` is fatal (`error firewall-rule`). It
-  deletes the rule on exit. The arguments, passed verbatim:
+  name=<name>` and ignores its exit code, because `delete rule` exits non-zero
+  when nothing matches. It then adds one inbound TCP allow rule for local port
+  T and the program `gateinto.exe` (the helper's own image path) with `add
+  rule`; a failing `add` is fatal (`error firewall-rule`) and is followed by
+  the same ignored `delete`, because an `add` killed at the timeout may still
+  have added the rule. It deletes the rule on exit. The arguments, passed
+  verbatim:
 
   ```text
   advfirewall firewall delete rule name=Gateinto-transparent-listener
@@ -1205,14 +1226,14 @@ the IPv6 table.
 **Helper tests on Windows** (`src/divert/windows.rs`, unelevated, without
 WinDivert; type-checked from Linux only): a missing file, a digest mismatch,
 held files that can be read but not written, renamed or deleted, and a
-directory of held files that cannot be renamed; a library that is not
-WinDivert refused with its Win32 error; the mutex held by a second lock;
-the pipe refused when another process serves it, lines written to the
-agent, and the liveness wait ending on a closed pipe, on a byte from the
-agent and on the end of the agent process; `netsh` taken from the system
-directory; a command killed after its timeout; the subcommand's raw
-arguments and its absence from the help. Opening WinDivert itself needs
-elevation and is left for the integration test.
+directory of held files and its parent that cannot be renamed; a library that
+is not WinDivert refused with its Win32 error; the mutex held by a second
+lock; the pipe refused when another process serves it, lines written to the
+agent, and the liveness wait ending on a closed pipe, on a byte from the agent
+and on the end of the agent process; `netsh` taken from the system directory;
+a command killed after its timeout; the subcommand's raw arguments and its
+absence from the help. Opening WinDivert itself needs elevation and is left
+for the integration test.
 
 **Helper tests** (implemented in `src/divert/`, every platform):
 argument validation (DSCP 0 and 64, port 49151 and 0 are refused with
@@ -1245,6 +1266,11 @@ echo server whatever the target *(proposed)*. Cases:
   job) is closed;
 - stopping the helper closes the session, kills its job and removes the
   firewall rule (checked with `netsh`'s exit code);
+- the helper ends within 20 s of the agent ending with no traffic on the
+  handle (grace period 5 s, shutdown deadline 5 s, `netsh` up to 10 s), and
+  the test records how: exit code 0 when `WinDivertShutdown` woke the
+  blocked receive, 5 when the shutdown watchdog ended it; the firewall rule
+  is gone either way;
 - tagged UDP is contained (engine counter equals datagrams sent);
 - a large upload through the transparent path (large send offload).
 
@@ -1437,9 +1463,23 @@ would need a design change if they fail. Results go to
   prompt raised by a background agent without a foreground window only
   flashes in the taskbar.
 - Holding the WinDivert files open without write or delete sharing prevents
-  replacing them (and renaming their directory) until the driver and the
-  DLL are loaded, and still lets `LoadLibraryExW` and the driver load open
-  them (unit tests for the first part exist and have not run on Windows).
+  replacing them (and renaming their directory or any ancestor of it) until
+  the driver and the DLL are loaded, and still lets `LoadLibraryExW` and the
+  driver load open them (unit tests for the first part exist and have not
+  run on Windows).
+- `WinDivertShutdown` wakes a `WinDivertRecv` that is already blocked on a
+  handle with no traffic. If it does not, the helper still ends, through
+  the shutdown watchdog, up to 5 s later and with exit code 5 instead of 0.
+- The 32-bit build starts the `netsh.exe` that `GetSystemDirectoryW` names,
+  `C:\Windows\System32`; under WOW64 the file system redirector runs
+  `C:\Windows\SysWOW64\netsh.exe` instead. The rules live in the firewall
+  service, not in the process, so the 32-bit `netsh` is expected to manage
+  them and `Sysnative` should not be needed. If its `advfirewall` context
+  fails, the helper would start `%windir%\Sysnative\netsh.exe` when
+  `IsWow64Process` says it runs under WOW64.
+- A firewall rule whose program is a `\\?\X:\` path matches the running
+  image; the image path comes from `GetModuleFileNameW`, which returns that
+  form when the helper was started through it.
 - `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` accepts the image
   directory when the helper was started through a `\\?\` path.
 - That 120 s of linger is enough for late segments, compared with the

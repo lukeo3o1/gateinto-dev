@@ -35,7 +35,7 @@ use windows_sys::core::BOOL;
 
 use super::firewall::NetshCommand;
 use super::helper::{
-    self, Arguments, DriverVersion, FilesError, PipeName, Platform, sha256_matches,
+    self, Abandon, Arguments, DriverVersion, FilesError, PipeName, Platform, sha256_matches,
 };
 use super::pump::{DivertPort, Liveness, Received, RecvError};
 use super::windivert::{Address, FILES, PinnedFile, recv_error};
@@ -67,6 +67,7 @@ impl Platform for Windows {
     type Lock = Handle;
     type Files = Files;
     type Port = Port;
+    type Abandon = GiveUp;
 
     fn connect(&mut self, pipe: &PipeName, agent: NonZeroU32) -> io::Result<(Pipe, Watch)> {
         let file = OpenOptions::new()
@@ -94,18 +95,7 @@ impl Platform for Windows {
     }
 
     fn lock(&mut self) -> Option<Handle> {
-        let name = wide(OsStr::new(MUTEX));
-        // SAFETY: SetLastError only stores the calling thread's error code.
-        unsafe { SetLastError(0) };
-        // SAFETY: name is a NUL-terminated UTF-16 string and no security attributes are passed.
-        let mutex = unsafe { CreateMutexW(null(), FALSE, name.as_ptr()) };
-        // SAFETY: GetLastError only reads the calling thread's error code.
-        let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-        if mutex.is_null() {
-            return None;
-        }
-        let mutex = Handle(mutex);
-        (!existed).then_some(mutex)
+        create_lock(MUTEX)
     }
 
     fn image_path(&mut self) -> Option<String> {
@@ -117,17 +107,7 @@ impl Platform for Windows {
     }
 
     fn netsh(&mut self, command: &NetshCommand) -> bool {
-        netsh_path().is_ok_and(|netsh| {
-            run_bounded(
-                Command::new(netsh)
-                    .raw_arg(command.as_str())
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .creation_flags(CREATE_NO_WINDOW),
-                NETSH_TIMEOUT,
-            )
-        })
+        netsh(command)
     }
 
     fn open_files(&mut self) -> Result<Files, FilesError> {
@@ -153,6 +133,51 @@ impl Platform for Windows {
             minor: port.param(PARAM_VERSION_MINOR)?,
         })
     }
+
+    fn abandon(&mut self) -> GiveUp {
+        GiveUp
+    }
+}
+
+struct GiveUp;
+
+impl Abandon for GiveUp {
+    fn netsh(&mut self, command: &NetshCommand) -> bool {
+        netsh(command)
+    }
+
+    fn exit(self, code: u8) {
+        std::process::exit(i32::from(code))
+    }
+}
+
+fn create_lock(name: &str) -> Option<Handle> {
+    let name = wide(OsStr::new(name));
+    // SAFETY: SetLastError only stores the calling thread's error code.
+    unsafe { SetLastError(0) };
+    // SAFETY: name is a NUL-terminated UTF-16 string and no security attributes are passed.
+    let mutex = unsafe { CreateMutexW(null(), FALSE, name.as_ptr()) };
+    // SAFETY: GetLastError only reads the calling thread's error code.
+    let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    if mutex.is_null() {
+        return None;
+    }
+    let mutex = Handle(mutex);
+    (!existed).then_some(mutex)
+}
+
+fn netsh(command: &NetshCommand) -> bool {
+    netsh_path().is_ok_and(|netsh| {
+        run_bounded(
+            Command::new(netsh)
+                .raw_arg(command.as_str())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW),
+            NETSH_TIMEOUT,
+        )
+    })
 }
 
 struct Files {
@@ -247,8 +272,8 @@ struct Port {
     library: Library,
 }
 
-// SAFETY: WinDivert handles may be used from several threads at once, WinDivertShutdown is meant
-// to end a WinDivertRecv blocked on another thread, and the function pointers never change.
+// SAFETY: WinDivert documents using one handle from several threads at once (Performance,
+// Multi-threading), and the function pointers never change.
 unsafe impl Sync for Port {}
 
 impl Port {
@@ -550,14 +575,17 @@ mod tests {
     }
 
     #[test]
-    fn the_directory_of_held_files_cannot_be_renamed() {
-        let dir = temp_dir("held-directory");
+    fn the_directory_of_held_files_and_its_ancestors_cannot_be_renamed() {
+        let root = temp_dir("held-directory");
+        let programs = root.join("Programs");
+        let dir = programs.join("Gateinto");
+        fs::create_dir_all(&dir).unwrap();
         let pinned = library_and_driver(&dir);
         let files = open_files(&dir, &pinned).unwrap();
-        let moved = dir.with_extension("moved");
-        assert!(fs::rename(&dir, &moved).is_err());
+        assert!(fs::rename(&dir, programs.join("moved")).is_err());
+        assert!(fs::rename(&programs, root.join("moved")).is_err());
         drop(files);
-        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -569,8 +597,9 @@ mod tests {
 
     #[test]
     fn a_library_that_is_not_windivert_is_refused_with_its_error() {
+        let dir = temp_dir("no-library");
         let missing = Files {
-            library: temp_dir("no-library").join("WinDivert.dll"),
+            library: dir.join("WinDivert.dll"),
             _held: Vec::new(),
         };
         assert_eq!(
@@ -585,15 +614,17 @@ mod tests {
             Windows.open_port(&other, "true").err(),
             Some(ERROR_PROC_NOT_FOUND)
         );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_second_helper_finds_the_machine_wide_mutex_taken() {
         assert_eq!(MUTEX, r"Global\Gateinto-divert");
-        let first = Windows.lock().expect("the mutex is free");
-        assert!(Windows.lock().is_none());
+        let name = format!(r"Global\Gateinto-divert-test-{}", random_hex());
+        let first = create_lock(&name).expect("the mutex is free");
+        assert!(create_lock(&name).is_none());
         drop(first);
-        assert!(Windows.lock().is_some());
+        assert!(create_lock(&name).is_some());
     }
 
     #[test]
@@ -625,8 +656,12 @@ mod tests {
             Command::new(&cmd).args(["/d", "/c", "exit 1"]),
             PATIENCE
         ));
-        let missing = temp_dir("no-command").join("missing.exe");
-        assert!(!run_bounded(&mut Command::new(missing), PATIENCE));
+        let dir = temp_dir("no-command");
+        assert!(!run_bounded(
+            &mut Command::new(dir.join("missing.exe")),
+            PATIENCE
+        ));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -642,10 +677,18 @@ mod tests {
         assert!(start.elapsed() < PATIENCE, "{:?}", start.elapsed());
     }
 
-    fn pipe_name() -> PipeName {
+    fn random() -> [u8; 16] {
         let mut random = [0; 16];
         aws_lc_rs::rand::fill(&mut random).unwrap();
-        PipeName::from_random(random)
+        random
+    }
+
+    fn random_hex() -> String {
+        random().iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn pipe_name() -> PipeName {
+        PipeName::from_random(random())
     }
 
     fn agent_pipe() -> (PipeName, NamedPipeServer) {

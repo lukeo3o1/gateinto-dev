@@ -583,6 +583,21 @@ fn tls_mode_parser() -> impl clap::builder::TypedValueParser<Value = TlsMode> {
 }
 
 fn main() -> ExitCode {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            if error.use_stderr() && arguments.get(1).is_some_and(|arg| arg == "open") {
+                prompt::show_launch_error(&error.to_string());
+            }
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    #[cfg(windows)]
+    if let Command::Divert(args) = &cli.command {
+        return divert(args);
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -596,24 +611,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = runtime.block_on(run());
+    let code = runtime.block_on(run(cli));
     // A prompt still open on a blocking thread waits for the user; exiting must not.
     runtime.shutdown_background();
     code
 }
 
-async fn run() -> ExitCode {
-    let arguments: Vec<_> = std::env::args_os().collect();
-    let cli = match Cli::try_parse_from(&arguments) {
-        Ok(cli) => cli,
-        Err(error) => {
-            let _ = error.print();
-            if error.use_stderr() && arguments.get(1).is_some_and(|arg| arg == "open") {
-                prompt::show_launch_error(&error.to_string());
-            }
-            return ExitCode::from(error.exit_code() as u8);
-        }
-    };
+async fn run(cli: Cli) -> ExitCode {
     let opening = matches!(&cli.command, Command::Open(_));
     let result = match cli.command {
         Command::CheckUpstream(args) => check_upstream(args).await,
@@ -634,7 +638,7 @@ async fn run() -> ExitCode {
         Command::Status(args) => status(args).await,
         Command::Reset(args) => reset(args).await,
         #[cfg(windows)]
-        Command::Divert(args) => return divert(&args),
+        Command::Divert(_) => unreachable!("the divert helper runs before the runtime is built"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

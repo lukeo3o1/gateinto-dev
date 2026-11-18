@@ -136,6 +136,7 @@ pub trait Platform {
     type Lock;
     type Files;
     type Port: DivertPort;
+    type Abandon: Abandon;
 
     fn connect(
         &mut self,
@@ -148,6 +149,12 @@ pub trait Platform {
     fn open_files(&mut self) -> Result<Self::Files, FilesError>;
     fn open_port(&mut self, files: &Self::Files, filter: &str) -> Result<Self::Port, u32>;
     fn driver_version(&mut self, port: &Self::Port) -> Option<DriverVersion>;
+    fn abandon(&mut self) -> Self::Abandon;
+}
+
+pub trait Abandon: Send {
+    fn netsh(&mut self, command: &NetshCommand) -> bool;
+    fn exit(self, code: u8);
 }
 
 pub fn run<P: Platform>(platform: &mut P, arguments: &Arguments<'_>) -> u8 {
@@ -186,6 +193,7 @@ fn serve<P: Platform>(
         .and_then(|program| firewall::add_rule(port, &program).ok())
         .ok_or(ErrorCode::FirewallRule)?;
     if !platform.netsh(&add) {
+        platform.netsh(&firewall::delete_rule());
         return Err(ErrorCode::FirewallRule);
     }
     let diverted = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -216,10 +224,16 @@ fn divert<P: Platform>(
         return Ok(EXIT_NOT_REPORTED);
     }
     let engine = Engine::new(port.get(), DEFAULT_CAPACITY, DEFAULT_IDLE_TIMEOUT);
-    match pump::run(&handle, engine, report, watch) {
+    let abandon = platform.abandon();
+    match pump::run(&handle, engine, report, watch, move || give_up(abandon)) {
         Ok(()) => Ok(EXIT_NORMAL),
         Err(_) => Ok(EXIT_ENGINE_FAILED),
     }
+}
+
+fn give_up<A: Abandon>(mut abandon: A) {
+    abandon.netsh(&firewall::delete_rule());
+    abandon.exit(EXIT_ENGINE_FAILED);
 }
 
 pub fn sha256_matches(mut source: impl Read, expected: &[u8; 32]) -> bool {
@@ -418,6 +432,7 @@ mod tests {
         Recv,
         Inject(u16),
         Shutdown,
+        Exit(u8),
     }
 
     fn record(log: &Log, call: Call) {
@@ -572,6 +587,7 @@ mod tests {
         type Lock = Closes;
         type Files = Closes;
         type Port = FakePort;
+        type Abandon = FakeAbandon;
 
         fn connect(
             &mut self,
@@ -636,6 +652,23 @@ mod tests {
             record(&self.log, Call::DriverVersion);
             assert!(!self.version_panics, "the version query failed");
             self.version
+        }
+
+        fn abandon(&mut self) -> FakeAbandon {
+            FakeAbandon(Arc::clone(&self.log))
+        }
+    }
+
+    struct FakeAbandon(Log);
+
+    impl Abandon for FakeAbandon {
+        fn netsh(&mut self, command: &NetshCommand) -> bool {
+            record(&self.0, Call::Netsh(command.as_str().to_owned()));
+            true
+        }
+
+        fn exit(self, code: u8) {
+            record(&self.0, Call::Exit(code));
         }
     }
 
@@ -814,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_add_is_reported_and_no_rule_is_deleted_afterwards() {
+    fn a_failed_add_is_reported_after_deleting_what_it_may_have_added() {
         let mut fake = Fake {
             adds: false,
             ..Fake::default()
@@ -824,9 +857,16 @@ mod tests {
             fake.calls(),
             joined(&[
                 &until_added(),
-                &[Call::Unlock, error(ErrorCode::FirewallRule)],
+                &[delete(), Call::Unlock, error(ErrorCode::FirewallRule)],
             ])
         );
+    }
+
+    #[test]
+    fn giving_up_on_a_stuck_engine_deletes_the_rule_and_ends_the_process_as_failed() {
+        let fake = Fake::default();
+        give_up(FakeAbandon(Arc::clone(&fake.log)));
+        assert_eq!(fake.calls(), [delete(), Call::Exit(EXIT_ENGINE_FAILED)]);
     }
 
     #[test]
