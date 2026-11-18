@@ -129,18 +129,30 @@ pub(crate) fn original<K>(
     local: SocketAddr,
     mut admit: impl FnMut(u32) -> Result<K, Denial>,
 ) -> Result<Original<K>, Denial> {
-    let client = SocketAddr::new(local.ip(), peer.port());
+    let rows: Vec<Row> = rows.into_iter().collect();
     let remote = peer.ip().to_canonical();
+    if remote.is_loopback()
+        || rows
+            .iter()
+            .any(|row| same(row.local, peer) && same(row.remote, local))
+    {
+        return Err(Denial::SelfTarget);
+    }
+    let client = SocketAddr::new(local.ip(), peer.port());
+    let mut seen = Vec::new();
     let mut found = None;
     let mut refused = None;
     for row in rows {
+        let candidate = (row.pid, row.remote.port());
         if row.pid == 0
             || row.remote.port() == 0
             || !same(row.local, client)
             || row.remote.ip().to_canonical() != remote
+            || seen.contains(&candidate)
         {
             continue;
         }
+        seen.push(candidate);
         match admit(row.pid) {
             Ok(_) if found.is_some() => return Err(Denial::Ambiguous),
             Ok(session) => {
@@ -150,17 +162,13 @@ pub(crate) fn original<K>(
                     destination: SocketAddr::new(remote, row.remote.port()),
                 });
             }
-            Err(denial @ (Denial::Lookup(_) | Denial::TimedOut)) => return Err(denial),
-            Err(denial) => {
+            Err(denial @ (Denial::OtherUser | Denial::NotInJob)) => {
                 refused.get_or_insert(denial);
             }
+            Err(denial) => return Err(denial),
         }
     }
-    let found = found.ok_or_else(|| refused.unwrap_or(Denial::NotFound))?;
-    if same(found.destination, local) {
-        return Err(Denial::SelfTarget);
-    }
-    Ok(found)
+    found.ok_or_else(|| refused.unwrap_or(Denial::NotFound))
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -608,7 +616,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_left_over_row_of_another_owner_does_not_make_two() {
-        for refusal in [Denial::NotInJob, Denial::OtherUser, Denial::Ambiguous] {
+        for refusal in [Denial::NotInJob, Denial::OtherUser] {
             let stale = row(CLIENT, "203.0.113.7:8443", 9);
             for rows in [
                 [stale, row(CLIENT, DESTINATION, 7)],
@@ -626,8 +634,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_owner_that_could_not_be_inspected_ends_the_lookup_next_to_an_admitted_row() {
-        for failure in [Denial::Lookup("access denied".to_owned()), Denial::TimedOut] {
+    fn an_owner_that_could_not_be_attributed_ends_the_lookup_next_to_an_admitted_row() {
+        for failure in [
+            Denial::Lookup("access denied".to_owned()),
+            Denial::TimedOut,
+            Denial::Ambiguous,
+        ] {
             let unknown = row(CLIENT, "203.0.113.7:8443", 9);
             for rows in [
                 [unknown, row(CLIENT, DESTINATION, 7)],
@@ -645,7 +657,7 @@ pub(crate) mod tests {
 
     #[test]
     fn when_no_owner_is_admitted_the_first_refusal_is_the_denial() {
-        for refusal in [Denial::NotInJob, Denial::OtherUser, Denial::Ambiguous] {
+        for refusal in [Denial::NotInJob, Denial::OtherUser] {
             let mut owners = admitting(&[(7, Err(refusal.clone()))]);
             assert_eq!(
                 original(
@@ -741,6 +753,90 @@ pub(crate) mod tests {
             original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
             Ok(found(7, "session", "203.0.113.7:50123"))
         );
+    }
+
+    #[test]
+    fn a_socket_that_dialed_the_listener_refuses_the_connection_whatever_else_matches() {
+        let in_job = row(CLIENT, "192.168.1.11:61000", 7);
+        for (peer, rows) in [
+            (
+                CLIENT,
+                [
+                    row(CLIENT, LISTENER, 9),
+                    row(CLIENT, "192.168.1.10:61000", 7),
+                ],
+            ),
+            (
+                "192.168.1.11:50000",
+                [in_job, row("192.168.1.11:50000", LISTENER, 9)],
+            ),
+            (
+                "192.168.1.11:50000",
+                [in_job, row("192.168.1.11:50000", LISTENER, 0)],
+            ),
+            (
+                "192.168.1.11:50000",
+                [
+                    in_job,
+                    row(
+                        "[::ffff:192.168.1.11]:50000",
+                        "[::ffff:192.168.1.10]:50123",
+                        9,
+                    ),
+                ],
+            ),
+        ] {
+            let mut owners = admitting(&[(7, Ok("session"))]);
+            assert_eq!(
+                original(rows, addr(peer), addr(LISTENER), |pid| owners.admit(pid)),
+                Err(Denial::SelfTarget),
+                "{rows:?}"
+            );
+            assert!(owners.asked.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_loopback_peer_is_refused_before_any_row_is_considered() {
+        let shared = [
+            row("127.0.0.1:50000", "127.0.0.1:50123", 9),
+            row("127.0.0.1:50000", "127.0.0.1:61000", 7),
+        ];
+        let mut owners = admitting(&[(7, Ok("session"))]);
+        let (peer, listener) = (addr("127.0.0.1:50000"), addr("127.0.0.1:50123"));
+        assert_eq!(
+            original(shared, peer, listener, |pid| owners.admit(pid)),
+            Err(Denial::SelfTarget)
+        );
+        assert!(owners.asked.is_empty());
+        for (peer, remote) in [
+            ("127.45.6.7:50000", "127.45.6.7:443"),
+            ("[::1]:50000", "[::1]:443"),
+            ("[::ffff:127.0.0.1]:50000", "127.0.0.1:443"),
+        ] {
+            let mut owners = admitting(&[(7, Ok("session"))]);
+            let rows = [row(CLIENT, remote, 7)];
+            assert_eq!(
+                original(rows, addr(peer), addr(LISTENER), |pid| owners.admit(pid)),
+                Err(Denial::SelfTarget),
+                "{peer}"
+            );
+            assert!(owners.asked.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_same_socket_listed_in_both_tables_is_one_candidate() {
+        let rows = [
+            row(CLIENT, DESTINATION, 7),
+            row("[::ffff:192.168.1.10]:50000", "[::ffff:203.0.113.7]:443", 7),
+        ];
+        let mut owners = admitting(&[(7, Ok("session"))]);
+        assert_eq!(
+            original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
+            Ok(found(7, "session", DESTINATION))
+        );
+        assert_eq!(owners.asked, [7]);
     }
 
     #[test]
@@ -917,7 +1013,7 @@ pub(crate) mod tests {
             Ok(None)
         });
         assert_eq!(timed_out, Err(Denial::TimedOut));
-        assert!((1..LOOKUP_ATTEMPTS).contains(&tried), "{tried}");
+        assert!(tried < LOOKUP_ATTEMPTS, "{tried}");
         assert!(Instant::now() >= soon);
     }
 

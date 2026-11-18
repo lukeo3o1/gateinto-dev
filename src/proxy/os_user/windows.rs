@@ -247,6 +247,7 @@ mod tests {
 
     use super::*;
     use crate::job::Process;
+    use crate::transparent::listener::reserve;
 
     const CLIENT: &str = "a_client_holds_its_connection_until_the_server_ends_it";
     const IPV4: &str = "ipv4";
@@ -258,6 +259,20 @@ mod tests {
         Instant::now() + Duration::from_secs(10)
     }
 
+    fn host() -> Ipv4Addr {
+        let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        // Connecting a UDP socket sends nothing; it only picks the address of the outbound route.
+        probe.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).unwrap();
+        let IpAddr::V4(ip) = probe.local_addr().unwrap().ip() else {
+            panic!("the probe is not IPv4");
+        };
+        assert!(
+            !ip.is_loopback() && !ip.is_unspecified(),
+            "this host has no non-loopback IPv4 address"
+        );
+        ip
+    }
+
     struct Client {
         process: Process,
         peer: SocketAddr,
@@ -267,7 +282,7 @@ mod tests {
 
     impl Client {
         async fn start(job: &Arc<Job>, mode: &str) -> Self {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let listener = TcpListener::bind((host(), 0)).await.unwrap();
             let server = listener.local_addr().unwrap();
             let name = format!("{}::{CLIENT}", module_path!().split_once("::").unwrap().1);
             let args = [
@@ -352,7 +367,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_owner_outside_every_session_job_is_refused() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = TcpListener::bind((host(), 0)).await.unwrap();
         let server = listener.local_addr().unwrap();
         let _stream = TcpStream::connect(server).await.unwrap();
         let (_accepted, client) = listener.accept().await.unwrap();
@@ -381,9 +396,33 @@ mod tests {
         client.process.kill().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_outside_the_job_that_dials_the_listener_from_a_client_port_is_refused() {
+        let job = Arc::new(Job::new().unwrap());
+        let jobs = [(SESSION, job.clone())];
+        let mut client = Client::start(&job, IPV4).await;
+        let listener = reserve().unwrap().listen().unwrap();
+        let target = SocketAddr::new(client.peer.ip(), listener.local_addr().unwrap().port());
+        let dialer = TcpSocket::new_v4().unwrap();
+        dialer.set_reuseaddr(true).unwrap();
+        dialer.bind(client.peer).unwrap();
+        let (dialed, accepted) = tokio::join!(dialer.connect(target), listener.accept());
+        let _dialed = dialed.unwrap();
+        let (accepted, peer) = accepted.unwrap();
+        assert_eq!(peer, client.peer);
+        let local = accepted.local_addr().unwrap();
+        assert_eq!(
+            Attribution::new()
+                .unwrap()
+                .original(peer, local, &jobs, far()),
+            Err(Denial::SelfTarget)
+        );
+        client.process.kill().await.unwrap();
+    }
+
     #[test]
     fn a_connection_without_a_row_is_not_found_and_a_late_lookup_times_out() {
-        let idle = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let idle = std::net::TcpListener::bind((host(), 0)).unwrap();
         let peer = idle.local_addr().unwrap();
         let local = SocketAddr::new(peer.ip(), LISTENER_PORT);
         let jobs = [(SESSION, Arc::new(Job::new().unwrap()))];

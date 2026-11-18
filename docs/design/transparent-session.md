@@ -437,13 +437,16 @@ For a transparent session request the agent:
    process handle, which may still be in its 5 s grace period holding the
    mutex, bounded by a timeout *(proposed: 10 s)*, and fails with a clear
    error if the old helper does not end. The start:
-   1. reserves the listener port T: it binds a socket to `0.0.0.0:0` with
-      `SO_EXCLUSIVEADDRUSE`, without listening. If the system hands out a
-      port below 49152 (a customised dynamic range), it binds explicit ports
-      in 49152 to 65535 instead, a bounded number of tries from a random
-      start *(proposed)*. `SO_EXCLUSIVEADDRUSE` keeps every other socket off
-      port T, which matters because the engine treats any captured packet
-      with source port T as a listener reply;
+   1. reserves the listener port T (`transparent::listener::reserve`): it
+      binds a socket to `0.0.0.0:0` with `SO_EXCLUSIVEADDRUSE`, without
+      listening. If the system hands out a port below 49152 (a customised
+      dynamic range), it closes that socket and binds explicit ports in
+      49152 to 65535 instead: up to 64 independent random draws
+      (`PORT_ATTEMPTS`), skipping a port that is in use (`AddrInUse`) or
+      excluded (`PermissionDenied`, as for a reserved port range) and
+      stopping at any other error. `SO_EXCLUSIVEADDRUSE` keeps every other
+      socket off port T, which matters because the engine treats any
+      captured packet with source port T as a listener reply;
    2. creates the [liveness pipe](#liveness-pipe) and starts the
       [helper](#the-divert-helper) with T, N, the pipe name and its own pid
       through `ShellExecuteExW`;
@@ -757,32 +760,54 @@ agent over the pipe and into the agent's log at `debug` *(proposed)*.
   agent reads both TCP tables, IPv4 and IPv6, as `os_user::lookup` does
   with `families`: a dual-stack IPv6 socket carrying IPv4 (Java, .NET)
   appears in the IPv6 table as `::ffff:L:p` to `::ffff:R`. Addresses are
-  compared canonically. Candidate rows are those whose local end is `L:p`
-  and whose remote address is R.
-- Rows with pid 0, and rows whose owner is not in the job of a live
-  transparent session, are discarded first; a `TIME_WAIT` row left by an
-  earlier use of the port must not make two. For each remaining owner the
-  process is opened, its SID must equal the agent's, and `IsProcessInJob`
-  must be true for the job of exactly one live transparent session.
+  compared canonically.
+- **Direct dials are refused first** (`SelfTarget`). A loopback peer
+  (127.0.0.0/8 or `::1`, also IPv4-mapped) is refused at once: the filter
+  excludes loopback, so a reflected peer never is one. So is a connection
+  for which any row, whatever its pid or state, has local end `R:p` and
+  remote end `L:T`: a direct dial always leaves the dialer's own socket in
+  the tables (in `TIME_WAIT` with pid 0 once it has closed), while a
+  reflected peer R is a remote host, never a local socket. Without this
+  rule a process outside every job could take the local port of a client
+  in a transparent job (`SO_REUSEADDR`), or the same port on a second
+  local address, dial the listener, and be attributed to the client's
+  session with the client's destination. A process inside a job that dials
+  the listener, through L, another local address or loopback, is refused
+  the same way.
+- Candidate rows are those whose local end is `L:p` and whose remote
+  address is R. Rows with pid 0 (such as a `TIME_WAIT` row left by an
+  earlier use of the port) or remote port 0 are not candidates, and the
+  same socket listed in both tables (same pid, canonically equal ends)
+  counts once.
+- For each candidate the owner's process is opened, its SID must equal the
+  agent's, and `IsProcessInJob` must be true for the job of exactly one
+  live transparent session. A row whose owner is outside every transparent
+  job is discarded, so a row left by another owner does not make two. A
+  row whose owner is another user is discarded too, which is equivalent:
+  the agent starts the processes of its jobs under its own token, so
+  another user's process is in none of them. An owner in the jobs of more
+  than one session, or one that could not be opened or queried (a lookup
+  error, the deadline), ends the lookup with that denial instead, so that
+  an owner the agent could not attribute cannot let another row win.
 - Exactly one row must then remain. Its remote port is the original
-  destination port. The tables are read again while the owner's handle is
-  held (pid reuse), as `System::check` does. The lookup retries like
-  `System::find` and runs in `spawn_blocking` under the handshake deadline.
-- No row, more than one row, an owner outside every transparent job, an
-  owner of another user, or a lookup error closes the connection without
-  contacting any upstream.
-- A local process that connects to the listener directly through L (or
-  through loopback) is closed by the same checks: if it is outside every
-  transparent job, by the job check; if it is inside one, its derived
-  destination is `L:T` itself, which is refused.
+  destination port. The tables are read again while the owners' handles
+  are held (pid reuse), as `System::check` does, and both readings must
+  agree on the owner and the destination. The lookup retries like
+  `System::find`, only when no row was found or the readings disagree, and
+  runs in `spawn_blocking` under the handshake deadline.
+- No row, more than one row, a direct dial, an owner outside every
+  transparent job or in several sessions' jobs, an owner of another user,
+  or a lookup error closes the connection without contacting any upstream.
+  When no owner is admitted, the first refusal is the denial.
 - This one lookup gives both the session (and so its gateway and route) and
   the original destination `R:port`, so the helper needs no data channel to
   the agent. Taking the destination from the TCP tables is untested (the
   experiment used the engine's translation map); the fallback, if it proves
   unreliable, is a per-flow message from the helper on the pipe, which would
   widen what the agent parses from the elevated side.
-- The matcher is a pure function over `Row` *(proposed
-  `os_user::original`)*, next to `owner`, so it is tested on every platform.
+- The matcher is `os_user::original`, a pure function over `Row` next to
+  `owner`, so it is tested on every platform; `Attribution`
+  (`src/proxy/os_user/windows.rs`) is its Windows lookup.
 
 **Decision: proxy settings are kept.** The session's own loopback listener
 stays as today, with `os_user` restricted to the job (terminal) or
@@ -1107,7 +1132,7 @@ Threat-model additions *(to be made with the implementation)*:
 | Threat | Mitigation |
 | --- | --- |
 | A host on the network connects to the listener port. | The engine drops genuine inbound packets to T and the firewall rule is scoped to the port; if both fail, attribution is defence in depth only (a host R using a client's local port p can match). |
-| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job; a process in a job that dials the listener derives `L:T` as destination, which is refused. |
+| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket, so a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
 | A local process uses a transparent session by tagging its own job with N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
 | The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
 | The agent dies and its session processes are still sending. | `KILL_ON_JOB_CLOSE` ends them; the helper keeps dropping for 5 s before it exits. |
@@ -1165,10 +1190,22 @@ implemented in `src/divert/`):**
 - A cargo-fuzz target `divert-engine` over `Engine::process`, using the
   checker in `divert::fuzzing`.
 
-To add with step 4: `os_user::original` with exactly one row, no row, two
-rows, pid 0, a `TIME_WAIT` row of another owner next to the client's row, a
-wrong local address, and mapped rows (`::ffff:L:p` to `::ffff:R`) found in
-the IPv6 table.
+Implemented with step 4 (`src/proxy/os_user.rs`,
+`src/transparent/listener.rs`): `os_user::original` with exactly one row, no
+row, two rows, pid 0, a `TIME_WAIT` row of another owner next to the
+client's row, a wrong local address or port, mapped rows (`::ffff:L:p` to
+`::ffff:R`) found in the IPv6 table, the same socket listed in both tables,
+an owner that could not be inspected or is in two sessions' jobs next to an
+admitted row (in both row orders), the first refusal as the denial, a
+process in a job that dials the listener, a direct dial from a port shared
+with an in-job client, from the same port on a second local address and
+from a closed dialer row with pid 0, a loopback peer, a reflected
+connection to a remote port equal to T that is still accepted, and ports 0,
+1 and 65535; the session of exactly one job; reading both tables; the
+second reading and the retries under a deadline; the listener's port choice
+with a fake binder (an ephemeral port in range kept, one outside closed
+before the explicit draws, ports in use or excluded skipped, the attempt
+limit, other errors).
 
 **(b) Windows unit tests:**
 
@@ -1176,6 +1213,20 @@ the IPv6 table.
   `KILL_ON_JOB_CLOSE`, and the last tag set wins (implemented, run only on
   Windows CI); values outside 1 to 63 are refused by `Dscp`.
 - The agent's own-job check.
+- Attribution (`src/proxy/os_user/windows.rs`, implemented, unelevated,
+  type-checked from Linux only), with a child process in a job connected to
+  a server on the host's own non-loopback address: an IPv4 and a dual-stack
+  client attributed to the right one of two sessions with its pid and
+  destination; a client in no given session's job and an owner outside
+  every job refused (`NotInJob`); a client that dials the listener address
+  refused; a process outside the job that binds the client's port with
+  `SO_REUSEADDR` and dials the reserved listener refused; no row and a
+  passed deadline.
+- The listener socket (`src/transparent/listener/windows.rs`, implemented,
+  type-checked from Linux only): a reserved port in range with
+  `SO_EXCLUSIVEADDRUSE` read back, other binds of the port refused (also
+  with `SO_REUSEADDR`), and connections refused before `listen` and
+  accepted after it.
 
 **Agent tests (all platforms, fake `Launcher` and a fake helper seam):**
 
@@ -1403,9 +1454,12 @@ code to pass it, then a refactor.
    Windows 7 import allow-list.
 4. **Session adoption and the transparent listener.** `Proxy::adopter`,
    `Shared::adopt` (adoption implemented, with `Adopter` and
-   `proxy::reset`), `os_user::original`, `TransparentListener` with
-   `SO_EXCLUSIVEADDRUSE` and the port range, the registry of transparent
-   jobs, the engine state and session marks.
+   `proxy::reset`), `os_user::original` and its Windows lookup
+   `Attribution` (implemented; the Windows part type-checked from Linux
+   only), `TransparentListener` with `SO_EXCLUSIVEADDRUSE` and the port
+   range (the socket and the port choice implemented in
+   `transparent::listener`, the Windows part type-checked from Linux only),
+   the registry of transparent jobs, the engine state and session marks.
 5. **Agent wiring.** On-demand helper with `ShellExecuteExW`, the order of
    operations, fail-closed handling, `[transparent]`, the CLI flag, the IPC
    mode, the GUI option, `SessionInfo::transparent` and the `status` lines;
