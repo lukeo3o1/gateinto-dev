@@ -964,13 +964,34 @@ agent over the pipe and into the agent's log at `debug`, one event
   (`src/proxy/os_user/windows.rs`) is its Windows lookup.
 - **Dispatch** (`transparent::serve::serve`, over the `Attribute` seam that
   `Attribution` implements on Windows). `serve` is given the generation
-  whose listener it runs. A peer that can never be reflected, a loopback
-  peer (127.0.0.0/8 or `::1`, also IPv4-mapped) or one whose address is
-  the accepted socket's own local address, is reset at once, before it
-  takes an attribution permit or reads any table: any local process, of
-  any user, can dial the listener over loopback, where the firewall rule
-  does not apply, and would otherwise hold a permit for two table
-  readings. `original` keeps its own direct-dial checks behind it. For
+  whose listener it runs. A peer that can never be reflected is reset at
+  once, before it takes an attribution permit or reads any table: a
+  loopback peer (127.0.0.0/8 or `::1`, also IPv4-mapped), one whose
+  address is the accepted socket's own local address, and one with any
+  other address of this host, such as that of a Hyper-V, WSL, Docker or
+  VPN adapter. A reflected peer is always a remote host, because traffic
+  to the host's own addresses goes over loopback, which the filter
+  excludes. The last check reads the host's unicast address table
+  (`GetUnicastIpAddressTable` for both families, freed with
+  `FreeMibTable`), not the TCP tables, and compares canonically: an
+  IPv4-mapped address matches its IPv4 address, and IPv6 scope ids are
+  ignored, because the listener is IPv4 and so every peer is. The table is
+  read for every stream that passes the two cheaper checks, in the accept
+  loop: the call queries the system and waits on nothing, and an
+  attribution reads two larger tables anyway. Nothing is bound: the agent
+  never binds a socket to an address a peer chose, which, if it could
+  raise Windows Defender Firewall's "allow this app" prompt, would let any
+  local process raise it at will. A table that cannot be read counts as
+  remote, because a peer wrongly counted as local would have a genuine
+  stream reset, while one wrongly counted as remote only takes a permit
+  and is then refused by `original`. So a local process, of any user, that
+  dials the listener over loopback (where the firewall rule does not
+  apply) or from any address of this host is reset before it can hold a
+  permit for two table readings, unless the address table cannot be read.
+  `original` keeps its own direct-dial checks behind it. Transparent
+  sessions exist only on Windows; elsewhere the same check binds a UDP
+  socket to the peer's address with port 0, which succeeds only for an
+  address of the host, so that it can be tested. For
   every other stream the loop takes the snapshot of the sessions
   registered under its generation (`State::jobs(g)`), runs the attribution
   in `spawn_blocking` with the handshake timeout as its deadline, and on a
@@ -1334,7 +1355,7 @@ Threat-model additions *(to be made with the implementation)*:
 | Threat | Mitigation |
 | --- | --- |
 | A host on the network connects to the listener port. | The engine drops genuine inbound packets to T and the firewall rule is scoped to the port; if both fail, attribution is defence in depth only (a host R using a client's local port p can match). |
-| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A loopback peer or a peer with the listener's own address is reset before it takes an attribution permit or reads a table, so direct dials cannot exhaust the attributions in flight. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
+| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A peer with a loopback address or any other address of this host (the listener's own, or another adapter's, found in the host's unicast address table without binding anything) is reset before it takes an attribution permit or reads a TCP table, so direct dials from this host cannot exhaust the attributions in flight; only if the address table cannot be read does such a dial take a permit, and attribution then refuses it. Dials from other hosts are the row above. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
 | A local process uses a transparent session by tagging its own job with N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
 | The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
 | The agent dies and its session processes are still sending. | `KILL_ON_JOB_CLOSE` ends them; the helper keeps dropping for 5 s before it exits. |

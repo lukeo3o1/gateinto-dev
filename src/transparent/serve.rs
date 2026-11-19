@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,9 @@ use crate::proxy::{self, Denial, Original};
 pub(crate) const MAX_ATTRIBUTIONS: usize = 64;
 
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+#[cfg(windows)]
+mod windows;
 
 pub(crate) trait Attribute<K, J>: Send + Sync + 'static {
     fn attribute(
@@ -67,7 +70,29 @@ pub(crate) async fn serve<K, J, A>(
 
 fn reflectable(peer: SocketAddr, local: SocketAddr) -> bool {
     let peer = peer.ip().to_canonical();
-    !peer.is_loopback() && peer != local.ip().to_canonical()
+    !peer.is_loopback() && peer != local.ip().to_canonical() && !of_this_host(peer)
+}
+
+// A table that cannot be read counts as remote: that costs at most an attribution permit, while
+// counting a remote peer as local would reset a genuine stream.
+#[cfg(windows)]
+fn of_this_host(ip: IpAddr) -> bool {
+    windows::addresses().is_ok_and(|addresses| among(ip, addresses))
+}
+
+// Transparent sessions exist only on Windows. Elsewhere only an address of this host can be bound,
+// which keeps the check testable; any failure counts as remote, as above.
+#[cfg(not(windows))]
+fn of_this_host(ip: IpAddr) -> bool {
+    std::net::UdpSocket::bind((ip, 0)).is_ok()
+}
+
+#[cfg(any(windows, test))]
+fn among(ip: IpAddr, addresses: impl IntoIterator<Item = IpAddr>) -> bool {
+    let ip = ip.to_canonical();
+    addresses
+        .into_iter()
+        .any(|address| address.to_canonical() == ip)
 }
 
 async fn run<K, J, A>(
@@ -470,8 +495,84 @@ mod tests {
         assert!(!reflectable(addr("[2001:db8::1]:50000"), v6));
     }
 
-    #[tokio::test]
-    async fn the_listener_resets_a_loopback_peer_without_attributing_it() {
+    fn host() -> Ipv4Addr {
+        let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        // Connecting a UDP socket sends nothing; it only picks the address of the outbound route.
+        probe.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).unwrap();
+        let std::net::IpAddr::V4(ip) = probe.local_addr().unwrap().ip() else {
+            panic!("the probe is not IPv4");
+        };
+        assert!(
+            !ip.is_loopback() && !ip.is_unspecified(),
+            "this host has no non-loopback IPv4 address"
+        );
+        ip
+    }
+
+    #[test]
+    fn a_peer_with_another_address_of_this_host_is_not_reflectable() {
+        let host = host();
+        for local in [
+            "127.0.0.1:50123",
+            "[::ffff:127.0.0.1]:50123",
+            "203.0.113.9:50123",
+        ] {
+            let local = local.parse().unwrap();
+            for peer in [
+                SocketAddr::from((host, 50000)),
+                SocketAddr::from((host.to_ipv6_mapped(), 50000)),
+            ] {
+                assert!(!reflectable(peer, local), "{peer} {local}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_addresses_of_this_host_are_local() {
+        assert!(of_this_host(host().into()));
+        for remote in DOCUMENTATION {
+            assert!(!of_this_host(remote.parse().unwrap()), "{remote}");
+        }
+    }
+
+    const DOCUMENTATION: [&str; 3] = ["203.0.113.7", "198.51.100.7", "2001:db8::7"];
+
+    #[test]
+    fn a_peer_matches_an_address_of_the_table_canonically() {
+        let ip = |text: &str| text.parse::<std::net::IpAddr>().unwrap();
+        let table = [
+            ip("192.168.1.10"),
+            ip("::ffff:10.0.0.5"),
+            ip("fe80::1"),
+            ip("2001:db8::1"),
+        ];
+        for local in [
+            "192.168.1.10",
+            "::ffff:192.168.1.10",
+            "10.0.0.5",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            assert!(among(ip(local), table), "{local}");
+        }
+        for remote in ["192.168.1.11", "10.0.0.6", "fe80::2", "2001:db8::2", "::1"] {
+            assert!(!among(ip(remote), table), "{remote}");
+        }
+        assert!(!among(ip("192.168.1.10"), []));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_address_table_lists_this_hosts_address_and_no_documentation_address() {
+        let addresses = windows::addresses().unwrap();
+        assert!(addresses.contains(&host().into()), "{addresses:?}");
+        for remote in DOCUMENTATION {
+            let remote: std::net::IpAddr = remote.parse().unwrap();
+            assert!(!addresses.contains(&remote), "{remote}");
+        }
+    }
+
+    async fn the_real_listener_resets_without_attributing(client: TcpSocket) {
         let logs = crate::test_logs::capture();
         let state = running();
         let mut adopter = session(&state, 1, 4);
@@ -493,7 +594,7 @@ mod tests {
             }
         })
         .await;
-        let mut client = served.connect().await;
+        let mut client = client.connect(served.addr).await.unwrap();
         let addresses = [
             client.local_addr().unwrap().to_string(),
             served.addr.to_string(),
@@ -508,6 +609,21 @@ mod tests {
         for address in addresses {
             assert!(!refused[0].contains(&address), "{refused:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_listener_resets_a_loopback_peer_without_attributing_it() {
+        the_real_listener_resets_without_attributing(TcpSocket::new_v4().unwrap()).await;
+    }
+
+    // Windows may refuse a client bound to a non-loopback address that dials a loopback listener
+    // (strong host model), so this runs where that is known to work.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_listener_resets_a_peer_with_another_address_of_this_host_without_attributing_it() {
+        let client = TcpSocket::new_v4().unwrap();
+        client.bind(SocketAddr::from((host(), 0))).unwrap();
+        the_real_listener_resets_without_attributing(client).await;
     }
 
     #[tokio::test]

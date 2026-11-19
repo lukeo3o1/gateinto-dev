@@ -19,7 +19,9 @@ crypt32.dll CertFindCertificateInStore
 crypt32.dll CertFreeCertificateContext
 crypt32.dll CertOpenStore
 crypt32.dll CryptEncodeObjectEx
+iphlpapi.dll FreeMibTable
 iphlpapi.dll GetExtendedTcpTable
+iphlpapi.dll GetUnicastIpAddressTable
 kernel32.dll AcquireSRWLockExclusive
 kernel32.dll AcquireSRWLockShared
 kernel32.dll AddVectoredExceptionHandler
