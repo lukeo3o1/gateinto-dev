@@ -11,11 +11,17 @@ adoption into a session's proxy (`Proxy::adopter`), the attribution
 (`os_user::original`, `Attribution`), the listener socket
 (`transparent::listener`), the engine state with the registry and the
 session marks (`transparent::state`) and the listener's dispatch loop
-(`transparent::serve`). Nothing starts the helper or uses these parts yet;
-the agent wiring is step 5. `Job::set_dscp_tag`, the helper's Windows
-bindings, the Windows attribution and listener socket, and their tests have
-only been type-checked from Linux until Windows CI runs them, and the helper
-has never opened a WinDivert handle. The design rests on premises that have
+(`transparent::serve`). Step 5 is partly implemented: the agent side of the
+helper (`transparent::helper`: starting it through `ShellExecuteExW`, the
+liveness pipe server, its status line and noticing when it stops) and the
+availability check (`transparent::availability`). Nothing starts the helper
+or uses these parts yet; wiring them into the agent, the configuration, the
+CLI, IPC, the GUI and `status` is the rest of step 5. `Job::set_dscp_tag`,
+the helper's Windows bindings, the Windows attribution and listener socket,
+the agent side of the helper and the availability probes on Windows, and
+their tests have only been type-checked from Linux until Windows CI runs
+them; the helper has never opened a WinDivert handle and `ShellExecuteExW`
+has never been called. The design rests on premises that have
 not been verified: the evidence is two experiments on GitHub-hosted Windows
 Server images ([Evidence](#evidence)), and nothing has been tried on a
 client edition of Windows, unelevated, over IPv6, or next to a VPN or
@@ -145,12 +151,11 @@ not change.
   - the Windows implementation of the seams (`src/divert/windows.rs`) and
     the hidden subcommand `gateinto divert` (`src/main.rs`), Windows only.
 
-  Nothing starts the helper yet: the agent side is step 5.
+  Nothing starts the helper yet; its agent side is described below.
 - `windows-sys` 0.61.2 with `Win32_System_JobObjects`, enabled in
   `Cargo.toml`, defines the net rate control types; `Win32_System_IO`,
   `Win32_System_Pipes` and `Win32_System_SystemInformation` were added for
-  the helper. `Win32_UI_Shell`
-  (`ShellExecuteExW`) is not enabled.
+  the helper, and `Win32_UI_Shell` (`ShellExecuteExW`) for its agent side.
 - `os_user` (`src/proxy/os_user.rs`): `Row { local, remote, pid }`, `owner`
   (the row whose local end is the client's address and whose remote end is
   the listener, pid not 0, addresses compared canonically), and `lookup`
@@ -226,8 +231,9 @@ not change.
   (`src/main.rs`) or the `HKCU` `Run` value. The MSI installs
   `%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe`, a directory the user can
   write. `lifecycle::windows::elevated` reads `TokenElevation`;
-  `check_account` adds `ELEVATED_NOTE` when `setup` runs elevated. Nothing
-  in Gateinto starts an elevated process.
+  `check_account` adds `ELEVATED_NOTE` when `setup` runs elevated.
+  `transparent::helper::Windows` can start the elevated helper (below);
+  nothing calls it yet.
 - `ConfigFile` (`src/config.rs`) has `deny_unknown_fields` and the sections
   `gateways`, `device_key`, `limits`, `browser` and `terminal`.
 - IPC (`src/ipc.rs`): `Request::Launch` carries `uri::LaunchRequest`, the
@@ -240,8 +246,29 @@ not change.
   every request head (`requests()`); `Behavior::Tunnel` connects to the
   `CONNECT` target itself.
 - `.github/scripts/win7-imports.txt` lists every DLL import allowed in the
-  experimental Windows 7 build of `gateinto.exe`; `shell32.dll` is not in
-  it.
+  experimental Windows 7 build of `gateinto.exe`; the agent side of the
+  helper added `shell32.dll ShellExecuteExW`, `kernel32.dll GetProcessId`
+  and `kernel32.dll GetNamedPipeClientProcessId`, all on Windows 7.
+- The step 5 parts, which nothing uses yet:
+  - `transparent::helper` (`src/transparent/helper.rs`, platform-independent
+    and unit-tested on every platform with a fake platform and paused time):
+    `Supervisor::new(platform)` and `Supervisor::start(ListenerPort, Dscp)`
+    over the `Platform` (`create_pipe`, `launch`), `Pipe` (`connect`,
+    `client_pid`, `AsyncRead`) and `Process` (`id`, `wait`) seams, which
+    returns `Running` or a `StartError`; `Running::stopped`, which completes
+    once with `Stopped` (`Closed`, `Protocol` or `Exited`); `Exit` (the exit
+    code, if it could be read); `PREVIOUS_HELPER_TIMEOUT` (10 s),
+    `START_TIMEOUT` (60 s) and `DRAIN_TIMEOUT` (1 s); see [Order of
+    operations](#order-of-operations) and [Liveness pipe](#liveness-pipe).
+    The Windows implementation (`src/transparent/helper/windows.rs`):
+    `Windows` (the platform), `Server` (the pipe server) and `Elevated`
+    (the helper's process handle);
+  - `transparent::availability` (`src/transparent/availability.rs`, with
+    the Windows probes in `src/transparent/availability/windows.rs`):
+    `available()`, `Availability` (`available` or `unavailable: <reason>`)
+    and `Reason`; see [CLI, IPC, GUI and status](#cli-ipc-gui-and-status);
+  - `job::parameters`, the command-line quoting of `src/job.rs` for a
+    parameter string without the executable.
 
 ## Evidence
 
@@ -510,8 +537,11 @@ For a transparent session request the agent:
    raises one UAC prompt; a request that finds `running(g)` continues.
    Before starting a new helper the agent waits on the previous helper's
    process handle, which may still be in its 5 s grace period holding the
-   mutex, bounded by a timeout *(proposed: 10 s)*, and fails with a clear
-   error if the old helper does not end. The start:
+   mutex, bounded by `PREVIOUS_HELPER_TIMEOUT` (10 s), and fails with "the
+   previous transparent engine has not ended" if the old helper does not
+   end. The previous helper is the last one launched, also by a start that
+   failed after the launch. Steps 2 and 3 are `Supervisor::start`
+   (`src/transparent/helper.rs`). The start:
    1. reserves the listener port T (`transparent::listener::reserve`): it
       binds a socket to `0.0.0.0:0` with `SO_EXCLUSIVEADDRUSE`, without
       listening. If the system hands out a port below 49152 (a customised
@@ -522,13 +552,20 @@ For a transparent session request the agent:
       stopping at any other error. `SO_EXCLUSIVEADDRUSE` keeps every other
       socket off port T, which matters because the engine treats any
       captured packet with source port T as a listener reply;
-   2. creates the [liveness pipe](#liveness-pipe) and starts the
-      [helper](#the-divert-helper) with T, N, the pipe name and its own pid
-      through `ShellExecuteExW`;
-   3. waits for the helper's first line at most 60 s, measured from
-      `ShellExecuteExW` returning, so time spent on the UAC prompt is not
-      counted (whether the call blocks until the prompt is answered needs
-      verification);
+   2. creates the [liveness pipe](#liveness-pipe) with a name from 16 bytes
+      of `SystemRandom` and starts the [helper](#the-divert-helper) with
+      `divert --pipe <name> --agent-pid <pid> --port T --dscp N` through
+      `ShellExecuteExW`; a declined prompt (`ERROR_CANCELLED`, 1223) fails
+      with "the administrator approval for the transparent engine was
+      declined";
+   3. waits for the helper to connect and for its first line at most 60 s
+      (`START_TIMEOUT`), measured from `ShellExecuteExW` returning, so time
+      spent on the UAC prompt is not counted (whether the call blocks until
+      the prompt is answered needs verification). It checks the client's
+      pid before it reads anything. If the helper process ends first, it
+      drains the pipe for at most 1 s (`DRAIN_TIMEOUT`) and reports an
+      `error` line found there, otherwise the exit code. `ready` returns a
+      `Running` handle; anything else fails the start and closes the pipe;
    4. on `ready`, starts listening on T and, under the engine lock, moves
       the state from `starting(g)` to `running(g)` only if it is still
       `starting(g)` with its own generation; otherwise its helper has
@@ -559,8 +596,20 @@ subcommand of the same executable, started on demand through UAC.**
 The MSI is per-user, the agent runs unelevated, and there is no machine
 service, so opening a WinDivert handle (which needs administrator rights and
 loads a kernel driver) needs an elevated process. The agent starts it with
-`ShellExecuteExW`, verb `runas`, `SEE_MASK_NOCLOSEPROCESS`, and keeps the
-returned process handle.
+`ShellExecuteExW`, verb `runas`, the absolute path of its own executable
+(`std::env::current_exe`), the arguments quoted by `job::parameters`,
+`SW_HIDE`, `SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC`, and keeps the
+returned process handle (`transparent::helper::Elevated`, pid from
+`GetProcessId`). `SEE_MASK_NOASYNC` because the call runs on a thread of
+Tokio's blocking pool (`spawn_blocking`), which may end soon after the call
+returns, and the flag is meant for such callers: the call completes before
+it returns. The agent does
+not call `CoInitializeEx`: no shell extension is involved in running an
+executable with `runas`, and it would add `ole32.dll` to the imports (see
+[Needs verification](#needs-verification)). The process is waited for on a
+thread of its own, as `job::Process` does (`WaitForSingleObject`, then
+`GetExitCodeProcess`), so it holds no blocking-pool thread for the life of
+the helper and does not delay the runtime's shutdown.
 
 - **Arguments:** `divert --port T --dscp N --pipe <name> --agent-pid <pid>`.
   The subcommand takes each as a raw `Option<OsString>`, accepts values that
@@ -660,10 +709,13 @@ returned process handle.
 
 - The agent creates a named pipe with a random name
   (`\\.\pipe\gateinto-divert-` and 32 lowercase hex digits,
-  `PipeName::from_random`), one instance, `PIPE_ACCESS_DUPLEX`,
-  `FILE_FLAG_FIRST_PIPE_INSTANCE`, remote clients rejected, a server handle
-  that is not inheritable, and a DACL that allows the agent's user and the
-  Administrators group *(proposed, step 5)*. Duplex, because the helper
+  `PipeName::from_random`), one instance (`max_instances(1)`),
+  `PIPE_ACCESS_DUPLEX`, `FILE_FLAG_FIRST_PIPE_INSTANCE`, remote clients
+  rejected, a server handle that is not inheritable (`bInheritHandle =
+  FALSE`), and the security descriptor
+  `O:<user>D:P(A;;GA;;;<user>)(A;;GA;;;BA)`, which allows the agent's user
+  and the Administrators group only (`transparent::helper::Windows`, as the
+  agent pipe in `src/ipc.rs` builds its own). Duplex, because the helper
   opens the pipe for reading and writing and keeps a read pending; not
   inheritable, so that the agent's death breaks the pipe even while a
   process the agent started is still running.
@@ -682,10 +734,15 @@ returned process handle.
   pending read would block every counter line. The agent accepts
   exactly one client and checks
   `GetNamedPipeClientProcessId` against the pid of the process handle
-  `ShellExecuteExW` returned.
+  `ShellExecuteExW` returned before it reads a byte; on a mismatch the start
+  fails and the pipe is closed, which makes that helper exit (the unelevated
+  agent cannot kill it).
 - An agent that sees the helper process end drains the pipe before it
   reports a generic exit: exit code 4 means the helper wrote an `error` line
-  just before it ended *(proposed, step 5)*.
+  just before it ended. The drain lasts at most `DRAIN_TIMEOUT` (1 s), long
+  enough for a connection and data the helper sent before it ended to be
+  delivered; a `ready` found there still fails the start with the exit
+  code, since the helper has ended.
 - **Protocol.** The helper's first and only status line is either `ready` or
   `error <code>` with `<code>` from a fixed list (`ErrorCode`):
   `invalid-arguments`, `another-helper`, `firewall-rule`, `files-missing`,
@@ -706,6 +763,13 @@ returned process handle.
   detected through the process handle from `ShellExecuteExW` and reported
   generically with its exit code. Whether the unelevated agent can wait on
   and query that handle for an elevated child needs verification.
+- `Running::stopped` completes once with what the agent saw first: the pipe
+  closed or broken (`Stopped::Closed`), a protocol error
+  (`Stopped::Protocol`), or the helper process ended (`Stopped::Exited` with
+  its code). Counter lines are logged at `debug` as aggregate fields until
+  then. Dropping `Running` closes the pipe, which tells the helper that the
+  agent is gone; the supervisor keeps the process handle's exit, so the
+  next start waits for that helper.
 - When the agent sees the pipe break, a protocol error, or the helper process
   end, it runs that helper's pipe-break handler (`State::stop`) with the
   helper's generation: if the state is still that generation's, engine
@@ -819,7 +883,8 @@ Counters (`divert::Counters`, aggregate integers): `captured`, `new_flows`,
 `fragments_dropped`, `options_dropped`, `malformed_dropped`, `table_full`,
 `contained_udp`, `contained_other`, `contained_ipv6`, `inbound_dropped`).
 The engine loop adds `receive_errors` and `send_errors`. They go to the
-agent over the pipe and into the agent's log at `debug` *(proposed)*.
+agent over the pipe and into the agent's log at `debug`, one event
+"transparent engine counters" with every field (`Running::stopped`).
 
 ### Transparent listener and attribution
 
@@ -1103,8 +1168,8 @@ with `netsh`.**
 
 ### CLI, IPC, GUI and status
 
-All *(proposed)*; the exact spelling is decided in step 5 of the
-[Implementation plan](#implementation-plan).
+All *(proposed)* except the availability check below; the exact spelling
+is decided in step 5 of the [Implementation plan](#implementation-plan).
 
 - CLI: `gateinto session terminal --agent --transparent`. `--transparent`
   requires `--agent`.
@@ -1121,7 +1186,22 @@ All *(proposed)*; the exact spelling is decided in step 5 of the
 - `gateinto status` prints `transparent-sessions: available` or
   `unavailable: <reason>` (system too old, ARM64, WinDivert files missing or
   digest mismatch) and, from the agent, `transparent-engine: running` or
-  `stopped` with the last helper error.
+  `stopped` with the last helper error. The check exists:
+  `transparent::availability::available()`, in this order: not Windows
+  ("transparent sessions need Windows"); a version older than 10.0.14393
+  from `RtlGetVersion`, which does not depend on the executable's manifest
+  as `GetVersionExW` does, or no version ("Windows 10 1607 or Windows Server
+  2016 or later is required"); ARM64 ("Windows on ARM64 is not supported"),
+  for a build that is neither x86 nor x64 or a native machine
+  `IMAGE_FILE_MACHINE_ARM64` from `IsWow64Process2`, which covers the x86
+  build under WOW64 and is expected to cover the x64 build under emulation
+  (see [Needs verification](#needs-verification)); then the pinned files next to the executable, all opened
+  before any is hashed, naming the first one missing ("WinDivert64.sys is
+  missing next to gateinto.exe") or whose SHA-256 differs or cannot be
+  read. `RtlGetVersion` and `IsWow64Process2` are looked up at runtime
+  (`GetModuleHandleW`, `GetProcAddress`), so neither becomes a static
+  import, and `IsWow64Process2`, which Windows 7 lacks, is only asked for
+  after the version check passed.
 - Links never select a transparent session: a page must not be able to
   trigger a UAC prompt.
 
@@ -1465,6 +1545,47 @@ attribution:
   challenge stores the verification offer and closes the stream; adopted
   tunnels log the target like proxy-mode tunnels and never the peer.
 
+Implemented with step 5 (`src/transparent/helper.rs`,
+`src/transparent/availability.rs`), on every platform with a fake platform
+and paused time: `ready` returns a running handle and the helper got
+`divert --pipe <name> --agent-pid <own pid> --port T --dscp N` with the name
+of the pipe that was created, a new random name per start; each `error
+<code>` becomes its message; counters, an unknown line, an empty line, a
+second status line, a line after `error` and a line cut off by the end of
+the pipe before the first status fail as protocol errors; an exit before
+connecting is reported with its exit code (3, 4, 5, 0 and others) one drain
+period later; an `error` line followed by an immediate exit is drained and
+reported with its code, and a `ready` found by the drain still fails with
+the exit code; a pipe closed without a line is reported with the exit code
+once the process ends, or as a timeout; the timeout counts from the launch
+returning (a 30 s prompt plus 60 s); a declined prompt and another launch
+error; a pipe that cannot be created starts nothing; a client with another
+pid fails the start and finds the pipe closed; after `ready`, counters keep
+it running, a broken pipe, a protocol error (a second status line, an
+`error` line, an invalid counter line, an unfinished line) or the exit end
+the run with the reason; dropping the handle closes the pipe; counter lines
+are logged at `debug` with every field and no pipe name, pid or port; the
+next start waits for the previous helper, also after a failed start, and
+fails after 10 s when it does not end, without creating a pipe; a helper
+whose run has ended is not waited for. The availability check over a fake
+probe: supported versions with the pinned files, older versions and an
+unknown version probe nothing else, ARM64 before any file, a missing or
+refused file named before any digest, the first file that differs or cannot
+be read named, and "not Windows" off Windows.
+
+**Agent side of the helper on Windows** (`src/transparent/helper/windows.rs`,
+`src/transparent/availability/windows.rs`, unelevated; type-checked from
+Linux only): the pipe's DACL read back holds exactly the user and
+`BA`; a client of the same user connects, its pid is read and its line
+arrives; one instance, a second client gets `ERROR_PIPE_BUSY`; a second
+server of the same name cannot be created; the options are duplex,
+first-instance and reject remote clients; the server handle is not
+inheritable; the pid and exit code of a process handle; the version from
+`RtlGetVersion`, not ARM64 on the runners, and the WinDivert files missing
+beside the test executable. `ShellExecuteExW` is not called by unit tests,
+since it would raise a UAC prompt on a desktop; it is left for the
+integration test.
+
 **Helper tests on Windows** (`src/divert/windows.rs`, unelevated, without
 WinDivert; type-checked from Linux only): a missing file, a digest mismatch,
 held files that can be read but not written, renamed or deleted, and a
@@ -1644,11 +1765,17 @@ code to pass it, then a refactor.
    engine state with its generations, the registry of transparent sessions
    and the session marks (`transparent::state`); and the listener's
    dispatch loop with its in-flight bound (`transparent::serve`).
-5. **Agent wiring.** On-demand helper with `ShellExecuteExW`, the order of
-   operations, fail-closed handling, `[transparent]`, the CLI flag, the IPC
-   mode, the GUI option, `SessionInfo::transparent` and the `status` lines;
-   `Win32_UI_Shell` in `Cargo.toml` and `shell32.dll` in the Windows 7
-   import allow-list.
+5. **Agent wiring** (partly implemented). On-demand helper with
+   `ShellExecuteExW`, the order of operations, fail-closed handling,
+   `[transparent]`, the CLI flag, the IPC mode, the GUI option,
+   `SessionInfo::transparent` and the `status` lines; `Win32_UI_Shell` in
+   `Cargo.toml` and `shell32.dll` in the Windows 7 import allow-list.
+   Implemented so far, used by nothing yet: the agent side of the helper
+   (`transparent::helper`: the previous-helper wait, the pipe with its DACL,
+   the launch, the first status line with the pid check, the drain and the
+   timeouts, and the running handle that reports how the helper stopped)
+   and the availability check (`transparent::availability`), with
+   `Win32_UI_Shell` and the new imports in the allow-list.
 6. **Packaging and user documentation.** The optional MSI feature with the
    WinDivert files and license, and the security model, threat model,
    security boundaries, install and compatibility pages.
@@ -1714,6 +1841,19 @@ would need a design change if they fail. Results go to
   prompt (the 60 s timeout from its return depends on it), and whether a
   prompt raised by a background agent without a foreground window only
   flashes in the taskbar.
+- `ShellExecuteExW` with `runas` for an executable works without
+  `CoInitializeEx` on the calling thread, a Tokio blocking-pool thread with
+  `SEE_MASK_NOASYNC`. The documentation asks callers to initialize COM
+  because shell extensions may run; none is expected for an executable.
+  Fallback: run the call on a thread of its own after
+  `CoInitializeEx(COINIT_APARTMENTTHREADED)`, which adds `ole32.dll`
+  (present on Windows 7) to the imports.
+- `ShellExecuteExW` accepts the image path `std::env::current_exe` returns
+  when the agent was started through a `\\?\` path.
+- `IsWow64Process2` reports `IMAGE_FILE_MACHINE_ARM64` as the native machine
+  for the x64 build under emulation on ARM64, as it does for the x86 build
+  under WOW64; otherwise the x64 build under emulation is reported as
+  available and fails when the helper loads the driver.
 - Holding the WinDivert files open without write or delete sharing prevents
   replacing them (and renaming their directory or any ancestor of it) until
   the driver and the DLL are loaded, and still lets `LoadLibraryExW` and the

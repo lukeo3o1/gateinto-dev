@@ -51,9 +51,9 @@ pub(super) fn recv_error(error: io::Error) -> RecvError {
     }
 }
 
-pub(super) struct PinnedFile {
-    pub(super) name: &'static str,
-    pub(super) sha256: [u8; 32],
+pub(crate) struct PinnedFile {
+    pub(crate) name: &'static str,
+    pub(crate) sha256: [u8; 32],
 }
 
 const LIBRARY: &str = "WinDivert.dll";
@@ -82,7 +82,7 @@ pub(super) const X86: &[PinnedFile] = &[
     DRIVER_64,
 ];
 
-pub(super) const FILES: &[PinnedFile] = if cfg!(target_arch = "x86_64") {
+pub(crate) const FILES: &[PinnedFile] = if cfg!(target_arch = "x86_64") {
     X86_64
 } else if cfg!(target_arch = "x86") {
     X86

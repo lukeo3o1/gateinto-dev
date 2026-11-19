@@ -15,7 +15,7 @@ pub mod pump;
 #[cfg(test)]
 mod testing;
 #[cfg(any(windows, test))]
-mod windivert;
+pub(crate) mod windivert;
 #[cfg(windows)]
 pub mod windows;
 

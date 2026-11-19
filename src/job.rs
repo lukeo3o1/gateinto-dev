@@ -3,6 +3,8 @@ use std::fmt;
 use std::io;
 
 #[cfg(windows)]
+pub(crate) use windows::wait_for;
+#[cfg(windows)]
 pub use windows::{Process, SpawnOptions};
 
 #[cfg(target_os = "linux")]
@@ -88,21 +90,40 @@ fn command_line(executable: &[u16], args: &[Vec<u16>]) -> io::Result<Vec<u16>> {
             "the executable path contains a quote",
         ));
     }
-    if executable.contains(&0) || args.iter().any(|arg| arg.contains(&0)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the command line contains a NUL character",
-        ));
+    if executable.contains(&0) {
+        return Err(nul_in_command_line());
     }
     let mut line = vec![QUOTE];
     line.extend_from_slice(executable);
     line.push(QUOTE);
-    for arg in args {
+    if !args.is_empty() {
         line.push(u16::from(b' '));
+    }
+    line.extend(parameters(args)?);
+    Ok(line)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn parameters(args: &[Vec<u16>]) -> io::Result<Vec<u16>> {
+    if args.iter().any(|arg| arg.contains(&0)) {
+        return Err(nul_in_command_line());
+    }
+    let mut line = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            line.push(u16::from(b' '));
+        }
         quote(arg, &mut line);
     }
     line.push(0);
     Ok(line)
+}
+
+fn nul_in_command_line() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "the command line contains a NUL character",
+    )
 }
 
 fn quote(arg: &[u16], line: &mut Vec<u16>) {
@@ -577,7 +598,7 @@ mod windows {
         }
     }
 
-    fn wait_for(process: &Handle) -> io::Result<ExitStatus> {
+    pub(crate) fn wait_for(process: &Handle) -> io::Result<ExitStatus> {
         // SAFETY: process is an open process handle.
         if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
             return Err(io::Error::last_os_error());
@@ -862,6 +883,7 @@ mod tests {
             line(r"C:\Program Files\Edge\msedge.exe", &["a", "--flag=1"]).unwrap(),
             r#""C:\Program Files\Edge\msedge.exe" a --flag=1"#
         );
+        assert_eq!(line("x", &[]).unwrap(), r#""x""#);
     }
 
     #[test]
@@ -882,6 +904,23 @@ mod tests {
                 "{arg}"
             );
         }
+    }
+
+    #[test]
+    fn parameters_are_quoted_like_a_command_line_without_the_executable() {
+        let args: Vec<Vec<u16>> = ["divert", "--pipe", r"\\.\pipe\x", "a b", "", r#"a"b"#]
+            .iter()
+            .map(|arg| wide(arg))
+            .collect();
+        let mut line = parameters(&args).unwrap();
+        assert_eq!(line.pop(), Some(0));
+        assert_eq!(
+            String::from_utf16(&line).unwrap(),
+            r#"divert --pipe \\.\pipe\x "a b" "" "a\"b""#
+        );
+        assert_eq!(parameters(&[]).unwrap(), [0]);
+        let error = parameters(&[wide("a\0b")]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

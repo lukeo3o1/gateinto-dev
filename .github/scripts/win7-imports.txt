@@ -88,11 +88,13 @@ kernel32.dll GetModuleFileNameW
 kernel32.dll GetModuleHandleA
 kernel32.dll GetModuleHandleExW
 kernel32.dll GetModuleHandleW
+kernel32.dll GetNamedPipeClientProcessId
 kernel32.dll GetNamedPipeServerProcessId
 kernel32.dll GetOEMCP
 kernel32.dll GetOverlappedResult
 kernel32.dll GetProcAddress
 kernel32.dll GetProcessHeap
+kernel32.dll GetProcessId
 kernel32.dll GetQueuedCompletionStatusEx
 kernel32.dll GetStartupInfoW
 kernel32.dll GetStdHandle
@@ -211,6 +213,7 @@ ntdll.dll NtOpenFile
 ntdll.dll NtReadFile
 ntdll.dll NtWriteFile
 ntdll.dll RtlNtStatusToDosError
+shell32.dll ShellExecuteExW
 user32.dll GetProcessWindowStation
 user32.dll GetUserObjectInformationW
 user32.dll MessageBoxW
