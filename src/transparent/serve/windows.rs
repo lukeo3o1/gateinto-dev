@@ -1,17 +1,23 @@
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::NO_ERROR;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetUnicastIpAddressTable, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
 };
-use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC};
+use windows_sys::Win32::Networking::WinSock::{
+    AF_INET, IpDadStateDeprecated as IP_DAD_STATE_DEPRECATED,
+    IpDadStateDuplicate as IP_DAD_STATE_DUPLICATE, IpDadStatePreferred as IP_DAD_STATE_PREFERRED,
+    IpDadStateTentative as IP_DAD_STATE_TENTATIVE,
+};
 
-pub(super) fn addresses() -> io::Result<Vec<IpAddr>> {
+use super::DadState;
+
+pub(super) fn addresses() -> io::Result<Vec<(Ipv4Addr, DadState)>> {
     let mut table = null_mut();
     // SAFETY: table receives a table allocated by the call, which Table frees with FreeMibTable.
-    let status = unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut table) };
+    let status = unsafe { GetUnicastIpAddressTable(AF_INET, &mut table) };
     if status != NO_ERROR {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
@@ -42,16 +48,21 @@ impl Drop for Table {
     }
 }
 
-fn address(row: &MIB_UNICASTIPADDRESS_ROW) -> Option<IpAddr> {
-    // SAFETY: si_family overlays the family field of both variants, and it selects the variant read.
-    unsafe {
-        match row.Address.si_family {
-            AF_INET => {
-                let bytes = row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes();
-                Some(Ipv4Addr::from(bytes).into())
-            }
-            AF_INET6 => Some(Ipv6Addr::from(row.Address.Ipv6.sin6_addr.u.Byte).into()),
-            _ => None,
+fn address(row: &MIB_UNICASTIPADDRESS_ROW) -> Option<(Ipv4Addr, DadState)> {
+    // SAFETY: si_family overlays the family field of every variant, and the IPv4 variant is read
+    // only when it is AF_INET.
+    let bytes = unsafe {
+        if row.Address.si_family != AF_INET {
+            return None;
         }
-    }
+        row.Address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()
+    };
+    let state = match row.DadState {
+        IP_DAD_STATE_PREFERRED => DadState::Preferred,
+        IP_DAD_STATE_DEPRECATED => DadState::Deprecated,
+        IP_DAD_STATE_TENTATIVE => DadState::Tentative,
+        IP_DAD_STATE_DUPLICATE => DadState::Duplicate,
+        _ => DadState::Invalid,
+    };
+    Some((Ipv4Addr::from(bytes), state))
 }

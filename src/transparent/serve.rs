@@ -77,7 +77,7 @@ fn reflectable(peer: SocketAddr, local: SocketAddr) -> bool {
 // counting a remote peer as local would reset a genuine stream.
 #[cfg(windows)]
 fn of_this_host(ip: IpAddr) -> bool {
-    windows::addresses().is_ok_and(|addresses| among(ip, addresses))
+    windows::addresses().is_ok_and(|table| among(ip, table))
 }
 
 // Transparent sessions exist only on Windows. Elsewhere only an address of this host can be bound,
@@ -88,11 +88,24 @@ fn of_this_host(ip: IpAddr) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn among(ip: IpAddr, addresses: impl IntoIterator<Item = IpAddr>) -> bool {
-    let ip = ip.to_canonical();
-    addresses
-        .into_iter()
-        .any(|address| address.to_canonical() == ip)
+#[derive(Debug, Clone, Copy)]
+enum DadState {
+    Invalid,
+    Tentative,
+    Duplicate,
+    Deprecated,
+    Preferred,
+}
+
+// A tentative, duplicate or invalid address may be another host's, so it counts as remote too.
+#[cfg(any(windows, test))]
+fn among(ip: IpAddr, table: impl IntoIterator<Item = (std::net::Ipv4Addr, DadState)>) -> bool {
+    let IpAddr::V4(ip) = ip.to_canonical() else {
+        return false;
+    };
+    table.into_iter().any(|(address, state)| {
+        address == ip && matches!(state, DadState::Preferred | DadState::Deprecated)
+    })
 }
 
 async fn run<K, J, A>(
@@ -498,7 +511,9 @@ mod tests {
     fn host() -> Ipv4Addr {
         let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         // Connecting a UDP socket sends nothing; it only picks the address of the outbound route.
-        probe.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).unwrap();
+        probe
+            .connect((Ipv4Addr::new(192, 0, 2, 1), 9))
+            .expect("this host has no IPv4 default route");
         let std::net::IpAddr::V4(ip) = probe.local_addr().unwrap().ip() else {
             panic!("the probe is not IPv4");
         };
@@ -541,34 +556,56 @@ mod tests {
     fn a_peer_matches_an_address_of_the_table_canonically() {
         let ip = |text: &str| text.parse::<std::net::IpAddr>().unwrap();
         let table = [
-            ip("192.168.1.10"),
-            ip("::ffff:10.0.0.5"),
-            ip("fe80::1"),
-            ip("2001:db8::1"),
+            (Ipv4Addr::new(192, 168, 1, 10), DadState::Preferred),
+            (Ipv4Addr::new(10, 0, 0, 5), DadState::Deprecated),
         ];
         for local in [
             "192.168.1.10",
             "::ffff:192.168.1.10",
             "10.0.0.5",
-            "fe80::1",
-            "2001:db8::1",
+            "::ffff:10.0.0.5",
         ] {
             assert!(among(ip(local), table), "{local}");
         }
-        for remote in ["192.168.1.11", "10.0.0.6", "fe80::2", "2001:db8::2", "::1"] {
+        for remote in [
+            "192.168.1.11",
+            "10.0.0.6",
+            "::ffff:10.0.0.6",
+            "::192.168.1.10",
+            "fe80::1",
+            "::1",
+        ] {
             assert!(!among(ip(remote), table), "{remote}");
         }
         assert!(!among(ip("192.168.1.10"), []));
     }
 
+    #[test]
+    fn only_a_preferred_or_deprecated_address_is_of_this_host() {
+        let address = Ipv4Addr::new(192, 168, 1, 10);
+        for (state, local) in [
+            (DadState::Preferred, true),
+            (DadState::Deprecated, true),
+            (DadState::Tentative, false),
+            (DadState::Duplicate, false),
+            (DadState::Invalid, false),
+        ] {
+            for peer in [address.into(), address.to_ipv6_mapped().into()] {
+                assert_eq!(among(peer, [(address, state)]), local, "{peer} {state:?}");
+            }
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn the_address_table_lists_this_hosts_address_and_no_documentation_address() {
-        let addresses = windows::addresses().unwrap();
-        assert!(addresses.contains(&host().into()), "{addresses:?}");
+        let table = windows::addresses().unwrap();
+        assert!(among(host().into(), table.iter().copied()), "{table:?}");
         for remote in DOCUMENTATION {
-            let remote: std::net::IpAddr = remote.parse().unwrap();
-            assert!(!addresses.contains(&remote), "{remote}");
+            assert!(
+                !among(remote.parse().unwrap(), table.iter().copied()),
+                "{remote}"
+            );
         }
     }
 
