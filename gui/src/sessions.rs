@@ -271,6 +271,7 @@ mod tests {
             browser: Some(BrowserKind::Edge),
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 

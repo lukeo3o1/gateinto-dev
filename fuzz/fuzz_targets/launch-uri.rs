@@ -1,7 +1,7 @@
 #![no_main]
 
 use gateinto::config::{GatewayName, PortalUrl};
-use gateinto::ipc::Request;
+use gateinto::ipc::{Mode, Request};
 use gateinto::link::{self, Decision, Known, KnownGateway, Origin, Resolution, Source};
 use gateinto::proxy::Route;
 use gateinto::uri::{LaunchRequest, MAX_LEN, UriError};
@@ -122,8 +122,9 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let line = Request::Launch(request.clone()).to_string();
+    let line = Request::Launch(request.clone(), Mode::Proxy).to_string();
     assert!(!line.contains(['\r', '\n']));
+    assert!(!line.ends_with(" mode=transparent"));
     let fields = [&request.url, &request.portal]
         .into_iter()
         .flatten()
@@ -134,5 +135,5 @@ fuzz_target!(|data: &[u8]| {
         line.split(' ').count(),
         2 + usize::from(request.profile.is_some()) + fields
     );
-    assert_eq!(line.parse::<Request>(), Ok(Request::Launch(request)));
+    assert_eq!(line.parse::<Request>(), Ok(Request::Launch(request, Mode::Proxy)));
 });

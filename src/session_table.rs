@@ -82,6 +82,7 @@ mod tests {
             browser,
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 

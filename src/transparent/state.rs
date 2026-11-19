@@ -9,7 +9,6 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::http::Authority;
-#[cfg(windows)]
 use crate::job::Job;
 use crate::proxy::Adopter;
 
@@ -60,7 +59,6 @@ pub trait Terminate {
     fn terminate(&self) -> io::Result<()>;
 }
 
-#[cfg(windows)]
 impl Terminate for Job {
     fn terminate(&self) -> io::Result<()> {
         Job::terminate(self)

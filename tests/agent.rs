@@ -16,11 +16,12 @@ use gateinto::agent::{
 use gateinto::browser::ProfileDir;
 use gateinto::clock::unix_now;
 use gateinto::config::{GatewayName, PortalUrl};
+use gateinto::divert::Dscp;
 use gateinto::identity::certificates::SelfSignedCertificates;
 use gateinto::identity::client_cert::ClientCertificate;
 use gateinto::identity::encoding::sha256_fingerprint;
 use gateinto::ipc::{
-    self, BindError, ConfigSource, ConfirmToken, Endpoint, LogPage, Request, RequestError,
+    self, BindError, ConfigSource, ConfirmToken, Endpoint, LogPage, Mode, Request, RequestError,
     Response, Server, SessionAuth, SessionInfo, SessionKind, SessionRoute,
 };
 use gateinto::link::{Known, KnownGateway, LinkedGateway, Source};
@@ -210,6 +211,7 @@ impl TestAgent {
                 limits,
                 logbook: Default::default(),
                 config: ConfigSource::Defaults,
+                dscp: Dscp::DEFAULT,
             },
             TestProfiles {
                 plans,
@@ -267,7 +269,7 @@ impl TestAgent {
     }
 
     async fn asks(&self, request: LaunchRequest) -> (Vec<String>, ConfirmToken) {
-        let lines = match self.send(Request::Launch(request)).await {
+        let lines = match self.send(Request::Launch(request, Mode::Proxy)).await {
             Response::Ok(lines) => lines,
             Response::Error(error) => panic!("launch failed: {error}"),
         };
@@ -290,6 +292,7 @@ impl TestAgent {
     async fn launch(&self, profile: &str) -> Response {
         self.send(Request::Launch(
             LaunchRequest::new(profile, "session_credentials").unwrap(),
+            Mode::Proxy,
         ))
         .await
     }
@@ -390,6 +393,7 @@ async fn a_gateway_approved_from_a_mixed_link_is_saved_with_the_mixed_route() {
     let (plain, plain_browser) = agent
         .opened(Request::Launch(
             LaunchRequest::new("newco", "session_credentials").unwrap(),
+            Mode::Proxy,
         ))
         .await;
     assert_eq!(field(&plain, "route"), "mixed");
@@ -433,12 +437,12 @@ async fn a_launch_line_without_a_route_from_an_older_client_uses_the_gateway_rou
 async fn a_gateway_approved_from_an_older_client_launch_without_a_route_is_saved_with_the_gateway_route()
  {
     let agent = TestAgent::start(limits()).await;
-    let current = Request::Launch(agent.new_link(None)).to_string();
+    let current = Request::Launch(agent.new_link(None), Mode::Proxy).to_string();
     assert!(current.contains(" route=saved"), "{current}");
     let old_line = current.replace(" route=saved", "");
     let old: Request = old_line.parse().unwrap();
     assert_eq!(old.to_string(), old_line);
-    let Request::Launch(old) = old else {
+    let Request::Launch(old, _) = old else {
         panic!("{old_line}")
     };
     let (echo, token) = agent.asks(old).await;
@@ -461,6 +465,7 @@ async fn a_gateway_approved_from_a_gateway_link_is_saved_with_the_gateway_route(
     let (plain, plain_browser) = agent
         .opened(Request::Launch(
             LaunchRequest::new("newco", "session_credentials").unwrap(),
+            Mode::Proxy,
         ))
         .await;
     assert!(!plain.iter().any(|line| line.starts_with("route:")));
@@ -568,6 +573,7 @@ async fn the_session_list_is_one_json_object_per_session_without_secrets() {
         browser: None,
         shell: None,
         verification: false,
+        transparent: false,
     };
     assert_eq!(listed, expected);
     let list = agent.list().await;
@@ -991,6 +997,7 @@ async fn serving_removes_profiles_left_behind_by_a_crashed_agent() {
             limits: limits(),
             logbook: Default::default(),
             config: ConfigSource::Defaults,
+            dscp: Dscp::DEFAULT,
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -1030,6 +1037,7 @@ async fn the_agent_answers_log_requests_from_its_logbook() {
             limits: limits(),
             logbook,
             config: ConfigSource::Defaults,
+            dscp: Dscp::DEFAULT,
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -1075,6 +1083,7 @@ async fn the_agent_reports_only_the_config_path_it_was_given() {
             limits: limits(),
             logbook: Logbook::default(),
             config: ConfigSource::File(config.clone()),
+            dscp: Dscp::DEFAULT,
         },
         TestProfiles {
             plans: BTreeMap::new(),
@@ -1217,7 +1226,10 @@ async fn a_link_opens_a_start_page_on_the_portal_origin_only() {
     let start = "https://portal.example.test/deep?x=1";
 
     let (_, browser) = agent
-        .opened(Request::Launch(link("main", Some(start), None, None)))
+        .opened(Request::Launch(
+            link("main", Some(start), None, None),
+            Mode::Proxy,
+        ))
         .await;
     assert_eq!(browser.start_page(), start);
 
@@ -1231,7 +1243,10 @@ async fn a_link_opens_a_start_page_on_the_portal_origin_only() {
         ("bare", "https://portal.example.test/", "has no portal_url"),
     ] {
         let response = agent
-            .send(Request::Launch(link(profile, Some(url), None, None)))
+            .send(Request::Launch(
+                link(profile, Some(url), None, None),
+                Mode::Proxy,
+            ))
             .await;
         assert!(refused(&response, error), "{url}: {response:?}");
     }
@@ -1250,23 +1265,19 @@ async fn a_link_that_disagrees_with_a_local_gateway_is_refused_without_asking() 
         ),
     ] {
         let response = agent
-            .send(Request::Launch(link(
-                "main",
-                None,
-                Some(gateway),
-                Some(portal),
-            )))
+            .send(Request::Launch(
+                link("main", None, Some(gateway), Some(portal)),
+                Mode::Proxy,
+            ))
             .await;
         assert!(refused(&response, "differs"), "{response:?}");
     }
     let upstream = format!("127.0.0.1:{}", agent.upstream_port);
     let response = agent
-        .send(Request::Launch(link(
-            "other",
-            None,
-            Some(&upstream),
-            Some(NEW_PORTAL),
-        )))
+        .send(Request::Launch(
+            link("other", None, Some(&upstream), Some(NEW_PORTAL)),
+            Mode::Proxy,
+        ))
         .await;
     assert!(refused(&response, "already set up as"), "{response:?}");
     assert!(agent.linked().is_empty());
@@ -1302,16 +1313,17 @@ async fn a_new_gateway_is_stored_only_after_approval_and_relays_the_session() {
         "no gateway confirmation"
     ));
     let (_, again) = agent
-        .opened(Request::Launch(link(
-            "newco",
-            None,
-            Some(&agent.gateway()),
-            Some(NEW_PORTAL),
-        )))
+        .opened(Request::Launch(
+            link("newco", None, Some(&agent.gateway()), Some(NEW_PORTAL)),
+            Mode::Proxy,
+        ))
         .await;
     assert_eq!(again.start_page(), NEW_PORTAL);
     let (_, plain) = agent
-        .opened(Request::Launch(link("newco", None, None, None)))
+        .opened(Request::Launch(
+            link("newco", None, None, None),
+            Mode::Proxy,
+        ))
         .await;
     assert_eq!(plain.start_page(), NEW_PORTAL);
     assert_eq!(agent.linked().len(), 1);
@@ -1356,7 +1368,9 @@ async fn only_one_confirmation_waits_at_a_time_until_it_is_answered() {
         Some("https://other.example/"),
     );
 
-    let response = agent.send(Request::Launch(other.clone())).await;
+    let response = agent
+        .send(Request::Launch(other.clone(), Mode::Proxy))
+        .await;
     assert!(refused(&response, "already waiting"), "{response:?}");
     let wrong = ConfirmToken::random().unwrap();
     assert!(refused(
@@ -1412,7 +1426,9 @@ async fn the_rate_limit_applies_before_any_confirmation_is_asked() {
         Response::Ok(Vec::new())
     );
 
-    let response = agent.send(Request::Launch(agent.new_link(None))).await;
+    let response = agent
+        .send(Request::Launch(agent.new_link(None), Mode::Proxy))
+        .await;
     assert!(
         refused(&response, "too many launch requests"),
         "{response:?}"
@@ -1440,7 +1456,10 @@ async fn an_approval_is_kept_when_the_session_cap_is_reached_meanwhile() {
     browser.exit();
     let deadline = std::time::Instant::now() + WAIT;
     let lines = loop {
-        match agent.send(Request::Launch(agent.new_link(None))).await {
+        match agent
+            .send(Request::Launch(agent.new_link(None), Mode::Proxy))
+            .await
+        {
             Response::Ok(lines) => break lines,
             Response::Error(error) if error.contains("already open") => {
                 assert!(

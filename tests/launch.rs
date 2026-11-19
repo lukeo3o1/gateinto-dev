@@ -426,10 +426,12 @@ async fn an_address_only_gateway_is_confirmed_stored_without_portal_and_reloaded
     .with_route("mixed")
     .unwrap();
     let generated = request.proposed_profile().unwrap();
-    let Response::Ok(lines) = ipc::send(&endpoint, &Request::Launch(request.clone()))
-        .await
-        .unwrap()
-    else {
+    let Response::Ok(lines) = ipc::send(
+        &endpoint,
+        &Request::Launch(request.clone(), ipc::Mode::Proxy),
+    )
+    .await
+    .unwrap() else {
         panic!("not confirmation")
     };
     assert_eq!(field(&lines, "gateway"), generated.as_str());
@@ -532,10 +534,12 @@ async fn a_launch_without_a_route_uses_the_route_saved_in_the_config_file() {
         assert!(refused.stdout.is_empty(), "{}", refused.stdout);
     }
     let endpoint = launcher.endpoint();
-    let Response::Ok(asked) = ipc::send(&endpoint, &Request::Launch(mixed.parse().unwrap()))
-        .await
-        .unwrap()
-    else {
+    let Response::Ok(asked) = ipc::send(
+        &endpoint,
+        &Request::Launch(mixed.parse().unwrap(), ipc::Mode::Proxy),
+    )
+    .await
+    .unwrap() else {
         panic!("not a confirmation")
     };
     assert_eq!(field(&asked, "route"), "mixed");
@@ -1346,7 +1350,7 @@ async fn an_approved_gateway_from_a_link_is_stored_and_relays_through_its_upstre
     let start = "https://portal.newco.example/app";
     let uri = link_uri("newco", Some(start), Some(&gateway), Some(portal));
 
-    let request = Request::Launch(uri.parse().unwrap());
+    let request = Request::Launch(uri.parse().unwrap(), ipc::Mode::Proxy);
     let Response::Ok(lines) = ipc::send(&endpoint, &request).await.unwrap() else {
         panic!("the agent refused the link");
     };
@@ -1424,10 +1428,12 @@ async fn a_linked_gateway_trusts_only_the_public_roots() {
         Some(&format!("127.0.0.1:{}", launcher.upstream_port)),
         Some("https://portal.newco.example/"),
     );
-    let Response::Ok(lines) = ipc::send(&endpoint, &Request::Launch(uri.parse().unwrap()))
-        .await
-        .unwrap()
-    else {
+    let Response::Ok(lines) = ipc::send(
+        &endpoint,
+        &Request::Launch(uri.parse().unwrap(), ipc::Mode::Proxy),
+    )
+    .await
+    .unwrap() else {
         panic!("the agent refused the link");
     };
     let token = ipc::confirm_token(&lines).unwrap();

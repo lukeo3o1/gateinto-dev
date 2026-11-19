@@ -13,15 +13,20 @@ adoption into a session's proxy (`Proxy::adopter`), the attribution
 session marks (`transparent::state`) and the listener's dispatch loop
 (`transparent::serve`). Step 5 is partly implemented: the agent side of the
 helper (`transparent::helper`: starting it through `ShellExecuteExW`, the
-liveness pipe server, its status line and noticing when it stops) and the
-availability check (`transparent::availability`). Nothing starts the helper
-or uses these parts yet; wiring them into the agent, the configuration, the
-CLI, IPC, the GUI and `status` is the rest of step 5. `Job::set_dscp_tag`,
-the helper's Windows bindings, the Windows attribution and listener socket,
-the agent side of the helper and the availability probes on Windows, and
-their tests have only been type-checked from Linux until Windows CI runs
-them; the helper has never opened a WinDivert handle and `ShellExecuteExW`
-has never been called. The design rests on premises that have
+liveness pipe server, its status line and noticing when it stops), the
+availability check (`transparent::availability`), and the agent wiring: the
+IPC mode word, `SessionInfo::transparent`, and transparent browser and
+terminal sessions in the agent in the [order of
+operations](#order-of-operations), over an engine seam (`src/agent/engine.rs`)
+and `Launcher::tag`. Nothing asks for a transparent session yet: the
+configuration (`[transparent] dscp`), the CLI flag, the GUI option, the
+`session list` marking and the `status` lines are the rest of step 5.
+`Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
+and listener socket, the agent side of the helper, the agent's Windows
+engine and the availability probes on Windows, and their tests have only
+been type-checked from Linux until Windows CI runs them; the helper has
+never opened a WinDivert handle and `ShellExecuteExW` has never been
+called. The design rests on premises that have
 not been verified: the evidence is two experiments on GitHub-hosted Windows
 Server images ([Evidence](#evidence)), and nothing has been tried on a
 client edition of Windows, unelevated, over IPv6, or next to a VPN or
@@ -151,7 +156,7 @@ not change.
   - the Windows implementation of the seams (`src/divert/windows.rs`) and
     the hidden subcommand `gateinto divert` (`src/main.rs`), Windows only.
 
-  Nothing starts the helper yet; its agent side is described below.
+  The agent starts the helper through its agent side, described below.
 - `windows-sys` 0.61.2 with `Win32_System_JobObjects`, enabled in
   `Cargo.toml`, defines the net rate control types; `Win32_System_IO`,
   `Win32_System_Pipes` and `Win32_System_SystemInformation` were added for
@@ -192,7 +197,8 @@ not change.
   (`src/http.rs`) has `Host::Ipv4` and `Host::Ipv6` variants and converts
   from a `SocketAddr` (`From<SocketAddr>`, an IP literal);
   `connect_request` writes `CONNECT {target}` with the literal.
-- The step 4 parts, which nothing uses yet:
+- The step 4 parts, which the agent uses (the listener socket, the
+  attribution and the dispatch loop on Windows only):
   - `os_user::original`, `one_session`, `all_rows`, `confirmed` and `retry`
     (`src/proxy/os_user.rs`) and the Windows lookup `Attribution`
     (`src/proxy/os_user/windows.rs`), described under [Transparent listener
@@ -208,38 +214,45 @@ not change.
     transparent sessions under one `std::sync::Mutex`, `Phase`, `Begin`,
     `Starter`, `Joiner`, `Refusal`, the session mark `Mark` with its
     `Launch` guard and `Closing`, and the `Terminate` seam over a job,
-    implemented by `Job` on Windows (`Job::terminate`,
-    `TerminateJobObject`); see [Engine state and session
+    implemented by `Job` (`Job::terminate`: `TerminateJobObject` on
+    Windows, an `Unsupported` error elsewhere, where no transparent session
+    exists); see [Engine state and session
     registration](#engine-state-and-session-registration);
   - `transparent::serve` (`src/transparent/serve.rs`): `serve`, the
     accept and dispatch loop of one generation's listener over the
     `Attribute` seam, which `Attribution` implements on Windows, and
     `MAX_ATTRIBUTIONS` (64).
 - `SessionManager::start` (`src/sessions.rs`) binds the `Proxy` with
-  `Proxy::bind_sharing` and moves it into a task running `run_until` with a
-  close signal; `Session` keeps no handle to the proxy's `Shared`.
+  `Proxy::bind_sharing`, takes its `Adopter` (`Session::adopter`) and moves
+  it into a task running `run_until` with a close signal; `Session` keeps no
+  handle to the proxy's `Shared`.
 - Browser sessions (`Agent::start`, `src/agent.rs`): `Launcher::job` returns
   `browser_job()`, which on failure logs a warning and returns `None`; on
-  `SpawnError::Job` the agent closes the session and starts the browser
-  without a job, with `session_credentials` only. The browser gets
-  `--proxy-server=http://<listen>` from `browser::browser_args`.
+  `SpawnError::Job` the agent closes the session and starts a proxy-mode
+  browser without a job, with `session_credentials` only; a transparent one
+  fails instead. The browser gets `--proxy-server=http://<listen>` from
+  `browser::browser_args`, in both modes.
 - Terminal sessions (`Agent::terminal`): `terminal::terminal_job` turns a job
   failure into an error with no fallback; `terminal::terminal_proxy` sets
   `LocalAuth::OS_USER` with the job; `terminal::terminal_environment` sets
-  the proxy variables to the session's loopback listener.
+  the proxy variables to the session's loopback listener, in both modes.
 - The agent is unelevated and per-user, started by `spawn_agent`
   (`src/main.rs`) or the `HKCU` `Run` value. The MSI installs
   `%LOCALAPPDATA%\Programs\Gateinto\gateinto.exe`, a directory the user can
   write. `lifecycle::windows::elevated` reads `TokenElevation`;
   `check_account` adds `ELEVATED_NOTE` when `setup` runs elevated.
-  `transparent::helper::Windows` can start the elevated helper (below);
-  nothing calls it yet.
+  `transparent::helper::Windows` starts the elevated helper (below) when the
+  agent starts its engine for a transparent session.
 - `ConfigFile` (`src/config.rs`) has `deny_unknown_fields` and the sections
   `gateways`, `device_key`, `limits`, `browser` and `terminal`.
-- IPC (`src/ipc.rs`): `Request::Launch` carries `uri::LaunchRequest`, the
-  type the `gateinto://` parser produces; `Request::Terminal` carries
-  `TerminalRequest { gateway, route }`. `SessionInfo` (`ipc-types`) uses
-  `serde(default)` without `deny_unknown_fields`.
+- IPC (`src/ipc.rs`): `Request::Launch(LaunchRequest, Mode)` carries
+  `uri::LaunchRequest`, the type the `gateinto://` parser produces, and the
+  mode apart from it; `Request::Terminal` carries `TerminalRequest { gateway,
+  route, mode }`. `Mode` is `Proxy` (the default) or `Transparent`, whose
+  word `mode=transparent` ends the line ([CLI, IPC, GUI and
+  status](#cli-ipc-gui-and-status)). `SessionInfo` (`ipc-types`) uses
+  `serde(default)` without `deny_unknown_fields` and has `transparent`,
+  serialized only when true.
 - `gateinto status` (`status` in `src/main.rs`) prints Linux-only lines from
   `lifecycle::current_linux_status`; it prints no Windows capability lines.
 - The test upstream fixture (`tests/fixture/`, `UpstreamProxy`) records
@@ -249,7 +262,7 @@ not change.
   experimental Windows 7 build of `gateinto.exe`; the agent side of the
   helper added `shell32.dll ShellExecuteExW`, `kernel32.dll GetProcessId`
   and `kernel32.dll GetNamedPipeClientProcessId`, all on Windows 7.
-- The step 5 parts, which nothing uses yet:
+- The step 5 parts so far:
   - `transparent::helper` (`src/transparent/helper.rs`, platform-independent
     and unit-tested on every platform with a fake platform and paused time):
     `Supervisor::new(platform)` and `Supervisor::start(ListenerPort, Dscp)`
@@ -257,7 +270,7 @@ not change.
     `client_pid`, `AsyncRead`) and `Process` (`id`, `wait`) seams, which
     returns `Running` or a `StartError`; `Running::stopped`, which completes
     once with `Stopped` (`Closed`, `Protocol` or `Exited`); `Exit` (the exit
-    code, if it could be read); `PREVIOUS_HELPER_TIMEOUT` (10 s),
+    code, if it could be read); `PREVIOUS_HELPER_TIMEOUT` (25 s),
     `START_TIMEOUT` (60 s) and `DRAIN_TIMEOUT` (1 s); see [Order of
     operations](#order-of-operations) and [Liveness pipe](#liveness-pipe).
     The Windows implementation (`src/transparent/helper/windows.rs`):
@@ -268,7 +281,19 @@ not change.
     `available()`, `Availability` (`available` or `unavailable: <reason>`)
     and `Reason`; see [CLI, IPC, GUI and status](#cli-ipc-gui-and-status);
   - `job::parameters`, the command-line quoting of `src/job.rs` for a
-    parameter string without the executable.
+    parameter string without the executable;
+  - the agent wiring (`src/agent.rs`, `src/agent/engine.rs`):
+    `AgentOptions::dscp` (`main` passes `Dscp::DEFAULT` until the
+    configuration sets it), `LaunchLimiter::would_allow`, `Launcher::tag`,
+    the engine seam `Engine` (`available`, `start`) with `Started` (the
+    helper's `stopped` future and a `Listener` that runs the dispatch loop),
+    implemented on Windows by `Divert` over one `Supervisor<helper::Windows>`
+    and elsewhere by an unavailable engine; the agent's registry
+    (`Inner::registry`, `State<SessionId, Job>`), `Agent::ensure_engine`,
+    `Agent::watch_engine`, `Agent::register`, `launched`,
+    `Agent::transparent_engine` (`EngineStatus`: the phase and the last
+    helper error) and `Agent::transparent_availability`; see [Order of
+    operations](#order-of-operations).
 
 ## Evidence
 
@@ -381,8 +406,9 @@ opt-in per agent-hosted browser or terminal session.**
 **Decision: one engine state and a per-session open/closing mark, each under
 a lock, so that no process starts in a job after the engine stopped.**
 
-- The agent keeps one engine state under a lock (`transparent::state::State`;
-  step 5 gives the agent one): `stopped`, `starting(g)` or `running(g)`
+- The agent keeps one engine state under a lock (`transparent::state::State`,
+  the agent's `Inner::registry`, a `State<SessionId, Job>` for the agent's
+  lifetime): `stopped`, `starting(g)` or `running(g)`
   (`Phase`). The same `std::sync::Mutex` guards the generation counter and
   the registry of transparent sessions, so that registering only under
   `running(g)` is one atomic step. The generation `g` is a counter incremented
@@ -467,17 +493,23 @@ a lock, so that no process starts in a job after the engine stopped.**
   - `Mark::launch` returns a `Launch` guard, held while the process is
     spawned (inside the `spawn_blocking` closure that spawns it), or
     `Closing`.
-- **Lock order.** In the code today, a terminal launch takes `launching`
-  (`Inner::launching`, `src/agent.rs:484`), then `Inner::terminals`
-  (`src/agent.rs:500`), which it holds through job creation,
-  `SessionManager::start` and the spawn, then `Inner::sessions`; the comment
-  at `src/agent.rs:497-499` states "launching, terminals, sessions". A
-  browser launch takes `launching` (`src/agent.rs:414`) and holds
-  `Inner::sessions` from `src/agent.rs:676` across `SessionManager::start`
-  and the spawn. `Agent::close` and `Agent::close_all`
-  (`src/agent.rs:839-871`) take `Inner::browsers` or `Inner::terminals`,
-  release it, and then take `Inner::sessions`. The new locks are
-  innermost: launching, terminals, sessions, engine state, session mark.
+- **Lock order.** A terminal launch takes `launching` (`Inner::launching`,
+  `src/agent.rs:681`), then `Inner::terminals` (`src/agent.rs:693`), which it
+  holds through job creation, the tag, `SessionManager::start`, the
+  registration and the spawn, then `Inner::sessions` (`src/agent.rs:713`)
+  for the start and the registration; the comment at
+  `src/agent.rs:690-692` states "launching, terminals, sessions, engine
+  state, session mark". A browser launch takes `launching`
+  (`src/agent.rs:472` in proxy mode, `535` for a transparent one) and holds
+  `Inner::sessions` from `src/agent.rs:947` across `SessionManager::start`,
+  the registration and the spawn. Both register (`Agent::register`, the
+  engine lock) while holding `sessions`, and take the session's mark
+  (`launched`) inside the `spawn_blocking` closure that spawns the process.
+  `Agent::close` and `Agent::close_all` (`src/agent.rs:1136-1174`) take
+  `Inner::browsers` or `Inner::terminals`, release it, and then take
+  `Inner::sessions` (`close_all` unregisters its sessions while holding
+  it). The new locks are innermost: launching, terminals, sessions, engine
+  state, session mark.
 - **Lock scope of the handler.** It holds the engine lock only to check
   its generation, set `stopped` and take the snapshot, and each session's
   mark only to set `closing` and terminate that job. It releases both
@@ -485,7 +517,14 @@ a lock, so that no process starts in a job after the engine stopped.**
   take `Inner::browsers` or `Inner::terminals` and then `Inner::sessions`.
   It never waits for a lock of the existing order while holding a new one,
   so a launch that holds `terminals` or `sessions` while waiting for the
-  engine lock cannot deadlock with it.
+  engine lock cannot deadlock with it. In the agent (`Agent::watch_engine`)
+  it runs `State::stop` in `spawn_blocking`, then ends that generation's
+  listener, then takes and releases `launching` before it closes the
+  sessions through `Agent::close`: a launch that registered before the stop
+  adds its session to `browsers` or `terminals` only when it ends, and a
+  close before that would only close the session and miss its process. It
+  holds no other lock while it waits for `launching`, and a launch holding
+  `launching` waits for nothing the handler holds.
 
 ### Order of operations
 
@@ -498,32 +537,39 @@ For a transparent session request the agent:
    effects, so that a request that would fail anyway raises no UAC prompt.
    The authoritative checks under `launching` (and, for terminals, under
    `terminals`) stay as they are and run again.
-   - **Rate limit.** Today `Agent::allow_launch`
-     (`src/agent.rs:465-481`) locks `Inner::launches`, a
+   The pre-checks are `Agent::launch_transparent` (`src/agent.rs:527-533`)
+   for browsers and `Agent::check_transparent_terminal`
+   (`src/agent.rs:793-805`) for terminals.
+   - **Rate limit.** `Agent::allow_launch` locks `Inner::launches`, a
      `std::sync::Mutex` around `LaunchLimiter`, and calls
      `LaunchLimiter::allow`, which drops entries older than `launch_window`
      and, when fewer than `launches` remain, records the request and returns
-     true. `Agent::launch` and `Agent::terminal` call it right after taking
-     `launching` (`src/agent.rs:416`, `486`). `allow` consumes a slot, so the
-     pre-check uses a read-only variant, `LaunchLimiter::would_allow`
-     *(proposed)*, under the same mutex, which drops expired entries but
-     records nothing; the check under `launching` still records the request.
-   - **Platform (terminals).** `Agent::terminal` refuses when
-     `Launcher::terminals()` is false (`src/agent.rs:491-495`); the
-     pre-check asks the same.
-   - **Capacity.** Browsers: `Agent::check_capacity` (`src/agent.rs:657-665`,
-     called at `420`) compares `Inner::browsers` with
-     `AgentLimits::max_browser_sessions`. Terminals: `Agent::terminal`
-     compares `Inner::terminals` with `max_terminal_sessions` while holding
-     `terminals` (`src/agent.rs:500-505`). The pre-check reads the same
-     counts, taking each map's lock only for the read.
+     true. `Agent::launch`, `Agent::launch_transparent` and `Agent::terminal`
+     call it right after taking `launching`. `allow` consumes a slot, so the
+     pre-check calls `Agent::would_allow_launch`, which uses the read-only
+     `LaunchLimiter::would_allow` under the same mutex: it drops expired
+     entries but records nothing, and `allow` is `would_allow` followed by
+     the record. Both answer the same rate-limit error.
+   - **Platform.** Terminals: `Launcher::terminals()`, as `Agent::terminal`
+     asks it. Both kinds: `Engine::available` (`Agent::check_transparent`,
+     in `spawn_blocking`, since the Windows probe hashes the WinDivert
+     files); `unavailable: <reason>` refuses with "transparent sessions are
+     unavailable: <reason>". Outside Windows the engine is always
+     unavailable ("transparent sessions need Windows").
+   - **Capacity.** Browsers: `Agent::check_capacity` compares
+     `Inner::browsers` with `AgentLimits::max_browser_sessions`. Terminals:
+     `Agent::check_terminal_capacity` compares the count of `Inner::terminals`
+     with `max_terminal_sessions`; the pre-check takes `terminals` only to
+     read the count, `Agent::terminal` checks again while holding it.
    - **Gateway.** Terminals: `Profiles::terminal_session(&gateway)`, which
-     refuses a gateway that is not in the configuration file
-     (`src/agent.rs:507`). Browsers: `Profiles::known()` and `link::resolve`
-     with `Decision::Defer` (`src/agent.rs:421-423`), which reads only; a
-     result other than `Resolution::Launch`, that is a request that would
-     need a gateway confirmation, is refused for a transparent session,
-     because the transparent mode is never set by a link.
+     refuses a gateway that is not in the configuration file. Browsers:
+     `Profiles::known()` and `link::resolve` with `Decision::Defer`
+     (`transparent_launch`), which reads only; a result other than
+     `Resolution::Launch`, that is a request that would need a gateway
+     confirmation, is refused for a transparent session ("a transparent
+     session is not started for a request that needs a gateway
+     confirmation; ..."), because the transparent mode is never set by a
+     link. Such a request never becomes the pending confirmation.
 
    The pre-checks guarantee no UAC prompt only for the requests they refuse.
    Several concurrent requests can pass them, share one prompt, and still be
@@ -536,12 +582,20 @@ For a transparent session request the agent:
    `starting(g)` waits for the outcome of generation `g`, so one start
    raises one UAC prompt; a request that finds `running(g)` continues.
    Before starting a new helper the agent waits on the previous helper's
-   process handle, which may still be in its 5 s grace period holding the
-   mutex, bounded by `PREVIOUS_HELPER_TIMEOUT` (10 s), and fails with "the
-   previous transparent engine has not ended" if the old helper does not
-   end. The previous helper is the last one launched, also by a start that
-   failed after the launch. Steps 2 and 3 are `Supervisor::start`
-   (`src/transparent/helper.rs`). The start:
+   process handle, which may still be ending, bounded by
+   `PREVIOUS_HELPER_TIMEOUT` (25 s, above the helper's worst-case end of
+   about 20 s: the 5 s grace period, the 5 s shutdown watchdog and up to
+   10 s for the final `netsh`), and fails with "the previous transparent
+   engine has not ended" if the old helper does not end. The previous
+   helper is the last one launched, also by a start that failed after the
+   launch; the agent keeps one `Supervisor` for its lifetime (in the
+   Windows engine `Divert`), so this holds across generations. A helper of
+   an earlier agent run is not known to the new agent; the new helper then
+   answers `error another-helper` ("another transparent engine is running
+   or still ending on this machine; try again in a few seconds"). In the
+   agent this step is `Agent::ensure_engine` (`src/agent.rs:605-642`) over
+   the `Engine` seam (`src/agent/engine.rs`); steps 2 and 3 are
+   `Supervisor::start` (`src/transparent/helper.rs`). The start:
    1. reserves the listener port T (`transparent::listener::reserve`): it
       binds a socket to `0.0.0.0:0` with `SO_EXCLUSIVEADDRUSE`, without
       listening. If the system hands out a port below 49152 (a customised
@@ -575,14 +629,46 @@ For a transparent session request the agent:
       firewall rule avoids Windows Firewall's "allow this app" prompt for
       `gateinto.exe`, which would create a rule for every port if the user
       accepted it (needs verification).
-2. Creates the job, sets and reads back the tag.
-3. Starts the session (`SessionManager::start`) and registers its job and
-   adoption channel with the transparent listener under the engine lock,
-   only if the state is `running(g)` then, recording that `g`.
-4. Starts the browser or shell in the job under the session's mark.
 
-Any failure closes what was opened and answers an error. There is no silent
-downgrade to a proxy-mode session: the user asked for transparent routing,
+   In the agent, the Windows engine creates the `Attribution`, reserves the
+   port, runs `Supervisor::start` and listens; any failure there is
+   answered with its message and recorded for `status`, and
+   `Starter::finish(Err(message))` hands it to every joiner. Then
+   `Agent::ensure_engine` looks once, biased, at the running handle's
+   `stopped` future: a helper whose pipe already broke fails the start with
+   its own message. Otherwise it spawns the stop-watcher on the handle
+   (`Agent::watch_engine`), which from then on drains the counter lines and
+   runs the handler of `g` whenever the helper stops, and calls
+   `Starter::finish(Ok(()))`. That can fail only if the watcher has already
+   stopped `g`; the listener is then dropped and the request fails. On
+   success it spawns that generation's `serve` with a shutdown future that
+   ends when the watcher drops its sender. No lock is held while it waits,
+   and a request that joined receives the same outcome.
+2. Creates the job, sets and reads back the tag: under `launching` (and
+   `terminals`) the authoritative checks run again, then `Launcher::job` or
+   `Launcher::terminal_job`, then `Agent::tag` (`Launcher::tag`, on Windows
+   `Job::set_dscp_tag`, in `spawn_blocking`) with `AgentOptions::dscp`. A
+   transparent browser without a job fails ("a transparent browser session
+   needs a job object, which could not be created; nothing was started");
+   a tag that cannot be set fails with "setting the DSCP tag N on the job
+   of the session failed: <error>; nothing was started".
+3. Starts the session (`SessionManager::start`, with the proxy settings of
+   proxy mode) and registers its job and adoption channel
+   (`Session::adopter`) with the transparent listener under the engine lock
+   (`Agent::register`, `State::register`), only if the state is
+   `running(g)` then, recording that `g`. A refusal closes the session and
+   answers "the transparent engine is not running; nothing was started".
+4. Starts the browser or shell in the job under the session's mark: the
+   `spawn_blocking` closure holds `Mark::launch` while it spawns
+   (`launched`), and a closing mark fails the spawn ("the transparent
+   session is closing"). A failed spawn unregisters and closes the session;
+   a transparent browser whose spawn fails with `SpawnError::Job` is not
+   started again without a job.
+
+Any failure closes what was opened and answers an error. Every close path
+(`Agent::close`, `Agent::close_all`, a session that ends by itself, the
+stop-watcher) unregisters the session (`State::unregister`). There is no
+silent downgrade to a proxy-mode session: the user asked for transparent routing,
 and a proxy-mode session would send everything that ignores the proxy
 settings directly. Messages name the cause: the helper's `error` code, the
 helper's exit code when it ended without a line, a timeout, the tag that
@@ -598,13 +684,17 @@ service, so opening a WinDivert handle (which needs administrator rights and
 loads a kernel driver) needs an elevated process. The agent starts it with
 `ShellExecuteExW`, verb `runas`, the absolute path of its own executable
 (`std::env::current_exe`), the arguments quoted by `job::parameters`,
-`SW_HIDE`, `SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC`, and keeps the
-returned process handle (`transparent::helper::Elevated`, pid from
-`GetProcessId`). `SEE_MASK_NOASYNC` because the call runs on a thread of
-Tokio's blocking pool (`spawn_blocking`), which may end soon after the call
-returns, and the flag is meant for such callers: the call completes before
-it returns. The agent does
-not call `CoInitializeEx`: no shell extension is involved in running an
+`SW_HIDE`, `SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC |
+SEE_MASK_FLAG_NO_UI`, and keeps the returned process handle
+(`transparent::helper::Elevated`, pid from `GetProcessId`).
+`SEE_MASK_NOASYNC` because the call runs on a thread of Tokio's blocking pool
+(`spawn_blocking`), which may end soon after the call returns, and the flag
+is meant for such callers: the call completes before it returns.
+`SEE_MASK_FLAG_NO_UI` keeps the shell from showing an error dialog of its
+own, for example when the executable cannot be started, since the agent
+answers the error itself; the UAC consent prompt is not error UI and is
+expected to still appear (see [Needs verification](#needs-verification)).
+The agent does not call `CoInitializeEx`: no shell extension is involved in running an
 executable with `runas`, and it would add `ole32.dll` to the imports (see
 [Needs verification](#needs-verification)). The process is waited for on a
 thread of its own, as `job::Process` does (`WaitForSingleObject`, then
@@ -672,7 +762,10 @@ the helper and does not delay the runtime's shutdown.
 - **One helper per machine**: the helper creates the named mutex
   `Global\Gateinto-divert` (`CreateMutexW`, not owned, only its existence
   matters) and answers `error another-helper` if it exists or cannot be
-  created. Two handles with overlapping filters would steal each
+  created; the agent reports it as "another transparent engine is running
+  or still ending on this machine; try again in a few seconds", since the
+  helper of an earlier agent run may still be in its grace period. Two
+  handles with overlapping filters would steal each
   other's packets: the first would divert another agent's sessions to its
   own listener, where attribution fails and the connections are closed. A
   second agent (another `GATEINTO_INSTANCE`, or another Windows user on the
@@ -777,7 +870,9 @@ the helper and does not delay the runtime's shutdown.
   `closing` and its job terminated, the sessions closed, that helper's
   listener closed (the shutdown of its `serve` loop; see [Engine
   state](#engine-state-and-session-registration)); in any other state it
-  changes nothing. `status` then reports the engine as
+  changes nothing. In the agent this is `Agent::watch_engine`, which also
+  logs the cause at `warn` and keeps it as the last helper error
+  (`Agent::transparent_engine`). `status` then reports the engine as
   stopped; a new transparent session starts a new helper (a new generation)
   and asks UAC again.
 
@@ -1009,7 +1104,9 @@ agent over the pipe and into the agent's log at `debug`, one event
   stream beyond the bound is reset at once. The shutdown future given to
   `serve` ends the loop: the listener is dropped and every dispatch in
   flight is aborted, which resets its stream; a lookup already running
-  finishes on its thread and its result is discarded.
+  finishes on its thread and its result is discarded. The agent passes the
+  default handshake timeout of a session (`proxy::Limits::default()`,
+  10 s), since the listener belongs to no session.
 
 **Decision: proxy settings are kept.** The session's own loopback listener
 stays as today, with `os_user` restricted to the job (terminal) or
@@ -1059,11 +1156,12 @@ its tunnel limit, route, upstream pool, counters and lifetime.**
   the adoption receiver and resets every stream still queued in it
   (receiving until the channel reports its end, so a send that had already
   reserved capacity is not lost), and `connections.shutdown()` aborts every
-  task, adopted tunnels included, before the session's task ends. `Session`
-  gains the adopter and its job *(proposed, step 5)*; the agent's registry
-  of transparent sessions (`State::register`) maps each session to its job
-  and adopter, and the agent drops the entry (`State::unregister`) when the
-  session closes. A send after the close fails, and that stream is
+  task, adopted tunnels included, before the session's task ends.
+  `Session::adopter` returns the adopter that `SessionManager::start` took
+  from the proxy before `run_until`; the agent's registry of transparent
+  sessions (`State::register`) maps each session to its job and adopter,
+  and the agent drops the entry (`State::unregister`) when the session
+  closes. A send after the close fails, and that stream is
   handed back and reset.
 - `OpenTunnels` counts adopted tunnels like the others, so `session list`
   shows them.
@@ -1189,21 +1287,33 @@ with `netsh`.**
 
 ### CLI, IPC, GUI and status
 
-All *(proposed)* except the availability check below; the exact spelling
-is decided in step 5 of the [Implementation plan](#implementation-plan).
+The IPC request, `SessionInfo::transparent`, the availability check and
+the agent's `Agent::transparent_engine` and `Agent::transparent_availability`
+exist; the CLI flag, the GUI option, the `session list` marking and the
+`status` lines are *(proposed)*, the rest of step 5 of the [Implementation
+plan](#implementation-plan).
 
 - CLI: `gateinto session terminal --agent --transparent`. `--transparent`
   requires `--agent`.
-- IPC: `terminal <gateway> route=<..> mode=transparent`; for browsers a new
-  `mode=transparent` word on the IPC `launch` line that the `gateinto://`
-  parser never produces and refuses. `Request::Launch` carries
+- IPC (`src/ipc.rs`): `terminal <gateway> route=<..> mode=transparent`, and
+  for browsers the word `mode=transparent` at the end of the IPC `launch`
+  line, after `route=`, `url=`, `gateway=` and `portal=`
+  (`launch office session_credentials mode=transparent`). The word is
+  accepted once, only as the last word, and only with the value
+  `transparent`; a proxy-mode request has no `mode` word, and `mode=proxy`
+  is refused, so every request has one spelling. `Request::Launch` carries
   `uri::LaunchRequest`, the type links produce, so the mode is a separate
-  field of the IPC request, not of `LaunchRequest`. An older agent answers
-  `invalid request`; the CLI and GUI say the agent is too old.
+  field of the IPC request (`Request::Launch(LaunchRequest, Mode)`;
+  `TerminalRequest::mode`), not of `LaunchRequest`, and the `gateinto://`
+  parser has no field for it (`mode`, `transparent` and any other unknown
+  field fail as `UnknownField`). An older agent answers `invalid launch
+  request` or `invalid terminal request`; the CLI and GUI say the agent is
+  too old.
 - GUI: a "Transparent" option for Open terminal and Start browser, offered
   only when the agent reports transparent sessions as available.
-- `SessionInfo` gains `transparent: bool`, serialized only when true;
-  `session list` marks such sessions.
+- `SessionInfo` has `transparent: bool`, serialized only when true and set
+  by the agent for its transparent browser and terminal sessions;
+  `session list` marks such sessions *(proposed)*.
 - `gateinto status` prints `transparent-sessions: available` or
   `unavailable: <reason>` (system too old, ARM64, WinDivert files missing or
   digest mismatch) and, from the agent, `transparent-engine: running` or
@@ -1230,6 +1340,12 @@ is decided in step 5 of the [Implementation plan](#implementation-plan).
 
 **Decision: proxy-mode logging does not change.**
 
+- The agent logs the engine's start at `info` ("started the transparent
+  engine"), a failed start at `warn` with the helper's message ("starting
+  the transparent engine failed: ..."), and a stop at `warn` ("the
+  transparent engine stopped: ...; closing its transparent sessions"); these
+  messages carry error codes, exit codes and timeouts, never a pipe name,
+  pid, port or path. A session's start line has a `transparent` field.
 - Adopted tunnels log the target `R:port` at the same levels and in the same
   events as proxy-mode tunnels: `debug` when opening, `warn` with the cause
   when the upstream refuses
@@ -1385,7 +1501,7 @@ Nothing here has been verified on client Windows.
 | VPN clients, antivirus, anti-cheat, other WFP products, another product's WinDivert | Unknown; a foreign WinDivert driver of another version is refused | Needs verification |
 | QoS policies using DSCP N | Broken while the helper runs | Expected by design |
 | Configuration file with `[transparent]` read by an older Gateinto | Refused (unknown section) | Expected, by `deny_unknown_fields` |
-| Older agent receiving `mode=transparent` | `invalid request`; CLI and GUI ask for an agent restart | Expected |
+| Older agent receiving `mode=transparent` | `invalid launch request` or `invalid terminal request`; CLI and GUI ask for an agent restart | Expected |
 
 ## Test plan
 
@@ -1512,7 +1628,8 @@ attribution:
   with `SO_REUSEADDR`), and connections refused before `listen` and
   accepted after it.
 
-**Agent tests (all platforms, fake `Launcher` and a fake helper seam):**
+**Agent tests (all platforms, fake `Launcher` and a fake helper seam;
+those implemented with step 5 are listed after this list):**
 
 - order of operations: no job is created before `ready`, no process before
   the tag is read back; each failure starts nothing and leaves no session;
@@ -1566,6 +1683,44 @@ attribution:
   challenge stores the verification offer and closes the stream; adopted
   tunnels log the target like proxy-mode tunnels and never the peer.
 
+Implemented with step 5 in the agent (`src/agent/tests/transparent.rs`,
+Unix, with a fake `Launcher`, a fake `Engine` whose helper is started,
+gated, failed or stopped by the test and whose listener records when it
+serves and when it is shut down, and fake jobs): a transparent terminal and
+a transparent browser start the helper with the configured DSCP, then
+create the job, then tag it, and only then spawn, are registered under the
+running generation with a live adopter, keep their proxy settings
+(`--proxy-server`, the proxy variables) and are listed with
+`transparent`; proxy-mode sessions start no helper, set no tag and are not
+listed as transparent; each helper failure (an error code, a declined
+prompt, a timeout, the previous helper still running, an exit) is answered
+with its message, recorded as the last error and starts nothing; a helper
+whose pipe has broken by the hand-over fails the start with its message
+and no listener is served; a tag that cannot be set starts no session and
+registers nothing; a transparent browser without a job starts nothing; a
+failed spawn (job refused or process error) closes and unregisters its
+session and is not retried in proxy mode or without a job; a helper that
+stops while a launch waits before registration (inside the tag, while a
+terminal launch holds `terminals`) stops the engine and its listener
+without waiting for the launch, and the launch is then refused and starts
+nothing; a launch that holds the mark when the helper stops spawns, and its
+session is then closed; the spawn guard refuses under a closing mark; two
+terminals and a browser waiting for one start share it, and two requests
+share its failure, with one helper start; waiting for the helper blocks no
+proxy-mode launch and no close; the rate limit, an unsupported platform,
+unavailable transparent sessions (with the reason), full capacity, an
+unknown gateway and a browser request that needs a confirmation (the mixed
+route on a gateway saved with the gateway route, a new gateway) are each
+refused before any helper start, and a refused confirmation never becomes
+the pending one; the pre-check takes no rate-limit slot; a helper that
+stops closes every transparent session of its generation and shuts down
+its listener, leaves proxy-mode sessions open and records the cause; and
+the helper is started once while it runs and again, as a new generation,
+after it stopped. Not covered at the agent level: the 60 s timeout from
+`ShellExecuteExW` returning and the waits for a previous helper (tested in
+`src/transparent/helper.rs`), and the listener port range (tested in
+`src/transparent/listener.rs`).
+
 Implemented with step 5 (`src/transparent/helper.rs`,
 `src/transparent/availability.rs`), on every platform with a fake platform
 and paused time: `ready` returns a running handle and the helper got
@@ -1587,7 +1742,7 @@ it running, a broken pipe, a protocol error (a second status line, an
 the run with the reason; dropping the handle closes the pipe; counter lines
 are logged at `debug` with every field and no pipe name, pid or port; the
 next start waits for the previous helper, also after a failed start, and
-fails after 10 s when it does not end, without creating a pipe; a helper
+fails after 25 s when it does not end, without creating a pipe; a helper
 whose run has ended is not waited for. The availability check over a fake
 probe: supported versions with the pinned files, older versions and an
 unknown version probe nothing else, ARM64 before any file, a missing or
@@ -1778,7 +1933,8 @@ code to pass it, then a refactor.
    `GetNamedPipeServerProcessId`, `WaitForMultipleObjects`) are in the
    Windows 7 import allow-list.
 4. **Session adoption and the transparent listener** (implemented as parts
-   that nothing uses yet; the Windows parts type-checked from Linux only).
+   that the agent wiring of step 5 uses; the Windows parts type-checked
+   from Linux only).
    `Proxy::adopter`, `Shared::adopt`, `Adopter` and `proxy::reset`;
    `os_user::original`, which also requires the listener's own row, and
    its Windows lookup `Attribution`; the listener socket with
@@ -1791,12 +1947,16 @@ code to pass it, then a refactor.
    `[transparent]`, the CLI flag, the IPC mode, the GUI option,
    `SessionInfo::transparent` and the `status` lines; `Win32_UI_Shell` in
    `Cargo.toml` and `shell32.dll` in the Windows 7 import allow-list.
-   Implemented so far, used by nothing yet: the agent side of the helper
+   Implemented so far: the agent side of the helper
    (`transparent::helper`: the previous-helper wait, the pipe with its DACL,
    the launch, the first status line with the pid check, the drain and the
-   timeouts, and the running handle that reports how the helper stopped)
-   and the availability check (`transparent::availability`), with
-   `Win32_UI_Shell` and the new imports in the allow-list.
+   timeouts, and the running handle that reports how the helper stopped),
+   the availability check (`transparent::availability`), with
+   `Win32_UI_Shell` and the new imports in the allow-list, the IPC mode,
+   `SessionInfo::transparent` and the agent wiring (the order of
+   operations, the engine seam and its Windows implementation, the
+   stop-watcher and fail-closed handling). Left: `[transparent]`, the CLI
+   flag, the GUI option, the `session list` marking and the `status` lines.
 6. **Packaging and user documentation.** The optional MSI feature with the
    WinDivert files and license, and the security model, threat model,
    security boundaries, install and compatibility pages.
@@ -1871,6 +2031,9 @@ would need a design change if they fail. Results go to
   (present on Windows 7) to the imports.
 - `ShellExecuteExW` accepts the image path `std::env::current_exe` returns
   when the agent was started through a `\\?\` path.
+- The consent prompt still appears with `SEE_MASK_FLAG_NO_UI`, which is
+  meant to suppress only the shell's own error dialogs; if it does not, the
+  flag is dropped.
 - `IsWow64Process2` reports `IMAGE_FILE_MACHINE_ARM64` as the native machine
   for the x64 build under emulation on ARM64, as it does for the x86 build
   under WOW64; otherwise the x64 build under emulation is reported as

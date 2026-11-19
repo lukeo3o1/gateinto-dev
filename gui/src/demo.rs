@@ -203,6 +203,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             browser: s.browser,
             shell: s.shell.map(str::to_owned),
             verification: s.id == VERIFYING,
+            transparent: false,
         })
         .collect()
 }
@@ -244,7 +245,7 @@ pub fn answer(request: Request, now: u64) -> Response {
         Request::Verification(id) => {
             Response::Error(format!("session {id} has no pending verification"))
         }
-        Request::Launch(_)
+        Request::Launch(..)
         | Request::Terminal(_)
         | Request::Close(_)
         | Request::Dismiss(..)
@@ -354,7 +355,7 @@ mod tests {
     use std::cell::RefCell;
     use std::time::Duration;
 
-    use gateinto::ipc::{LogPage, SessionAuth, SessionInfo, SessionKind};
+    use gateinto::ipc::{LogPage, Mode, SessionAuth, SessionInfo, SessionKind};
     use gateinto::sessions::SessionId;
     use gateinto::uri::{LaunchAuth, LaunchRequest};
     use tokio::sync::mpsc::unbounded_channel;
@@ -439,10 +440,11 @@ mod tests {
         let launch = LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
         let token = || "0123456789abcdef0123456789abcdef".parse().unwrap();
         for request in [
-            Request::Launch(launch),
+            Request::Launch(launch, Mode::Proxy),
             Request::Terminal(gateinto::ipc::TerminalRequest {
                 gateway: "office".parse().unwrap(),
                 route: None,
+                mode: Mode::Proxy,
             }),
             Request::Close(SessionId::from(3)),
             Request::Stop,

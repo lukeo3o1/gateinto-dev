@@ -27,7 +27,7 @@ const BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    Launch(LaunchRequest),
+    Launch(LaunchRequest, Mode),
     Terminal(TerminalRequest),
     Approve(ConfirmToken),
     Deny(ConfirmToken),
@@ -45,7 +45,17 @@ pub enum Request {
 pub struct TerminalRequest {
     pub gateway: GatewayName,
     pub route: Option<Route>,
+    pub mode: Mode,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Proxy,
+    Transparent,
+}
+
+const TRANSPARENT: &str = "mode=transparent";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmToken([u8; 16]);
@@ -121,7 +131,7 @@ impl std::error::Error for ProtocolError {}
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Launch(request) => {
+            Self::Launch(request, mode) => {
                 f.write_str("launch ")?;
                 if let Some(profile) = &request.profile {
                     write!(f, "{profile} ")?;
@@ -141,12 +151,15 @@ impl fmt::Display for Request {
                 if let Some(portal) = &request.portal {
                     write!(f, " portal={portal}")?;
                 }
-                Ok(())
+                mode.fmt(f)
             }
-            Self::Terminal(request) => match request.route {
-                None => write!(f, "terminal {} route=saved", request.gateway),
-                Some(route) => write!(f, "terminal {} route={route}", request.gateway),
-            },
+            Self::Terminal(request) => {
+                match request.route {
+                    None => write!(f, "terminal {} route=saved", request.gateway)?,
+                    Some(route) => write!(f, "terminal {} route={route}", request.gateway)?,
+                }
+                request.mode.fmt(f)
+            }
             Self::Approve(token) => write!(f, "approve {token}"),
             Self::Deny(token) => write!(f, "deny {token}"),
             Self::List => f.write_str("list"),
@@ -212,7 +225,24 @@ fn canonical(word: &str) -> Option<u64> {
         .filter(|number: &u64| number.to_string() == word)
 }
 
-fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Proxy => Ok(()),
+            Self::Transparent => write!(f, " {TRANSPARENT}"),
+        }
+    }
+}
+
+fn mode<'a, 'b>(words: &'a [&'b str]) -> (&'a [&'b str], Mode) {
+    match words.split_last() {
+        Some((&TRANSPARENT, rest)) => (rest, Mode::Transparent),
+        _ => (words, Mode::Proxy),
+    }
+}
+
+fn launch(profile: Option<&str>, auth: &str, words: &[&str]) -> Option<Request> {
+    let (link, mode) = mode(words);
     let mut values = [None; 4];
     let mut next = 0;
     for word in link {
@@ -234,10 +264,11 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
             ..request
         }),
     }
-    .map(Request::Launch)
+    .map(|request| Request::Launch(request, mode))
 }
 
 fn terminal(words: &[&str]) -> Option<Request> {
+    let (words, mode) = mode(words);
     let ["terminal", gateway, route] = words else {
         return None;
     };
@@ -248,6 +279,7 @@ fn terminal(words: &[&str]) -> Option<Request> {
     Some(Request::Terminal(TerminalRequest {
         gateway: gateway.parse().ok()?,
         route,
+        mode,
     }))
 }
 
@@ -1139,7 +1171,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn launch(profile: &str) -> Request {
-        Request::Launch(LaunchRequest::new(profile, "session_credentials").unwrap())
+        Request::Launch(
+            LaunchRequest::new(profile, "session_credentials").unwrap(),
+            Mode::Proxy,
+        )
     }
 
     #[test]
@@ -1231,7 +1266,7 @@ mod tests {
         ] {
             let request: Request = line.parse().unwrap();
             assert_eq!(request.to_string(), line);
-            let Request::Launch(launch) = request else {
+            let Request::Launch(launch, _) = request else {
                 panic!("not launch")
             };
             assert!(!launch.to_string().contains("profile="));
@@ -1244,7 +1279,7 @@ mod tests {
         let line = "launch session_credentials session_credentials";
         let request: Request = line.parse().unwrap();
         assert_eq!(request.to_string(), line);
-        let Request::Launch(launch) = request else {
+        let Request::Launch(launch, _) = request else {
             panic!("not launch")
         };
         assert_eq!(launch.profile.unwrap().as_str(), "session_credentials");
@@ -1271,7 +1306,7 @@ mod tests {
             assert!(error.contains("session_credentials"), "{error}");
         }
         let line = "launch basic_tofu session_credentials";
-        let Request::Launch(launch) = line.parse().unwrap() else {
+        let Request::Launch(launch, _) = line.parse().unwrap() else {
             panic!("not launch")
         };
         assert_eq!(launch.profile.unwrap().as_str(), "basic_tofu");
@@ -1289,7 +1324,7 @@ mod tests {
         ] {
             let parsed: Request = line.parse().unwrap();
             assert_eq!(parsed.to_string(), line);
-            let Request::Launch(link) = parsed else {
+            let Request::Launch(link, _) = parsed else {
                 panic!("not a launch")
             };
             assert_eq!(link.route, route, "{line}");
@@ -1337,6 +1372,7 @@ mod tests {
         Request::Terminal(TerminalRequest {
             gateway: "office".parse().unwrap(),
             route,
+            mode: Mode::Proxy,
         })
     }
 
@@ -1393,6 +1429,112 @@ mod tests {
         );
     }
 
+    fn transparent_terminal(route: Option<Route>) -> Request {
+        Request::Terminal(TerminalRequest {
+            gateway: "office".parse().unwrap(),
+            route,
+            mode: Mode::Transparent,
+        })
+    }
+
+    #[test]
+    fn transparent_requests_end_with_their_mode_word_and_round_trip() {
+        let transparent = |request: Request| match request {
+            Request::Launch(link, _) => Request::Launch(link, Mode::Transparent),
+            other => other,
+        };
+        for (request, line) in [
+            (
+                transparent(launch("office")),
+                "launch office session_credentials route=saved mode=transparent",
+            ),
+            (
+                Request::Launch(
+                    LaunchRequest {
+                        route: Some(Route::Gateway),
+                        ..LaunchRequest::new("office", "session_credentials").unwrap()
+                    },
+                    Mode::Transparent,
+                ),
+                "launch office session_credentials mode=transparent",
+            ),
+            (
+                transparent(linked_launch()),
+                "launch corp session_credentials route=saved url=https://p.example/app?a=b&c=d \
+                 gateway=proxy.example:443 portal=https://p.example/ mode=transparent",
+            ),
+            (
+                transparent_terminal(None),
+                "terminal office route=saved mode=transparent",
+            ),
+            (
+                transparent_terminal(Some(Route::Mixed)),
+                "terminal office route=mixed mode=transparent",
+            ),
+        ] {
+            assert_eq!(request.to_string(), line);
+            assert_eq!(line.parse::<Request>(), Ok(request));
+        }
+    }
+
+    #[test]
+    fn the_mode_word_is_accepted_only_once_at_the_end_and_only_as_transparent() {
+        for line in [
+            "launch office session_credentials mode=transparent route=mixed",
+            "launch office session_credentials mode=transparent url=https://p.example/",
+            "launch office mode=transparent session_credentials",
+            "launch mode=transparent office session_credentials",
+            "launch office session_credentials mode=transparent mode=transparent",
+            "launch office session_credentials mode=proxy",
+            "launch office session_credentials mode=Transparent",
+            "launch office session_credentials mode=",
+            "launch office session_credentials mode",
+            "launch office session_credentials transparent",
+            "launch office session_credentials mode=transparent ",
+            "launch office session_credentials  mode=transparent",
+            "launch session_credentials mode=transparent",
+        ] {
+            assert!(line.parse::<Request>().is_err(), "{line:?}");
+        }
+        for line in [
+            "terminal office mode=transparent route=saved",
+            "terminal office mode=transparent",
+            "terminal mode=transparent office route=saved",
+            "terminal office route=saved mode=transparent mode=transparent",
+            "terminal office route=saved mode=proxy",
+            "terminal office route=saved mode=Transparent",
+            "terminal office route=saved mode=",
+            "terminal office route=saved mode",
+            "terminal office route=saved transparent",
+            "terminal office route=saved mode=transparent ",
+            "terminal office route=saved  mode=transparent",
+        ] {
+            assert_eq!(
+                line.parse::<Request>(),
+                Err(ProtocolError("invalid terminal request")),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn requests_without_the_mode_word_are_in_proxy_mode() {
+        for line in [
+            "launch office session_credentials",
+            "launch corp session_credentials route=saved url=https://p.example/",
+        ] {
+            let Ok(Request::Launch(_, mode)) = line.parse() else {
+                panic!("not a launch: {line}")
+            };
+            assert_eq!(mode, Mode::Proxy);
+        }
+        let Ok(Request::Terminal(terminal)) = "terminal office route=saved".parse() else {
+            panic!("not a terminal")
+        };
+        assert_eq!(terminal.mode, Mode::Proxy);
+        assert_eq!(Mode::default(), Mode::Proxy);
+    }
+
     fn linked_launch() -> Request {
         Request::Launch(
             LaunchRequest::new("corp", "session_credentials")
@@ -1403,6 +1545,7 @@ mod tests {
                     Some("https://p.example/"),
                 )
                 .unwrap(),
+            Mode::Proxy,
         )
     }
 
@@ -1415,6 +1558,7 @@ mod tests {
                 .unwrap()
                 .with_link(Some("https://p.example/"), None, None)
                 .unwrap(),
+            Mode::Proxy,
         );
         for (request, line) in [
             (
@@ -1485,6 +1629,7 @@ mod tests {
                 .unwrap()
                 .with_link(Some(&url), Some(&format!("{host}:65535")), Some(&url))
                 .unwrap(),
+            Mode::Transparent,
         );
         let line = request.to_string();
         assert!(line.len() + 1 < MAX_REQUEST_BYTES, "{}", line.len());

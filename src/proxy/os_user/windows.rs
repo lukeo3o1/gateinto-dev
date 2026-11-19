@@ -28,12 +28,10 @@ use crate::token::{Handle, TokenUserInfo};
 
 const TABLE_ATTEMPTS: u32 = 8;
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Attribution {
     own: TokenUserInfo,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl Attribution {
     pub(crate) fn new() -> io::Result<Self> {
         Ok(Self {

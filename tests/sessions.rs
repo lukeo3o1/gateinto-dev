@@ -401,6 +401,7 @@ async fn a_session_describes_itself_for_the_list_with_its_open_tunnels() {
             browser: Some(BrowserKind::Edge),
             shell: None,
             verification: false,
+            transparent: false,
         }
     );
     let mut stream = open_tunnel(session.local_addr(), target).await;

@@ -49,6 +49,14 @@ impl Job {
     pub(crate) fn handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
         self.handle.0
     }
+
+    #[cfg(not(windows))]
+    pub(crate) fn terminate(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "job objects can only be terminated on Windows",
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]

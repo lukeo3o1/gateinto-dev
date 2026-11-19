@@ -25,7 +25,7 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{Elevated, Server, Windows};
 
-pub const PREVIOUS_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+pub const PREVIOUS_HELPER_TIMEOUT: Duration = Duration::from_secs(25);
 pub const START_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -120,7 +120,10 @@ impl fmt::Display for StartError {
             }
             Self::Failed(code) => f.write_str(match code {
                 ErrorCode::InvalidArguments => "the transparent engine refused its arguments",
-                ErrorCode::AnotherHelper => "another transparent engine runs on this machine",
+                ErrorCode::AnotherHelper => {
+                    "another transparent engine is running or still ending on this machine; try \
+                     again in a few seconds"
+                }
                 ErrorCode::FirewallRule => "the transparent engine could not add its firewall rule",
                 ErrorCode::FilesMissing => "the WinDivert files are missing next to gateinto.exe",
                 ErrorCode::DigestMismatch => {
@@ -744,7 +747,8 @@ mod tests {
             ),
             (
                 ErrorCode::AnotherHelper,
-                "another transparent engine runs on this machine",
+                "another transparent engine is running or still ending on this machine; try \
+                 again in a few seconds",
             ),
             (
                 ErrorCode::FirewallRule,
@@ -1194,7 +1198,7 @@ mod tests {
 
     #[test]
     fn the_timeouts_are_those_of_the_design() {
-        assert_eq!(PREVIOUS_HELPER_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(PREVIOUS_HELPER_TIMEOUT, Duration::from_secs(25));
         assert_eq!(START_TIMEOUT, Duration::from_secs(60));
         assert_eq!(DRAIN_TIMEOUT, Duration::from_secs(1));
     }

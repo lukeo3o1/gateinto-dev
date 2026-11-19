@@ -14,6 +14,7 @@ use gateinto::agent::{
 use gateinto::browser;
 use gateinto::check::{self, CheckOptions};
 use gateinto::config::{self, ConfigFile, DeviceKeySettings, GatewayName, Overrides, Settings};
+use gateinto::divert::Dscp;
 use gateinto::http::Authority;
 use gateinto::identity::client_cert::{
     self, CertificateSource, ClientCertificate, ClientCertificateMode, ClientCertificateOptions,
@@ -23,7 +24,7 @@ use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
 use gateinto::ipc::{
-    self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
+    self, ConfigSource, Endpoint, Mode, Request, RequestError, Response, Server, SessionInfo,
     TerminalRequest,
 };
 use gateinto::lifecycle::{self, Purge};
@@ -897,6 +898,7 @@ fn terminal_request(args: &TerminalSessionArgs) -> Option<Request> {
     Some(Request::Terminal(TerminalRequest {
         gateway,
         route: args.route.requested(),
+        mode: Mode::Proxy,
     }))
 }
 
@@ -1187,6 +1189,7 @@ async fn agent(args: ConfigArg) -> Result {
         limits: AgentLimits::default(),
         logbook,
         config,
+        dscp: Dscp::DEFAULT,
     };
     let profiles = ConfigProfiles {
         file: file.clone(),
@@ -1256,7 +1259,7 @@ async fn open(args: OpenArgs) -> Result {
         Handoff::Pending => return Err(handoff::PENDING_HELP.into()),
         Handoff::Kept => {}
     }
-    let request = Request::Launch(launch.clone());
+    let request = Request::Launch(launch.clone(), Mode::Proxy);
     let response = match ipc::send(&endpoint, &request).await {
         Err(RequestError::NotRunning | RequestError::Closed) => {
             start_agent_and_send(&endpoint, &request, config).await?
@@ -2196,6 +2199,7 @@ args = ["-l"]
             Some(Request::Terminal(TerminalRequest {
                 gateway: "office".parse().unwrap(),
                 route: Some(gateinto::proxy::Route::Mixed),
+                mode: Mode::Proxy,
             }))
         );
         assert_eq!(terminal_request(&terminal_args(&[]).unwrap()), None);

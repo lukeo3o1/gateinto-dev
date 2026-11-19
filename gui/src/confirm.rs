@@ -104,6 +104,7 @@ mod tests {
             browser: None,
             shell: shell.map(str::to_owned),
             verification: false,
+            transparent: false,
         }
     }
 

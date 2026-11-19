@@ -46,7 +46,7 @@ impl<K: Clone + Send + Sync + 'static> Attribute<K, Job> for Attribution {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
 pub(crate) async fn serve<K, J, A>(
     listener: TcpListener,
     state: Arc<State<K, J>>,

@@ -20,7 +20,8 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows_sys::Win32::System::Threading::GetProcessId;
 use windows_sys::Win32::UI::Shell::{
-    SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    ShellExecuteExW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -28,6 +29,8 @@ use super::pipe_sddl;
 use crate::divert::helper::PipeName;
 use crate::job::{parameters, wait_for};
 use crate::token::Handle;
+
+const MASK: u32 = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
 
 pub struct Windows;
 
@@ -169,7 +172,7 @@ fn run_elevated(image: &Path, arguments: &[String]) -> io::Result<Elevated> {
     let parameters = parameters(&arguments)?;
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        fMask: MASK,
         lpVerb: verb.as_ptr(),
         lpFile: file.as_ptr(),
         lpParameters: parameters.as_ptr(),
@@ -337,6 +340,14 @@ mod tests {
         let read = unsafe { GetHandleInformation(server.0.as_raw_handle(), &mut flags) };
         assert_ne!(read, 0, "{}", io::Error::last_os_error());
         assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+    }
+
+    #[test]
+    fn the_launch_waits_for_completion_keeps_the_process_handle_and_shows_no_error_dialog() {
+        assert_eq!(
+            MASK,
+            SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI
+        );
     }
 
     #[tokio::test]

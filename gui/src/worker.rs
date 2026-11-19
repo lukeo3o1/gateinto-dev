@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use gateinto::config::{GatewayName, Gateways};
-use gateinto::ipc::{self, Request, RequestError, Response, TerminalRequest};
+use gateinto::ipc::{self, Mode, Request, RequestError, Response, TerminalRequest};
 use gateinto::link::approval::{ApprovalError, settle};
 use gateinto::link::{Ask, Known};
 use gateinto::sessions::SessionId;
@@ -59,10 +59,12 @@ impl Command {
             Command::Launch(name) => Request::Launch(
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
                     .map_err(|error| error.to_string())?,
+                Mode::Proxy,
             ),
             Command::Terminal(gateway) => Request::Terminal(TerminalRequest {
                 gateway: gateway.clone(),
                 route: None,
+                mode: Mode::Proxy,
             }),
             Command::Start => return Err("starting the agent is not an agent request".to_owned()),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
@@ -264,7 +266,7 @@ where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
-    let reply = match send(Request::Launch(launch.clone())).await {
+    let reply = match send(Request::Launch(launch.clone(), Mode::Proxy)).await {
         Ok(reply) => reply,
         Err(error) => return Some(unlinked(error)),
     };
@@ -1123,14 +1125,17 @@ mod tests {
         move |request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => Response::Ok(lines.clone()),
+                Request::Launch(..) => Response::Ok(lines.clone()),
                 _ => Response::Ok(Vec::new()),
             }))
         }
     }
 
     fn launch(name: &str) -> Request {
-        Request::Launch(LaunchRequest::new(name, LaunchAuth::SessionCredentials.as_str()).unwrap())
+        Request::Launch(
+            LaunchRequest::new(name, LaunchAuth::SessionCredentials.as_str()).unwrap(),
+            Mode::Proxy,
+        )
     }
 
     #[tokio::test(start_paused = true)]
@@ -1161,6 +1166,7 @@ mod tests {
         Request::Terminal(gateinto::ipc::TerminalRequest {
             gateway: name.parse().unwrap(),
             route: None,
+            mode: Mode::Proxy,
         })
     }
 
@@ -1701,7 +1707,7 @@ mod tests {
         move |request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => {
+                Request::Launch(..) => {
                     let mut lines = vec![ipc::confirm_line(&token())];
                     lines.extend(loosening().echo());
                     Response::Ok(lines)
@@ -1742,7 +1748,10 @@ mod tests {
                 wait,
             )
             .await;
-            assert_eq!(settled(&log), [Request::Launch(loosening_link()), sent]);
+            assert_eq!(
+                settled(&log),
+                [Request::Launch(loosening_link(), Mode::Proxy), sent]
+            );
             assert_eq!(prompts, [Prompt::Ask(1, loosening()), Prompt::Dismiss(1)]);
             assert!(failures.iter().all(Option::is_none), "{failures:?}");
         }
@@ -1754,7 +1763,7 @@ mod tests {
         move |request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => {
+                Request::Launch(..) => {
                     let mut lines = proposed().echo();
                     lines.push(ipc::confirm_line(&token()));
                     Response::Ok(lines)
@@ -1822,7 +1831,10 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Approve(token())]
+            [
+                Request::Launch(link(), Mode::Proxy),
+                Request::Approve(token())
+            ]
         );
         assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
         assert!(failures.iter().all(Option::is_none));
@@ -1840,7 +1852,7 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
         assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
         assert!(failures.iter().all(Option::is_none));
@@ -1857,7 +1869,7 @@ mod tests {
         )
         .await;
         assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert_eq!(log.borrow().len(), 1 + polls(3).len());
     }
 
@@ -1873,7 +1885,7 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
         assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
     }
@@ -1892,7 +1904,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .await;
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
     }
 
@@ -1914,9 +1926,9 @@ mod tests {
         assert_eq!(
             settled(&log),
             [
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Deny(token()),
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Approve(token())
             ]
         );
@@ -1944,9 +1956,9 @@ mod tests {
         assert_eq!(
             settled(&log),
             [
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Deny(token()),
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Approve(token())
             ]
         );
@@ -1971,7 +1983,7 @@ mod tests {
         timeout(Duration::from_millis(500), run).await.unwrap();
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
     }
 
@@ -1989,7 +2001,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .await;
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert!(prompts.is_empty());
         assert_eq!(
             failures.last(),
@@ -2003,7 +2015,7 @@ mod tests {
         let refused = |request: Request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => Response::Error("no such gateway".to_owned()),
+                Request::Launch(..) => Response::Error("no such gateway".to_owned()),
                 _ => Response::Ok(Vec::new()),
             }))
         };
@@ -2014,7 +2026,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .await;
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert!(prompts.is_empty());
         assert_eq!(failures.last(), Some(&said("no such gateway")));
     }
@@ -2025,7 +2037,7 @@ mod tests {
         let other = |request: Request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => {
+                Request::Launch(..) => {
                     let Ask::Add(mut elsewhere) = proposed() else {
                         unreachable!()
                     };
@@ -2046,7 +2058,7 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
         assert!(prompts.is_empty());
         assert_eq!(failures.last(), Some(&Some(Text::LinkNotEchoed.into())));
@@ -2406,7 +2418,7 @@ mod tests {
             request.to_string(),
             "launch office session_credentials route=saved"
         );
-        let Request::Launch(launch) = request else {
+        let Request::Launch(launch, _) = request else {
             panic!("expected a launch request");
         };
         assert_eq!(launch.route, None);
