@@ -48,6 +48,8 @@ const CONFIRMATION_REFUSED: &str = "a transparent session is not started for a r
                                     saved route first";
 const NO_BROWSER_JOB: &str = "a transparent browser session needs a job object, which could not \
                               be created; nothing was started";
+const NO_HOME: &str =
+    "the agent has no absolute USERPROFILE to start the shell in; nothing was started";
 
 fn accept_retry_delay(failures: u32) -> Duration {
     match failures.checked_sub(1) {
@@ -530,7 +532,8 @@ impl Agent {
         }
         self.check_transparent().await?;
         self.check_capacity().await?;
-        transparent_launch(&request, &self.inner.profiles.known()?)?;
+        let launch = transparent_launch(&request, &self.inner.profiles.known()?)?;
+        self.browser_plan(&launch.profile)?;
         self.ensure_engine().await?;
         let _pending = self.inner.launching.lock().await;
         if let Err(error) = self.allow_launch() {
@@ -632,6 +635,7 @@ impl Agent {
         }
         let (shutdown, shut) = oneshot::channel::<()>();
         tokio::spawn(self.clone().watch_engine(generation, stopped, shutdown));
+        // Fails only once the watcher above has stopped this generation: nothing to release.
         starter.finish(Ok(()))?;
         info!("started the transparent engine");
         let shut: Boxed<'static, ()> = Box::pin(async move {
@@ -655,20 +659,46 @@ impl Agent {
         warn!("the transparent engine stopped: {message}; closing its transparent sessions");
         self.engine_stopped(&message);
         let registry = self.inner.registry.clone();
-        let closing = match tokio::task::spawn_blocking(move || registry.stop(generation)).await {
-            Ok(closing) => closing,
-            Err(error) => {
-                warn!("stopping the transparent sessions failed: {error}");
-                Vec::new()
-            }
-        };
+        let stopping = tokio::task::spawn_blocking(move || registry.stop(generation));
+        self.close_stopped(stopping, shutdown).await;
+    }
+
+    async fn close_stopped(
+        &self,
+        stopping: JoinHandle<Vec<SessionId>>,
+        shutdown: oneshot::Sender<()>,
+    ) {
+        let stopped = stopping.await;
         drop(shutdown);
         // A launch that registered before the stop adds its session to `browsers` or `terminals`
         // only when it ends, and a close before that would miss its process.
         drop(self.inner.launching.lock().await);
+        let closing = match stopped {
+            Ok(closing) => closing,
+            Err(error) => {
+                warn!(
+                    "stopping the transparent sessions failed: {error}; closing every \
+                     transparent session"
+                );
+                self.transparent_sessions().await
+            }
+        };
         for id in closing {
             let _ = self.close(id).await;
         }
+    }
+
+    async fn transparent_sessions(&self) -> Vec<SessionId> {
+        let mut ids: Vec<SessionId> = (self.inner.terminals.lock().await)
+            .iter()
+            .filter_map(|(&id, terminal)| terminal.transparent.then_some(id))
+            .collect();
+        ids.extend(
+            (self.inner.browsers.lock().await)
+                .iter()
+                .filter_map(|(&id, browser)| browser.transparent.then_some(id)),
+        );
+        ids
     }
 
     async fn terminal(&self, request: TerminalRequest) -> Result<Vec<String>, String> {
@@ -697,10 +727,7 @@ impl Agent {
         let route = terminal::terminal_route(request.route, plan.route);
         let inherited = launcher.environment();
         let Some(current_dir) = home_dir(&inherited) else {
-            return Err(
-                "the agent has no absolute USERPROFILE to start the shell in; nothing was started"
-                    .to_owned(),
-            );
+            return Err(NO_HOME.to_owned());
         };
         let job =
             terminal::terminal_job(launcher.terminal_job()).map_err(|error| error.to_string())?;
@@ -801,7 +828,10 @@ impl Agent {
         self.check_transparent().await?;
         let open = self.inner.terminals.lock().await.len();
         self.check_terminal_capacity(open)?;
-        self.inner.profiles.terminal_session(gateway).map(drop)
+        self.inner.profiles.terminal_session(gateway)?;
+        home_dir(&self.inner.launcher.environment())
+            .map(drop)
+            .ok_or_else(|| NO_HOME.to_owned())
     }
 
     fn check_terminal_capacity(&self, open: usize) -> Result<(), String> {
@@ -931,12 +961,17 @@ impl Agent {
         Ok(())
     }
 
+    fn browser_plan(&self, profile: &GatewayName) -> Result<(BrowserSessionPlan, PathBuf), String> {
+        let plan = self.inner.profiles.browser_session(profile)?;
+        let executable = browser::find_browser(self.inner.options.browser.as_deref())
+            .map_err(|e| e.to_string())?;
+        Ok((plan, executable))
+    }
+
     async fn start(&self, launch: Launch, mode: Mode) -> Result<Vec<String>, String> {
         let transparent = mode == Mode::Transparent;
         let profile = launch.profile;
-        let plan = self.inner.profiles.browser_session(&profile)?;
-        let executable = browser::find_browser(self.inner.options.browser.as_deref())
-            .map_err(|e| e.to_string())?;
+        let (plan, executable) = self.browser_plan(&profile)?;
         let mut proxy = plan.proxy;
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         proxy.route = launch.route;

@@ -471,9 +471,9 @@ a lock, so that no process starts in a job after the engine stopped.**
     checks `starting(g)` or `running(g)`, sets `stopped` and removes the
     registry entries recorded with `g`; after releasing it, it takes each
     entry's mark, sets `closing`, terminates the job through the
-    `Terminate` seam (a failure is logged as a warning and the other jobs
-    are still terminated) and releases the mark. It returns the keys of
-    those sessions, which the caller then closes through the existing
+    `Terminate` seam (a failure, or a panic caught per entry, is logged as a
+    warning and the other jobs are still terminated) and releases the mark.
+    It returns the keys of all those sessions, which the caller then closes through the existing
     close paths; in any other state it returns none. It blocks on each
     mark while a launch holds it, so the agent calls it off the async
     runtime (`spawn_blocking`).
@@ -493,19 +493,19 @@ a lock, so that no process starts in a job after the engine stopped.**
   - `Mark::launch` returns a `Launch` guard, held while the process is
     spawned (inside the `spawn_blocking` closure that spawns it), or
     `Closing`.
-- **Lock order.** A terminal launch takes `launching` (`Inner::launching`,
-  `src/agent.rs:681`), then `Inner::terminals` (`src/agent.rs:693`), which it
-  holds through job creation, the tag, `SessionManager::start`, the
-  registration and the spawn, then `Inner::sessions` (`src/agent.rs:713`)
-  for the start and the registration; the comment at
-  `src/agent.rs:690-692` states "launching, terminals, sessions, engine
-  state, session mark". A browser launch takes `launching`
-  (`src/agent.rs:472` in proxy mode, `535` for a transparent one) and holds
-  `Inner::sessions` from `src/agent.rs:947` across `SessionManager::start`,
-  the registration and the spawn. Both register (`Agent::register`, the
+- **Lock order.** A terminal launch (`Agent::terminal`) takes `launching`
+  (`Inner::launching`), then `Inner::terminals`, which it holds through job
+  creation, the tag, `SessionManager::start`, the registration and the
+  spawn, then `Inner::sessions` for the start and the registration; the
+  comment above its `terminals` lock states "launching, terminals,
+  sessions, engine state, session mark". A browser launch takes
+  `launching` (in `Agent::launch` in proxy mode, in
+  `Agent::launch_transparent` for a transparent one) and holds
+  `Inner::sessions` in `Agent::start` across `SessionManager::start`, the
+  registration and the spawn. Both register (`Agent::register`, the
   engine lock) while holding `sessions`, and take the session's mark
   (`launched`) inside the `spawn_blocking` closure that spawns the process.
-  `Agent::close` and `Agent::close_all` (`src/agent.rs:1136-1174`) take
+  `Agent::close` and `Agent::close_all` take
   `Inner::browsers` or `Inner::terminals`, release it, and then take
   `Inner::sessions` (`close_all` unregisters its sessions while holding
   it). The new locks are innermost: launching, terminals, sessions, engine
@@ -517,14 +517,20 @@ a lock, so that no process starts in a job after the engine stopped.**
   take `Inner::browsers` or `Inner::terminals` and then `Inner::sessions`.
   It never waits for a lock of the existing order while holding a new one,
   so a launch that holds `terminals` or `sessions` while waiting for the
-  engine lock cannot deadlock with it. In the agent (`Agent::watch_engine`)
-  it runs `State::stop` in `spawn_blocking`, then ends that generation's
-  listener, then takes and releases `launching` before it closes the
-  sessions through `Agent::close`: a launch that registered before the stop
-  adds its session to `browsers` or `terminals` only when it ends, and a
-  close before that would only close the session and miss its process. It
-  holds no other lock while it waits for `launching`, and a launch holding
-  `launching` waits for nothing the handler holds.
+  engine lock cannot deadlock with it. In the agent (`Agent::watch_engine`,
+  then `Agent::close_stopped`) it runs `State::stop` in `spawn_blocking`,
+  then ends that generation's listener, then takes and releases
+  `launching` before it closes the sessions through `Agent::close`: a
+  launch that registered before the stop adds its session to `browsers` or
+  `terminals` only when it ends, and a close before that would only close
+  the session and miss its process. It holds no other lock while it waits
+  for `launching`, and a launch holding `launching` waits for nothing the
+  handler holds. If the blocking task does not finish (a `JoinError`, from
+  a panic `State::stop` does not catch or from the runtime shutting down),
+  `stop` may already have set `stopped` and taken the entries, but their
+  keys are lost. The handler then fails closed: it closes every session
+  flagged transparent in `browsers` and `terminals`, which can include
+  sessions of a newer generation, and leaves proxy-mode sessions alone.
 
 ### Order of operations
 
@@ -537,9 +543,9 @@ For a transparent session request the agent:
    effects, so that a request that would fail anyway raises no UAC prompt.
    The authoritative checks under `launching` (and, for terminals, under
    `terminals`) stay as they are and run again.
-   The pre-checks are `Agent::launch_transparent` (`src/agent.rs:527-533`)
-   for browsers and `Agent::check_transparent_terminal`
-   (`src/agent.rs:793-805`) for terminals.
+   The pre-checks are the start of `Agent::launch_transparent`, before
+   `Agent::ensure_engine`, for browsers and `Agent::check_transparent_terminal`
+   for terminals.
    - **Rate limit.** `Agent::allow_launch` locks `Inner::launches`, a
      `std::sync::Mutex` around `LaunchLimiter`, and calls
      `LaunchLimiter::allow`, which drops entries older than `launch_window`
@@ -570,6 +576,14 @@ For a transparent session request the agent:
      session is not started for a request that needs a gateway
      confirmation; ..."), because the transparent mode is never set by a
      link. Such a request never becomes the pending confirmation.
+   - **Session plan.** Browsers: `Agent::browser_plan` for the gateway the
+     request resolved to, the same call `Agent::start` makes:
+     `Profiles::browser_session`, which refuses settings that do not
+     resolve, and `browser::find_browser`, which refuses a configured
+     browser that is not a file or a system without a browser. Terminals:
+     an absolute `USERPROFILE` in `Launcher::environment` (`home_dir`), the
+     shell's working directory, refused with "the agent has no absolute
+     USERPROFILE to start the shell in; nothing was started".
 
    The pre-checks guarantee no UAC prompt only for the requests they refuse.
    Several concurrent requests can pass them, share one prompt, and still be
@@ -593,7 +607,7 @@ For a transparent session request the agent:
    an earlier agent run is not known to the new agent; the new helper then
    answers `error another-helper` ("another transparent engine is running
    or still ending on this machine; try again in a few seconds"). In the
-   agent this step is `Agent::ensure_engine` (`src/agent.rs:605-642`) over
+   agent this step is `Agent::ensure_engine` over
    the `Engine` seam (`src/agent/engine.rs`); steps 2 and 3 are
    `Supervisor::start` (`src/transparent/helper.rs`). The start:
    1. reserves the listener port T (`transparent::listener::reserve`): it
@@ -636,11 +650,15 @@ For a transparent session request the agent:
    `Starter::finish(Err(message))` hands it to every joiner. Then
    `Agent::ensure_engine` looks once, biased, at the running handle's
    `stopped` future: a helper whose pipe already broke fails the start with
-   its own message. Otherwise it spawns the stop-watcher on the handle
-   (`Agent::watch_engine`), which from then on drains the counter lines and
-   runs the handler of `g` whenever the helper stops, and calls
-   `Starter::finish(Ok(()))`. That can fail only if the watcher has already
-   stopped `g`; the listener is then dropped and the request fails. On
+   its own message. This look is only a fast path: on the real overlapped
+   pipe a break is rarely observed that early and the poll mostly returns
+   pending, so the stop-watcher is the real guard. Otherwise it spawns the
+   stop-watcher on the handle (`Agent::watch_engine`), which from then on
+   drains the counter lines and runs the handler of `g` whenever the helper
+   stops, and calls `Starter::finish(Ok(()))`. That can fail only if the
+   watcher has already stopped `g`; the listener is then dropped and the
+   request fails, and the watcher needs no release from the start, since it
+   has already ended that generation. On
    success it spawns that generation's `serve` with a shutdown future that
    ends when the watcher drops its sender. No lock is held while it waits,
    and a request that joined receives the same outcome.
@@ -1106,7 +1124,9 @@ agent over the pipe and into the agent's log at `debug`, one event
   flight is aborted, which resets its stream; a lookup already running
   finishes on its thread and its result is discarded. The agent passes the
   default handshake timeout of a session (`proxy::Limits::default()`,
-  10 s), since the listener belongs to no session.
+  10 s), since the listener belongs to no session: `[limits]
+  connect_timeout_seconds`, which sets a session's `handshake_timeout`,
+  does not apply to the transparent listener.
 
 **Decision: proxy settings are kept.** The session's own loopback listener
 stays as today, with `os_user` restricted to the job (terminal) or
@@ -1555,7 +1575,8 @@ attribution:
 
 - the engine state (`src/transparent/state.rs`): concurrent requests share
   one start and its success or failure, and the next start is a new
-  generation; a joiner gets the outcome of the generation it joined, never
+  generation; the joiners of a start are counted (`State::joiners`, for
+  tests) so that tests can wait for them instead of sleeping; a joiner gets the outcome of the generation it joined, never
   a later one; a helper that stops after `ready` but before the hand-over
   leaves the engine `stopped`, fails the hand-over and refuses
   registration; a stale start's hand-over, failure path or abandonment
@@ -1565,7 +1586,8 @@ attribution:
   generation and marks it `closing`, and a late or repeated break changes
   nothing, so a newer generation keeps running, keeps its sessions and
   still accepts registrations; a failed terminate is logged and the other
-  jobs are still terminated; unregistered sessions leave the snapshot; a
+  jobs are still terminated; a terminate that panics is logged and every
+  session is still marked `closing`, terminated and returned; unregistered sessions leave the snapshot; a
   launch that holds the mark before the break is terminated by it (the
   fake job records the spawn before the terminate) and one after it sees
   `closing`; and the break releases the engine lock before it terminates a
@@ -1684,7 +1706,13 @@ those implemented with step 5 are listed after this list):**
   tunnels log the target like proxy-mode tunnels and never the peer.
 
 Implemented with step 5 in the agent (`src/agent/tests/transparent.rs`,
-Unix, with a fake `Launcher`, a fake `Engine` whose helper is started,
+Unix only, like its sibling `src/agent/tests/terminals.rs`: the fakes use
+`Job::fake`, which exists only outside Windows because the Windows `Job` is
+a real job object, spawn `/bin/sleep` through `browser::spawn`, and give an
+absolute Unix `USERPROFILE`; on Windows the job and `os_user` paths behind
+them are real. The tests wait on what they can observe (the helper start,
+the joiners of a start, the listener's serve), never on a sleep. With a
+fake `Launcher`, a fake `Engine` whose helper is started,
 gated, failed or stopped by the test and whose listener records when it
 serves and when it is shut down, and fake jobs): a transparent terminal and
 a transparent browser start the helper with the configured DSCP, then
@@ -1709,12 +1737,15 @@ terminals and a browser waiting for one start share it, and two requests
 share its failure, with one helper start; waiting for the helper blocks no
 proxy-mode launch and no close; the rate limit, an unsupported platform,
 unavailable transparent sessions (with the reason), full capacity, an
-unknown gateway and a browser request that needs a confirmation (the mixed
-route on a gateway saved with the gateway route, a new gateway) are each
-refused before any helper start, and a refused confirmation never becomes
+unknown gateway, a browser request that needs a confirmation (the mixed
+route on a gateway saved with the gateway route, a new gateway), a browser
+plan that fails, a missing browser and a missing or relative `USERPROFILE`
+for a terminal are each refused before any helper start, and a refused confirmation never becomes
 the pending one; the pre-check takes no rate-limit slot; a helper that
 stops closes every transparent session of its generation and shuts down
-its listener, leaves proxy-mode sessions open and records the cause; and
+its listener, leaves proxy-mode sessions open and records the cause; a
+stop whose blocking task did not finish closes every transparent session,
+whatever its generation, and no proxy-mode session; and
 the helper is started once while it runs and again, as a new generation,
 after it stopped. Not covered at the agent level: the 60 s timeout from
 `ShellExecuteExW` returning and the waits for a previous helper (tested in

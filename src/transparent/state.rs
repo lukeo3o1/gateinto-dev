@@ -1,7 +1,9 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::btree_map;
 use std::fmt;
 use std::io;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::net::TcpStream;
@@ -69,7 +71,7 @@ type Outcome = Option<Result<(), String>>;
 
 enum Current {
     Stopped,
-    Starting(Generation, watch::Receiver<Outcome>),
+    Starting(Generation, watch::Sender<Outcome>),
     Running(Generation),
 }
 
@@ -89,10 +91,25 @@ struct Entry<J> {
 impl<J: Terminate> Entry<J> {
     fn close(&self) {
         let _closing = self.mark.close();
-        if let Err(error) = self.job.terminate() {
-            warn!("terminating the job of a transparent session failed: {error}");
+        match panic::catch_unwind(AssertUnwindSafe(|| self.job.terminate())) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!("terminating the job of a transparent session failed: {error}");
+            }
+            Err(panic) => warn!(
+                "terminating the job of a transparent session panicked: {}",
+                panic_message(panic.as_ref())
+            ),
         }
     }
+}
+
+fn panic_message(panic: &(dyn Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
 }
 
 pub struct State<K, J> {
@@ -140,19 +157,27 @@ impl<K, J> State<K, J> {
             Current::Running(generation) => Begin::Running(*generation),
             Current::Starting(generation, outcome) => Begin::Join(Joiner {
                 generation: *generation,
-                outcome: outcome.clone(),
+                outcome: outcome.subscribe(),
             }),
             Current::Stopped => {
                 inner.generations += 1;
                 let generation = Generation(inner.generations);
-                let (sender, outcome) = watch::channel(None);
-                inner.current = Current::Starting(generation, outcome);
+                let (sender, _) = watch::channel(None);
+                inner.current = Current::Starting(generation, sender.clone());
                 Begin::Start(Starter {
                     state: self.clone(),
                     generation,
                     sender: Some(sender),
                 })
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn joiners(&self) -> usize {
+        match &self.lock().current {
+            Current::Starting(_, outcome) => outcome.receiver_count(),
+            Current::Stopped | Current::Running(_) => 0,
         }
     }
 
@@ -443,12 +468,15 @@ mod tests {
         assert_eq!(state.phase(), Phase::Stopped);
         let starter = start(&state);
         let generation = starter.generation();
+        assert_eq!(state.joiners(), 0);
         let joiners = [join(&state), join(&state)];
         assert_eq!(state.phase(), Phase::Starting(generation));
+        assert_eq!(state.joiners(), 2);
         for joiner in &joiners {
             assert_eq!(joiner.generation(), generation);
         }
         assert_eq!(starter.finish(Ok(())), Ok(()));
+        assert_eq!(state.joiners(), 0);
         for joiner in joiners {
             assert_eq!(joiner.outcome().await, Ok(()));
         }
@@ -644,6 +672,29 @@ mod tests {
         let warnings = logs.lines(" WARN ");
         assert_eq!(warnings.len(), 1, "{:?}", logs.lines(""));
         assert!(warnings[0].contains("access denied"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_panicking_terminate_is_logged_and_every_session_is_still_closed_and_returned() {
+        let logs = crate::test_logs::capture();
+        let state = Arc::new(Fake::new());
+        let generation = running(&state);
+        let (panicking, panicking_mark) = register(&state, 1);
+        *panicking.during.lock().unwrap() = Some(Box::new(|| panic!("the job handle is gone")));
+        let (other, other_mark) = register(&state, 2);
+        assert_eq!(state.stop(generation), [1, 2]);
+        assert_eq!(state.phase(), Phase::Stopped);
+        assert!(panicking.events().is_empty());
+        assert_eq!(other.events(), [Event::Terminated]);
+        for mark in [panicking_mark, other_mark] {
+            assert_eq!(mark.launch().err(), Some(Closing));
+        }
+        let warnings = logs.lines(" WARN ");
+        assert_eq!(warnings.len(), 1, "{:?}", logs.lines(""));
+        assert!(
+            warnings[0].contains("panicked: the job handle is gone"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

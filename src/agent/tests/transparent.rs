@@ -146,8 +146,8 @@ impl Listener for FakeListener {
         shutdown: Boxed<'static, ()>,
     ) -> Boxed<'static, ()> {
         let served = self.0;
+        served.lock().unwrap().push((generation, false));
         Box::pin(async move {
-            served.lock().unwrap().push((generation, false));
             shutdown.await;
             for entry in served.lock().unwrap().iter_mut() {
                 if entry.0 == generation {
@@ -212,6 +212,7 @@ struct Processes {
     job: bool,
     tag_fails: bool,
     spawn: Spawn,
+    home: Option<&'static str>,
     browsers: Mutex<Vec<Vec<OsString>>>,
     shells: Mutex<Vec<TerminalSpawn>>,
     spawn_gate: Mutex<Option<Gate>>,
@@ -226,6 +227,7 @@ impl Processes {
             job: true,
             tag_fails: false,
             spawn: Spawn::Runs,
+            home: Some("/home/ana"),
             browsers: Mutex::new(Vec::new()),
             shells: Mutex::new(Vec::new()),
             spawn_gate: Mutex::new(None),
@@ -270,8 +272,9 @@ impl Launcher for Processes {
     }
 
     fn environment(&self) -> Variables {
-        [("USERPROFILE", "/home/ana"), ("Path", r"C:\Windows")]
-            .into_iter()
+        let home = self.home.map(|home| ("USERPROFILE", home));
+        home.into_iter()
+            .chain([("Path", r"C:\Windows")])
             .map(|(name, value)| (name.into(), value.into()))
             .collect()
     }
@@ -295,7 +298,10 @@ impl Launcher for Processes {
     }
 }
 
-struct Gateways;
+#[derive(Default)]
+struct Gateways {
+    browser_plan: Option<&'static str>,
+}
 
 impl Profiles for Gateways {
     fn known(&self) -> Result<Known, String> {
@@ -319,6 +325,9 @@ impl Profiles for Gateways {
     }
 
     fn browser_session(&self, _: &GatewayName) -> Result<BrowserSessionPlan, String> {
+        if let Some(error) = self.browser_plan {
+            return Err(error.to_owned());
+        }
         Ok(BrowserSessionPlan {
             proxy: super::no_job_retry::proxy_config(),
         })
@@ -355,16 +364,28 @@ impl Drop for Harness {
 
 static HARNESSES: AtomicUsize = AtomicUsize::new(0);
 
-fn harness(configure: impl FnOnce(&mut Processes, &mut Helpers, &mut AgentLimits)) -> Harness {
+struct Setup {
+    processes: Processes,
+    helpers: Helpers,
+    limits: AgentLimits,
+    gateways: Gateways,
+    browser: &'static str,
+}
+
+fn harness(configure: impl FnOnce(&mut Setup)) -> Harness {
     let events = Events::default();
-    let mut processes = Processes::new(events.clone());
-    let mut helpers = Helpers {
-        events: events.clone(),
-        ..Helpers::default()
+    let mut setup = Setup {
+        processes: Processes::new(events.clone()),
+        helpers: Helpers {
+            events: events.clone(),
+            ..Helpers::default()
+        },
+        limits: AgentLimits::default(),
+        gateways: Gateways::default(),
+        browser: "/bin/sleep",
     };
-    let mut limits = AgentLimits::default();
-    configure(&mut processes, &mut helpers, &mut limits);
-    let (processes, helpers) = (Arc::new(processes), Arc::new(helpers));
+    configure(&mut setup);
+    let (processes, helpers) = (Arc::new(setup.processes), Arc::new(setup.helpers));
     let root = std::env::temp_dir().join(format!(
         "gateinto-transparent-agent-{}-{}",
         std::process::id(),
@@ -372,14 +393,14 @@ fn harness(configure: impl FnOnce(&mut Processes, &mut Helpers, &mut AgentLimits
     ));
     let agent = Agent::with_seams(
         AgentOptions {
-            browser: Some(PathBuf::from("/bin/sleep")),
+            browser: Some(PathBuf::from(setup.browser)),
             profiles_root: root.clone(),
-            limits,
+            limits: setup.limits,
             logbook: Default::default(),
             config: ipc::ConfigSource::Defaults,
             dscp: dscp(),
         },
-        Gateways,
+        setup.gateways,
         processes.clone(),
         helpers.clone(),
     );
@@ -393,7 +414,7 @@ fn harness(configure: impl FnOnce(&mut Processes, &mut Helpers, &mut AgentLimits
 }
 
 fn plain() -> Harness {
-    harness(|_, _, _| {})
+    harness(|_| {})
 }
 
 fn terminal(mode: Mode) -> Request {
@@ -462,10 +483,6 @@ async fn until<F: Future<Output = bool>>(what: &str, mut done: impl FnMut() -> F
     })
     .await;
     assert!(waited.is_ok(), "timed out waiting until {what}");
-}
-
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 async fn stream() -> (TcpStream, TcpStream) {
@@ -611,7 +628,6 @@ async fn a_helper_that_stops_right_after_ready_fails_the_start_with_its_cause() 
         assert_eq!(h.events.all(), [Event::HelperStarted(dscp()), Event::Ready]);
         assert_eq!(h.agent.inner.registry.phase(), Phase::Stopped);
         assert!(session_ids(&h.agent).await.is_empty());
-        settle().await;
         assert!(h.helpers.served().is_empty());
         assert_eq!(
             h.agent.transparent_engine().last_error.as_deref(),
@@ -623,7 +639,7 @@ async fn a_helper_that_stops_right_after_ready_fails_the_start_with_its_cause() 
 #[tokio::test]
 async fn a_tag_that_cannot_be_set_starts_nothing() {
     for request in both() {
-        let h = harness(|processes, _, _| processes.tag_fails = true);
+        let h = harness(|setup| setup.processes.tag_fails = true);
 
         assert_eq!(
             answer(&h.agent, request).await,
@@ -649,7 +665,7 @@ async fn a_tag_that_cannot_be_set_starts_nothing() {
 
 #[tokio::test]
 async fn a_transparent_browser_without_a_job_starts_nothing() {
-    let h = harness(|processes, _, _| processes.job = false);
+    let h = harness(|setup| setup.processes.job = false);
 
     assert_eq!(
         answer(&h.agent, browser(Mode::Transparent)).await,
@@ -673,7 +689,7 @@ async fn a_failed_spawn_closes_and_unregisters_its_session_without_a_proxy_mode_
         (Spawn::Fails, "not found"),
     ] {
         for request in both() {
-            let h = harness(|processes, _, _| processes.spawn = spawn);
+            let h = harness(|setup| setup.processes.spawn = spawn);
 
             let error = answer(&h.agent, request).await.unwrap_err();
             assert!(error.starts_with("starting "), "{error}");
@@ -691,7 +707,7 @@ async fn a_failed_spawn_closes_and_unregisters_its_session_without_a_proxy_mode_
 async fn a_helper_that_stops_before_registration_refuses_it_without_waiting_for_the_launch() {
     for request in both() {
         let (tag_gate, opener) = gate();
-        let h = harness(|processes, _, _| processes.tag_gate = tag_gate);
+        let h = harness(|setup| setup.processes.tag_gate = tag_gate);
         let is_terminal = matches!(request, Request::Terminal(_));
         let launching = tokio::spawn({
             let agent = h.agent.clone();
@@ -731,7 +747,7 @@ async fn a_helper_that_stops_before_registration_refuses_it_without_waiting_for_
 async fn a_launch_that_holds_the_mark_when_the_helper_stops_is_closed_once_it_started() {
     for request in both() {
         let (spawn_gate, opener) = gate();
-        let h = harness(|processes, _, _| processes.spawn_gate = spawn_gate);
+        let h = harness(|setup| setup.processes.spawn_gate = spawn_gate);
         let launching = tokio::spawn({
             let agent = h.agent.clone();
             async move { answer(&agent, request).await }
@@ -743,7 +759,6 @@ async fn a_launch_that_holds_the_mark_when_the_helper_stops_is_closed_once_it_st
             h.agent.inner.registry.phase() == Phase::Stopped
         })
         .await;
-        settle().await;
         assert_eq!(h.events.count(Event::Spawned), 0);
         release.send(()).unwrap();
 
@@ -802,7 +817,10 @@ async fn concurrent_requests_while_the_helper_starts_share_its_success() {
         tokio::spawn(async move { answer(&agent, request).await })
     })
     .collect();
-    settle().await;
+    until("the other requests joined the start", || async {
+        h.agent.inner.registry.joiners() == 2
+    })
+    .await;
     assert!(matches!(h.agent.inner.registry.phase(), Phase::Starting(_)));
 
     open.send(Ok(())).unwrap();
@@ -825,7 +843,10 @@ async fn concurrent_requests_while_the_helper_starts_share_its_failure() {
             tokio::spawn(async move { answer(&agent, request).await })
         })
         .collect();
-    settle().await;
+    until("the other request joined the start", || async {
+        h.agent.inner.registry.joiners() == 1
+    })
+    .await;
 
     let declined = StartError::Declined.to_string();
     open.send(Err(declined.clone())).unwrap();
@@ -844,7 +865,10 @@ async fn waiting_for_the_helper_blocks_no_other_launch_and_no_close() {
         let agent = h.agent.clone();
         async move { answer(&agent, terminal(Mode::Transparent)).await }
     });
-    settle().await;
+    until("the request waits for the helper", || async {
+        h.events.count(Event::HelperStarted(dscp())) == 1
+    })
+    .await;
 
     let others = tokio::time::timeout(PATIENCE, async {
         answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
@@ -866,7 +890,7 @@ async fn waiting_for_the_helper_blocks_no_other_launch_and_no_close() {
 
 #[tokio::test]
 async fn a_rate_limited_transparent_request_is_refused_before_the_helper() {
-    let h = harness(|_, _, limits| limits.launches = 1);
+    let h = harness(|setup| setup.limits.launches = 1);
     answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
 
     for request in both() {
@@ -879,7 +903,7 @@ async fn a_rate_limited_transparent_request_is_refused_before_the_helper() {
 
 #[tokio::test]
 async fn the_rate_limit_pre_check_takes_no_slot() {
-    let h = harness(|_, _, limits| limits.launches = 2);
+    let h = harness(|setup| setup.limits.launches = 2);
     answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
     answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
 
@@ -890,7 +914,7 @@ async fn the_rate_limit_pre_check_takes_no_slot() {
 
 #[tokio::test]
 async fn an_unsupported_platform_is_refused_before_the_helper() {
-    let h = harness(|processes, _, _| processes.terminals = false);
+    let h = harness(|setup| setup.processes.terminals = false);
 
     assert_eq!(
         answer(&h.agent, terminal(Mode::Transparent)).await,
@@ -901,7 +925,7 @@ async fn an_unsupported_platform_is_refused_before_the_helper() {
 
 #[tokio::test]
 async fn unavailable_transparent_sessions_are_refused_with_the_reason_before_the_helper() {
-    let h = harness(|_, helpers, _| helpers.unavailable = Some(Reason::TooOld));
+    let h = harness(|setup| setup.helpers.unavailable = Some(Reason::TooOld));
 
     for request in both() {
         assert_eq!(
@@ -924,9 +948,9 @@ async fn unavailable_transparent_sessions_are_refused_with_the_reason_before_the
 
 #[tokio::test]
 async fn full_capacity_is_refused_before_the_helper() {
-    let h = harness(|_, _, limits| {
-        limits.max_terminal_sessions = 1;
-        limits.max_browser_sessions = 1;
+    let h = harness(|setup| {
+        setup.limits.max_terminal_sessions = 1;
+        setup.limits.max_browser_sessions = 1;
     });
     answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
     answer(&h.agent, browser(Mode::Proxy)).await.unwrap();
@@ -941,6 +965,44 @@ async fn full_capacity_is_refused_before_the_helper() {
     );
     assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
     h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn a_browser_plan_that_fails_is_refused_before_the_helper() {
+    let h = harness(|setup| setup.gateways.browser_plan = Some("the CA file cannot be read"));
+
+    assert_eq!(
+        answer(&h.agent, browser(Mode::Transparent)).await,
+        Err("the CA file cannot be read".to_owned())
+    );
+    assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
+    assert!(session_ids(&h.agent).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_browser_is_refused_before_the_helper() {
+    let h = harness(|setup| setup.browser = "/nonexistent/browser");
+
+    assert_eq!(
+        answer(&h.agent, browser(Mode::Transparent)).await,
+        Err("browser executable /nonexistent/browser not found".to_owned())
+    );
+    assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
+    assert!(session_ids(&h.agent).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_or_relative_userprofile_is_refused_before_the_helper() {
+    for home in [None, Some("ana")] {
+        let h = harness(|setup| setup.processes.home = home);
+
+        assert_eq!(
+            answer(&h.agent, terminal(Mode::Transparent)).await,
+            Err(NO_HOME.to_owned())
+        );
+        assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
+        assert!(session_ids(&h.agent).await.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1010,6 +1072,30 @@ async fn a_helper_that_stops_closes_its_transparent_sessions_and_listener_and_no
     assert!(listed.iter().all(|session| !session.transparent));
     assert_eq!(h.agent.inner.terminals.lock().await.len(), 1);
     assert_eq!(h.agent.inner.browsers.lock().await.len(), 1);
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn a_stop_that_did_not_finish_closes_every_transparent_session_and_no_other() {
+    let h = plain();
+    for request in [
+        terminal(Mode::Transparent),
+        browser(Mode::Transparent),
+        terminal(Mode::Proxy),
+        browser(Mode::Proxy),
+    ] {
+        answer(&h.agent, request).await.unwrap();
+    }
+    let generation = running(&h.agent);
+    let stopping = tokio::spawn(std::future::pending());
+    stopping.abort();
+
+    h.agent.close_stopped(stopping, oneshot::channel().0).await;
+
+    assert!(registered(&h.agent, generation).is_empty());
+    let listed = SessionInfo::parse_list(&h.agent.list().await).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().all(|session| !session.transparent));
     h.agent.close_all().await;
 }
 

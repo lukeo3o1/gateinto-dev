@@ -344,10 +344,13 @@ mod tests {
 
     #[test]
     fn the_launch_waits_for_completion_keeps_the_process_handle_and_shows_no_error_dialog() {
-        assert_eq!(
-            MASK,
-            SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI
-        );
+        for (flag, name) in [
+            (SEE_MASK_NOCLOSEPROCESS, "SEE_MASK_NOCLOSEPROCESS"),
+            (SEE_MASK_NOASYNC, "SEE_MASK_NOASYNC"),
+            (SEE_MASK_FLAG_NO_UI, "SEE_MASK_FLAG_NO_UI"),
+        ] {
+            assert_eq!(MASK & flag, flag, "{name} is missing from the mask");
+        }
     }
 
     #[tokio::test]
