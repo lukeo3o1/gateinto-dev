@@ -135,5 +135,8 @@ fuzz_target!(|data: &[u8]| {
         line.split(' ').count(),
         2 + usize::from(request.profile.is_some()) + fields
     );
-    assert_eq!(line.parse::<Request>(), Ok(Request::Launch(request, Mode::Proxy)));
+    assert_eq!(
+        line.parse::<Request>(),
+        Ok(Request::Launch(request, Mode::Proxy))
+    );
 });
