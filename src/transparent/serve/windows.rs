@@ -31,8 +31,10 @@ struct Table(*mut MIB_UNICASTIPADDRESS_TABLE);
 
 impl Table {
     fn rows(&self) -> &[MIB_UNICASTIPADDRESS_ROW] {
-        // SAFETY: the table is live until FreeMibTable and holds NumEntries rows from its Table field
-        // on; the pointer to them is taken without a reference to the one-row array type.
+        // SAFETY: the table is live until FreeMibTable and holds NumEntries rows from its Table
+        // field on; the pointer to them is taken without a reference to the one-row array type. The
+        // only row field that not every bit pattern makes valid is SkipAsSource, a bool here, and
+        // Windows writes that BOOLEAN as 0 or 1.
         unsafe {
             let count = (*self.0).NumEntries as usize;
             let rows = (&raw const (*self.0).Table).cast::<MIB_UNICASTIPADDRESS_ROW>();
@@ -50,7 +52,8 @@ impl Drop for Table {
 
 fn address(row: &MIB_UNICASTIPADDRESS_ROW) -> Option<(Ipv4Addr, DadState)> {
     // SAFETY: si_family overlays the family field of every variant, and the IPv4 variant is read
-    // only when it is AF_INET.
+    // only when it is AF_INET; S_addr is the u32 view of the same four bytes in IN_ADDR's union, so
+    // reading it is valid too.
     let bytes = unsafe {
         if row.Address.si_family != AF_INET {
             return None;

@@ -473,10 +473,10 @@ a lock, so that no process starts in a job after the engine stopped.**
     entry's mark, sets `closing`, terminates the job through the
     `Terminate` seam (a failure, or a panic caught per entry, is logged as a
     warning and the other jobs are still terminated) and releases the mark.
-    It returns the keys of all those sessions, which the caller then closes through the existing
-    close paths; in any other state it returns none. It blocks on each
-    mark while a launch holds it, so the agent calls it off the async
-    runtime (`spawn_blocking`).
+    It returns the keys of all those sessions, which the caller then closes
+    through the existing close paths; in any other state it returns none. It
+    blocks on each mark while a launch holds it, so the agent calls it off
+    the async runtime (`spawn_blocking`).
   - `State::register(key, job, adopter)` succeeds only under `running(g)`
     and returns the session's `Mark`; otherwise it refuses with
     `Refusal::NotRunning`, and a key already registered is refused with
@@ -544,8 +544,8 @@ For a transparent session request the agent:
    The authoritative checks under `launching` (and, for terminals, under
    `terminals`) stay as they are and run again.
    The pre-checks are the start of `Agent::launch_transparent`, before
-   `Agent::ensure_engine`, for browsers and `Agent::check_transparent_terminal`
-   for terminals.
+   `Agent::ensure_engine`, for browsers and
+   `Agent::check_transparent_terminal` for terminals.
    - **Rate limit.** `Agent::allow_launch` locks `Inner::launches`, a
      `std::sync::Mutex` around `LaunchLimiter`, and calls
      `LaunchLimiter::allow`, which drops entries older than `launch_window`
@@ -693,10 +693,10 @@ For a transparent session request the agent:
 Any failure closes what was opened and answers an error. Every close path
 (`Agent::close`, `Agent::close_all`, a session that ends by itself, the
 stop-watcher) unregisters the session (`State::unregister`). There is no
-silent downgrade to a proxy-mode session: the user asked for transparent routing,
-and a proxy-mode session would send everything that ignores the proxy
-settings directly. Messages name the cause: the helper's `error` code, the
-helper's exit code when it ended without a line, a timeout, the tag that
+silent downgrade to a proxy-mode session: the user asked for transparent
+routing, and a proxy-mode session would send everything that ignores the
+proxy settings directly. Messages name the cause: the helper's `error` code,
+the helper's exit code when it ended without a line, a timeout, the tag that
 could not be set, a system too old.
 
 ### The divert helper
@@ -719,12 +719,13 @@ is meant for such callers: the call completes before it returns.
 own, for example when the executable cannot be started, since the agent
 answers the error itself; the UAC consent prompt is not error UI and is
 expected to still appear (see [Needs verification](#needs-verification)).
-The agent does not call `CoInitializeEx`: no shell extension is involved in running an
-executable with `runas`, and it would add `ole32.dll` to the imports (see
-[Needs verification](#needs-verification)). The process is waited for on a
-thread of its own, as `job::Process` does (`WaitForSingleObject`, then
-`GetExitCodeProcess`), so it holds no blocking-pool thread for the life of
-the helper and does not delay the runtime's shutdown.
+The agent does not call `CoInitializeEx`: no shell extension is involved in
+running an executable with `runas`, and it would add `ole32.dll` to the
+imports (see [Needs verification](#needs-verification)). The process is
+waited for on a thread of its own, as `job::Process` does
+(`WaitForSingleObject`, then `GetExitCodeProcess`), so it holds no
+blocking-pool thread for the life of the helper and does not delay the
+runtime's shutdown.
 
 - **Arguments:** `divert --port T --dscp N --pipe <name> --agent-pid <pid>`.
   The subcommand takes each as a raw `Option<OsString>`, accepts values that
@@ -1356,13 +1357,13 @@ plan](#implementation-plan).
   for a build that is neither x86 nor x64 or a native machine
   `IMAGE_FILE_MACHINE_ARM64` from `IsWow64Process2`, which covers the x86
   build under WOW64 and is expected to cover the x64 build under emulation
-  (see [Needs verification](#needs-verification)); then the pinned files next to the executable, all opened
-  before any is hashed, naming the first one missing ("WinDivert64.sys is
-  missing next to gateinto.exe") or whose SHA-256 differs or cannot be
-  read. `RtlGetVersion` and `IsWow64Process2` are looked up at runtime
-  (`GetModuleHandleW`, `GetProcAddress`), so neither becomes a static
-  import, and `IsWow64Process2`, which Windows 7 lacks, is only asked for
-  after the version check passed.
+  (see [Needs verification](#needs-verification)); then the pinned files
+  next to the executable, all opened before any is hashed, naming the first
+  one missing ("WinDivert64.sys is missing next to gateinto.exe") or whose
+  SHA-256 differs or cannot be read. `RtlGetVersion` and `IsWow64Process2`
+  are looked up at runtime (`GetModuleHandleW`, `GetProcAddress`), so
+  neither becomes a static import, and `IsWow64Process2`, which Windows 7
+  lacks, is only asked for after the version check passed.
 - Links never select a transparent session: a page must not be able to
   trigger a UAC prompt.
 
@@ -1501,7 +1502,7 @@ Threat-model additions *(to be made with the implementation)*:
 | Threat | Mitigation |
 | --- | --- |
 | A host on the network connects to the listener port. | The engine drops genuine inbound packets to T and the firewall rule is scoped to the port; if both fail, attribution is defence in depth only (a host R using a client's local port p can match). |
-| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A peer with a loopback address or any other address of this host (the listener's own, or another adapter's, found as preferred or deprecated in the host's IPv4 unicast address table without binding anything) is reset before it takes an attribution permit or reads a TCP table, so direct dials from this host cannot exhaust the attributions in flight; only if the address table cannot be read does such a dial take a permit, and attribution then refuses it. Dials from other hosts are the row above. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
+| A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A peer with a loopback address or any other address of this host (the listener's own, or another adapter's, found as preferred or deprecated in the host's IPv4 unicast address table without binding anything) is reset before it takes an attribution permit or reads a TCP table, so direct dials from this host cannot exhaust the attributions in flight; only if the address table cannot be read, or if the address is not in use and so cannot be bound, does such a dial take a permit, and attribution then refuses it. Dials from other hosts are the row above. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
 | A local process uses a transparent session by tagging its own job with N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
 | The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
 | The agent dies and its session processes are still sending. | `KILL_ON_JOB_CLOSE` ends them; the helper keeps dropping for 5 s before it exits. |
@@ -1586,29 +1587,30 @@ attribution:
 - the engine state (`src/transparent/state.rs`): concurrent requests share
   one start and its success or failure, and the next start is a new
   generation; the joiners of a start are counted (`State::joiners`, for
-  tests) so that tests can wait for them instead of sleeping; a joiner gets the outcome of the generation it joined, never
-  a later one; a helper that stops after `ready` but before the hand-over
-  leaves the engine `stopped`, fails the hand-over and refuses
-  registration; a stale start's hand-over, failure path or abandonment
-  neither completes nor clears a newer start; an abandoned start stops the
-  engine and fails its joiners; registration succeeds only under
-  `running(g)` and once per key; a break terminates every session of its
-  generation and marks it `closing`, and a late or repeated break changes
-  nothing, so a newer generation keeps running, keeps its sessions and
-  still accepts registrations; a failed terminate is logged and the other
-  jobs are still terminated; a terminate that panics is logged and every
-  session is still marked `closing`, terminated and returned; unregistered sessions leave the snapshot; a
-  launch that holds the mark before the break is terminated by it (the
-  fake job records the spawn before the terminate) and one after it sees
-  `closing`; and the break releases the engine lock before it terminates a
-  job (a registration from another thread during the terminate completes
-  and is refused); the snapshot and the adoption see only the sessions of
-  the given generation; a full session hands the stream back; and no
-  stream is adopted once `unregister` or a break has taken the session,
-  also from within the break's terminate, while one adopted before it
-  stays in the session's channel. Because the adoption looks the session
-  up and sends under the state lock, those two orders are the only ones,
-  so there is no interleaving left for a test to provoke;
+  tests) so that tests can wait for them instead of sleeping; a joiner gets
+  the outcome of the generation it joined, never a later one; a helper that
+  stops after `ready` but before the hand-over leaves the engine `stopped`,
+  fails the hand-over and refuses registration; a stale start's hand-over,
+  failure path or abandonment neither completes nor clears a newer start; an
+  abandoned start stops the engine and fails its joiners; registration
+  succeeds only under `running(g)` and once per key; a break terminates
+  every session of its generation and marks it `closing`, and a late or
+  repeated break changes nothing, so a newer generation keeps running, keeps
+  its sessions and still accepts registrations; a failed terminate is logged
+  and the other jobs are still terminated; a terminate that panics is logged
+  and every session is still marked `closing`, terminated and returned;
+  unregistered sessions leave the snapshot; a launch that holds the mark
+  before the break is terminated by it (the fake job records the spawn
+  before the terminate) and one after it sees `closing`; and the break
+  releases the engine lock before it terminates a job (a registration from
+  another thread during the terminate completes and is refused); the
+  snapshot and the adoption see only the sessions of the given generation; a
+  full session hands the stream back; and no stream is adopted once
+  `unregister` or a break has taken the session, also from within the
+  break's terminate, while one adopted before it stays in the session's
+  channel. Because the adoption looks the session up and sends under the
+  state lock, those two orders are the only ones, so there is no
+  interleaving left for a test to provoke;
 - the dispatch loop (`src/transparent/serve.rs`), with real loopback
   sockets: only a remote peer other than the local address is reflectable
   (loopback, IPv4-mapped loopback and the local address refused); the
@@ -1734,21 +1736,21 @@ those implemented with step 5 are listed after this list):**
   tunnels log the target like proxy-mode tunnels and never the peer.
 
 Implemented with step 5 in the agent (`src/agent/tests/transparent.rs`,
-Unix only, like its sibling `src/agent/tests/terminals.rs`: the fakes use
-`Job::fake`, which exists only outside Windows because the Windows `Job` is
-a real job object, spawn `/bin/sleep` through `browser::spawn`, and give an
-absolute Unix `USERPROFILE`; on Windows the job and `os_user` paths behind
-them are real. The tests wait on what they can observe (the helper start,
-the joiners of a start, the listener's serve), never on a sleep. With a
-fake `Launcher`, a fake `Engine` whose helper is started,
-gated, failed or stopped by the test and whose listener records when it
-serves and when it is shut down, and fake jobs): a transparent terminal and
-a transparent browser start the helper with the configured DSCP, then
-create the job, then tag it, and only then spawn, are registered under the
-running generation with a live adopter, keep their proxy settings
-(`--proxy-server`, the proxy variables) and are listed with
-`transparent`; proxy-mode sessions start no helper, set no tag and are not
-listed as transparent; each helper failure (an error code, a declined
+Unix only, like the inline `#[cfg(unix)]` modules `no_job_retry` and
+`terminal_sessions` in `src/agent.rs`: the fakes use `Job::fake`, which
+exists only outside Windows because the Windows `Job` is a real job object,
+spawn `/bin/sleep` through `browser::spawn`, and give an absolute Unix
+`USERPROFILE`; on Windows the job and `os_user` paths behind them are real.
+The tests wait on what they can observe (the helper start, the joiners of a
+start, the listener's serve), never on a sleep. With a fake `Launcher`, a
+fake `Engine` whose helper is started, gated, failed or stopped by the test
+and whose listener records when it serves and when it is shut down, and fake
+jobs): a transparent terminal and a transparent browser start the helper
+with the configured DSCP, then create the job, then tag it, and only then
+spawn, are registered under the running generation with a live adopter, keep
+their proxy settings (`--proxy-server`, the proxy variables) and are listed
+with `transparent`; proxy-mode sessions start no helper, set no tag and are
+not listed as transparent; each helper failure (an error code, a declined
 prompt, a timeout, the previous helper still running, an exit) is answered
 with its message, recorded as the last error and starts nothing; a helper
 whose pipe has broken by the hand-over fails the start with its message
@@ -1768,12 +1770,12 @@ unavailable transparent sessions (with the reason), full capacity, an
 unknown gateway, a browser request that needs a confirmation (the mixed
 route on a gateway saved with the gateway route, a new gateway), a browser
 plan that fails, a missing browser and a missing or relative `USERPROFILE`
-for a terminal are each refused before any helper start, and a refused confirmation never becomes
-the pending one; the pre-check takes no rate-limit slot; a helper that
-stops closes every transparent session of its generation and shuts down
-its listener, leaves proxy-mode sessions open and records the cause; a
-stop whose blocking task did not finish closes every transparent session,
-whatever its generation, and no proxy-mode session; and
+for a terminal are each refused before any helper start, and a refused
+confirmation never becomes the pending one; the pre-check takes no
+rate-limit slot; a helper that stops closes every transparent session of its
+generation and shuts down its listener, leaves proxy-mode sessions open and
+records the cause; a stop whose blocking task did not finish closes every
+transparent session, whatever its generation, and no proxy-mode session; and
 the helper is started once while it runs and again, as a new generation,
 after it stopped. Not covered at the agent level: the 60 s timeout from
 `ShellExecuteExW` returning and the waits for a previous helper (tested in

@@ -97,7 +97,7 @@ enum DadState {
     Preferred,
 }
 
-// A tentative, duplicate or invalid address may be another host's, so it counts as remote too.
+// An address that is not in use (tentative, duplicate or invalid) counts as remote too.
 #[cfg(any(windows, test))]
 fn among(ip: IpAddr, table: impl IntoIterator<Item = (std::net::Ipv4Addr, DadState)>) -> bool {
     let IpAddr::V4(ip) = ip.to_canonical() else {
