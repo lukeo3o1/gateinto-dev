@@ -725,7 +725,7 @@ impl Agent {
         let mut terminals = self.inner.terminals.lock().await;
         self.check_terminal_capacity(terminals.len())?;
         let known = self.inner.profiles.known()?;
-        let plan = self.inner.profiles.terminal_session(&gateway)?;
+        let plan = self.terminal_plan(&gateway).await?;
         let route = terminal::terminal_route(request.route, plan.route);
         let inherited = launcher.environment();
         let Some(current_dir) = home_dir(&inherited) else {
@@ -830,10 +830,19 @@ impl Agent {
         self.check_transparent().await?;
         let open = self.inner.terminals.lock().await.len();
         self.check_terminal_capacity(open)?;
-        self.inner.profiles.terminal_session(gateway)?;
+        // Discarded: the CA file, the client certificate and the shell executable can change
+        // while the helper starts, so `terminal` builds the plan again.
+        self.terminal_plan(gateway).await?;
         home_dir(&self.inner.launcher.environment())
             .map(drop)
             .ok_or_else(|| NO_HOME.to_owned())
+    }
+
+    async fn terminal_plan(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String> {
+        let (inner, gateway) = (self.inner.clone(), gateway.clone());
+        tokio::task::spawn_blocking(move || inner.profiles.terminal_session(&gateway))
+            .await
+            .map_err(|error| format!("building the terminal session plan failed: {error}"))?
     }
 
     fn check_terminal_capacity(&self, open: usize) -> Result<(), String> {

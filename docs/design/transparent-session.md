@@ -567,13 +567,18 @@ For a transparent session request the agent:
      `Agent::check_terminal_capacity` compares the count of `Inner::terminals`
      with `max_terminal_sessions`; the pre-check takes `terminals` only to
      read the count, `Agent::terminal` checks again while holding it.
-   - **Gateway.** Terminals: `Profiles::terminal_session(&gateway)`, which
-     refuses a gateway that is not in the configuration file. Browsers:
-     `Profiles::known()` and `link::resolve` with `Decision::Defer`
-     (`transparent_launch`), which reads only; a result other than
-     `Resolution::Launch`, that is a request that would need a gateway
-     confirmation, is refused for a transparent session ("a transparent
-     session is not started for a request that needs a gateway
+   - **Gateway.** Terminals: `Agent::terminal_plan`, the same call
+     `Agent::terminal` makes: `Profiles::terminal_session(&gateway)`, which
+     refuses a gateway that is not in the configuration file. As for the
+     browser plan below, it runs in `spawn_blocking`, and the pre-check
+     discards it and `Agent::terminal` builds it again, under `launching`
+     and `terminals`, because the CA file, the client certificate and the
+     shell executable can change while the request waits for the helper.
+     Browsers: `Profiles::known()` and `link::resolve` with
+     `Decision::Defer` (`transparent_launch`), which reads only; a result
+     other than `Resolution::Launch`, that is a request that would need a
+     gateway confirmation, is refused for a transparent session ("a
+     transparent session is not started for a request that needs a gateway
      confirmation; ..."), because the transparent mode is never set by a
      link. Such a request never becomes the pending confirmation.
    - **Session plan.** Browsers: `Agent::browser_plan` for the gateway the
@@ -1714,8 +1719,9 @@ those implemented with step 5 are listed after this list):**
 - each pre-check (rate limit, platform, capacity, gateway, a browser request
   that would need a confirmation) refuses without starting a helper;
 - a transparent browser launch builds its plan twice, in the pre-check and
-  in `Agent::start`, a proxy-mode one once, and every build runs off the
-  async worker;
+  in `Agent::start`, and a transparent terminal twice, in the pre-check and
+  in `Agent::terminal`; a proxy-mode launch of either builds it once, and
+  every build runs off the async worker;
 - a rate-limited transparent request is refused by the pre-check with the
   existing rate-limit error and raises no helper start; the pre-check
   consumes no slot, so a request it lets through is counted once, under

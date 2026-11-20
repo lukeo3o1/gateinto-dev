@@ -341,6 +341,10 @@ impl Profiles for Gateways {
     }
 
     fn terminal_session(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String> {
+        self.builds
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
         if gateway.as_str() != "office" {
             return Err(format!("unknown gateway \"{gateway}\""));
         }
@@ -995,6 +999,22 @@ async fn browser_plans_are_built_off_the_async_worker_twice_in_transparent_once_
     answer(&h.agent, browser(Mode::Transparent)).await.unwrap();
     assert_eq!(builds.lock().unwrap().len(), 2);
     answer(&h.agent, browser(Mode::Proxy)).await.unwrap();
+
+    let builds = builds.lock().unwrap().clone();
+    assert_eq!(builds.len(), 3);
+    assert!(builds.iter().all(|&thread| thread != worker));
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn terminal_plans_are_built_off_the_async_worker_twice_in_transparent_once_in_proxy_mode() {
+    let builds = Builds::default();
+    let h = harness(|setup| setup.gateways.builds = builds.clone());
+    let worker = std::thread::current().id();
+
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+    assert_eq!(builds.lock().unwrap().len(), 2);
+    answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
 
     let builds = builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 3);
