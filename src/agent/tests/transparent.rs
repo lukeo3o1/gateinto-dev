@@ -298,9 +298,12 @@ impl Launcher for Processes {
     }
 }
 
+type Builds = Arc<Mutex<Vec<std::thread::ThreadId>>>;
+
 #[derive(Default)]
 struct Gateways {
     browser_plan: Option<&'static str>,
+    builds: Builds,
 }
 
 impl Profiles for Gateways {
@@ -325,6 +328,10 @@ impl Profiles for Gateways {
     }
 
     fn browser_session(&self, _: &GatewayName) -> Result<BrowserSessionPlan, String> {
+        self.builds
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
         if let Some(error) = self.browser_plan {
             return Err(error.to_owned());
         }
@@ -977,6 +984,22 @@ async fn a_browser_plan_that_fails_is_refused_before_the_helper() {
     );
     assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
     assert!(session_ids(&h.agent).await.is_empty());
+}
+
+#[tokio::test]
+async fn browser_plans_are_built_off_the_async_worker_twice_in_transparent_once_in_proxy_mode() {
+    let builds = Builds::default();
+    let h = harness(|setup| setup.gateways.builds = builds.clone());
+    let worker = std::thread::current().id();
+
+    answer(&h.agent, browser(Mode::Transparent)).await.unwrap();
+    assert_eq!(builds.lock().unwrap().len(), 2);
+    answer(&h.agent, browser(Mode::Proxy)).await.unwrap();
+
+    let builds = builds.lock().unwrap().clone();
+    assert_eq!(builds.len(), 3);
+    assert!(builds.iter().all(|&thread| thread != worker));
+    h.agent.close_all().await;
 }
 
 #[tokio::test]

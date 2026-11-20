@@ -580,10 +580,17 @@ For a transparent session request the agent:
      request resolved to, the same call `Agent::start` makes:
      `Profiles::browser_session`, which refuses settings that do not
      resolve, and `browser::find_browser`, which refuses a configured
-     browser that is not a file or a system without a browser. Terminals:
-     an absolute `USERPROFILE` in `Launcher::environment` (`home_dir`), the
-     shell's working directory, refused with "the agent has no absolute
-     USERPROFILE to start the shell in; nothing was started".
+     browser that is not a file or a system without a browser. It runs in
+     `spawn_blocking`, since building the proxy configuration reads the CA
+     file and can sign with the device key. The pre-check discards the plan
+     and `Agent::start` builds it again under `launching`: while the request
+     waits for the helper, another process can forget a linked gateway and
+     `Agent::approve` can link the name again with another address, and the
+     CA file, the client certificate and the browser executable can change.
+     Terminals: an absolute `USERPROFILE` in `Launcher::environment`
+     (`home_dir`), the shell's working directory, refused with "the agent
+     has no absolute USERPROFILE to start the shell in; nothing was
+     started".
 
    The pre-checks guarantee no UAC prompt only for the requests they refuse.
    Several concurrent requests can pass them, share one prompt, and still be
@@ -1704,6 +1711,9 @@ those implemented with step 5 are listed after this list):**
   under it still succeeds;
 - each pre-check (rate limit, platform, capacity, gateway, a browser request
   that would need a confirmation) refuses without starting a helper;
+- a transparent browser launch builds its plan twice, in the pre-check and
+  in `Agent::start`, a proxy-mode one once, and every build runs off the
+  async worker;
 - a rate-limited transparent request is refused by the pre-check with the
   existing rate-limit error and raises no helper start; the pre-check
   consumes no slot, so a request it lets through is counted once, under

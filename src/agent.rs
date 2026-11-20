@@ -533,7 +533,9 @@ impl Agent {
         self.check_transparent().await?;
         self.check_capacity().await?;
         let launch = transparent_launch(&request, &self.inner.profiles.known()?)?;
-        self.browser_plan(&launch.profile)?;
+        // Discarded: the linked gateways, the CA file, the client certificate and the browser
+        // executable can change while the helper starts, so `start` builds the plan again.
+        self.browser_plan(&launch.profile).await?;
         self.ensure_engine().await?;
         let _pending = self.inner.launching.lock().await;
         if let Err(error) = self.allow_launch() {
@@ -961,17 +963,25 @@ impl Agent {
         Ok(())
     }
 
-    fn browser_plan(&self, profile: &GatewayName) -> Result<(BrowserSessionPlan, PathBuf), String> {
-        let plan = self.inner.profiles.browser_session(profile)?;
-        let executable = browser::find_browser(self.inner.options.browser.as_deref())
-            .map_err(|e| e.to_string())?;
-        Ok((plan, executable))
+    async fn browser_plan(
+        &self,
+        profile: &GatewayName,
+    ) -> Result<(BrowserSessionPlan, PathBuf), String> {
+        let (inner, profile) = (self.inner.clone(), profile.clone());
+        tokio::task::spawn_blocking(move || {
+            let plan = inner.profiles.browser_session(&profile)?;
+            let executable = browser::find_browser(inner.options.browser.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok((plan, executable))
+        })
+        .await
+        .map_err(|error| format!("building the browser session plan failed: {error}"))?
     }
 
     async fn start(&self, launch: Launch, mode: Mode) -> Result<Vec<String>, String> {
         let transparent = mode == Mode::Transparent;
         let profile = launch.profile;
-        let (plan, executable) = self.browser_plan(&profile)?;
+        let (plan, executable) = self.browser_plan(&profile).await?;
         let mut proxy = plan.proxy;
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         proxy.route = launch.route;
