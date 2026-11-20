@@ -285,9 +285,9 @@ removes one added from a link. See
 
 ## Where settings are stored
 
-- The config file (above) holds the gateways and the `[limits]`, `[browser]` and
-  `[device_key]` settings. The agent reads it when it starts. The GUI only reads it and opens
-  it in the system's editor on request; it never writes it.
+- The config file (above) holds the gateways and the `[limits]`, `[browser]`, `[transparent]`
+  and `[device_key]` settings. The agent reads it when it starts. The GUI only reads it and
+  opens it in the system's editor on request; it never writes it.
 - The GUI's own preferences are stored per user as the values `Theme` and `Language` in
   `HKCU\Software\Gateinto\App`. They apply when chosen in Settings and do not involve the agent.
 - **Start the app at sign-in** is the GUI's value `Gateinto App` in

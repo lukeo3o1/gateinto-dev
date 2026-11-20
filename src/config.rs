@@ -10,6 +10,7 @@ use rustls::pki_types::ServerName;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 
+use crate::divert::Dscp;
 use crate::http::DEFAULT_MAX_HEADER_BYTES;
 use crate::identity::client_cert::ClientCertificateMode;
 use crate::identity::device_key::{Backend, KeyName};
@@ -62,6 +63,8 @@ pub struct ConfigFile {
     pub browser: BrowserSection,
     #[serde(default)]
     pub terminal: TerminalSection,
+    #[serde(default, deserialize_with = "transparent_section")]
+    pub transparent: TransparentSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
@@ -417,6 +420,56 @@ pub struct LimitsSection {
 #[serde(deny_unknown_fields)]
 pub struct BrowserSection {
     pub executable: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransparentSection {
+    #[serde(default, deserialize_with = "optional_dscp")]
+    pub dscp: Option<Dscp>,
+}
+
+impl TransparentSection {
+    pub fn dscp(&self) -> Dscp {
+        self.dscp.unwrap_or_default()
+    }
+}
+
+fn transparent_section<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<TransparentSection, D::Error> {
+    TransparentSection::deserialize(deserializer).map_err(|error| {
+        let message = error.to_string();
+        // toml appends the key path on later lines; the first line already names the key.
+        de::Error::custom(format!(
+            "[transparent] {}",
+            message.lines().next().unwrap_or_default()
+        ))
+    })
+}
+
+fn optional_dscp<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Dscp>, D::Error> {
+    struct DscpVisitor;
+
+    impl Visitor<'_> for DscpVisitor {
+        type Value = Dscp;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an integer between 1 and 63")
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Dscp, E> {
+            u8::try_from(value)
+                .ok()
+                .and_then(|value| Dscp::new(value).ok())
+                .ok_or_else(|| E::invalid_value(de::Unexpected::Signed(value), &self))
+        }
+    }
+
+    deserializer
+        .deserialize_i64(DscpVisitor)
+        .map(Some)
+        .map_err(|error| de::Error::custom(format!("dscp: {error}")))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -1148,6 +1201,7 @@ port = 443
             ("[limits]\nmax_tunnels = 1\n", "max_tunnels"),
             ("[terminal]\ncommand = \"sh\"\n", "command"),
             ("[terminal]\nshell = \"sh\"\nenv = {}\n", "env"),
+            ("[transparent]\nmark = 1\n", "mark"),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains(key), "{text}: {error}");
@@ -1395,6 +1449,65 @@ port = 443
             .unwrap_err()
             .to_string();
         assert!(error.contains("args"), "{error}");
+    }
+
+    #[test]
+    fn the_transparent_section_sets_the_dscp_mark() {
+        for value in [1, 10, 63] {
+            let file = ConfigFile::parse(&format!("[transparent]\ndscp = {value}\n")).unwrap();
+            let dscp = Dscp::new(value).unwrap();
+            assert_eq!(file.transparent, TransparentSection { dscp: Some(dscp) });
+            assert_eq!(file.transparent.dscp(), dscp);
+        }
+        for text in ["", "[transparent]\n"] {
+            let file = ConfigFile::parse(text).unwrap();
+            assert_eq!(file.transparent, TransparentSection::default());
+            assert_eq!(file.transparent.dscp(), Dscp::DEFAULT);
+        }
+    }
+
+    #[test]
+    fn an_invalid_transparent_section_is_refused_naming_the_section_and_key() {
+        for (text, key) in [
+            ("[transparent]\ndscp = 0\n", "dscp"),
+            ("[transparent]\ndscp = 64\n", "dscp"),
+            ("[transparent]\ndscp = -1\n", "dscp"),
+            ("[transparent]\ndscp = 256\n", "dscp"),
+            ("[transparent]\ndscp = \"43\"\n", "dscp"),
+            ("[transparent]\ndscp = 43.0\n", "dscp"),
+            ("[transparent]\nmark = 1\n", "mark"),
+            ("[transparent]\ndscp = 43\nmark = 1\n", "mark"),
+            ("transparent = 1\n", "transparent"),
+        ] {
+            let error = ConfigFile::parse(text).unwrap_err().to_string();
+            assert!(error.contains("[transparent]"), "{text}: {error}");
+            assert!(error.contains(key), "{text}: {error}");
+        }
+        for (text, message) in [
+            (
+                "[transparent]\ndscp = 64\n",
+                "[transparent] dscp: invalid value: integer `64`, expected an integer between 1 \
+                 and 63",
+            ),
+            (
+                "[transparent]\ndscp = \"43\"\n",
+                "[transparent] dscp: invalid type: string \"43\", expected an integer between 1 \
+                 and 63",
+            ),
+            (
+                "[transparent]\nmark = 1\n",
+                "[transparent] unknown field `mark`, expected `dscp`",
+            ),
+        ] {
+            let error = ConfigFile::parse(text).unwrap_err().to_string();
+            assert!(error.ends_with(message), "{text}: {error}");
+        }
+        for value in [0, -1, 256] {
+            let error = ConfigFile::parse(&format!("[transparent]\ndscp = {value}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("between 1 and 63"), "{value}: {error}");
+        }
     }
 
     #[test]

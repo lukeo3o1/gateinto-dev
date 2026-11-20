@@ -18,8 +18,8 @@ availability check (`transparent::availability`), and the agent wiring: the
 IPC mode word, `SessionInfo::transparent`, and transparent browser and
 terminal sessions in the agent in the [order of
 operations](#order-of-operations), over an engine seam (`src/agent/engine.rs`)
-and `Launcher::tag`. Nothing asks for a transparent session yet: the
-configuration (`[transparent] dscp`), the CLI flag, the GUI option, the
+and `Launcher::tag`, and the configuration (`[transparent] dscp`). Nothing
+asks for a transparent session yet: the CLI flag, the GUI option, the
 `session list` marking and the `status` lines are the rest of step 5.
 `Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
 and listener socket, the agent side of the helper, the agent's Windows
@@ -244,7 +244,8 @@ not change.
   `transparent::helper::Windows` starts the elevated helper (below) when the
   agent starts its engine for a transparent session.
 - `ConfigFile` (`src/config.rs`) has `deny_unknown_fields` and the sections
-  `gateways`, `device_key`, `limits`, `browser` and `terminal`.
+  `gateways`, `device_key`, `limits`, `browser`, `terminal` and
+  `transparent`.
 - IPC (`src/ipc.rs`): `Request::Launch(LaunchRequest, Mode)` carries
   `uri::LaunchRequest`, the type the `gateinto://` parser produces, and the
   mode apart from it; `Request::Terminal` carries `TerminalRequest { gateway,
@@ -378,11 +379,15 @@ opt-in per agent-hosted browser or terminal session.**
   dscp = 43
   ```
 
-  `TransparentSection { dscp: Option<Dscp> }` *(proposed)*, with
+  `TransparentSection { dscp: Option<Dscp> }` in `src/config.rs`, with
   `deny_unknown_fields`; `Dscp` accepts 1 to 63 and defaults to
-  `Dscp::DEFAULT` (43). An older Gateinto refuses a file with
-  `[transparent]` (unknown section). The agent reads it once at start, like
-  `[browser] executable`.
+  `Dscp::DEFAULT` (43). A value out of range or of the wrong type, an
+  unknown key and a `transparent` that is not a table are refused with a
+  message that starts with `[transparent]` and names the key, for example
+  "[transparent] dscp: invalid value: integer `64`, expected an integer
+  between 1 and 63". An older Gateinto refuses a file with `[transparent]`
+  (unknown section). The agent reads it once at start, like `[browser]
+  executable`, into `AgentOptions::dscp`.
 - Setting: `Job::set_dscp_tag(Dscp)` with read-back. The session does not
   start when the call fails or the read-back lacks either flag or reports
   another tag; the failure is reported with its Win32 error code, never
@@ -1650,7 +1655,13 @@ attribution:
   address, port, pid or denial detail in any line. The tests that need
   another address of this host take the one of its IPv4 default route,
   found by connecting a UDP socket to a documentation address, which sends
-  nothing, so they fail on a host without an IPv4 default route.
+  nothing, so they fail on a host without an IPv4 default route;
+- the configuration (`src/config.rs`): `[transparent] dscp` accepts 1 to 63
+  and is 43 without the key or the section; 0, 64, -1, 256, a string, a
+  float, an unknown key and a `transparent` that is not a table are refused
+  with a message that starts with `[transparent]` and names the key; and the
+  agent takes the value into `AgentOptions::dscp` (`agent_options` in
+  `src/main.rs`).
 
 **(b) Windows unit tests:**
 
@@ -1784,16 +1795,18 @@ unknown gateway, a browser request that needs a confirmation (the mixed
 route on a gateway saved with the gateway route, a new gateway), a browser
 plan that fails, a missing browser and a missing or relative `USERPROFILE`
 for a terminal are each refused before any helper start, and a refused
-confirmation never becomes the pending one; the pre-check takes no
-rate-limit slot; a helper that stops closes every transparent session of its
-generation and shuts down its listener, leaves proxy-mode sessions open and
-records the cause; a stop whose blocking task did not finish closes every
-transparent session, whatever its generation, and no proxy-mode session; and
-the helper is started once while it runs and again, as a new generation,
-after it stopped. Not covered at the agent level: the 60 s timeout from
-`ShellExecuteExW` returning and the waits for a previous helper (tested in
-`src/transparent/helper.rs`), and the listener port range (tested in
-`src/transparent/listener.rs`).
+confirmation never becomes the pending one; a gateway forgotten while the
+helper starts refuses the browser or terminal launch after the start, with
+no session and nothing spawned, and the helper keeps running; the
+pre-check takes no rate-limit slot; a helper that stops closes every
+transparent session of its generation and shuts down its listener, leaves
+proxy-mode sessions open and records the cause; a stop whose blocking task
+did not finish closes every transparent session, whatever its generation,
+and no proxy-mode session; and the helper is started once while it runs and
+again, as a new generation, after it stopped. Not covered at the agent
+level: the 60 s timeout from `ShellExecuteExW` returning and the waits for a
+previous helper (tested in `src/transparent/helper.rs`), and the listener
+port range (tested in `src/transparent/listener.rs`).
 
 Implemented with step 5 (`src/transparent/helper.rs`,
 `src/transparent/availability.rs`), on every platform with a fake platform
@@ -2029,8 +2042,9 @@ code to pass it, then a refactor.
    `Win32_UI_Shell` and the new imports in the allow-list, the IPC mode,
    `SessionInfo::transparent` and the agent wiring (the order of
    operations, the engine seam and its Windows implementation, the
-   stop-watcher and fail-closed handling). Left: `[transparent]`, the CLI
-   flag, the GUI option, the `session list` marking and the `status` lines.
+   stop-watcher and fail-closed handling) and `[transparent] dscp`. Left:
+   the CLI flag, the GUI option, the `session list` marking and the `status`
+   lines.
 6. **Packaging and user documentation.** The optional MSI feature with the
    WinDivert files and license, and the security model, threat model,
    security boundaries, install and compatibility pages.

@@ -14,7 +14,6 @@ use gateinto::agent::{
 use gateinto::browser;
 use gateinto::check::{self, CheckOptions};
 use gateinto::config::{self, ConfigFile, DeviceKeySettings, GatewayName, Overrides, Settings};
-use gateinto::divert::Dscp;
 use gateinto::http::Authority;
 use gateinto::identity::client_cert::{
     self, CertificateSource, ClientCertificate, ClientCertificateMode, ClientCertificateOptions,
@@ -1167,6 +1166,22 @@ fn agent_config(path: Option<PathBuf>) -> std::io::Result<ConfigSource> {
     })
 }
 
+fn agent_options(
+    file: &ConfigFile,
+    config: ConfigSource,
+    profiles_root: PathBuf,
+    logbook: Logbook,
+) -> AgentOptions {
+    AgentOptions {
+        browser: file.browser.executable.clone(),
+        profiles_root,
+        limits: AgentLimits::default(),
+        logbook,
+        config,
+        dscp: file.transparent.dscp(),
+    }
+}
+
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
     let config = agent_config(args.path().map(|(path, _)| path))?;
@@ -1183,14 +1198,7 @@ async fn agent(args: ConfigArg) -> Result {
     let server = Server::bind(&endpoint)?;
     let profiles_root = browser::profiles_root()
         .ok_or("cannot find the per-user application data directory for browser profiles")?;
-    let options = AgentOptions {
-        browser: file.browser.executable.clone(),
-        profiles_root,
-        limits: AgentLimits::default(),
-        logbook,
-        config,
-        dscp: Dscp::DEFAULT,
-    };
+    let options = agent_options(&file, config, profiles_root, logbook);
     let profiles = ConfigProfiles {
         file: file.clone(),
         linked: linked_store(),
@@ -1949,7 +1957,34 @@ mod tests {
         assert!(agent_config(Some(PathBuf::new())).is_err());
     }
 
+    #[test]
+    fn the_agent_takes_the_browser_and_the_transparent_mark_from_the_config_file() {
+        let file = ConfigFile::parse(
+            "[browser]\nexecutable = \"/opt/chrome\"\n[transparent]\ndscp = 10\n",
+        )
+        .unwrap();
+        let options = agent_options(
+            &file,
+            ConfigSource::Defaults,
+            PathBuf::from("profiles"),
+            Logbook::default(),
+        );
+        assert_eq!(options.dscp, Dscp::new(10).unwrap());
+        assert_eq!(options.browser, Some(PathBuf::from("/opt/chrome")));
+        assert_eq!(options.profiles_root, PathBuf::from("profiles"));
+        assert_eq!(options.config, ConfigSource::Defaults);
+        let options = agent_options(
+            &ConfigFile::default(),
+            ConfigSource::Defaults,
+            PathBuf::from("profiles"),
+            Logbook::default(),
+        );
+        assert_eq!(options.dscp, Dscp::DEFAULT);
+        assert_eq!(options.browser, None);
+    }
+
     use super::*;
+    use gateinto::divert::Dscp;
 
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;
 

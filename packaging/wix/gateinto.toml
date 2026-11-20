@@ -48,6 +48,12 @@
 # [browser]
 # executable = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 
+# DSCP value, 1 to 63, that `gateinto agent` will tag the traffic of
+# transparent sessions with. Choose another value only if 43 is already used
+# by a program or a QoS policy on this machine.
+# [transparent]
+# dscp = 43
+
 # Limits apply to each session separately.
 # [limits]
 # max_concurrent_tunnels = 64
