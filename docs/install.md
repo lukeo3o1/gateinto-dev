@@ -342,8 +342,10 @@ uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe
 only name, host, port, default route (`mixed`, the default, or `gateway`) and source (`config` or `linked`); CA files, certificate files, portal
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
 its path or query. Sessions come from the running agent, the same table as `gateinto session list`.
-`transparent-sessions` says whether this computer can run transparent sessions, which nothing can
-start yet: `available`, or `unavailable: <reason>` (not Windows, Windows older than Windows 10 1607
+`transparent-sessions` says whether this computer can run transparent sessions, which
+`gateinto open --transparent` and `gateinto session terminal --agent --transparent` ask for (see
+[the README](../README.md#transparent-sessions-from-the-command-line)): `available`, or
+`unavailable: <reason>` (not Windows, Windows older than Windows 10 1607
 or Windows Server 2016, Windows on ARM64, or a WinDivert file missing next to `gateinto.exe` or
 different from the pinned one; the installer does not ship these files yet). It is printed whether
 or not the agent runs. While the agent runs, `transparent-engine` is `running`, `starting`, `stopped`

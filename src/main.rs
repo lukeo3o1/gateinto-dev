@@ -237,6 +237,12 @@ struct OpenArgs {
     #[command(flatten)]
     config: ConfigArg,
 
+    /// Ask for a transparent session instead of a local proxy (Windows only); starting the
+    /// transparent engine may ask for administrator approval, and the link is not handed to the
+    /// Gateinto window
+    #[arg(long)]
+    transparent: bool,
+
     /// Launch URI such as gateinto://connect?profile=<gateway>; put -- before it
     uri: String,
 }
@@ -312,7 +318,7 @@ struct TerminalSessionArgs {
     upstream: UpstreamArgs,
 
     /// Ask the running agent to start the shell in a new console window and return; takes only
-    /// --gateway and --route, and never starts an agent
+    /// --gateway, --route and --transparent, and never starts an agent
     #[arg(
         long,
         requires = "gateway",
@@ -332,6 +338,11 @@ struct TerminalSessionArgs {
     /// mixed
     #[arg(long, value_enum, default_value_t = RouteArg::Saved)]
     route: RouteArg,
+
+    /// With --agent, ask for a transparent session instead of a local proxy (Windows only);
+    /// starting the transparent engine may ask for administrator approval
+    #[arg(long, requires = "agent")]
+    transparent: bool,
 
     /// Shell to start instead of [terminal] shell from --config or the default shell; a bare
     /// name is searched in PATH only, never in the current directory
@@ -897,7 +908,7 @@ fn terminal_request(args: &TerminalSessionArgs) -> Option<Request> {
     Some(Request::Terminal(TerminalRequest {
         gateway,
         route: args.route.requested(),
-        mode: Mode::Proxy,
+        mode: mode(args.transparent),
     }))
 }
 
@@ -913,7 +924,9 @@ fn agent_terminal_answer(response: Response) -> Result<Vec<String>, String> {
 
 async fn agent_terminal(request: Request) -> Result {
     let endpoint = Endpoint::for_current_user()?;
-    for line in agent_terminal_answer(ipc::send(&endpoint, &request).await?)? {
+    announce(&request);
+    let response = transparent_answer(&request, ipc::send(&endpoint, &request).await?);
+    for line in agent_terminal_answer(response)? {
         println!("{line}");
     }
     Ok(())
@@ -1226,6 +1239,53 @@ async fn agent_detach(config: Option<&Path>) -> Result {
 
 const AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_START_ATTEMPTS: u32 = 3;
+const TRANSPARENT_NOTICE: &str =
+    "starting the transparent engine may ask for administrator approval";
+const TOO_OLD_FOR_TRANSPARENT: &str = "the agent is too old for transparent sessions; restart it";
+const TRANSPARENT_LINE: &str = "mode: transparent";
+
+fn mode(transparent: bool) -> Mode {
+    if transparent {
+        Mode::Transparent
+    } else {
+        Mode::Proxy
+    }
+}
+
+fn offered_gui(request: &Request, installed: Option<PathBuf>) -> Option<PathBuf> {
+    installed.filter(|_| !request.is_transparent())
+}
+
+fn announce(request: &Request) {
+    if request.is_transparent() {
+        eprintln!("{TRANSPARENT_NOTICE}");
+    }
+}
+
+fn transparent_answer(request: &Request, response: Response) -> Response {
+    match response {
+        Response::Error(error) if ipc::agent_too_old_for_transparent(request, &error) => {
+            Response::Error(TOO_OLD_FOR_TRANSPARENT.to_owned())
+        }
+        Response::Ok(mut lines) if request.is_transparent() => {
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with("session: "))
+                .map_or(0, |at| at + 1);
+            lines.insert(at, TRANSPARENT_LINE.to_owned());
+            Response::Ok(lines)
+        }
+        response => response,
+    }
+}
+
+fn starting_agent_limit(request: &Request, remaining: Duration) -> Duration {
+    if request.is_transparent() {
+        request.timeout()
+    } else {
+        remaining.max(Duration::from_secs(1))
+    }
+}
 
 fn agent_start_help(config: Option<&Path>) -> String {
     match config {
@@ -1241,11 +1301,13 @@ async fn open(args: OpenArgs) -> Result {
     let launch = args.uri.parse::<LaunchRequest>()?;
     let endpoint = Endpoint::for_current_user()?;
     let config = args.config.config.as_deref();
-    let gui = if cfg!(windows) {
+    let request = Request::Launch(launch.clone(), mode(args.transparent));
+    let installed = if cfg!(windows) {
         handoff::installed(&std::env::current_exe()?)
     } else {
         None
     };
+    let gui = offered_gui(&request, installed);
     let ensure_agent = async || -> Result {
         match ipc::send(&endpoint, &Request::List).await {
             Err(RequestError::NotRunning | RequestError::Closed) => {
@@ -1267,7 +1329,7 @@ async fn open(args: OpenArgs) -> Result {
         Handoff::Pending => return Err(handoff::PENDING_HELP.into()),
         Handoff::Kept => {}
     }
-    let request = Request::Launch(launch.clone(), Mode::Proxy);
+    announce(&request);
     let response = match ipc::send(&endpoint, &request).await {
         Err(RequestError::NotRunning | RequestError::Closed) => {
             start_agent_and_send(&endpoint, &request, config).await?
@@ -1283,7 +1345,8 @@ async fn open(args: OpenArgs) -> Result {
             .await
             .unwrap_or_else(|error| Err(error.to_string()))
     };
-    print_launched(approval::settle(&launch, response, send, ask).await?).await
+    let settled = approval::settle(&launch, response, send, ask).await?;
+    print_launched(transparent_answer(&request, settled)).await
 }
 
 fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
@@ -1354,7 +1417,7 @@ async fn start_agent_and_send(
         tokio::time::sleep(delay).await;
         let exited = child.try_wait()?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let limit = remaining.max(Duration::from_secs(1));
+        let limit = starting_agent_limit(request, remaining);
         match ipc::send_with_timeout(endpoint, request, limit).await {
             Err(RequestError::NotRunning | RequestError::Closed) => {}
             result => return Ok(result?),
@@ -2275,6 +2338,130 @@ args = ["-l"]
                 .chain(flags.iter().copied())
                 .collect();
             assert!(terminal_args(&flags).is_err(), "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn a_transparent_terminal_is_asked_of_the_agent_only() {
+        let args = terminal_args(&["--agent", "--gateway", "office", "--transparent"]).unwrap();
+        assert_eq!(
+            terminal_request(&args),
+            Some(Request::Terminal(TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: None,
+                mode: Mode::Transparent,
+            }))
+        );
+        for flags in [
+            &["--transparent"][..],
+            &["--gateway", "office", "--transparent"],
+            &["--transparent", "--shell", "sh"],
+        ] {
+            let error = terminal_args(flags).err().unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{flags:?}"
+            );
+            assert!(error.to_string().contains("--agent"), "{error}");
+        }
+    }
+
+    fn open_args(flags: &[&str]) -> OpenArgs {
+        let args = ["gateinto", "open"].iter().chain(flags);
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::Open(args) => args,
+            _ => unreachable!(),
+        }
+    }
+
+    const LINK: &str = "gateinto://connect?profile=office";
+
+    fn launch(mode: Mode) -> Request {
+        Request::Launch(LINK.parse().unwrap(), mode)
+    }
+
+    #[test]
+    fn open_asks_for_a_transparent_session_only_when_told_to() {
+        assert_eq!(mode(open_args(&["--", LINK]).transparent), Mode::Proxy);
+        let args = open_args(&["--transparent", "--", LINK]);
+        assert_eq!(mode(args.transparent), Mode::Transparent);
+        assert_eq!(args.uri, LINK);
+    }
+
+    #[test]
+    fn a_transparent_launch_is_not_handed_to_the_gui() {
+        let gui = Some(PathBuf::from("gateinto-gui.exe"));
+        let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
+        assert_eq!(offered_gui(&proxy, gui.clone()), gui);
+        assert_eq!(offered_gui(&transparent, gui), None);
+        assert_eq!(offered_gui(&proxy, None), None);
+    }
+
+    #[test]
+    fn only_a_transparent_request_to_a_starting_agent_waits_for_the_transparent_timeout() {
+        let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
+        for remaining in [Duration::ZERO, Duration::from_secs(20)] {
+            assert_eq!(
+                starting_agent_limit(&transparent, remaining),
+                ipc::TRANSPARENT_REQUEST_TIMEOUT
+            );
+        }
+        assert_eq!(
+            starting_agent_limit(&proxy, Duration::from_secs(20)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            starting_agent_limit(&proxy, Duration::from_millis(200)),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn a_transparent_answer_is_marked_and_an_older_agent_is_named() {
+        let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
+        let lines = |lines: &[&str]| lines.iter().map(|line| (*line).to_owned()).collect();
+        assert_eq!(
+            transparent_answer(
+                &transparent,
+                Response::Ok(lines(&["session: 4", "gateway: office"]))
+            ),
+            Response::Ok(lines(&[
+                "session: 4",
+                "mode: transparent",
+                "gateway: office"
+            ]))
+        );
+        assert_eq!(
+            transparent_answer(&proxy, Response::Ok(lines(&["session: 4"]))),
+            Response::Ok(lines(&["session: 4"]))
+        );
+        let refused = |error: &str| Response::Error(error.to_owned());
+        let too_old = refused("the agent is too old for transparent sessions; restart it");
+        assert_eq!(
+            transparent_answer(&transparent, refused(ipc::INVALID_LAUNCH_REQUEST)),
+            too_old
+        );
+        let terminal = |mode| {
+            Request::Terminal(TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: None,
+                mode,
+            })
+        };
+        assert_eq!(
+            transparent_answer(
+                &terminal(Mode::Transparent),
+                refused(ipc::INVALID_TERMINAL_REQUEST)
+            ),
+            too_old
+        );
+        for (request, error) in [
+            (&proxy, ipc::INVALID_LAUNCH_REQUEST),
+            (&terminal(Mode::Proxy), ipc::INVALID_TERMINAL_REQUEST),
+            (&transparent, "transparent sessions are unavailable: x"),
+        ] {
+            assert_eq!(transparent_answer(request, refused(error)), refused(error));
         }
     }
 

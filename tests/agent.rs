@@ -1158,7 +1158,41 @@ async fn a_request_to_an_agent_that_never_answers_times_out() {
     let result =
         ipc::send_with_timeout(&endpoint, &Request::List, Duration::from_millis(300)).await;
 
-    assert!(matches!(result, Err(RequestError::TimedOut)), "{result:?}");
+    assert!(
+        matches!(result, Err(RequestError::TimedOut(limit)) if limit == Duration::from_millis(300)),
+        "{result:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_a_transparent_request_waits_longer_than_the_request_timeout() {
+    let dir = temp_dir("hung-transparent");
+    let endpoint = endpoint(&dir);
+    let _server = Server::bind(&endpoint).unwrap();
+    let terminal = |mode| {
+        Request::Terminal(gateinto::ipc::TerminalRequest {
+            gateway: "main".parse().unwrap(),
+            route: None,
+            mode,
+        })
+    };
+
+    for (request, limit) in [
+        (terminal(Mode::Proxy), ipc::REQUEST_TIMEOUT),
+        (
+            terminal(Mode::Transparent),
+            ipc::TRANSPARENT_REQUEST_TIMEOUT,
+        ),
+    ] {
+        let begun = tokio::time::Instant::now();
+        let result = ipc::send(&endpoint, &request).await;
+
+        assert!(
+            matches!(result, Err(RequestError::TimedOut(waited)) if waited == limit),
+            "{request}: {result:?}"
+        );
+        assert_eq!(begun.elapsed(), limit, "{request}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

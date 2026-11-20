@@ -15,7 +15,7 @@ pub fn note(error: RequestError) -> Note {
     match error {
         RequestError::NotRunning => Text::AgentNotRunning.into(),
         RequestError::Closed => Text::AgentClosed.into(),
-        RequestError::TimedOut => Text::AgentTimedOut.into(),
+        RequestError::TimedOut(_) => Text::AgentTimedOut.into(),
         error => Note::Agent(error.to_string()),
     }
 }
@@ -128,9 +128,12 @@ mod tests {
             note(RequestError::Closed).shown(),
             "代理程式未回應就關閉了連線"
         );
-        assert_eq!(note(RequestError::TimedOut).shown(), "代理程式未及時回應");
         assert_eq!(
-            AgentState::from_list(Err(RequestError::TimedOut)),
+            note(RequestError::TimedOut(ipc::REQUEST_TIMEOUT)).shown(),
+            "代理程式未及時回應"
+        );
+        assert_eq!(
+            AgentState::from_list(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))),
             AgentState::Unreachable(Note::Gui(Text::AgentTimedOut))
         );
         let broken = || RequestError::Io(std::io::Error::other("pipe broke"));
@@ -177,7 +180,7 @@ mod tests {
             Config::Unreported
         );
         assert_eq!(
-            Config::from_reply(Err(RequestError::TimedOut)),
+            Config::from_reply(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))),
             Config::Unreported
         );
         assert_eq!(reported(&[]), Config::Unreported);

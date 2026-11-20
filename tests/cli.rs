@@ -1161,6 +1161,104 @@ fn an_agent_too_old_for_verification_is_named() {
 }
 
 #[cfg(unix)]
+const TRANSPARENT_NOTICE: &str =
+    "starting the transparent engine may ask for administrator approval\n";
+
+#[cfg(unix)]
+#[test]
+fn an_agent_too_old_for_transparent_sessions_is_named() {
+    let link = "gateinto://connect?profile=office&auth=session_credentials";
+    for (args, refusal, asked) in [
+        (
+            &[
+                "session",
+                "terminal",
+                "--agent",
+                "--gateway",
+                "office",
+                "--transparent",
+            ][..],
+            "invalid terminal request",
+            "terminal office route=saved mode=transparent",
+        ),
+        (
+            &["open", "--transparent", "--", link][..],
+            "invalid launch request",
+            "launch office session_credentials route=saved mode=transparent",
+        ),
+    ] {
+        let agent = fake_agent::FakeAgent::new();
+        let (output, request) = agent.run(
+            args,
+            gateinto::ipc::Response::Error(refusal.to_owned()),
+            gateinto_command(),
+        );
+        assert_eq!(request.as_deref(), Some(asked), "{args:?}");
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "{TRANSPARENT_NOTICE}error: the agent is too old for transparent sessions; restart it\n"
+            ),
+            "{args:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_proxy_terminal_refused_as_invalid_keeps_the_agent_message() {
+    let agent = fake_agent::FakeAgent::new();
+    let (output, request) = agent.run(
+        &["session", "terminal", "--agent", "--gateway", "office"],
+        gateinto::ipc::Response::Error("invalid terminal request".to_owned()),
+        gateinto_command(),
+    );
+    assert_eq!(request.as_deref(), Some("terminal office route=saved"));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: invalid terminal request\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_started_transparent_terminal_is_marked() {
+    let agent = fake_agent::FakeAgent::new();
+    let (output, request) = agent.run(
+        &[
+            "session",
+            "terminal",
+            "--agent",
+            "--gateway",
+            "office",
+            "--transparent",
+        ],
+        gateinto::ipc::Response::Ok(vec![
+            "session: 4".to_owned(),
+            "gateway: office".to_owned(),
+            "shell: powershell".to_owned(),
+        ]),
+        gateinto_command(),
+    );
+    assert_eq!(
+        request.as_deref(),
+        Some("terminal office route=saved mode=transparent")
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "session: 4\nmode: transparent\ngateway: office\nshell: powershell\n"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        TRANSPARENT_NOTICE
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn the_session_list_notes_a_pending_verification_on_standard_error() {
     let agent = fake_agent::FakeAgent::new();

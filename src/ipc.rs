@@ -23,6 +23,9 @@ pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const INSTANCE_VARIABLE: &str = "GATEINTO_INSTANCE";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub const TRANSPARENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+pub const INVALID_LAUNCH_REQUEST: &str = "invalid launch request";
+pub const INVALID_TERMINAL_REQUEST: &str = "invalid terminal request";
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,38 @@ pub enum Mode {
 }
 
 const TRANSPARENT: &str = "mode=transparent";
+
+impl Request {
+    pub fn is_transparent(&self) -> bool {
+        matches!(
+            self,
+            Self::Launch(_, Mode::Transparent)
+                | Self::Terminal(TerminalRequest {
+                    mode: Mode::Transparent,
+                    ..
+                })
+        )
+    }
+
+    pub fn timeout(&self) -> Duration {
+        if self.is_transparent() {
+            TRANSPARENT_REQUEST_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        }
+    }
+}
+
+pub fn agent_too_old_for_transparent(request: &Request, error: &str) -> bool {
+    match request {
+        Request::Launch(_, Mode::Transparent) => error == INVALID_LAUNCH_REQUEST,
+        Request::Terminal(TerminalRequest {
+            mode: Mode::Transparent,
+            ..
+        }) => error == INVALID_TERMINAL_REQUEST,
+        _ => false,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmToken([u8; 16]);
@@ -186,13 +221,13 @@ impl FromStr for Request {
             ["launch", profile, auth @ "session_credentials", link @ ..] => {
                 let request = launch(Some(profile), auth, link)
                     .filter(|request| request.to_string() == line)
-                    .ok_or(ProtocolError("invalid launch request"))?;
+                    .ok_or(ProtocolError(INVALID_LAUNCH_REQUEST))?;
                 Ok(request)
             }
             ["launch", auth @ "session_credentials", link @ ..] => {
                 let request = launch(None, auth, link)
                     .filter(|request| request.to_string() == line)
-                    .ok_or(ProtocolError("invalid launch request"))?;
+                    .ok_or(ProtocolError(INVALID_LAUNCH_REQUEST))?;
                 Ok(request)
             }
             ["launch", "basic_tofu", ..] | ["launch", _, "basic_tofu", ..] => Err(ProtocolError(
@@ -200,7 +235,7 @@ impl FromStr for Request {
             )),
             ["terminal", ..] => terminal(&words)
                 .filter(|request| request.to_string() == line)
-                .ok_or(ProtocolError("invalid terminal request")),
+                .ok_or(ProtocolError(INVALID_TERMINAL_REQUEST)),
             ["approve", token] => token.parse().map(Self::Approve),
             ["deny", token] => token.parse().map(Self::Deny),
             ["list"] => Ok(Self::List),
@@ -811,7 +846,7 @@ pub fn taken_pipe(endpoint: &Endpoint, owned_by_user: io::Result<bool>) -> BindE
 pub enum RequestError {
     NotRunning,
     Closed,
-    TimedOut,
+    TimedOut(Duration),
     UntrustedServer(String),
     Io(io::Error),
     Protocol(ProtocolError),
@@ -822,10 +857,10 @@ impl fmt::Display for RequestError {
         match self {
             Self::NotRunning => f.write_str("no agent is running"),
             Self::Closed => f.write_str("the agent closed the connection without an answer"),
-            Self::TimedOut => write!(
+            Self::TimedOut(limit) => write!(
                 f,
                 "the agent did not answer within {} seconds",
-                REQUEST_TIMEOUT.as_secs()
+                limit.as_secs()
             ),
             Self::UntrustedServer(reason) => write!(
                 f,
@@ -847,7 +882,7 @@ impl From<io::Error> for RequestError {
 }
 
 pub async fn send(endpoint: &Endpoint, request: &Request) -> Result<Response, RequestError> {
-    send_with_timeout(endpoint, request, REQUEST_TIMEOUT).await
+    send_with_timeout(endpoint, request, request.timeout()).await
 }
 
 pub async fn send_with_timeout(
@@ -857,7 +892,7 @@ pub async fn send_with_timeout(
 ) -> Result<Response, RequestError> {
     tokio::time::timeout(limit, exchange(endpoint, request))
         .await
-        .unwrap_or(Err(RequestError::TimedOut))
+        .unwrap_or(Err(RequestError::TimedOut(limit)))
 }
 
 fn closed_or_io(error: io::Error) -> RequestError {
@@ -1214,7 +1249,7 @@ mod windows {
                 Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                     match busy_retry_delay(deadline, Instant::now()) {
                         Some(delay) => tokio::time::sleep(delay).await,
-                        None => return Err(RequestError::TimedOut),
+                        None => return Err(RequestError::TimedOut(REQUEST_TIMEOUT)),
                     }
                 }
                 Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
@@ -1665,6 +1700,77 @@ mod tests {
         };
         assert_eq!(terminal.mode, Mode::Proxy);
         assert_eq!(Mode::default(), Mode::Proxy);
+    }
+
+    fn transparent_launch() -> Request {
+        Request::Launch(
+            LaunchRequest::new("office", "session_credentials").unwrap(),
+            Mode::Transparent,
+        )
+    }
+
+    fn proxy_terminal() -> Request {
+        Request::Terminal(TerminalRequest {
+            gateway: "office".parse().unwrap(),
+            route: None,
+            mode: Mode::Proxy,
+        })
+    }
+
+    #[test]
+    fn only_transparent_launches_and_terminals_wait_for_the_transparent_timeout() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(TRANSPARENT_REQUEST_TIMEOUT, Duration::from_secs(300));
+        for request in [transparent_launch(), transparent_terminal(None)] {
+            assert!(request.is_transparent(), "{request}");
+            assert_eq!(request.timeout(), TRANSPARENT_REQUEST_TIMEOUT, "{request}");
+        }
+        for request in [
+            launch("office"),
+            proxy_terminal(),
+            Request::List,
+            Request::Transparent,
+            Request::Stop,
+        ] {
+            assert!(!request.is_transparent(), "{request}");
+            assert_eq!(request.timeout(), REQUEST_TIMEOUT, "{request}");
+        }
+    }
+
+    #[test]
+    fn a_timeout_names_the_limit_that_was_waited() {
+        assert_eq!(
+            RequestError::TimedOut(REQUEST_TIMEOUT).to_string(),
+            "the agent did not answer within 60 seconds"
+        );
+        assert_eq!(
+            RequestError::TimedOut(TRANSPARENT_REQUEST_TIMEOUT).to_string(),
+            "the agent did not answer within 300 seconds"
+        );
+    }
+
+    #[test]
+    fn only_a_transparent_request_refused_as_invalid_was_sent_to_an_older_agent() {
+        assert_eq!(INVALID_LAUNCH_REQUEST, "invalid launch request");
+        assert_eq!(INVALID_TERMINAL_REQUEST, "invalid terminal request");
+        let too_old = agent_too_old_for_transparent;
+        assert!(too_old(&transparent_launch(), INVALID_LAUNCH_REQUEST));
+        assert!(too_old(
+            &transparent_terminal(None),
+            INVALID_TERMINAL_REQUEST
+        ));
+        for (request, error) in [
+            (transparent_launch(), INVALID_TERMINAL_REQUEST),
+            (transparent_launch(), INVALID_REQUEST),
+            (transparent_terminal(None), INVALID_LAUNCH_REQUEST),
+            (transparent_terminal(None), INVALID_REQUEST),
+            (transparent_terminal(None), "invalid terminal request: x"),
+            (launch("office"), INVALID_LAUNCH_REQUEST),
+            (proxy_terminal(), INVALID_TERMINAL_REQUEST),
+            (Request::List, INVALID_REQUEST),
+        ] {
+            assert!(!too_old(&request, error), "{request}: {error}");
+        }
     }
 
     fn linked_launch() -> Request {

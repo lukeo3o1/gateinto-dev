@@ -19,9 +19,10 @@ IPC mode word, `SessionInfo::transparent`, and transparent browser and
 terminal sessions in the agent in the [order of
 operations](#order-of-operations), over an engine seam (`src/agent/engine.rs`)
 and `Launcher::tag`, the configuration (`[transparent] dscp`), the IPC
-`transparent` request, the `status` lines and the `session list` marking.
-Nothing asks for a transparent session yet: the CLI flag and the GUI option
-are the rest of step 5.
+`transparent` request, the `status` lines, the `session list` marking and
+the CLI flags (`gateinto session terminal --agent --transparent`, `gateinto
+open --transparent`). The GUI does not ask for a transparent session yet:
+its option is the rest of step 5.
 `Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
 and listener socket, the agent side of the helper, the agent's Windows
 engine and the availability probes on Windows, and their tests have only
@@ -1347,12 +1348,49 @@ with `netsh`.**
 ### CLI, IPC, GUI and status
 
 The IPC mode, `SessionInfo::transparent`, the availability check, the
-`transparent` status request, the `session list` marking and the `status`
-lines exist; the CLI flag and the GUI option are *(proposed)*, the rest of
-step 5 of the [Implementation plan](#implementation-plan).
+`transparent` status request, the `session list` marking, the `status`
+lines and the CLI flags exist; the GUI option and the GUI's marking are
+*(proposed)*, the rest of step 5 of the
+[Implementation plan](#implementation-plan).
 
-- CLI: `gateinto session terminal --agent --transparent`. `--transparent`
-  requires `--agent`.
+- CLI: `gateinto session terminal --agent --transparent` and
+  `gateinto open --transparent -- <uri>`. `--transparent` of
+  `session terminal` requires `--agent` (clap's `requires`, so a missing
+  `--agent` is clap's usual error). `gateinto open` is the command that
+  asks the agent for a browser session; it always goes through the agent
+  and has no `--agent`, so its flag requires nothing. `gateinto session
+  browser` runs its own session without an agent and has no flag. Without
+  the flag the request is unchanged and has no `mode` word.
+  - Before sending a transparent request the CLI prints `starting the
+    transparent engine may ask for administrator approval` on stderr.
+  - A transparent `open` is not handed to an installed GUI, which receives
+    only the link and would lose the mode; `gateinto open` sends it to the
+    agent itself.
+  - The client waits `ipc::TRANSPARENT_REQUEST_TIMEOUT` (300 s) for the
+    answer to a transparent launch or terminal request and
+    `ipc::REQUEST_TIMEOUT` (60 s) for any other request. The worst case of
+    a transparent request is the wait for a previous helper (25 s), the UAC
+    prompt (as long as the user takes), the start timeout (60 s) and the
+    plan builds, so 300 s leaves more than three minutes for the prompt.
+    `Request::timeout` chooses the limit and `ipc::send` applies it, so
+    every client gets it. `RequestError::TimedOut` carries the limit that
+    ran out and names it. When `gateinto open` has just started the agent,
+    a transparent request waits the 300 s instead of what is left of the
+    agent's 30 s start time. The Windows client's wait for a busy pipe
+    keeps its 60 s limit and names it.
+  - The agent sets no deadline on handling a request or writing its answer;
+    its 10 s limit covers only reading the request line, so it does not cut
+    a transparent request short. It does not watch the connection either:
+    a client that gives up while the prompt is still shown does not stop
+    the start, and the session may start after the CLI reported the
+    timeout; `session list` then shows it.
+  - An answer of exactly `invalid launch request` or `invalid terminal
+    request` to a transparent request comes from an older agent (a current
+    one parses every line the CLI writes) and is shown as "the agent is too
+    old for transparent sessions; restart it". Proxy-mode requests keep the
+    agent's message.
+  - The answer to a transparent request gets a `mode: transparent` line
+    after its `session:` line.
 - IPC (`src/ipc.rs`): `terminal <gateway> route=<..> mode=transparent`, and
   for browsers the word `mode=transparent` at the end of the IPC `launch`
   line, after `route=`, `url=`, `gateway=` and `portal=`
@@ -1365,8 +1403,8 @@ step 5 of the [Implementation plan](#implementation-plan).
   `TerminalRequest::mode`), not of `LaunchRequest`, and the `gateinto://`
   parser has no field for it (`mode`, `transparent` and any other unknown
   field fail as `UnknownField`). An older agent answers `invalid launch
-  request` or `invalid terminal request`; the CLI and GUI say the agent is
-  too old.
+  request` or `invalid terminal request`; the CLI says the agent is too old
+  for transparent sessions, and the GUI is to say so too *(proposed)*.
 - IPC status: the request `transparent`, without arguments, answers `ok`
   with `key: value` lines, in the style of the other answers:
   `availability: available` or `availability: unavailable: <reason>`, and
@@ -1876,6 +1914,26 @@ stopped` from a running agent. The fuzz target `ipc-line` checks that an
 accepted status re-encodes to itself, with seeds for the request and two
 answers. The demo GUI agent answers available with the engine stopped.
 
+Implemented with step 5 for the CLI: in `src/ipc.rs`, only transparent
+launch and terminal requests choose the 300 s limit, a timeout names the
+limit that was waited, and only a transparent request refused with exactly
+the parser's `invalid launch request` or `invalid terminal request` (the
+constants the parser uses) counts as sent to an older agent;
+`tests/agent.rs` checks with a paused clock that a hung agent is waited on
+60 s for a proxy-mode terminal request and 300 s for a transparent one. In
+`src/main.rs`: the terminal flag sends `mode=transparent` only with
+`--agent` and is refused by clap without it; `open --transparent` asks for
+the transparent mode, is not handed to the GUI, and waits the 300 s on an
+agent it has just started; the answer is marked and an older agent is
+named for launches and terminals, and proxy-mode answers are unchanged.
+`tests/cli.rs`, against a fake agent: the request lines, the notice before
+the too-old message for both commands, the marked terminal answer, and a
+proxy-mode terminal that keeps `invalid terminal request`.
+`tests/launch.rs`, against a real agent outside Windows: `open
+--transparent` starts the agent and is refused as unavailable, and
+`session terminal --agent --transparent` is refused as unsupported on this
+platform, each after the notice.
+
 Implemented with step 5 (`src/transparent/helper.rs`,
 `src/transparent/availability.rs`), on every platform with a fake platform
 and paused time: `ready` returns a running handle and the helper got
@@ -2099,7 +2157,7 @@ code to pass it, then a refactor.
    dispatch loop with its in-flight bound (`transparent::serve`).
 5. **Agent wiring** (partly implemented). On-demand helper with
    `ShellExecuteExW`, the order of operations, fail-closed handling,
-   `[transparent]`, the CLI flag, the IPC mode, the GUI option,
+   `[transparent]`, the CLI flags, the IPC mode, the GUI option,
    `SessionInfo::transparent` and the `status` lines; `Win32_UI_Shell` in
    `Cargo.toml` and `shell32.dll` in the Windows 7 import allow-list.
    Implemented so far: the agent side of the helper
@@ -2111,8 +2169,10 @@ code to pass it, then a refactor.
    `SessionInfo::transparent` and the agent wiring (the order of
    operations, the engine seam and its Windows implementation, the
    stop-watcher and fail-closed handling), `[transparent] dscp`, the IPC
-   `transparent` request, the `status` lines and the `session list`
-   marking. Left: the CLI flag and the GUI option.
+   `transparent` request, the `status` lines, the `session list` marking
+   and the CLI flags (`session terminal --agent --transparent`, `open
+   --transparent`). Left: the GUI option and the GUI's marking of
+   transparent sessions.
 6. **Packaging and user documentation.** The optional MSI feature with the
    WinDivert files and license, and the security model, threat model,
    security boundaries, install and compatibility pages.
@@ -2175,7 +2235,9 @@ would need a design change if they fail. Results go to
 - The unelevated agent can wait on and query the exit code of the elevated
   child's process handle returned by `ShellExecuteExW`.
 - Whether `ShellExecuteExW` with `runas` blocks until the user answers the
-  prompt (the 60 s timeout from its return depends on it), and whether a
+  prompt (the 60 s timeout from its return depends on it, and so does the
+  client's 300 s limit, which leaves more than three minutes for the
+  prompt), and whether a
   prompt raised by a background agent without a foreground window only
   flashes in the taskbar.
 - `ShellExecuteExW` with `runas` for an executable works without

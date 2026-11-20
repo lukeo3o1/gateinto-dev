@@ -103,9 +103,9 @@ be uninstalled before a release MSI is installed.
 | --- | --- |
 | `gateinto check-upstream` | Connect to the upstream once and print the negotiated TLS parameters. |
 | `gateinto session browser` | Run one browser session with `session_credentials` local proxy authentication on an ephemeral loopback port and show its credentials. |
-| `gateinto session terminal` | Windows only, pre-release: start a shell in this console whose proxy variables point to a new session that accepts only the shell and the processes it starts (`os_user` with a job object, no credentials), and close the session when the shell exits. With `--agent` and a gateway of the config file, the running agent opens the shell in a new console window instead, lists the session in `session list` and closes it with `session close` or `stop`. |
+| `gateinto session terminal` | Windows only, pre-release: start a shell in this console whose proxy variables point to a new session that accepts only the shell and the processes it starts (`os_user` with a job object, no credentials), and close the session when the shell exits. With `--agent` and a gateway of the config file, the running agent opens the shell in a new console window instead, lists the session in `session list` and closes it with `session close` or `stop`; `--agent --transparent` asks for a [transparent session](#transparent-sessions-from-the-command-line) instead. |
 | `gateinto agent` | Run the per-user agent: the endpoint that starts browser sessions and, on Windows, terminal sessions. `--detach` starts it in the background without a console and returns (the installer's logon autostart uses it). |
-| `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. |
+| `gateinto open -- <uri>` | Start a browser session for a `gateinto://` launch URI through the agent, starting the agent if needed. `--transparent` asks for a [transparent session](#transparent-sessions-from-the-command-line) instead. |
 | `gateinto session list`, `gateinto session close <id>` | List the agent's sessions with their browser or shell, or close one (its browser is stopped, its profile deleted and its credentials revoked; a terminal's job is killed with its shell). |
 | `gateinto session credentials <id>` | Show the local proxy credentials of one of the agent's sessions again, in the same prompt as at launch. |
 | `gateinto session verification <id>` | Show the pending gateway verification of one of the agent's sessions (link, origin, pairing code, targets, remaining time) on standard error, only when it is a terminal; never on standard output and never in a browser. See [interactive verification](docs/design/interactive-auth.md). |
@@ -380,6 +380,8 @@ share only the device key.
   `gateinto session close <id>` and `gateinto stop` kill its job, ending the
   shell and everything started from it. At most 4 terminal sessions are
   open at a time, and terminal requests share the launch rate limit.
+  With `--transparent` it asks for a
+  [transparent session](#transparent-sessions-from-the-command-line).
 - With self-signed client certificates, each session issues its own
   certificate for the device key when it starts and renews only its own; two
   sessions never present the same certificate. A certificate file or
@@ -392,6 +394,34 @@ share only the device key.
   running.
   `gateinto session browser` closes its session on Ctrl+C (or SIGTERM on
   Unix) and then exits.
+
+### Transparent sessions from the command line
+
+Windows only, pre-release and not yet verified on real Windows; see
+[the design](docs/design/transparent-session.md).
+
+- `gateinto open --transparent -- <uri>` and `gateinto session terminal
+  --agent --gateway <name> --transparent` ask the agent for a transparent
+  session instead of a local proxy session. `--transparent` of `session
+  terminal` requires `--agent`; `gateinto session browser` has no such
+  option, and a `gateinto://` link cannot ask for one. A launch that would
+  need a gateway confirmation is refused; add the gateway or use its saved
+  route first. The GUI does not offer transparent sessions yet.
+- The first transparent session of an agent starts the transparent engine,
+  which asks for administrator approval, so the command first prints
+  `starting the transparent engine may ask for administrator approval` on
+  stderr. It then waits up to 300 seconds for the agent's answer (60
+  seconds for every other request). If it gives up while the prompt is
+  still shown, the agent carries on and the session may still start;
+  `gateinto session list` shows it.
+- `gateinto open --transparent` keeps the request itself and does not pass
+  the link to the Gateinto window.
+- The answer has a `mode: transparent` line after its `session:` line. An
+  agent from before this option is named: `the agent is too old for
+  transparent sessions; restart it`. Outside Windows the agent refuses a
+  transparent browser session as unavailable, and a terminal session from
+  the agent as unsupported. `gateinto status` says whether transparent
+  sessions are available.
 
 ### Launching a browser session from a link
 
@@ -751,8 +781,9 @@ Rules:
   Gateinto is expected to refuse a file that contains it, because it does not
   know the key; this has not been tried.
 - `[transparent] dscp` is the DSCP value, 1 to 63 (default 43), that the
-  agent will tag the traffic of transparent sessions with; no Gateinto command
-  or option requests a transparent session yet. The agent reads it once when
+  agent tags the traffic of transparent sessions with; `gateinto open
+  --transparent` and `gateinto session terminal --agent --transparent`
+  request such sessions, and the GUI does not yet. The agent reads it once when
   it starts. Traffic that a program or QoS policy tags with the same value
   outside Gateinto is expected to be captured and dropped or closed while the
   transparent engine runs (from the first transparent session until the agent

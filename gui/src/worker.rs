@@ -1109,7 +1109,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_agent_that_is_not_running_is_not_asked_for_its_config() {
-        for reply in [stopped as fn() -> _, || Err(RequestError::TimedOut)] {
+        for reply in [stopped as fn() -> _, timed_out] {
             let log = RefCell::new(Vec::new());
             let (loads, _, delivered) = configs_read(listing(&log, reply)).await;
             assert_eq!(loads, vec![Config::Unreported; 2]);
@@ -2154,6 +2154,10 @@ mod tests {
         Err(RequestError::NotRunning)
     }
 
+    fn timed_out() -> Result<Response, RequestError> {
+        Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_stopped_agent_is_started_once_and_refreshed_at_the_next_allowed_poll() {
         let log = RefCell::new(Vec::new());
@@ -2296,8 +2300,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn only_a_stopped_agent_is_started() {
         let running = || Ok(Response::Ok(Vec::new()));
-        let unreachable = || Err(RequestError::TimedOut);
-        for reply in [running as fn() -> _, unreachable] {
+        for reply in [running as fn() -> _, timed_out] {
             let log = RefCell::new(Vec::new());
             let (calls, seen) = starts(
                 listing(&log, reply),

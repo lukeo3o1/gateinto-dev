@@ -330,8 +330,14 @@ See [install.md](install.md).
   for this user; Gateinto leaves it alone. `not registered`: install the MSI
   or run `gateinto uri register`.
 - `transparent-engine: unknown: the agent is too old; restart it` in
-  `status`: the running agent was started by an older Gateinto. Stop it with
-  `gateinto stop`, which closes its sessions, and start it again.
+  `status`, or `the agent is too old for transparent sessions; restart it`
+  from `gateinto open --transparent` or `gateinto session terminal --agent
+  --transparent`: the running agent was started by an older Gateinto. Stop
+  it with `gateinto stop`, which closes its sessions, and start it again.
+- `the agent did not answer within 300 seconds` from a transparent request:
+  the administrator approval was not given in time, or the transparent
+  engine did not start. The agent may still start the session; check
+  `gateinto session list` before asking again.
 - `refusing to delete the device key without confirmation: no terminal ...`:
   `reset` was run from a script. Pass `--confirm-spki` with the first 16 or
   more hex digits of `spki-sha256` from `gateinto status`.

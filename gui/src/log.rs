@@ -417,7 +417,7 @@ mod tests {
     fn other_failures_are_shown_and_asked_again_on_the_next_poll() {
         let mut journal = Journal::default();
         journal.absorb(answer(7, 1, [1]));
-        assert!(!journal.absorb(Err(RequestError::TimedOut)));
+        assert!(!journal.absorb(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))));
         assert_eq!(
             journal.problem(),
             Some(crate::i18n::tr(crate::i18n::Text::AgentTimedOut))
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn a_failure_is_shown_above_the_rows_it_kept() {
         let mut journal = mixed();
-        journal.absorb(Err(RequestError::TimedOut));
+        journal.absorb(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT)));
         assert!(
             matches!(body(&running(), &journal, Filter::All, 0), Body::Rows(rows) if rows.len() == 3)
         );
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn problems_with_kept_rows_and_failures_replace_the_subtitle() {
         let mut journal = mixed();
-        journal.absorb(Err(RequestError::TimedOut));
+        journal.absorb(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT)));
         let shown_body = body(&running(), &journal, Filter::All, 0);
         let shown = page(&journal, &shown_body, Filter::All, None, false);
         assert_eq!(

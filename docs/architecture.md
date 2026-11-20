@@ -322,7 +322,11 @@ The full protocol, limits and guarantees are in
   suffixed by `GATEINTO_INSTANCE` when it is set), the `Server` that only one
   agent can bind (on Unix under a lock file), and `send` for clients, which
   checks on Windows that the pipe is owned by the same user and gives up
-  after 60 seconds.
+  after 60 seconds, or 300 seconds for a transparent launch or terminal
+  request (`Request::timeout`), whose answer can wait for the UAC prompt of
+  the transparent engine; `RequestError::TimedOut` names the limit that ran
+  out. The agent has no deadline for handling a request or writing its
+  answer, only for reading the request line (10 seconds).
 - `agent::Agent` owns a `SessionManager` and one watch task per browser
   session. `Agent::serve` first deletes profile directories left by an
   earlier agent, then accepts at most 8 connections at a time, answers one
@@ -366,6 +370,16 @@ The full protocol, limits and guarantees are in
   request; if no agent answers it starts one (Windows: `DETACHED_PROCESS`
   and `CREATE_NEW_PROCESS_GROUP`, standard handles made non-inheritable; Unix:
   a new process group) and retries with backoff for up to 30 seconds.
+  `--transparent` adds `mode=transparent` to the request, keeps the link
+  from the installed GUI (which would receive only the link and lose the
+  mode), prints a notice that administrator approval may be asked on stderr
+  before sending, and waits the full 300 seconds for the answer even from
+  an agent it has just started. `session terminal --agent --transparent`
+  does the same for a terminal request. A transparent request answered with
+  the parser's exact `invalid launch request` or `invalid terminal request`
+  comes from an older agent and is shown as "the agent is too old for
+  transparent sessions; restart it"; a successful answer gets a
+  `mode: transparent` line after its `session:` line.
 - The GUI (`gateinto-gui.exe`) starts an agent only when the user clicks
   Start agent, which it offers on the sessions page and in the tray flyout
   only while its last poll found no agent. It runs `gateinto.exe agent
@@ -515,8 +529,8 @@ The full protocol, limits and guarantees are in
 ### Terminal sessions in the agent
 
 ```text
- gateinto session terminal --agent --gateway <name> [--route ..]
-        |  "terminal <name> route=<saved|gateway|mixed>\n"
+ gateinto session terminal --agent --gateway <name> [--route ..] [--transparent]
+        |  "terminal <name> route=<saved|gateway|mixed>[ mode=transparent]\n"
         |  (no agent: fail, never start one)
         v
  gateinto agent ---- agent::Agent::terminal
@@ -569,13 +583,13 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `session verification`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`, and on Windows the hidden `divert` that runs the elevated helper with its raw arguments and a silent panic hook, before the Tokio runtime is built), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`), the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open`, the `transparent-sessions` and `transparent-engine` lines of `status`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `session verification`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`, and on Windows the hidden `divert` that runs the elevated helper with its raw arguments and a silent panic hook, before the Tokio runtime is built), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`, with `--transparent` for a transparent one), the `--transparent` flag of `open` (not handed to the GUI), the notice before a transparent request, the `mode: transparent` line of its answer and the older-agent message, the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open`, the `transparent-sessions` and `transparent-engine` lines of `status`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
 | `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting (with the `gateway forget` decision shared with the GUI) and purging. |
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); the pending verification text on a terminal or the fixed line without values; failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
-| `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. A browser launch (`Request::Launch`, which carries the link type `LaunchRequest`) and a terminal request carry a `Mode` of their own; `Mode::Transparent` is the last word `mode=transparent` of the line, accepted once and only there, which a `gateinto://` link cannot produce. `TransparentStatus` is the answer to `transparent` (`availability` and `engine` lines, other keys ignored), and `transparent_status` reads it, names an `invalid request` from an older agent as too old and refuses a malformed answer. |
+| `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. A browser launch (`Request::Launch`, which carries the link type `LaunchRequest`) and a terminal request carry a `Mode` of their own; `Mode::Transparent` is the last word `mode=transparent` of the line, accepted once and only there, which a `gateinto://` link cannot produce. `Request::timeout` gives a transparent launch or terminal request 300 s (`TRANSPARENT_REQUEST_TIMEOUT`) and every other request 60 s (`REQUEST_TIMEOUT`); `send` applies it, and `RequestError::TimedOut` carries the limit. `agent_too_old_for_transparent` recognizes the parser's `invalid launch request` and `invalid terminal request` (`INVALID_LAUNCH_REQUEST`, `INVALID_TERMINAL_REQUEST`) as an older agent's answer to a transparent request. `TransparentStatus` is the answer to `transparent` (`availability` and `engine` lines, other keys ignored), and `transparent_status` reads it, names an `invalid request` from an older agent as too old and refuses a malformed answer. |
 | `src/logbook.rs` | The agent's in-memory logbook: a `tracing` layer that keeps the last 500 events at `info` and above, each message cut to 1000 characters and scoped to its session or module, and the page of events after a sequence number for the IPC `log` request. Never written to disk. |
 | `src/agent.rs` | The agent: launch validation, rate limit and session caps, browser and terminal sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. Reading the known gateways (`Agent::known`), storing an approved one (`Agent::link`) and deleting a closed browser's profile run in `spawn_blocking`. Transparent sessions: read-only pre-checks (`LaunchLimiter::would_allow`, the platform, availability, capacity and the gateway, refusing a browser request that needs a confirmation, then the browser plan and the browser executable (built in `spawn_blocking`, like the plan of every browser launch, and built again under `launching` because the linked gateways, the CA file, the client certificate and the browser executable can change while the helper starts), or the terminal plan (built in `spawn_blocking`, like the plan of every terminal launch, and built again under `launching` and `terminals` because the CA file, the client certificate and the shell executable can change while the helper starts) and the shell's absolute `USERPROFILE`), the engine start before any launch lock is taken (one start per generation shared by concurrent requests, a biased look at the running handle at the hand-over, then the stop-watcher and the listener's loop), the job, its DSCP tag (`Launcher::tag`, read back by `Job::set_dscp_tag` on Windows), registration with the session's adopter and the spawn under the session's mark (`launched`); the stop-watcher records the cause, stops its generation (`State::stop` in `spawn_blocking`), shuts that listener down, waits for a launch in progress (`launching`) and closes the sessions through `close`; if that blocking stop does not finish, it closes every transparent session instead. Every close path unregisters the session. The `transparent` request answers the availability, checked through the engine seam in `spawn_blocking`, and the engine's phase with the last helper error (`Agent::transparent_engine`), only while stopped; a successful start clears that error before the stop-watcher is spawned, and a failed start and the stop-watcher record theirs before the phase becomes stopped, so a stopped engine reports what stopped it or made its last start fail, and a running one no error. No fallback to proxy mode, and none to a browser without a job. |
 | `src/agent/engine.rs` | The engine seam of the agent (`Engine`: availability and the start of one generation's helper and listener, yielding the helper's `stopped` future and a `Listener` that runs the dispatch loop until its shutdown). On Windows `Divert` keeps one `Supervisor<helper::Windows>` for the agent's lifetime, so a start waits for the previous generation's helper, and per start creates the `Attribution`, reserves the port, starts the helper, listens after `ready` and serves with the default handshake timeout; elsewhere the engine is unavailable. The agent tests replace it with a fake. |

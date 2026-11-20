@@ -789,6 +789,46 @@ async fn an_agent_terminal_is_refused_by_an_agent_outside_windows() {
     launcher.run(&["stop"]).await.success();
 }
 
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transparent_session_is_refused_by_an_agent_outside_windows() {
+    let launcher = Launcher::new("").await;
+    let config = launcher.config.to_str().unwrap().to_owned();
+    let link = "gateinto://connect?profile=main&auth=session_credentials";
+
+    for (args, refusal) in [
+        (
+            &["open", "--config", &config, "--transparent", "--", link][..],
+            "transparent sessions are unavailable: transparent sessions need Windows",
+        ),
+        (
+            &[
+                "session",
+                "terminal",
+                "--agent",
+                "--gateway",
+                "main",
+                "--transparent",
+            ][..],
+            "terminal sessions from the agent are not supported on this platform",
+        ),
+    ] {
+        let output = launcher.run(args).await;
+        assert_eq!(
+            output.failure().stderr,
+            format!(
+                "starting the transparent engine may ask for administrator approval\nerror: \
+                 {refusal}\n"
+            ),
+            "{args:?}"
+        );
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
+    assert!(launcher.list().await.is_empty());
+    assert!(browsers(&launcher.profiles_root).is_empty());
+    launcher.run(&["stop"]).await.success();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_agent_rejects_a_profile_missing_from_its_configuration() {
     let launcher = Launcher::new("").await;
