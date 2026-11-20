@@ -438,7 +438,21 @@ impl TransparentSection {
 fn transparent_section<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<TransparentSection, D::Error> {
-    TransparentSection::deserialize(deserializer).map_err(|error| {
+    struct TableVisitor;
+
+    impl<'de> Visitor<'de> for TableVisitor {
+        type Value = TransparentSection;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a table")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<TransparentSection, A::Error> {
+            TransparentSection::deserialize(de::value::MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(TableVisitor).map_err(|error| {
         let message = error.to_string();
         // toml appends the key path on later lines; the first line already names the key.
         de::Error::custom(format!(
@@ -464,6 +478,25 @@ fn optional_dscp<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Ds
                 .and_then(|value| Dscp::new(value).ok())
                 .ok_or_else(|| E::invalid_value(de::Unexpected::Signed(value), &self))
         }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Dscp, E> {
+            Err(E::invalid_value(de::Unexpected::Unsigned(value), &self))
+        }
+
+        fn visit_i128<E: de::Error>(self, value: i128) -> Result<Dscp, E> {
+            Err(out_of_range(value, &self))
+        }
+
+        fn visit_u128<E: de::Error>(self, value: u128) -> Result<Dscp, E> {
+            Err(out_of_range(value, &self))
+        }
+    }
+
+    fn out_of_range<E: de::Error>(value: impl fmt::Display, expected: &DscpVisitor) -> E {
+        E::invalid_value(
+            de::Unexpected::Other(&format!("integer `{value}`")),
+            expected,
+        )
     }
 
     deserializer
@@ -1454,10 +1487,20 @@ port = 443
     #[test]
     fn the_transparent_section_sets_the_dscp_mark() {
         for value in [1, 10, 63] {
-            let file = ConfigFile::parse(&format!("[transparent]\ndscp = {value}\n")).unwrap();
-            let dscp = Dscp::new(value).unwrap();
-            assert_eq!(file.transparent, TransparentSection { dscp: Some(dscp) });
-            assert_eq!(file.transparent.dscp(), dscp);
+            for text in [
+                format!("[transparent]\ndscp = {value}\n"),
+                format!("transparent.dscp = {value}\n"),
+                format!("transparent = {{ dscp = {value} }}\n"),
+            ] {
+                let file = ConfigFile::parse(&text).unwrap();
+                let dscp = Dscp::new(value).unwrap();
+                assert_eq!(
+                    file.transparent,
+                    TransparentSection { dscp: Some(dscp) },
+                    "{text}"
+                );
+                assert_eq!(file.transparent.dscp(), dscp);
+            }
         }
         for text in ["", "[transparent]\n"] {
             let file = ConfigFile::parse(text).unwrap();
@@ -1478,6 +1521,9 @@ port = 443
             ("[transparent]\nmark = 1\n", "mark"),
             ("[transparent]\ndscp = 43\nmark = 1\n", "mark"),
             ("transparent = 1\n", "transparent"),
+            ("transparent = []\n", "transparent"),
+            ("transparent = [10]\n", "transparent"),
+            ("transparent = [10, 11]\n", "transparent"),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.contains("[transparent]"), "{text}: {error}");
@@ -1498,15 +1544,36 @@ port = 443
                 "[transparent]\nmark = 1\n",
                 "[transparent] unknown field `mark`, expected `dscp`",
             ),
+            (
+                "transparent = 1\n",
+                "[transparent] invalid type: integer `1`, expected a table",
+            ),
+            (
+                "transparent = [10]\n",
+                "[transparent] invalid type: sequence, expected a table",
+            ),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
             assert!(error.ends_with(message), "{text}: {error}");
         }
-        for value in [0, -1, 256] {
+        for value in [
+            "0",
+            "-1",
+            "256",
+            "9223372036854775808",
+            "18446744073709551615",
+            "18446744073709551616",
+            "-9223372036854775809",
+            "170141183460469231731687303715884105728",
+        ] {
             let error = ConfigFile::parse(&format!("[transparent]\ndscp = {value}\n"))
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("between 1 and 63"), "{value}: {error}");
+            let message = format!(
+                "[transparent] dscp: invalid value: integer `{value}`, expected an integer \
+                 between 1 and 63"
+            );
+            assert!(error.ends_with(&message), "{value}: {error}");
         }
     }
 

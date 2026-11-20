@@ -391,13 +391,18 @@ opt-in per agent-hosted browser or terminal session.**
 
   `TransparentSection { dscp: Option<Dscp> }` in `src/config.rs`, with
   `deny_unknown_fields`; `Dscp` accepts 1 to 63 and defaults to
-  `Dscp::DEFAULT` (43). A value out of range or of the wrong type, an
-  unknown key and a `transparent` that is not a table are refused with a
-  message that starts with `[transparent]` and names the key, for example
-  "[transparent] dscp: invalid value: integer `64`, expected an integer
-  between 1 and 63". An older Gateinto refuses a file with `[transparent]`
-  (unknown section). The agent reads it once at start, like `[browser]
-  executable`, into `AgentOptions::dscp`.
+  `Dscp::DEFAULT` (43). The dotted key `transparent.dscp` and an inline
+  table work too. A value out of range or of the wrong type, an unknown key
+  and a `transparent` that is not a table (an array included) are refused.
+  The error starts with toml's "TOML parse error at line N, column M" and
+  an excerpt of the file; its message line starts with `[transparent]` and
+  names the key at fault, for example "[transparent] dscp: invalid value:
+  integer `64`, expected an integer between 1 and 63", also for an integer
+  outside the i64 range up to 128 bits (a larger one gets toml's "integer
+  number overflowed"), or "[transparent] invalid type: sequence, expected a
+  table". An older Gateinto refuses a file with `[transparent]` (unknown
+  section). The agent reads it once at start, like `[browser] executable`,
+  into `AgentOptions::dscp`.
 - Setting: `Job::set_dscp_tag(Dscp)` with read-back. The session does not
   start when the call fails or the read-back lacks either flag or reports
   another tag; the failure is reported with its Win32 error code, never
@@ -1692,11 +1697,14 @@ attribution:
   another address of this host take the one of its IPv4 default route,
   found by connecting a UDP socket to a documentation address, which sends
   nothing, so they fail on a host without an IPv4 default route;
-- the configuration (`src/config.rs`): `[transparent] dscp` accepts 1 to 63
-  and is 43 without the key or the section; 0, 64, -1, 256, a string, a
-  float, an unknown key and a `transparent` that is not a table are refused
-  with a message that starts with `[transparent]` and names the key; and the
-  agent takes the value into `AgentOptions::dscp` (`agent_options` in
+- the configuration (`src/config.rs`): `[transparent] dscp` accepts 1 to 63,
+  also as the dotted key `transparent.dscp` or an inline table, and is 43
+  without the key or the section; 0, 64, -1, 256, integers outside the i64
+  range up to 128 bits (`invalid value` like the others), a string, a float,
+  an unknown key and a `transparent` that is not a table (an integer, an
+  empty array, `[10]` and `[10, 11]`) are refused with an error whose
+  message line starts with `[transparent]` and names the key at fault; and
+  the agent takes the value into `AgentOptions::dscp` (`agent_options` in
   `src/main.rs`).
 
 **(b) Windows unit tests:**
@@ -1831,9 +1839,11 @@ unknown gateway, a browser request that needs a confirmation (the mixed
 route on a gateway saved with the gateway route, a new gateway), a browser
 plan that fails, a missing browser and a missing or relative `USERPROFILE`
 for a terminal are each refused before any helper start, and a refused
-confirmation never becomes the pending one; a gateway forgotten while the
-helper starts refuses the browser or terminal launch after the start, with
-no session and nothing spawned, and the helper keeps running; the
+confirmation never becomes the pending one; after the start, a gateway
+forgotten while the helper starts refuses a browser launch and a terminal
+plan that no longer builds (here, a CA file that can no longer be read)
+refuses a terminal launch, each with no session and nothing spawned, and
+the helper keeps running; the
 pre-check takes no rate-limit slot; a helper that stops closes every
 transparent session of its generation and shuts down its listener, leaves
 proxy-mode sessions open and records the cause; a stop whose blocking task

@@ -311,17 +311,16 @@ fn record(threads: &Threads) {
 #[derive(Default)]
 struct Gateways {
     browser_plan: Option<&'static str>,
+    terminal_plan_breaks: Option<&'static str>,
     forgets: bool,
     builds: Threads,
     reads: Threads,
     links: Threads,
 }
 
-impl Gateways {
-    fn forgotten(&self, calls: &Threads) -> bool {
-        record(calls);
-        self.forgets && calls.lock().unwrap().len() > 1
-    }
+fn again(calls: &Threads) -> bool {
+    record(calls);
+    calls.lock().unwrap().len() > 1
 }
 
 impl Profiles for Gateways {
@@ -336,7 +335,7 @@ impl Profiles for Gateways {
             source: Source::Config,
         };
         Ok(Known {
-            gateways: (!self.forgotten(&self.reads))
+            gateways: (!(again(&self.reads) && self.forgets))
                 .then_some(office)
                 .into_iter()
                 .collect(),
@@ -361,7 +360,10 @@ impl Profiles for Gateways {
     }
 
     fn terminal_session(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String> {
-        if self.forgotten(&self.builds) || gateway.as_str() != "office" {
+        if let (true, Some(error)) = (again(&self.builds), self.terminal_plan_breaks) {
+            return Err(error.to_owned());
+        }
+        if gateway.as_str() != "office" {
             return Err(format!("unknown gateway \"{gateway}\""));
         }
         Ok(TerminalSessionPlan {
@@ -1062,24 +1064,39 @@ async fn terminal_plans_are_built_off_the_async_worker_twice_in_transparent_once
 }
 
 #[tokio::test]
-async fn a_gateway_forgotten_while_the_helper_starts_refuses_the_launch_after_the_start() {
-    for (request, refusal) in [
-        (
-            browser(Mode::Transparent),
+async fn a_gateway_forgotten_while_the_helper_starts_refuses_the_browser_launch_after_the_start() {
+    let h = harness(|setup| setup.gateways.forgets = true);
+
+    assert_eq!(
+        answer(&h.agent, browser(Mode::Transparent)).await,
+        Err(
             "unknown gateway \"office\": it is not set up on this device and the link does not \
              bring one; the link must provide the gateway address, or an administrator must add \
-             [gateways.office] to the config file",
-        ),
-        (terminal(Mode::Transparent), "unknown gateway \"office\""),
-    ] {
-        let h = harness(|setup| setup.gateways.forgets = true);
-        assert_eq!(answer(&h.agent, request).await, Err(refusal.to_owned()));
-        assert_eq!(h.events.all(), [Event::HelperStarted(dscp()), Event::Ready]);
-        assert!(session_ids(&h.agent).await.is_empty());
-        assert!(h.processes.browsers.lock().unwrap().is_empty());
-        assert!(h.processes.shells.lock().unwrap().is_empty());
-        assert!(registered(&h.agent, running(&h.agent)).is_empty());
-    }
+             [gateways.office] to the config file"
+                .to_owned()
+        )
+    );
+    refused_after_the_start(&h).await;
+}
+
+#[tokio::test]
+async fn a_terminal_plan_that_no_longer_builds_after_the_helper_starts_refuses_the_launch() {
+    let h =
+        harness(|setup| setup.gateways.terminal_plan_breaks = Some("the CA file cannot be read"));
+
+    assert_eq!(
+        answer(&h.agent, terminal(Mode::Transparent)).await,
+        Err("the CA file cannot be read".to_owned())
+    );
+    refused_after_the_start(&h).await;
+}
+
+async fn refused_after_the_start(h: &Harness) {
+    assert_eq!(h.events.all(), [Event::HelperStarted(dscp()), Event::Ready]);
+    assert!(session_ids(&h.agent).await.is_empty());
+    assert!(h.processes.browsers.lock().unwrap().is_empty());
+    assert!(h.processes.shells.lock().unwrap().is_empty());
+    assert!(registered(&h.agent, running(&h.agent)).is_empty());
 }
 
 #[tokio::test]

@@ -751,15 +751,15 @@ Rules:
   Gateinto is expected to refuse a file that contains it, because it does not
   know the key; this has not been tried.
 - `[transparent] dscp` is the DSCP value, 1 to 63 (default 43), that the
-  agent will tag the traffic of transparent sessions with; nothing can request
-  a transparent session yet. The agent reads it once when it starts. Traffic
-  that a program or QoS policy tags with the same value outside Gateinto is
-  expected to be captured and dropped while the transparent engine runs (from
-  the first transparent session until the agent stops), so choose another
-  value if 43 is already in use. A value out of range or of the wrong type
-  and an unknown key in `[transparent]` are errors naming the section and the
-  key. An older Gateinto refuses a file with `[transparent]`, so remove the
-  section before downgrading.
+  agent will tag the traffic of transparent sessions with; no Gateinto command
+  or option requests a transparent session yet. The agent reads it once when
+  it starts. Traffic that a program or QoS policy tags with the same value
+  outside Gateinto is expected to be captured and dropped or closed while the
+  transparent engine runs (from the first transparent session until the agent
+  stops), so choose another value if 43 is already in use. A value out of
+  range or of the wrong type and an unknown key in `[transparent]` are errors
+  naming the section and the key. An older Gateinto refuses a file with
+  `[transparent]`, so remove the section before downgrading.
 - Relative `ca_file`, `client_cert_file` and `[browser] executable` paths are
   resolved against the directory of the configuration file. Relative paths on the command line are
   resolved against the current directory.
