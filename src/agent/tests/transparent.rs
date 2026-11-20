@@ -298,16 +298,23 @@ impl Launcher for Processes {
     }
 }
 
-type Builds = Arc<Mutex<Vec<std::thread::ThreadId>>>;
+type Threads = Arc<Mutex<Vec<std::thread::ThreadId>>>;
+
+fn record(threads: &Threads) {
+    threads.lock().unwrap().push(std::thread::current().id());
+}
 
 #[derive(Default)]
 struct Gateways {
     browser_plan: Option<&'static str>,
-    builds: Builds,
+    builds: Threads,
+    reads: Threads,
+    links: Threads,
 }
 
 impl Profiles for Gateways {
     fn known(&self) -> Result<Known, String> {
+        record(&self.reads);
         Ok(Known {
             gateways: vec![KnownGateway {
                 name: "office".parse().unwrap(),
@@ -324,14 +331,12 @@ impl Profiles for Gateways {
     }
 
     fn link(&self, _: &LinkedGateway) -> Result<(), String> {
-        Err("not used".to_owned())
+        record(&self.links);
+        Ok(())
     }
 
     fn browser_session(&self, _: &GatewayName) -> Result<BrowserSessionPlan, String> {
-        self.builds
-            .lock()
-            .unwrap()
-            .push(std::thread::current().id());
+        record(&self.builds);
         if let Some(error) = self.browser_plan {
             return Err(error.to_owned());
         }
@@ -341,10 +346,7 @@ impl Profiles for Gateways {
     }
 
     fn terminal_session(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String> {
-        self.builds
-            .lock()
-            .unwrap()
-            .push(std::thread::current().id());
+        record(&self.builds);
         if gateway.as_str() != "office" {
             return Err(format!("unknown gateway \"{gateway}\""));
         }
@@ -445,6 +447,24 @@ fn browser(mode: Mode) -> Request {
         LaunchRequest::new("office", "session_credentials").unwrap(),
         mode,
     )
+}
+
+fn new_gateway() -> Request {
+    let link = LaunchRequest::new("newco", "session_credentials")
+        .unwrap()
+        .with_link(
+            None,
+            Some("127.0.0.1:10"),
+            Some("https://portal.newco.example/home"),
+        )
+        .unwrap();
+    Request::Launch(link, Mode::Proxy)
+}
+
+async fn approved(agent: &Agent) -> Vec<String> {
+    let lines = answer(agent, new_gateway()).await.unwrap();
+    let token = ipc::confirm_token(&lines).unwrap_or_else(|| panic!("{lines:?}"));
+    answer(agent, Request::Approve(token)).await.unwrap()
 }
 
 fn both() -> [Request; 2] {
@@ -992,7 +1012,7 @@ async fn a_browser_plan_that_fails_is_refused_before_the_helper() {
 
 #[tokio::test]
 async fn browser_plans_are_built_off_the_async_worker_twice_in_transparent_once_in_proxy_mode() {
-    let builds = Builds::default();
+    let builds = Threads::default();
     let h = harness(|setup| setup.gateways.builds = builds.clone());
     let worker = std::thread::current().id();
 
@@ -1008,7 +1028,7 @@ async fn browser_plans_are_built_off_the_async_worker_twice_in_transparent_once_
 
 #[tokio::test]
 async fn terminal_plans_are_built_off_the_async_worker_twice_in_transparent_once_in_proxy_mode() {
-    let builds = Builds::default();
+    let builds = Threads::default();
     let h = harness(|setup| setup.gateways.builds = builds.clone());
     let worker = std::thread::current().id();
 
@@ -1019,6 +1039,40 @@ async fn terminal_plans_are_built_off_the_async_worker_twice_in_transparent_once
     let builds = builds.lock().unwrap().clone();
     assert_eq!(builds.len(), 3);
     assert!(builds.iter().all(|&thread| thread != worker));
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn the_gateways_are_read_off_the_async_worker_by_every_launch_and_approval() {
+    let reads = Threads::default();
+    let h = harness(|setup| setup.gateways.reads = reads.clone());
+    let worker = std::thread::current().id();
+
+    answer(&h.agent, browser(Mode::Proxy)).await.unwrap();
+    assert_eq!(reads.lock().unwrap().len(), 1);
+    answer(&h.agent, browser(Mode::Transparent)).await.unwrap();
+    assert_eq!(reads.lock().unwrap().len(), 3);
+    answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
+    assert_eq!(reads.lock().unwrap().len(), 4);
+    approved(&h.agent).await;
+
+    let reads = reads.lock().unwrap().clone();
+    assert_eq!(reads.len(), 6);
+    assert!(reads.iter().all(|&thread| thread != worker));
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn an_approved_gateway_is_stored_off_the_async_worker() {
+    let links = Threads::default();
+    let h = harness(|setup| setup.gateways.links = links.clone());
+    let worker = std::thread::current().id();
+
+    approved(&h.agent).await;
+
+    let links = links.lock().unwrap().clone();
+    assert_eq!(links.len(), 1);
+    assert!(links.iter().all(|&thread| thread != worker));
     h.agent.close_all().await;
 }
 

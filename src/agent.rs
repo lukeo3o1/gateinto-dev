@@ -478,7 +478,7 @@ impl Agent {
             return Err(error);
         }
         self.check_capacity().await?;
-        let known = self.inner.profiles.known()?;
+        let known = self.known().await?;
         let resolution = link::resolve(&request, &known, &mut Decision::Defer, unix_now())
             .map_err(|error| error.to_string())?;
         let ask = match resolution {
@@ -532,7 +532,7 @@ impl Agent {
         }
         self.check_transparent().await?;
         self.check_capacity().await?;
-        let launch = transparent_launch(&request, &self.inner.profiles.known()?)?;
+        let launch = transparent_launch(&request, &self.known().await?)?;
         // Discarded: the linked gateways, the CA file, the client certificate and the browser
         // executable can change while the helper starts, so `start` builds the plan again.
         self.browser_plan(&launch.profile).await?;
@@ -543,7 +543,7 @@ impl Agent {
             return Err(error);
         }
         self.check_capacity().await?;
-        let known = self.inner.profiles.known()?;
+        let known = self.known().await?;
         let launch = transparent_launch(&request, &known)?;
         self.start(launch, Mode::Transparent)
             .await
@@ -724,7 +724,7 @@ impl Agent {
         // sessions, engine state, session mark.
         let mut terminals = self.inner.terminals.lock().await;
         self.check_terminal_capacity(terminals.len())?;
-        let known = self.inner.profiles.known()?;
+        let known = self.known().await?;
         let plan = self.terminal_plan(&gateway).await?;
         let route = terminal::terminal_route(request.route, plan.route);
         let inherited = launcher.environment();
@@ -905,7 +905,7 @@ impl Agent {
     async fn approve(&self, token: ConfirmToken) -> Result<Vec<String>, String> {
         let mut pending = self.inner.launching.lock().await;
         let answered = Self::answered(&mut pending, token)?;
-        let known = self.inner.profiles.known()?;
+        let known = self.known().await?;
         let mut asked = Asked {
             ask: &answered.ask,
             approved: false,
@@ -927,7 +927,7 @@ impl Agent {
             return Err("the gateway could not be approved".to_owned());
         };
         if let Some(gateway) = &launch.add {
-            self.inner.profiles.link(gateway)?;
+            self.link(gateway).await?;
             info!(
                 gateway = %gateway.name,
                 address = %gateway.address,
@@ -970,6 +970,20 @@ impl Agent {
             ));
         }
         Ok(())
+    }
+
+    async fn known(&self) -> Result<Known, String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.profiles.known())
+            .await
+            .map_err(|error| format!("reading the gateways failed: {error}"))?
+    }
+
+    async fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
+        let (inner, gateway) = (self.inner.clone(), gateway.clone());
+        tokio::task::spawn_blocking(move || inner.profiles.link(&gateway))
+            .await
+            .map_err(|error| format!("storing the gateway failed: {error}"))?
     }
 
     async fn browser_plan(
@@ -1287,7 +1301,8 @@ async fn watch(
     }
     drop(child);
     inner.close_session(id).await;
-    remove_profile(&profile).await;
+    let path = profile.path().to_owned();
+    remove_profile(&path, move || profile.remove()).await;
     inner.browsers.lock().await.remove(&id);
 }
 
@@ -1330,13 +1345,19 @@ fn home_dir(environment: &Variables) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
-async fn remove_profile(profile: &ProfileDir) {
+async fn remove_profile(path: &Path, remove: impl Fn() -> io::Result<()> + Send + Sync + 'static) {
+    let remove = Arc::new(remove);
     for attempt in 1..=PROFILE_REMOVAL_ATTEMPTS {
-        match profile.remove() {
+        let removing = remove.clone();
+        let removed = tokio::task::spawn_blocking(move || removing())
+            .await
+            .map_err(io::Error::other)
+            .and_then(|removed| removed);
+        match removed {
             Ok(()) => return,
             Err(error) if attempt == PROFILE_REMOVAL_ATTEMPTS => warn!(
                 "removing the browser profile {} failed: {error}; the next agent start retries",
-                profile.path().display()
+                path.display()
             ),
             Err(_) => tokio::time::sleep(PROFILE_REMOVAL_DELAY).await,
         }
@@ -1471,6 +1492,28 @@ mod tests {
     fn a_zero_limit_refuses_everything() {
         let mut limiter = LaunchLimiter::new(0, Duration::from_secs(10));
         assert!(!limiter.allow(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn profile_removal_runs_off_the_async_worker_and_pauses_between_attempts() {
+        let worker = std::thread::current().id();
+        let attempts: Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>> = Arc::default();
+        let recorded = attempts.clone();
+        let started = tokio::time::Instant::now();
+        remove_profile(Path::new("profile"), move || {
+            let mut attempts = recorded.lock().unwrap();
+            attempts.push(std::thread::current().id());
+            if attempts.len() < 3 {
+                Err(io::Error::other("in use"))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts.iter().all(|thread| *thread != worker));
+        assert_eq!(started.elapsed(), PROFILE_REMOVAL_DELAY * 2);
     }
 
     #[cfg(unix)]

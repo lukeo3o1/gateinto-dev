@@ -574,8 +574,11 @@ For a transparent session request the agent:
      discards it and `Agent::terminal` builds it again, under `launching`
      and `terminals`, because the CA file, the client certificate and the
      shell executable can change while the request waits for the helper.
-     Browsers: `Profiles::known()` and `link::resolve` with
-     `Decision::Defer` (`transparent_launch`), which reads only; a result
+     Browsers: `Agent::known` and `link::resolve` with
+     `Decision::Defer` (`transparent_launch`), which reads only.
+     `Agent::known` runs `Profiles::known()` in `spawn_blocking`, as every
+     path of the agent does, since the linked gateways are files under
+     `%APPDATA%`, which can be redirected to a network share. A result
      other than `Resolution::Launch`, that is a request that would need a
      gateway confirmation, is refused for a transparent session ("a
      transparent session is not started for a request that needs a gateway
@@ -1722,6 +1725,10 @@ those implemented with step 5 are listed after this list):**
   in `Agent::start`, and a transparent terminal twice, in the pre-check and
   in `Agent::terminal`; a proxy-mode launch of either builds it once, and
   every build runs off the async worker;
+- every read of the known gateways (both launch modes, terminals and
+  approvals), the store of an approved gateway and every attempt to delete
+  a browser profile run off the async worker, and the profile deletion
+  still pauses between attempts;
 - a rate-limited transparent request is refused by the pre-check with the
   existing rate-limit error and raises no helper start; the pre-check
   consumes no slot, so a request it lets through is counted once, under
