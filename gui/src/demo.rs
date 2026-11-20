@@ -6,7 +6,8 @@ use gateinto::config::{ConfigFile, GatewayName};
 use gateinto::identity::device_key::{Backend, KeyName};
 use gateinto::ipc::{
     BrowserKind, LogEvent, LogLevel, LogPage, Request, RequestError, Response, SessionAuth,
-    SessionInfo, SessionKind, SessionRoute,
+    SessionInfo, SessionKind, SessionRoute, TransparentAvailability, TransparentEngine,
+    TransparentStatus,
 };
 use gateinto::link::{Known, KnownGateway, Source};
 use gateinto::proxy::Verification;
@@ -245,6 +246,13 @@ pub fn answer(request: Request, now: u64) -> Response {
         Request::Verification(id) => {
             Response::Error(format!("session {id} has no pending verification"))
         }
+        Request::Transparent => Response::Ok(
+            TransparentStatus {
+                availability: TransparentAvailability::Available,
+                engine: TransparentEngine::Stopped(None),
+            }
+            .to_lines(),
+        ),
         Request::Launch(..)
         | Request::Terminal(_)
         | Request::Close(_)
@@ -404,6 +412,17 @@ mod tests {
                 |_| false
             ),
             real.display().to_string()
+        );
+    }
+
+    #[test]
+    fn the_demo_agent_offers_transparent_sessions_with_its_engine_stopped() {
+        assert_eq!(
+            gateinto::ipc::transparent_status(answer(Request::Transparent, NOW)),
+            Ok(TransparentStatus {
+                availability: TransparentAvailability::Available,
+                engine: TransparentEngine::Stopped(None),
+            })
         );
     }
 

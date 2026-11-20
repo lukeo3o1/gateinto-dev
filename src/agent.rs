@@ -17,6 +17,7 @@ use crate::config::GatewayName;
 use crate::divert::Dscp;
 use crate::ipc::{
     self, BrowserKind, ConfirmToken, Connection, Mode, Request, Response, Server, TerminalRequest,
+    TransparentAvailability, TransparentEngine, TransparentStatus,
 };
 use crate::job::{Job, SpawnError};
 use crate::link::{self, Ask, Confirm, Decision, Known, Launch, LinkedGateway, Resolution};
@@ -460,6 +461,10 @@ impl Agent {
             Request::Config => ipc::config_line(&self.inner.options.config)
                 .map(|line| vec![line])
                 .ok_or_else(|| "the config path cannot be sent over IPC".to_owned()),
+            Request::Transparent => self
+                .transparent_status()
+                .await
+                .map(|status| status.to_lines()),
         };
         match result {
             Ok(lines) => Response::Ok(lines),
@@ -576,10 +581,6 @@ impl Agent {
         )
     }
 
-    pub fn transparent_availability(&self) -> Availability {
-        self.inner.engine.available()
-    }
-
     pub fn transparent_engine(&self) -> EngineStatus {
         EngineStatus {
             phase: self.inner.registry.phase(),
@@ -594,14 +595,36 @@ impl Agent {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    async fn check_transparent(&self) -> Result<(), String> {
+    async fn transparent_availability(&self) -> Result<Availability, String> {
         let engine = self.inner.engine.clone();
-        let availability = tokio::task::spawn_blocking(move || engine.available())
+        tokio::task::spawn_blocking(move || engine.available())
             .await
             .map_err(|error| {
                 format!("checking whether transparent sessions are available failed: {error}")
-            })?;
-        match availability {
+            })
+    }
+
+    async fn transparent_status(&self) -> Result<TransparentStatus, String> {
+        let availability = match self.transparent_availability().await? {
+            Availability::Available => TransparentAvailability::Available,
+            Availability::Unavailable(reason) => {
+                TransparentAvailability::Unavailable(reason.to_string())
+            }
+        };
+        let EngineStatus { phase, last_error } = self.transparent_engine();
+        let engine = match phase {
+            Phase::Running(_) => TransparentEngine::Running,
+            Phase::Starting(_) => TransparentEngine::Starting,
+            Phase::Stopped => TransparentEngine::Stopped(last_error),
+        };
+        Ok(TransparentStatus {
+            availability,
+            engine,
+        })
+    }
+
+    async fn check_transparent(&self) -> Result<(), String> {
+        match self.transparent_availability().await? {
             Availability::Available => Ok(()),
             unavailable => Err(format!("transparent sessions are {unavailable}")),
         }
@@ -635,6 +658,7 @@ impl Agent {
             self.engine_stopped(&message);
             return starter.finish(Err(message));
         }
+        *self.engine_error() = None;
         let (shutdown, shut) = oneshot::channel::<()>();
         tokio::spawn(self.clone().watch_engine(generation, stopped, shutdown));
         // Fails only once the watcher above has stopped this generation: nothing to release.

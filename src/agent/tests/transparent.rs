@@ -65,6 +65,8 @@ type Served = Arc<Mutex<Vec<(Generation, bool)>>>;
 struct Helpers {
     events: Events,
     unavailable: Option<Reason>,
+    checks: Threads,
+    check_panics: bool,
     plans: Mutex<VecDeque<Plan>>,
     stops: Mutex<Vec<oneshot::Sender<String>>>,
     served: Served,
@@ -104,6 +106,8 @@ impl Helpers {
 
 impl Engine for Helpers {
     fn available(&self) -> Availability {
+        record(&self.checks);
+        assert!(!self.check_panics, "the availability check panicked");
         self.unavailable
             .map_or(Availability::Available, Availability::Unavailable)
     }
@@ -980,8 +984,13 @@ async fn unavailable_transparent_sessions_are_refused_with_the_reason_before_the
     }
     assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
     assert_eq!(
-        h.agent.transparent_availability(),
-        Availability::Unavailable(Reason::TooOld)
+        answer(&h.agent, Request::Transparent).await,
+        Ok(vec![
+            "availability: unavailable: Windows 10 1607 or Windows Server 2016 or later is \
+             required"
+                .to_owned(),
+            "engine: stopped".to_owned()
+        ])
     );
     answer(&h.agent, terminal(Mode::Proxy)).await.unwrap();
     h.agent.close_all().await;
@@ -1247,4 +1256,116 @@ async fn the_helper_starts_once_while_it_runs_and_again_after_it_stopped() {
     assert_ne!(second, first);
     assert_eq!(registered(&h.agent, second).len(), 1);
     h.agent.close_all().await;
+}
+
+async fn engine_line(agent: &Agent) -> String {
+    let lines = answer(agent, Request::Transparent).await.unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], "availability: available");
+    lines[1].clone()
+}
+
+#[tokio::test]
+async fn the_transparent_status_follows_the_engine_through_each_phase() {
+    let h = plain();
+    assert_eq!(engine_line(&h.agent).await, "engine: stopped");
+
+    let open = h.helpers.gated();
+    let starting = tokio::spawn({
+        let agent = h.agent.clone();
+        async move { answer(&agent, terminal(Mode::Transparent)).await }
+    });
+    until("the engine is starting", || async {
+        matches!(h.agent.inner.registry.phase(), Phase::Starting(_))
+    })
+    .await;
+    assert_eq!(engine_line(&h.agent).await, "engine: starting");
+
+    open.send(Ok(())).unwrap();
+    starting.await.unwrap().unwrap();
+    assert_eq!(engine_line(&h.agent).await, "engine: running");
+
+    h.helpers.stop(STOPPED);
+    until("the engine stopped", || async {
+        h.agent.inner.registry.phase() == Phase::Stopped
+    })
+    .await;
+    assert_eq!(
+        engine_line(&h.agent).await,
+        format!("engine: stopped: {STOPPED}")
+    );
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn the_transparent_status_names_why_the_last_start_failed() {
+    let failed = "the transparent engine failed (exit code 5)";
+    for (plan, error) in [
+        (Plan::Fails(failed.to_owned()), failed),
+        (Plan::StopsAtOnce(STOPPED.to_owned()), STOPPED),
+    ] {
+        let h = plain();
+        h.helpers.will(plan);
+        answer(&h.agent, browser(Mode::Transparent))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            engine_line(&h.agent).await,
+            format!("engine: stopped: {error}")
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_successful_start_clears_the_error_of_the_last_one() {
+    let failed = "the transparent engine failed (exit code 5)";
+    let h = plain();
+    h.helpers.will(Plan::Fails(failed.to_owned()));
+    answer(&h.agent, terminal(Mode::Transparent))
+        .await
+        .unwrap_err();
+
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+
+    assert_eq!(h.agent.transparent_engine().last_error, None);
+    assert_eq!(engine_line(&h.agent).await, "engine: running");
+    h.helpers.stop(STOPPED);
+    until("the engine stopped", || async {
+        h.agent.inner.registry.phase() == Phase::Stopped
+    })
+    .await;
+    assert_eq!(
+        h.agent.transparent_engine().last_error.as_deref(),
+        Some(STOPPED)
+    );
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn the_availability_is_checked_off_the_async_worker() {
+    let checks = Threads::default();
+    let h = harness(|setup| setup.helpers.checks = checks.clone());
+    let worker = std::thread::current().id();
+
+    answer(&h.agent, Request::Transparent).await.unwrap();
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+
+    let checks = checks.lock().unwrap().clone();
+    assert_eq!(checks.len(), 2);
+    assert!(checks.iter().all(|&thread| thread != worker));
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
+async fn an_availability_check_that_fails_is_answered_and_starts_nothing() {
+    let h = harness(|setup| setup.helpers.check_panics = true);
+    for request in [Request::Transparent, terminal(Mode::Transparent)] {
+        let error = answer(&h.agent, request).await.unwrap_err();
+        assert!(
+            error.starts_with("checking whether transparent sessions are available failed: "),
+            "{error}"
+        );
+    }
+    assert_eq!(h.events.count(Event::HelperStarted(dscp())), 0);
 }

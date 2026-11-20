@@ -894,6 +894,12 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
         before.contains(&"agent: not running".to_owned()),
         "{before:?}"
     );
+    assert!(
+        !before
+            .iter()
+            .any(|line| line.starts_with("transparent-engine")),
+        "{before:?}"
+    );
     let (lines, browser) = launcher.opened("main").await;
 
     let after = status(&launcher).await;
@@ -914,6 +920,27 @@ async fn status_reports_gateways_and_agent_sessions_without_secrets_or_changes()
     );
     assert!(after.contains(&"agent: running".to_owned()), "{after:?}");
     assert!(in_table(&after, &lines), "{after:?}");
+    for status in [&before, &after] {
+        assert_eq!(
+            status
+                .iter()
+                .filter(|line| line.starts_with("transparent-sessions: "))
+                .count(),
+            1,
+            "{status:?}"
+        );
+    }
+    #[cfg(not(windows))]
+    assert!(
+        after.contains(
+            &"transparent-sessions: unavailable: transparent sessions need Windows".to_owned()
+        ),
+        "{after:?}"
+    );
+    assert!(
+        after.contains(&"transparent-engine: stopped".to_owned()),
+        "{after:?}"
+    );
     let text = after.join("\n");
     let shown = launcher.shown_credentials(browser.proxy()).await;
     for secret in [

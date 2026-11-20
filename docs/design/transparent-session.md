@@ -18,9 +18,10 @@ availability check (`transparent::availability`), and the agent wiring: the
 IPC mode word, `SessionInfo::transparent`, and transparent browser and
 terminal sessions in the agent in the [order of
 operations](#order-of-operations), over an engine seam (`src/agent/engine.rs`)
-and `Launcher::tag`, and the configuration (`[transparent] dscp`). Nothing
-asks for a transparent session yet: the CLI flag, the GUI option, the
-`session list` marking and the `status` lines are the rest of step 5.
+and `Launcher::tag`, the configuration (`[transparent] dscp`), the IPC
+`transparent` request, the `status` lines and the `session list` marking.
+Nothing asks for a transparent session yet: the CLI flag and the GUI option
+are the rest of step 5.
 `Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
 and listener socket, the agent side of the helper, the agent's Windows
 engine and the availability probes on Windows, and their tests have only
@@ -255,7 +256,10 @@ not change.
   `serde(default)` without `deny_unknown_fields` and has `transparent`,
   serialized only when true.
 - `gateinto status` (`status` in `src/main.rs`) prints Linux-only lines from
-  `lifecycle::current_linux_status`; it prints no Windows capability lines.
+  `lifecycle::current_linux_status`, and on every platform the
+  `transparent-sessions` line and, from a running agent, the
+  `transparent-engine` line ([CLI, IPC, GUI and
+  status](#cli-ipc-gui-and-status)).
 - The test upstream fixture (`tests/fixture/`, `UpstreamProxy`) records
   every request head (`requests()`); `Behavior::Tunnel` connects to the
   `CONNECT` target itself.
@@ -291,10 +295,16 @@ not change.
     implemented on Windows by `Divert` over one `Supervisor<helper::Windows>`
     and elsewhere by an unavailable engine; the agent's registry
     (`Inner::registry`, `State<SessionId, Job>`), `Agent::ensure_engine`,
-    `Agent::watch_engine`, `Agent::register`, `launched`,
+    `Agent::watch_engine`, `Agent::register`, `launched` and
     `Agent::transparent_engine` (`EngineStatus`: the phase and the last
-    helper error) and `Agent::transparent_availability`; see [Order of
-    operations](#order-of-operations).
+    helper error); see [Order of operations](#order-of-operations);
+  - the status (`src/ipc.rs`, `src/agent.rs`, `src/main.rs`,
+    `src/session_table.rs`): the IPC `transparent` request with
+    `TransparentStatus` and `ipc::transparent_status`, the agent's answer,
+    the `transparent-sessions` and `transparent-engine` lines of
+    `gateinto status`, and the ` (transparent)` marking of the `PROGRAM`
+    cell in `session list` and the session table of `status`; see [CLI,
+    IPC, GUI and status](#cli-ipc-gui-and-status).
 
 ## Evidence
 
@@ -911,8 +921,8 @@ runtime's shutdown.
   state](#engine-state-and-session-registration)); in any other state it
   changes nothing. In the agent this is `Agent::watch_engine`, which also
   logs the cause at `warn` and keeps it as the last helper error
-  (`Agent::transparent_engine`). `status` then reports the engine as
-  stopped; a new transparent session starts a new helper (a new generation)
+  (`Agent::transparent_engine`) before it stops the generation. `status`
+  then reports the engine as stopped with that error; a new transparent session starts a new helper (a new generation)
   and asks UAC again.
 
 #### Engine
@@ -1331,11 +1341,10 @@ with `netsh`.**
 
 ### CLI, IPC, GUI and status
 
-The IPC request, `SessionInfo::transparent`, the availability check and
-the agent's `Agent::transparent_engine` and `Agent::transparent_availability`
-exist; the CLI flag, the GUI option, the `session list` marking and the
-`status` lines are *(proposed)*, the rest of step 5 of the [Implementation
-plan](#implementation-plan).
+The IPC mode, `SessionInfo::transparent`, the availability check, the
+`transparent` status request, the `session list` marking and the `status`
+lines exist; the CLI flag and the GUI option are *(proposed)*, the rest of
+step 5 of the [Implementation plan](#implementation-plan).
 
 - CLI: `gateinto session terminal --agent --transparent`. `--transparent`
   requires `--agent`.
@@ -1353,15 +1362,42 @@ plan](#implementation-plan).
   field fail as `UnknownField`). An older agent answers `invalid launch
   request` or `invalid terminal request`; the CLI and GUI say the agent is
   too old.
+- IPC status: the request `transparent`, without arguments, answers `ok`
+  with `key: value` lines, in the style of the other answers:
+  `availability: available` or `availability: unavailable: <reason>`, and
+  `engine: running`, `engine: starting`, `engine: stopped` or
+  `engine: stopped: <error>` (`ipc::TransparentStatus`). The error is the
+  last helper error, the one that stopped the engine or made its last start
+  fail; a successful start clears it, so it is sent only with `stopped`.
+  The request starts nothing; the agent checks the availability through
+  the engine seam in `spawn_blocking`, because on Windows it opens and
+  hashes the WinDivert files. The client (`ipc::transparent_status`)
+  ignores lines with keys it does not know, so a later agent can add some,
+  and refuses an answer with a line without `: `, a missing or repeated
+  `availability` or `engine` line, an unknown value or an empty reason or
+  error. An older agent answers `error: invalid request`, its answer to any
+  request it does not know, which the client reads as "the agent is too
+  old; restart it".
 - GUI: a "Transparent" option for Open terminal and Start browser, offered
-  only when the agent reports transparent sessions as available.
+  only when the agent reports transparent sessions as available *(proposed)*;
+  the GUI does not mark transparent sessions yet *(proposed)*.
 - `SessionInfo` has `transparent: bool`, serialized only when true and set
-  by the agent for its transparent browser and terminal sessions;
-  `session list` marks such sessions *(proposed)*.
-- `gateinto status` prints `transparent-sessions: available` or
-  `unavailable: <reason>` (system too old, ARM64, WinDivert files missing or
-  digest mismatch) and, from the agent, `transparent-engine: running` or
-  `stopped` with the last helper error. The check exists:
+  by the agent for its transparent browser and terminal sessions.
+  `session list` and the session table of `status` append ` (transparent)`
+  to the `PROGRAM` cell of such a session (`pwsh.exe (transparent)`): a mode
+  column would read `proxy` on almost every row, and a marker in the last
+  column leaves every earlier cell a single word.
+- `gateinto status` always prints `transparent-sessions: available` or
+  `transparent-sessions: unavailable: <reason>` (not Windows, system too
+  old, ARM64, WinDivert files missing or digest mismatch) from its own
+  check, so the line is there without an agent. When the agent answered
+  `list`, it also asks for `transparent` and prints
+  `transparent-engine: running`, `transparent-engine: starting`,
+  `transparent-engine: stopped` or `transparent-engine: stopped: <error>`;
+  an older agent gives `transparent-engine: unknown: the agent is too old;
+  restart it`, and any other failure `transparent-engine: unknown:
+  <reason>`. Without a running agent there is no engine line. The lines
+  follow the session table and come before `uri-handler`. The check is
   `transparent::availability::available()`, in this order: not Windows
   ("transparent sessions need Windows"); a version older than 10.0.14393
   from `RtlGetVersion`, which does not depend on the executable's manifest
@@ -1808,6 +1844,28 @@ level: the 60 s timeout from `ShellExecuteExW` returning and the waits for a
 previous helper (tested in `src/transparent/helper.rs`), and the listener
 port range (tested in `src/transparent/listener.rs`).
 
+Implemented with step 5 for the status: the `transparent` answer follows the
+engine from stopped through starting (a gated start) to running and to
+stopped with the helper's message, names why the last start failed (a
+failed start, a helper gone by the hand-over) and no longer names it after a
+successful start; the availability check runs on a blocking thread, its
+reason is answered with the engine stopped, and a check that panics is
+answered as an error and starts nothing (`src/agent/tests/transparent.rs`).
+In `src/ipc.rs`: the request round-trips and its malformed forms are
+refused; the status round-trips as its lines, is read in any order with
+unknown keys skipped, and a line without `: `, a missing or repeated key, an
+unknown or empty value is refused; an `invalid request`, which an agent
+answers to a request it does not know (checked against the parser and the
+encoding), is read as too old. In `src/main.rs`, the `transparent-engine`
+line for each phase, an older agent, a malformed answer, an agent error and a
+failed request; in `src/session_table.rs` and `src/main.rs`, the
+` (transparent)` marking. `tests/cli.rs` and `tests/launch.rs` through the
+binary: `transparent-sessions: unavailable: transparent sessions need
+Windows` without an agent and no engine line, and `transparent-engine:
+stopped` from a running agent. The fuzz target `ipc-line` checks that an
+accepted status re-encodes to itself, with seeds for the request and two
+answers. The demo GUI agent answers available with the engine stopped.
+
 Implemented with step 5 (`src/transparent/helper.rs`,
 `src/transparent/availability.rs`), on every platform with a fake platform
 and paused time: `ready` returns a running handle and the helper got
@@ -2042,9 +2100,9 @@ code to pass it, then a refactor.
    `Win32_UI_Shell` and the new imports in the allow-list, the IPC mode,
    `SessionInfo::transparent` and the agent wiring (the order of
    operations, the engine seam and its Windows implementation, the
-   stop-watcher and fail-closed handling) and `[transparent] dscp`. Left:
-   the CLI flag, the GUI option, the `session list` marking and the `status`
-   lines.
+   stop-watcher and fail-closed handling), `[transparent] dscp`, the IPC
+   `transparent` request, the `status` lines and the `session list`
+   marking. Left: the CLI flag and the GUI option.
 6. **Packaging and user documentation.** The optional MSI feature with the
    WinDivert files and license, and the security model, threat model,
    security boundaries, install and compatibility pages.

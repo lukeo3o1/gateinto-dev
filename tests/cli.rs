@@ -460,6 +460,7 @@ fn status_is_read_only_and_reports_what_it_can() {
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
+             transparent-sessions: unavailable: transparent sessions need Windows\n\
              uri-handler: not supported on this platform\n",
             default_config(&isolated_root()).display(),
             default_config(&isolated_root())
@@ -486,6 +487,7 @@ fn status_on_linux_reports_the_device_key_terminals_and_os_user_as_they_are() {
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
+             transparent-sessions: unavailable: transparent sessions need Windows\n\
              uri-handler: not registered\n\
              terminal-sessions: not supported on Linux yet\n\
              os-user: not offered by any session on Linux yet; pidfd_open is available",
@@ -512,6 +514,7 @@ fn status_on_linux_reports_the_device_key_terminals_and_os_user_as_they_are() {
     assert_eq!(
         order,
         [
+            "transparent-sessions",
             "uri-handler",
             "terminal-sessions",
             "terminal-containment",

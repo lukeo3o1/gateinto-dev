@@ -1795,9 +1795,16 @@ async fn status(args: StatusArgs) -> Result {
     println!("key-name: {name}");
     print_device_key(&name);
     print_config(&args.config, &file);
-    let agent = match Endpoint::for_current_user() {
-        Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
-        Err(error) => Err(RequestError::Io(error)),
+    let (agent, engine) = match Endpoint::for_current_user() {
+        Ok(endpoint) => {
+            let agent = ipc::send(&endpoint, &Request::List).await;
+            let engine = match agent {
+                Ok(_) => Some(ipc::send(&endpoint, &Request::Transparent).await),
+                Err(_) => None,
+            };
+            (agent, engine)
+        }
+        Err(error) => (Err(RequestError::Io(error)), None),
     };
     match agent {
         Ok(Response::Ok(lines)) => match listed_sessions(&lines) {
@@ -1813,12 +1820,29 @@ async fn status(args: StatusArgs) -> Result {
         Err(RequestError::NotRunning | RequestError::Closed) => println!("agent: not running"),
         Err(error) => println!("agent: unknown: {error}"),
     }
+    println!(
+        "transparent-sessions: {}",
+        gateinto::transparent::availability::available()
+    );
+    if let Some(engine) = engine {
+        println!("{}", transparent_engine_line(engine));
+    }
     print_handler();
     #[cfg(target_os = "linux")]
     for line in lifecycle::current_linux_status() {
         println!("{line}");
     }
     Ok(())
+}
+
+fn transparent_engine_line(answer: Result<Response, RequestError>) -> String {
+    let engine = answer
+        .map_err(|error| error.to_string())
+        .and_then(|response| ipc::transparent_status(response).map_err(|error| error.to_string()));
+    match engine {
+        Ok(status) => format!("transparent-engine: {}", status.engine),
+        Err(error) => format!("transparent-engine: unknown: {error}"),
+    }
 }
 
 async fn stop_agent() -> Result<(), String> {
@@ -2293,6 +2317,54 @@ args = ["-l"]
     }
 
     #[test]
+    fn the_transparent_engine_line_names_the_phase_or_why_it_is_unknown() {
+        use gateinto::ipc::{TransparentAvailability, TransparentEngine, TransparentStatus};
+        let engine = |engine| {
+            Ok(Response::Ok(
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine,
+                }
+                .to_lines(),
+            ))
+        };
+        let failed = "the transparent engine failed (exit code 5)";
+        for (answer, line) in [
+            (engine(TransparentEngine::Running), "running".to_owned()),
+            (engine(TransparentEngine::Starting), "starting".to_owned()),
+            (
+                engine(TransparentEngine::Stopped(None)),
+                "stopped".to_owned(),
+            ),
+            (
+                engine(TransparentEngine::Stopped(Some(failed.to_owned()))),
+                format!("stopped: {failed}"),
+            ),
+            (
+                Ok(Response::Error(ipc::INVALID_REQUEST.to_owned())),
+                "unknown: the agent is too old; restart it".to_owned(),
+            ),
+            (
+                Ok(Response::Error("busy".to_owned())),
+                "unknown: busy".to_owned(),
+            ),
+            (
+                Ok(Response::Ok(vec!["engine: running".to_owned()])),
+                "unknown: invalid transparent status from the agent".to_owned(),
+            ),
+            (
+                Err(RequestError::Closed),
+                "unknown: the agent closed the connection without an answer".to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                transparent_engine_line(answer),
+                format!("transparent-engine: {line}")
+            );
+        }
+    }
+
+    #[test]
     fn stop_names_the_terminals_it_closed() {
         assert_eq!(closed_terminals_message(&[ipc::agent_pid_line()]), None);
         assert_eq!(
@@ -2313,6 +2385,17 @@ args = ["-l"]
     fn the_session_table_shows_an_unknown_browser() {
         let table = session_list_lines(&[NEWER_SESSION.to_owned()], false, 1_700_000_045).unwrap();
         assert!(table[1].ends_with("45s     unknown"), "{table:?}");
+    }
+
+    #[test]
+    fn the_session_table_marks_a_transparent_session_from_the_agent_line() {
+        let transparent =
+            NEWER_SESSION.replace(r#""tunnels":2,"#, r#""tunnels":2,"transparent":true,"#);
+        let table = session_list_lines(&[transparent], false, 1_700_000_045).unwrap();
+        assert!(
+            table[1].ends_with("45s     unknown (transparent)"),
+            "{table:?}"
+        );
     }
 
     fn key_init_temp_path() -> std::path::PathBuf {

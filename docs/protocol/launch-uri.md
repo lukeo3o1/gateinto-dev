@@ -583,6 +583,7 @@ they never contain spaces or line breaks.
 | `stop` | `agent-pid: <pid>`, `terminals-closed: <n>` (the number of terminal sessions closed); the agent closes every session, then exits |
 | `log <after>` | `agent-pid: <pid>`, `last: <n>` (the sequence number of the newest event logged since the agent started, `0` when none), then, oldest first, one JSON object per kept event with a sequence number above `<after>`: `{"seq":<n>,"time":<Unix milliseconds>,"level":"error"\|"warn"\|"info","scope":"session <id>" or a module name,"message":<text>}`. The agent keeps only the last 500 events at `info` and above in memory, each message cut to 1000 characters, and stops adding events before the answer would exceed 64 KiB. `<after>` is a decimal number without sign or leading zeros. |
 | `config` | `config: <absolute path>` of the config file the agent loaded, or `config: none` when it runs without one; an agent whose path is not UTF-8 or contains a line break answers an error instead |
+| `transparent` | `availability: available` or `availability: unavailable: <reason>`, then `engine: running`, `engine: starting`, `engine: stopped` or `engine: stopped: <error>`, where `<error>` is what stopped the engine or made its last start fail. Each line is `<key>: <value>`; a client ignores lines with other keys, so later agents can add some, and refuses an answer with a line without `: `, a missing or repeated `availability` or `engine` line, an unknown value or an empty reason or error. An agent older than `transparent` answers `error: invalid request` |
 
 Mixed launches and their first-time confirmations also include `route: mixed`.
 Without a route word the session uses the `gateway` route; `route=mixed`
@@ -601,7 +602,9 @@ removed; use session_credentials`. Credentials appear only in the answers to a
 started `launch`, `approve` and `credentials`, never in an error, in `list` or
 in what the command line prints. `config` changes nothing and answers only
 the path, never the file's contents. An agent older than `config` answers it
-with `error: invalid request`. Canonical optional fields remain ordered
+with `error: invalid request`. `transparent` changes nothing either and
+starts no engine; its errors carry error codes, exit codes and timeouts,
+never a pipe name, process ID, port or path. Canonical optional fields remain ordered
 `route`, `url`, `gateway`, `portal`. Older agents reject the new
 address-only form and `route=saved`; stop the old agent after upgrading.
 
@@ -613,7 +616,8 @@ within 10 seconds. A client gives up on an agent that does not answer within
 connection that the agent closes without an answer is reported as such. The command line exposes the requests as `gateinto open`,
 `gateinto session list`, `gateinto session close <id>`,
 `gateinto session credentials <id>` (shows the credentials again in the
-prompt and prints nothing) and `gateinto stop`.
+prompt and prints nothing) and `gateinto stop`; `gateinto status` sends
+`list` and, when that is answered, `transparent`.
 
 `gateinto open` without a running agent starts `gateinto agent` with the same
 `--config` as a detached process (on Windows without a console and without

@@ -331,14 +331,25 @@ gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: C:\Users\me\AppData\Roaming\Gateinto\gateways
 gateway: corp: proxy.corp.example:443, route mixed (linked)
 agent: running
-session: 2 browser office 127.0.0.1:50123
+ID  KIND     GATEWAY  LISTEN           ROUTE  AUTH     TUNNELS  UPTIME  PROGRAM
+2   browser  office   127.0.0.1:50123  mixed  os_user  3        12m40s  edge
+transparent-sessions: unavailable: WinDivert.dll is missing next to gateinto.exe
+transparent-engine: stopped
 uri-handler: gateinto: "C:\Users\me\AppData\Local\Programs\Gateinto\gateinto.exe" open -- "%1"
 ```
 
 `device-key` is `present`, `absent`, `unavailable` (not Windows; on Linux `unavailable: no device key backend on Linux; connections are unauthenticated`) or `error: …`. Gateways show
 only name, host, port, default route (`mixed`, the default, or `gateway`) and source (`config` or `linked`); CA files, certificate files, portal
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
-its path or query. Sessions come from the running agent, the same lines as `gateinto session list`.
+its path or query. Sessions come from the running agent, the same table as `gateinto session list`.
+`transparent-sessions` says whether this computer can run transparent sessions, which nothing can
+start yet: `available`, or `unavailable: <reason>` (not Windows, Windows older than Windows 10 1607
+or Windows Server 2016, Windows on ARM64, or a WinDivert file missing next to `gateinto.exe` or
+different from the pinned one; the installer does not ship these files yet). It is printed whether
+or not the agent runs. While the agent runs, `transparent-engine` is `running`, `starting`, `stopped`
+or `stopped: <error>`, the error that stopped the transparent engine or made its last start fail;
+`unknown: the agent is too old; restart it` comes from an agent older than this line. A transparent
+session's `PROGRAM` cell ends with `(transparent)`.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.
 On Linux, `status` also prints `uri-handler-warning` when Gateinto's desktop file is installed
 but another installed default overrides it or no installed default is found,
@@ -357,6 +368,7 @@ config: /home/me/.config/gateinto/gateinto.toml (default location)
 gateway: office: proxy.example.com:443, route mixed (config)
 linked-gateways: none (no directory at /home/me/.config/gateinto/gateways)
 agent: not running
+transparent-sessions: unavailable: transparent sessions need Windows
 uri-handler: gateinto: "/home/me/.local/bin/gateinto" open -- %u
 terminal-sessions: not supported on Linux yet
 terminal-containment: unavailable: terminal sessions need the cgroup v2 hierarchy mounted at /sys/fs/cgroup

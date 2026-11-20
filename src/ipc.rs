@@ -39,6 +39,7 @@ pub enum Request {
     Stop,
     Log { after: u64 },
     Config,
+    Transparent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +171,7 @@ impl fmt::Display for Request {
             Self::Stop => f.write_str("stop"),
             Self::Log { after } => write!(f, "log {after}"),
             Self::Config => f.write_str("config"),
+            Self::Transparent => f.write_str("transparent"),
         }
     }
 }
@@ -211,6 +213,7 @@ impl FromStr for Request {
             },
             ["stop"] => Ok(Self::Stop),
             ["config"] => Ok(Self::Config),
+            ["transparent"] => Ok(Self::Transparent),
             ["log", word] => canonical(word)
                 .map(|after| Self::Log { after })
                 .ok_or(invalid),
@@ -441,6 +444,134 @@ pub fn config_source(lines: &[String]) -> Option<ConfigSource> {
     }
     let path = PathBuf::from(text);
     path.is_absolute().then_some(ConfigSource::File(path))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentStatus {
+    pub availability: TransparentAvailability,
+    pub engine: TransparentEngine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentAvailability {
+    Available,
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentEngine {
+    Running,
+    Starting,
+    Stopped(Option<String>),
+}
+
+const AVAILABILITY: &str = "availability";
+const ENGINE: &str = "engine";
+
+impl TransparentStatus {
+    pub fn to_lines(&self) -> Vec<String> {
+        vec![
+            format!("{AVAILABILITY}: {}", self.availability),
+            format!("{ENGINE}: {}", self.engine),
+        ]
+    }
+
+    pub fn parse(lines: &[String]) -> Option<Self> {
+        let mut availability = None;
+        let mut engine = None;
+        for line in lines {
+            let (key, value) = line.split_once(": ")?;
+            match key {
+                AVAILABILITY => first(&mut availability, TransparentAvailability::parse(value)?)?,
+                ENGINE => first(&mut engine, TransparentEngine::parse(value)?)?,
+                _ => {}
+            }
+        }
+        Some(Self {
+            availability: availability?,
+            engine: engine?,
+        })
+    }
+}
+
+fn first<T>(slot: &mut Option<T>, value: T) -> Option<()> {
+    slot.replace(value).is_none().then_some(())
+}
+
+fn word_and_detail(value: &str) -> Option<(&str, Option<&str>)> {
+    match value.split_once(": ") {
+        None => Some((value, None)),
+        Some((_, "")) => None,
+        Some((word, detail)) => Some((word, Some(detail))),
+    }
+}
+
+impl TransparentAvailability {
+    fn parse(value: &str) -> Option<Self> {
+        match word_and_detail(value)? {
+            ("available", None) => Some(Self::Available),
+            ("unavailable", Some(reason)) => Some(Self::Unavailable(reason.to_owned())),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TransparentAvailability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Available => f.write_str("available"),
+            Self::Unavailable(reason) => write!(f, "unavailable: {reason}"),
+        }
+    }
+}
+
+impl TransparentEngine {
+    fn parse(value: &str) -> Option<Self> {
+        match word_and_detail(value)? {
+            ("running", None) => Some(Self::Running),
+            ("starting", None) => Some(Self::Starting),
+            ("stopped", error) => Some(Self::Stopped(error.map(str::to_owned))),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TransparentEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => f.write_str("running"),
+            Self::Starting => f.write_str("starting"),
+            Self::Stopped(None) => f.write_str("stopped"),
+            Self::Stopped(Some(error)) => write!(f, "stopped: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentError {
+    TooOld,
+    Agent(String),
+    Malformed,
+}
+
+impl fmt::Display for TransparentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooOld => f.write_str("the agent is too old; restart it"),
+            Self::Agent(error) => f.write_str(error),
+            Self::Malformed => f.write_str("invalid transparent status from the agent"),
+        }
+    }
+}
+
+impl std::error::Error for TransparentError {}
+
+pub fn transparent_status(response: Response) -> Result<TransparentStatus, TransparentError> {
+    match response {
+        Response::Ok(lines) => TransparentStatus::parse(&lines).ok_or(TransparentError::Malformed),
+        Response::Error(error) if error == INVALID_REQUEST => Err(TransparentError::TooOld),
+        Response::Error(error) => Err(TransparentError::Agent(error)),
+    }
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
@@ -1360,6 +1491,7 @@ mod tests {
             ),
             (Request::Stop, "stop"),
             (Request::Config, "config"),
+            (Request::Transparent, "transparent"),
             (Request::Log { after: 0 }, "log 0"),
             (Request::Log { after: u64::MAX }, "log 18446744073709551615"),
         ] {
@@ -1887,10 +2019,167 @@ mod tests {
             "config ",
             "config x",
             "CONFIG",
+            "transparent ",
+            "transparent x",
+            " transparent",
+            "TRANSPARENT",
             "open gateinto://connect?profile=office",
         ] {
             assert!(line.parse::<Request>().is_err(), "{line:?}");
         }
+    }
+
+    fn lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_transparent_status_round_trips_as_key_lines() {
+        for (status, expected) in [
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine: TransparentEngine::Running,
+                },
+                ["availability: available", "engine: running"],
+            ),
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine: TransparentEngine::Starting,
+                },
+                ["availability: available", "engine: starting"],
+            ),
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Unavailable(
+                        "transparent sessions need Windows".to_owned(),
+                    ),
+                    engine: TransparentEngine::Stopped(None),
+                },
+                [
+                    "availability: unavailable: transparent sessions need Windows",
+                    "engine: stopped",
+                ],
+            ),
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine: TransparentEngine::Stopped(Some(
+                        "the transparent engine failed (exit code 5): stopped: x".to_owned(),
+                    )),
+                },
+                [
+                    "availability: available",
+                    "engine: stopped: the transparent engine failed (exit code 5): stopped: x",
+                ],
+            ),
+        ] {
+            assert_eq!(status.to_lines(), lines(&expected));
+            assert_eq!(TransparentStatus::parse(&lines(&expected)), Some(status));
+        }
+    }
+
+    #[test]
+    fn the_transparent_status_reads_in_any_order_and_skips_unknown_keys() {
+        assert_eq!(
+            TransparentStatus::parse(&lines(&[
+                "helper: 2",
+                "engine: starting",
+                "availability: unavailable: x",
+                "engine-since: 3",
+            ])),
+            Some(TransparentStatus {
+                availability: TransparentAvailability::Unavailable("x".to_owned()),
+                engine: TransparentEngine::Starting,
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_transparent_statuses_are_refused() {
+        for broken in [
+            &[][..],
+            &["availability: available"],
+            &["engine: running"],
+            &[
+                "availability: available",
+                "engine: running",
+                "engine: running",
+            ],
+            &[
+                "availability: available",
+                "availability: available",
+                "engine: running",
+            ],
+            &["availability: availabl", "engine: running"],
+            &["availability: Available", "engine: running"],
+            &["availability: available ", "engine: running"],
+            &["availability: unavailable", "engine: running"],
+            &["availability: unavailable: ", "engine: running"],
+            &["availability: unavailable:x", "engine: running"],
+            &["availability:available", "engine: running"],
+            &["availability: available", "engine: run"],
+            &["availability: available", "engine: running: x"],
+            &["availability: available", "engine: starting: x"],
+            &["availability: available", "engine: stopped: "],
+            &["availability: available", "engine: stopped:x"],
+            &["availability: available", "engine: Stopped"],
+            &["availability: available", "engine: running", "garbage"],
+            &["availability: available", "engine: running", ""],
+            &["availability: available", "engine: running", "{\"id\":1}"],
+        ] {
+            assert_eq!(TransparentStatus::parse(&lines(broken)), None, "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn a_transparent_answer_is_read_or_named_as_too_old_or_malformed() {
+        let status = TransparentStatus {
+            availability: TransparentAvailability::Available,
+            engine: TransparentEngine::Running,
+        };
+        assert_eq!(
+            transparent_status(Response::Ok(status.to_lines())),
+            Ok(status)
+        );
+        assert_eq!(
+            transparent_status(Response::Error(INVALID_REQUEST.to_owned())),
+            Err(TransparentError::TooOld)
+        );
+        assert_eq!(
+            transparent_status(Response::Error("busy".to_owned())),
+            Err(TransparentError::Agent("busy".to_owned()))
+        );
+        assert_eq!(
+            transparent_status(Response::Ok(lines(&["engine: running"]))),
+            Err(TransparentError::Malformed)
+        );
+        assert_eq!(
+            TransparentError::TooOld.to_string(),
+            "the agent is too old; restart it"
+        );
+        assert_eq!(
+            TransparentError::Agent("busy".to_owned()).to_string(),
+            "busy"
+        );
+        assert_eq!(
+            TransparentError::Malformed.to_string(),
+            "invalid transparent status from the agent"
+        );
+    }
+
+    #[test]
+    fn an_agent_answers_a_request_it_does_not_know_as_an_invalid_request() {
+        let answer = match "transparency".parse::<Request>() {
+            Err(error) => Response::Error(error.to_string()),
+            Ok(request) => panic!("{request:?}"),
+        };
+        assert_eq!(answer.encode(), "error: invalid request\n");
+        assert_eq!(
+            transparent_status(Response::decode(&answer.encode()).unwrap()),
+            Err(TransparentError::TooOld)
+        );
     }
 
     #[test]
