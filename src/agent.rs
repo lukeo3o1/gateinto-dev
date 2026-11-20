@@ -634,7 +634,10 @@ impl Agent {
         let starter = match self.inner.registry.begin() {
             Begin::Running(_) => return Ok(()),
             Begin::Join(joiner) => return joiner.outcome().await,
-            Begin::Start(starter) => starter,
+            Begin::Start(starter) => starter.on_abandon({
+                let agent = self.clone();
+                move |error| agent.engine_stopped(error)
+            }),
         };
         let generation = starter.generation();
         let Started {

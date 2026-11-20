@@ -1104,6 +1104,27 @@ impl ConfigProfiles {
     }
 }
 
+fn installed_gui() -> Result<Option<PathBuf>> {
+    if let Some(gui) = test_gui() {
+        return Ok(Some(gui));
+    }
+    Ok(if cfg!(windows) {
+        handoff::installed(&std::env::current_exe()?)
+    } else {
+        None
+    })
+}
+
+#[cfg(feature = "test-hooks")]
+fn test_gui() -> Option<PathBuf> {
+    std::env::var_os("GATEINTO_TEST_GUI").map(PathBuf::from)
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn test_gui() -> Option<PathBuf> {
+    None
+}
+
 #[cfg(feature = "test-hooks")]
 fn linked_test_ca() -> Option<PathBuf> {
     std::env::var_os("GATEINTO_TEST_LINKED_CA_FILE").map(PathBuf::from)
@@ -1302,12 +1323,7 @@ async fn open(args: OpenArgs) -> Result {
     let endpoint = Endpoint::for_current_user()?;
     let config = args.config.config.as_deref();
     let request = Request::Launch(launch.clone(), mode(args.transparent));
-    let installed = if cfg!(windows) {
-        handoff::installed(&std::env::current_exe()?)
-    } else {
-        None
-    };
-    let gui = offered_gui(&request, installed);
+    let gui = offered_gui(&request, installed_gui()?);
     let ensure_agent = async || -> Result {
         match ipc::send(&endpoint, &Request::List).await {
             Err(RequestError::NotRunning | RequestError::Closed) => {
@@ -1404,21 +1420,46 @@ fn stop_inheriting_standard_handles() {
     }
 }
 
+trait Started {
+    fn exited(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl Started for std::process::Child {
+    fn exited(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+}
+
 async fn start_agent_and_send(
     endpoint: &Endpoint,
     request: &Request,
     config: Option<&Path>,
 ) -> Result<Response> {
+    send_while_starting(
+        request,
+        config,
+        || spawn_agent(config),
+        async |limit| ipc::send_with_timeout(endpoint, request, limit).await,
+    )
+    .await
+}
+
+async fn send_while_starting<S: Started>(
+    request: &Request,
+    config: Option<&Path>,
+    spawn: impl Fn() -> Result<S>,
+    send: impl AsyncFn(Duration) -> Result<Response, RequestError>,
+) -> Result<Response> {
     let deadline = Instant::now() + AGENT_START_TIMEOUT;
-    let mut child = spawn_agent(config)?;
+    let mut child = spawn()?;
     let mut started = 1;
     let mut delay = Duration::from_millis(25);
     loop {
         tokio::time::sleep(delay).await;
-        let exited = child.try_wait()?;
+        let exited = child.exited()?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let limit = starting_agent_limit(request, remaining);
-        match ipc::send_with_timeout(endpoint, request, limit).await {
+        match send(limit).await {
             Err(RequestError::NotRunning | RequestError::Closed) => {}
             result => return Ok(result?),
         }
@@ -1430,7 +1471,7 @@ async fn start_agent_and_send(
                 )
                 .into());
             }
-            child = spawn_agent(config)?;
+            child = spawn()?;
             started += 1;
         }
         if Instant::now() >= deadline {
@@ -2398,6 +2439,49 @@ args = ["-l"]
         assert_eq!(offered_gui(&proxy, None), None);
     }
 
+    struct Starting;
+
+    impl Started for Starting {
+        fn exited(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            Ok(None)
+        }
+    }
+
+    async fn limits_while_starting(request: &Request) -> Vec<Duration> {
+        let limits = std::sync::Mutex::new(Vec::new());
+        let answer = send_while_starting(
+            request,
+            None,
+            || Ok(Starting),
+            async |limit| {
+                let mut limits = limits.lock().unwrap();
+                limits.push(limit);
+                if limits.len() < 3 {
+                    Err(RequestError::NotRunning)
+                } else {
+                    Ok(Response::Ok(Vec::new()))
+                }
+            },
+        )
+        .await;
+        assert_eq!(answer.unwrap(), Response::Ok(Vec::new()), "{request}");
+        limits.into_inner().unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transparent_request_to_an_agent_just_started_waits_for_the_transparent_timeout() {
+        assert_eq!(
+            limits_while_starting(&launch(Mode::Transparent)).await,
+            [ipc::TRANSPARENT_REQUEST_TIMEOUT; 3]
+        );
+        let limits = limits_while_starting(&launch(Mode::Proxy)).await;
+        assert_eq!(limits.len(), 3);
+        assert!(
+            limits.iter().all(|limit| *limit <= AGENT_START_TIMEOUT),
+            "{limits:?}"
+        );
+    }
+
     #[test]
     fn only_a_transparent_request_to_a_starting_agent_waits_for_the_transparent_timeout() {
         let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
@@ -2431,6 +2515,10 @@ args = ["-l"]
                 "mode: transparent",
                 "gateway: office"
             ]))
+        );
+        assert_eq!(
+            transparent_answer(&transparent, Response::Ok(lines(&["gateway: office"]))),
+            Response::Ok(lines(&["mode: transparent", "gateway: office"]))
         );
         assert_eq!(
             transparent_answer(&proxy, Response::Ok(lines(&["session: 4"]))),

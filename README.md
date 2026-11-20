@@ -408,7 +408,7 @@ Windows only, pre-release and not yet verified on real Windows; see
   need a gateway confirmation is refused; add the gateway or use its saved
   route first. The GUI does not offer transparent sessions yet.
 - The first transparent session of an agent starts the transparent engine,
-  which asks for administrator approval, so the command first prints
+  which may ask for administrator approval, so the command first prints
   `starting the transparent engine may ask for administrator approval` on
   stderr. It then waits up to 300 seconds for the agent's answer (60
   seconds for every other request). If it gives up while the prompt is

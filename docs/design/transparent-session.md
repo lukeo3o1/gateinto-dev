@@ -487,7 +487,9 @@ a lock, so that no process starts in a job after the engine stopped.**
     a `tokio::sync::watch` channel of its own generation. A `Starter`
     dropped without `finish`, for example because its request was
     cancelled, finishes as a failure ("abandoned"), so neither the state
-    nor its joiners wait forever.
+    nor its joiners wait forever. It first passes that error to the hook
+    set with `Starter::on_abandon`, through which the agent records it as
+    the engine's last error before the phase becomes `stopped`.
   - `State::stop(g)` is the pipe-break handler. Under the state lock it
     checks `starting(g)` or `running(g)`, sets `stopped` and removes the
     registry entries recorded with `g`; after releasing it, it takes each
@@ -1684,11 +1686,13 @@ attribution:
   stops after `ready` but before the hand-over leaves the engine `stopped`,
   fails the hand-over and refuses registration; a stale start's hand-over,
   failure path or abandonment neither completes nor clears a newer start; an
-  abandoned start stops the engine and fails its joiners; registration
-  succeeds only under `running(g)` and once per key; a break terminates
-  every session of its generation and marks it `closing`, and a late or
-  repeated break changes nothing, so a newer generation keeps running, keeps
-  its sessions and still accepts registrations; a failed terminate is logged
+  abandoned start stops the engine and fails its joiners; only an
+  abandoned start calls its `on_abandon` hook, and before the engine counts
+  as stopped; registration succeeds only under `running(g)` and once per
+  key; a break terminates every session of its generation and marks it
+  `closing`, and a late or repeated break changes nothing, so a newer
+  generation keeps running, keeps its sessions and still accepts
+  registrations; a failed terminate is logged
   and the other jobs are still terminated; a terminate that panics is logged
   and every session is still marked `closing`, terminated and returned;
   unregistered sessions leave the snapshot; a launch that holds the mark
@@ -1895,10 +1899,13 @@ port range (tested in `src/transparent/listener.rs`).
 Implemented with step 5 for the status: the `transparent` answer follows the
 engine from stopped through starting (a gated start) to running and to
 stopped with the helper's message, names why the last start failed (a
-failed start, a helper gone by the hand-over) and no longer names it after a
-successful start; the availability check runs on a blocking thread, its
-reason is answered with the engine stopped, and a check that panics is
-answered as an error and starts nothing (`src/agent/tests/transparent.rs`).
+failed start, a helper gone by the hand-over, a start abandoned because its
+request was cancelled) and no longer names it after a successful start; the
+stop-watcher stores the helper's message before the engine counts as
+stopped, even while a launch holds `launching`; the availability check runs
+on a blocking thread, its reason is answered with the engine stopped, and a
+check that panics is answered as an error and starts nothing
+(`src/agent/tests/transparent.rs`).
 In `src/ipc.rs`: the request round-trips and its malformed forms are
 refused; the status round-trips as its lines, is read in any order with
 unknown keys skipped, and a line without `: `, a missing or repeated key, an
@@ -1924,11 +1931,17 @@ constants the parser uses) counts as sent to an older agent;
 `src/main.rs`: the terminal flag sends `mode=transparent` only with
 `--agent` and is refused by clap without it; `open --transparent` asks for
 the transparent mode, is not handed to the GUI, and waits the 300 s on an
-agent it has just started; the answer is marked and an older agent is
-named for launches and terminals, and proxy-mode answers are unchanged.
-`tests/cli.rs`, against a fake agent: the request lines, the notice before
-the too-old message for both commands, the marked terminal answer, and a
-proxy-mode terminal that keeps `invalid terminal request`.
+agent it has just started, checked through the start loop with a fake
+agent process and a paused clock; the answer is marked after its
+`session:` line, or first when it has none, and an older agent is named
+for launches and terminals, and proxy-mode answers are unchanged.
+`tests/cli.rs`, against a fake agent that holds its answer until the
+notice is on the client's standard error, so the notice must come before
+the request: the request lines, the notice before the too-old message for
+both commands, the marked terminal answer, a proxy-mode terminal that
+keeps `invalid terminal request`, and, with a fake GUI named by the
+`test-hooks` variable `GATEINTO_TEST_GUI`, a proxy-mode `open` handed to
+the GUI and a transparent one sent to the agent instead.
 `tests/launch.rs`, against a real agent outside Windows: `open
 --transparent` starts the agent and is refused as unavailable, and
 `session terminal --agent --transparent` is refused as unsupported on this

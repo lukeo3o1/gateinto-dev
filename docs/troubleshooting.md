@@ -335,9 +335,10 @@ See [install.md](install.md).
   --transparent`: the running agent was started by an older Gateinto. Stop
   it with `gateinto stop`, which closes its sessions, and start it again.
 - `the agent did not answer within 300 seconds` from a transparent request:
-  the administrator approval was not given in time, or the transparent
-  engine did not start. The agent may still start the session; check
-  `gateinto session list` before asking again.
+  the administrator approval prompt was not answered in time. Once the
+  prompt is answered, an engine that fails to start or does not start in time
+  is answered with its own error. The agent may still start the session;
+  check `gateinto session list` before asking again.
 - `refusing to delete the device key without confirmation: no terminal ...`:
   `reset` was run from a script. Pass `--confirm-spki` with the first 16 or
   more hex digits of `spki-sha256` from `gateinto status`.

@@ -573,13 +573,15 @@ they never contain spaces or line breaks.
 
 | Request | Answer lines after `ok` |
 | --- | --- |
-| `launch [<profile>] session_credentials [route=saved\|mixed] [url=<url>] [gateway=<host:port>] [portal=<url>]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>` (the last two not on Windows when the browser is in a job and the session offers `os_user`); or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>` |
+| `launch [<profile>] session_credentials [route=saved\|mixed] [url=<url>] [gateway=<host:port>] [portal=<url>] [mode=transparent]` | `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `realm: <realm>`, `profile: <directory>`, `browser: <executable>`, `username: <user name>`, `password: <password>` (the last two not on Windows when the browser is in a job and the session offers `os_user`); or, for a new gateway, `confirm: <32 hex digits>`, `gateway: <name>`, `address: <host:port>`, `portal: <origin or none>`. The last word `mode=transparent` asks for a [transparent session](../design/transparent-session.md); a link can never produce it, `gateinto open --transparent` sends it, and it is refused for a launch that needs a confirmation. An agent older than `mode=transparent` answers `error: invalid launch request` |
 | `approve <token>` | as for a started `launch` |
 | `deny <token>` | none |
 | `list` | One JSON object per session, for example `{"id":2,"kind":"browser","gateway":"office","upstream":"proxy.example:443","listen":"127.0.0.1:50123","route":"mixed","auth":"os_user","started":1767225600,"tunnels":3,"browser":"edge"}`: `kind` is `browser` or `terminal`, `upstream` the gateway's `host:port`, `route` `all` or `mixed`, `auth` `os_user`, `password` (session credentials) or `none`, `started` Unix seconds and `tunnels` the open tunnels. Optional keys: `browser` (`chrome`, `edge` or `chromium`, for a recognised browser), `shell` (the terminal's shell file name), `verification` (`true` while a verification challenge waits) and `transparent` (`true` for a transparent session); a missing one means none or `false`. A client reads an unknown value of `kind`, `route`, `auth` or `browser` as `unknown` and ignores unknown keys. An agent older than this format answers `session: <id> ...` lines, which `gateinto session list`, `status` and the GUI refuse with a request to restart the agent |
 | `close <id>` | none |
 | `credentials <id>` | `listen: 127.0.0.1:<port>`, `username: <user name>`, `password: <password>`; `error: no session <id>` once the session is closed |
-| `terminal <gateway> route=<saved\|gateway\|mixed>` | Windows only: `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `route: <route>`, `auth: os_user`, `shell: <file name>`, then the gateway's warnings and, for `mixed`, the mixed-route warning; never credentials. The gateway must be in the agent's configuration file. Other platforms answer an error; an agent older than `terminal` answers `error: invalid request` |
+| `verification <id>` | The session's pending [verification](../design/interactive-auth.md#ipc), one line each in this order: `challenge: <serial>`, `gateway: <name>`, `origin: <origin>`, `auth_uri: <url>`, `user_code: <code>`, `expires_in: <remaining seconds>`, one `target: <authority>` line per stored target (at most 8), `more_targets: <n>` and `suppressed: <n>`; `error: no session <id>` or `error: session <id> has no pending verification` otherwise. An agent older than `verification` answers `error: invalid request` |
+| `dismiss <id> <serial>` | none. Removes the session's pending verification only if its `challenge` is `<serial>`, so a dismissal cannot remove a challenge the client has not read, and answers `ok` whether or not one was removed; `error: no session <id>` for a session that does not exist. `<serial>` is a decimal number without sign or leading zeros. An agent older than `dismiss` answers `error: invalid request` |
+| `terminal <gateway> route=<saved\|gateway\|mixed> [mode=transparent]` | Windows only: `session: <id>`, `gateway: <name>`, `listen: 127.0.0.1:<port>`, `route: <route>`, `auth: os_user`, `shell: <file name>`, then the gateway's warnings and, for `mixed`, the mixed-route warning; never credentials. The gateway must be in the agent's configuration file. Other platforms answer an error; an agent older than `terminal` answers `error: invalid request`. The last word `mode=transparent` asks for a [transparent session](../design/transparent-session.md); a link can never produce it, `gateinto session terminal --agent --transparent` sends it, and an agent older than `mode=transparent` answers `error: invalid terminal request` |
 | `stop` | `agent-pid: <pid>`, `terminals-closed: <n>` (the number of terminal sessions closed); the agent closes every session, then exits |
 | `log <after>` | `agent-pid: <pid>`, `last: <n>` (the sequence number of the newest event logged since the agent started, `0` when none), then, oldest first, one JSON object per kept event with a sequence number above `<after>`: `{"seq":<n>,"time":<Unix milliseconds>,"level":"error"\|"warn"\|"info","scope":"session <id>" or a module name,"message":<text>}`. The agent keeps only the last 500 events at `info` and above in memory, each message cut to 1000 characters, and stops adding events before the answer would exceed 64 KiB. `<after>` is a decimal number without sign or leading zeros. |
 | `config` | `config: <absolute path>` of the config file the agent loaded, or `config: none` when it runs without one; an agent whose path is not UTF-8 or contains a line break answers an error instead |
@@ -604,20 +606,26 @@ in what the command line prints. `config` changes nothing and answers only
 the path, never the file's contents. An agent older than `config` answers it
 with `error: invalid request`. `transparent` changes nothing either and
 starts no engine; its errors carry error codes, exit codes and timeouts,
-never a pipe name, process ID, port or path. Canonical optional fields remain ordered
-`route`, `url`, `gateway`, `portal`. Older agents reject the new
-address-only form and `route=saved`; stop the old agent after upgrading.
+never a pipe name, process ID, port or path. Canonical optional fields remain
+ordered `route`, `url`, `gateway`, `portal`, and `mode=transparent` comes
+after them. Older agents reject the new address-only form and `route=saved`;
+stop the old agent after upgrading.
 
 An error is the single line `error: <message>`. Line breaks inside a message
 are replaced by spaces. Answers are at most 64 KiB. The agent serves at most
 8 connections at a time and drops a connection that sends no complete request
-within 10 seconds. A client gives up on an agent that does not answer within
-60 seconds, and on Windows stops retrying a busy pipe after the same time; a
-connection that the agent closes without an answer is reported as such. The command line exposes the requests as `gateinto open`,
-`gateinto session list`, `gateinto session close <id>`,
+within 10 seconds; it sets no deadline on its answer. A client waits 300
+seconds for the answer to a `launch` or `terminal` that ends with
+`mode=transparent`, since starting the transparent engine may wait for an
+administrator approval, and 60 seconds for the answer to every other request.
+On Windows it always stops retrying a busy pipe after 60 seconds. A
+connection that the agent closes without an answer is reported as such. The
+command line exposes the requests as `gateinto open`, `gateinto session
+terminal --agent`, `gateinto session list`, `gateinto session close <id>`,
 `gateinto session credentials <id>` (shows the credentials again in the
-prompt and prints nothing) and `gateinto stop`; `gateinto status` sends
-`list` and, when that is answered, `transparent`.
+prompt and prints nothing), `gateinto session verification <id>` and
+`gateinto stop`; `gateinto status` sends `list` and, when that is answered,
+`transparent`.
 
 `gateinto open` without a running agent starts `gateinto agent` with the same
 `--config` as a detached process (on Windows without a console and without

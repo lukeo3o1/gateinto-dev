@@ -473,23 +473,27 @@ fn optional_dscp<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Ds
         }
 
         fn visit_i64<E: de::Error>(self, value: i64) -> Result<Dscp, E> {
-            u8::try_from(value)
-                .ok()
-                .and_then(|value| Dscp::new(value).ok())
-                .ok_or_else(|| E::invalid_value(de::Unexpected::Signed(value), &self))
+            in_range(value).ok_or_else(|| E::invalid_value(de::Unexpected::Signed(value), &self))
         }
 
         fn visit_u64<E: de::Error>(self, value: u64) -> Result<Dscp, E> {
-            Err(E::invalid_value(de::Unexpected::Unsigned(value), &self))
+            in_range(value).ok_or_else(|| E::invalid_value(de::Unexpected::Unsigned(value), &self))
         }
 
         fn visit_i128<E: de::Error>(self, value: i128) -> Result<Dscp, E> {
-            Err(out_of_range(value, &self))
+            in_range(value).ok_or_else(|| out_of_range(value, &self))
         }
 
         fn visit_u128<E: de::Error>(self, value: u128) -> Result<Dscp, E> {
-            Err(out_of_range(value, &self))
+            in_range(value).ok_or_else(|| out_of_range(value, &self))
         }
+    }
+
+    fn in_range(value: impl TryInto<u8>) -> Option<Dscp> {
+        value
+            .try_into()
+            .ok()
+            .and_then(|value| Dscp::new(value).ok())
     }
 
     fn out_of_range<E: de::Error>(value: impl fmt::Display, expected: &DscpVisitor) -> E {
@@ -1549,8 +1553,26 @@ port = 443
                 "[transparent] invalid type: integer `1`, expected a table",
             ),
             (
+                "transparent = []\n",
+                "[transparent] invalid type: sequence, expected a table",
+            ),
+            (
                 "transparent = [10]\n",
                 "[transparent] invalid type: sequence, expected a table",
+            ),
+            (
+                "transparent = [10, 11]\n",
+                "[transparent] invalid type: sequence, expected a table",
+            ),
+            (
+                "[transparent]\ndscp = []\n",
+                "[transparent] dscp: invalid type: sequence, expected an integer between 1 and \
+                 63",
+            ),
+            (
+                "[transparent]\ndscp = [10, 11]\n",
+                "[transparent] dscp: invalid type: sequence, expected an integer between 1 and \
+                 63",
             ),
         ] {
             let error = ConfigFile::parse(text).unwrap_err().to_string();
@@ -1574,6 +1596,37 @@ port = 443
                  between 1 and 63"
             );
             assert!(error.ends_with(&message), "{value}: {error}");
+        }
+    }
+
+    fn dscp_from<'de>(
+        value: impl de::IntoDeserializer<'de, de::value::Error>,
+    ) -> Result<Option<Dscp>, String> {
+        optional_dscp(value.into_deserializer()).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn a_dscp_of_any_integer_width_is_range_checked() {
+        for value in [1, 43, 63] {
+            let dscp = Ok(Some(Dscp::new(value).unwrap()));
+            assert_eq!(dscp_from(i64::from(value)), dscp);
+            assert_eq!(dscp_from(u64::from(value)), dscp);
+            assert_eq!(dscp_from(i128::from(value)), dscp);
+            assert_eq!(dscp_from(u128::from(value)), dscp);
+        }
+        let refused = |value: &dyn fmt::Display| {
+            Err(format!(
+                "dscp: invalid value: integer `{value}`, expected an integer between 1 and 63"
+            ))
+        };
+        for value in [0, 64, 256, u64::MAX] {
+            assert_eq!(dscp_from(value), refused(&value));
+        }
+        for value in [-1, 0, 64, i128::MIN, i128::MAX] {
+            assert_eq!(dscp_from(value), refused(&value));
+        }
+        for value in [0, 64, u128::MAX] {
+            assert_eq!(dscp_from(value), refused(&value));
         }
     }
 

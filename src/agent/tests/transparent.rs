@@ -1360,6 +1360,49 @@ async fn a_successful_start_clears_the_error_of_the_last_one() {
 }
 
 #[tokio::test]
+async fn a_start_abandoned_by_its_request_is_named_as_the_engine_error() {
+    let h = plain();
+    let _open = h.helpers.gated();
+    let starting = tokio::spawn({
+        let agent = h.agent.clone();
+        async move { answer(&agent, terminal(Mode::Transparent)).await }
+    });
+    until("the engine is starting", || async {
+        matches!(h.agent.inner.registry.phase(), Phase::Starting(_))
+    })
+    .await;
+
+    starting.abort();
+    assert!(starting.await.unwrap_err().is_cancelled());
+
+    assert_eq!(h.agent.inner.registry.phase(), Phase::Stopped);
+    assert_eq!(
+        engine_line(&h.agent).await,
+        "engine: stopped: the start of the transparent engine was abandoned"
+    );
+}
+
+#[tokio::test]
+async fn the_engine_error_is_stored_before_the_engine_counts_as_stopped() {
+    let h = plain();
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+    let launching = h.agent.inner.launching.lock().await;
+
+    h.helpers.stop(STOPPED);
+    until("the engine stopped", || async {
+        h.agent.inner.registry.phase() == Phase::Stopped
+    })
+    .await;
+
+    assert_eq!(
+        h.agent.transparent_engine().last_error.as_deref(),
+        Some(STOPPED)
+    );
+    drop(launching);
+    h.agent.close_all().await;
+}
+
+#[tokio::test]
 async fn the_availability_is_checked_off_the_async_worker() {
     let checks = Threads::default();
     let h = harness(|setup| setup.helpers.checks = checks.clone());

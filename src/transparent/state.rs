@@ -168,6 +168,7 @@ impl<K, J> State<K, J> {
                     state: self.clone(),
                     generation,
                     sender: Some(sender),
+                    abandoned: None,
                 })
             }
         }
@@ -268,15 +269,23 @@ impl<K: Ord + Clone, J> State<K, J> {
     }
 }
 
+type Abandoned = Box<dyn FnOnce(&str) + Send>;
+
 pub struct Starter<K, J> {
     state: Arc<State<K, J>>,
     generation: Generation,
     sender: Option<watch::Sender<Outcome>>,
+    abandoned: Option<Abandoned>,
 }
 
 impl<K, J> Starter<K, J> {
     pub fn generation(&self) -> Generation {
         self.generation
+    }
+
+    pub fn on_abandon(mut self, abandoned: impl FnOnce(&str) + Send + 'static) -> Self {
+        self.abandoned = Some(Box::new(abandoned));
+        self
     }
 
     pub fn finish(mut self, result: Result<(), String>) -> Result<(), String> {
@@ -295,6 +304,9 @@ impl<K, J> Starter<K, J> {
 impl<K, J> Drop for Starter<K, J> {
     fn drop(&mut self) {
         if self.sender.is_some() {
+            if let Some(abandoned) = self.abandoned.take() {
+                abandoned(ABANDONED);
+            }
             let _ = self.conclude(Err(ABANDONED.to_owned()));
         }
     }
@@ -580,6 +592,35 @@ mod tests {
             "{outcome:?}"
         );
         start(&state);
+    }
+
+    #[test]
+    fn only_an_abandoned_start_is_reported_and_before_the_engine_stops() {
+        let state = Arc::new(Fake::new());
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let report = || {
+            let (state, reports) = (state.clone(), reports.clone());
+            move |error: &str| {
+                reports
+                    .lock()
+                    .unwrap()
+                    .push((error.to_owned(), state.phase()));
+            }
+        };
+        let starter = start(&state).on_abandon(report());
+        let generation = starter.generation();
+        drop(starter);
+        assert_eq!(state.phase(), Phase::Stopped);
+
+        for result in [Err("the helper failed".to_owned()), Ok(())] {
+            let _ = start(&state).on_abandon(report()).finish(result);
+        }
+
+        assert_eq!(
+            *reports.lock().unwrap(),
+            [(ABANDONED.to_owned(), Phase::Starting(generation))]
+        );
+        assert!(matches!(state.phase(), Phase::Running(_)));
     }
 
     #[test]
