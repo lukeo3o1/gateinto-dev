@@ -22,6 +22,11 @@
         <FileSearch Id="ConfigFileSearch" Name="gateinto.toml" />
       </DirectorySearch>
     </Property>
+    <Property Id="GATEINTOEXISTS" Secure="yes">
+      <DirectorySearch Id="InstalledFolderSearch" Path="[LocalAppDataFolder]Programs\Gateinto" Depth="0">
+        <FileSearch Id="InstalledExeSearch" Name="gateinto.exe" />
+      </DirectorySearch>
+    </Property>
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="LocalProgramsFolder" Name="Programs">
@@ -91,13 +96,11 @@
 <?endif?>
     </Feature>
 
-    <CustomAction
-        Id="StopAgent"
+    <CustomAction Id="StopAgent"
         FileRef="GateintoExe"
         ExeCommand="stop --remove-stale-profiles"
-        Execute="deferred"
-        Impersonate="yes"
-        Return="ignore" />
+        Execute="immediate"
+        Return="check" />
 
     <CustomAction
         Id="UninstallGui"
@@ -116,7 +119,13 @@
         Return="ignore" />
 
     <InstallExecuteSequence>
-      <Custom Action="StopAgent" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+<?ifdef WinDivertDir?>
+      <Custom Action="StopAgent" Before="InstallValidate"
+          Condition="GATEINTOEXISTS AND (WIX_UPGRADE_DETECTED OR (Installed AND (REMOVE~=&quot;ALL&quot; OR (&amp;Main = 2 AND !Main = 3) OR (&amp;Transparent = 2 AND !Transparent = 3))))" />
+<?else?>
+      <Custom Action="StopAgent" Before="InstallValidate"
+          Condition="GATEINTOEXISTS AND (WIX_UPGRADE_DETECTED OR (Installed AND (REMOVE~=&quot;ALL&quot; OR (&amp;Main = 2 AND !Main = 3))))" />
+<?endif?>
       <Custom Action="UninstallGui" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="QuitGui" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>

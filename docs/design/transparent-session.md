@@ -801,9 +801,8 @@ runtime's shutdown.
      refuse any version other than the pinned one (`DRIVER_VERSION`, 2.2);
   7. send `ready` and run the engine loop.
 
-  A panic anywhere between a successful `add` and the final `delete` is
-  caught there: the handle closes while the stack unwinds, the rule is
-  deleted, and the helper ends with exit code 5 like a fatal engine error.
+  A panic between a successful `add` and the final `delete` is caught. The
+  helper releases the handle, deletes the rule, and ends with exit code 5.
   Inside the engine loop, a panic in the packet loop marks the loop ended
   and a panic in the reporter shuts the port down, so neither leaves the
   other thread waiting. A panic in the liveness wait counts as the agent
@@ -849,10 +848,16 @@ runtime's shutdown.
   exits. The 5 s is a margin, not a measurement. Closing the handle restores
   normal networking; according to WinDivert's documentation the driver
   stays loaded until the next reboot (see [WinDivert
-  distribution](#windivert-distribution)). A fatal engine error (any receive error other than the shutdown)
-  ends the helper the same way, without the grace period. The helper closes
-  the handle before it deletes the rule, and releases the mutex only after
-  that, because the next helper adds a rule of the same name.
+  distribution](#windivert-distribution)). On a normal stop the agent
+  cancels starts still waiting for UAC, closes its sessions, disconnects the
+  helper pipe and waits up to 25 s for the helper to exit before answering.
+  The helper closes the handle before it deletes the rule, and releases the
+  mutex only after that, because the next helper adds a rule of the same name.
+- **Fatal packet-loop error:** when receive fails while the agent is still
+  connected, the helper sends `stopping` and keeps the WinDivert handle open
+  until the agent disconnects or 25 s elapse. The agent closes the affected
+  sessions before disconnecting. The helper then closes the handle and removes
+  the firewall rule. A panic in the packet loop uses the same notification.
 - **Shutdown watchdog:** WinDivert documents that a `WinDivertRecv` made
   after `WinDivertShutdown` fails with `ERROR_NO_DATA` once the queue is
   empty, but not that a receive already blocked on an idle handle wakes up.
@@ -885,7 +890,7 @@ runtime's shutdown.
   `GetNamedPipeServerProcessId` against `--agent-pid` before it opens the
   agent process with `SYNCHRONIZE`. It opens the pipe with
   `FILE_FLAG_OVERLAPPED` and no sharing: the reporter's writes wait for
-  their own completion, while the liveness wait keeps a one-byte overlapped
+  their own completion for up to 2 s, while the liveness wait keeps a one-byte overlapped
   read pending and waits with `WaitForMultipleObjects` on that read's event
   and the agent process handle. It returns when the read completes (any
   byte, or an error such as a broken pipe) or the agent process ends, then
@@ -907,7 +912,8 @@ runtime's shutdown.
   `error <code>` with `<code>` from a fixed list (`ErrorCode`):
   `invalid-arguments`, `another-helper`, `firewall-rule`, `files-missing`,
   `digest-mismatch`, `driver-load <win32 error>`, `driver-version`. After
-  `ready`, only counter lines follow: `counters`, then ` name=value` for the
+  `ready`, the helper sends counter lines and can end with `stopping`.
+  A counter line starts with `counters`, then ` name=value` for the
   16 fields of `Counters` in their order and `receive_errors` and
   `send_errors`, each value a decimal `u64` without sign or leading zeros.
   The helper writes one every 10 s when a value changed since its last line
@@ -915,7 +921,7 @@ runtime's shutdown.
   while the agent is still there. These are the only data the agent reads
   from the elevated side. Lines are printable ASCII ending in `\n`, at most
   1024 bytes (`MAX_LINE_BYTES`). Anything else, including a second status
-  line, a line after `error`, counters before `ready`, an empty line or the
+  line, a line after `error` or `stopping`, counters before `ready`, an empty line or the
   end of the stream inside a line, is a protocol error (`StatusReader`) and
   is treated as a broken pipe. The agent sends nothing; a byte from the
   agent means to the helper that the agent is gone.
@@ -923,14 +929,13 @@ runtime's shutdown.
   detected through the process handle from `ShellExecuteExW` and reported
   generically with its exit code. Whether the unelevated agent can wait on
   and query that handle for an elevated child needs verification.
-- `Running::stopped` completes once with what the agent saw first: the pipe
-  closed or broken (`Stopped::Closed`), a protocol error
-  (`Stopped::Protocol`), or the helper process ended (`Stopped::Exited` with
-  its code). Counter lines are logged at `debug` as aggregate fields until
-  then. Dropping `Running` closes the pipe, which tells the helper that the
-  agent is gone; the supervisor keeps the process handle's exit, so the
-  next start waits for that helper.
-- When the agent sees the pipe break, a protocol error, or the helper process
+- `Running::wait_for_stop` completes on `stopping` (`Stopped::EngineFailed`),
+  a closed or broken pipe (`Stopped::Closed`), a protocol error
+  (`Stopped::Protocol`), or helper process exit (`Stopped::Exited` with its
+  code). The agent holds `Running` until it finishes closing the generation.
+  Dropping `Running` closes the pipe. The supervisor records process exit for
+  a subsequent start or an agent stop.
+- When the agent receives `stopping`, sees the pipe break, a protocol error, or the helper process
   end, it runs that helper's pipe-break handler (`State::stop`) with the
   helper's generation: if the state is still that generation's, engine
   state `stopped`, every transparent session of that generation marked
@@ -1329,11 +1334,10 @@ verification; gateway policies keyed on host names will not match.
   delete WinDivert`, once no process uses WinDivert, remove it earlier. So
   the driver does not block removing the feature or uninstalling; the files
   that can be in use are `gateinto.exe` and `WinDivert.dll`, while the
-  elevated helper runs. The MSI's `StopAgent` stops the agent before
-  `RemoveFiles`, but the helper outlives it by its grace period and the
-  firewall rule delete, so Windows Installer may need a restart to remove
-  them; the MSI schedules no restart of its own. `REMOVE=Transparent` does
-  not stop the agent. Neither is verified on Windows.
+  elevated helper runs. The MSI runs `StopAgent` before `InstallValidate`
+  during uninstall, upgrade and removal of the installed `Transparent`
+  feature. It waits for the command to succeed before validating file
+  removal. CI builds and tests the WinDivert packages on x64 and x86.
 - Without the files, or with a digest mismatch, Gateinto works as today;
   `status` and the error for a transparent request say which file is
   missing or differs.
@@ -1627,8 +1631,9 @@ of the [Implementation plan](#implementation-plan)).
   by creating the mutex first.
 - **No ARM64**, no Windows before 10 1607.
 - **Throughput** is not measured.
-- **Residual leak window.** Between the helper dying and the agent killing
-  the jobs, tagged packets go out directly (with DSCP N on the wire). A
+- **Residual leak window.** If the helper dies unexpectedly or the stop
+  acknowledgment times out, tagged packets can go out directly (with DSCP N
+  on the wire) until the agent kills the jobs. A
   candidate hardening is to also set a minimal `MaxBandwidth` on the job:
   if net rate control throttles below the WinDivert NETWORK layer, diverted
   packets would be unaffected and leaked ones throttled. This is a
@@ -2234,7 +2239,8 @@ tunnels are open, the agent killed while tunnels are open.
     output is aggregate.
 14. **Helper reporting.** The helper connects to the pipe first, with
     `SECURITY_IDENTIFICATION`, and sends exactly one status line, `ready` or
-    `error <code>` from a fixed list, then only counter lines; anything else
+    `error <code>` from a fixed list. After `ready` it sends counter lines and
+    can end with `stopping`. Anything else
     is a broken pipe; a helper that ends earlier is reported with its exit
     code from the `ShellExecuteExW` process handle.
 15. **Helper lifetime.** Until the agent stops: one approval per agent run.

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, Notify, Semaphore, oneshot};
+use tokio::sync::{Mutex, Semaphore, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -31,12 +31,14 @@ use crate::uri::LaunchRequest;
 
 mod engine;
 
-use engine::{Boxed, Engine, Registry, Started};
+use engine::{Boxed, Engine, EngineStopped, Registry, Started};
 
 const MAX_CONNECTIONS: usize = 8;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(25);
 const DRAIN_REJECTED_BYTES: usize = 64 * 1024;
+const AGENT_STOPPING: &str = "the agent is stopping; nothing was started";
 const DRAIN_REJECTED_TIMEOUT: Duration = Duration::from_secs(1);
 const PROFILE_REMOVAL_ATTEMPTS: u32 = 40;
 const PROFILE_REMOVAL_DELAY: Duration = Duration::from_millis(250);
@@ -322,7 +324,8 @@ struct Inner {
     launching: Mutex<Option<Pending>>,
     registry: Arc<Registry>,
     engine_error: std::sync::Mutex<Option<String>>,
-    stop: Notify,
+    stop: watch::Sender<bool>,
+    helper_stop: watch::Sender<bool>,
 }
 
 impl Inner {
@@ -362,7 +365,8 @@ impl Agent {
                 launching: Mutex::new(None),
                 registry: Arc::new(Registry::new()),
                 engine_error: std::sync::Mutex::new(None),
-                stop: Notify::new(),
+                stop: watch::Sender::new(false),
+                helper_stop: watch::Sender::new(false),
             }),
         }
     }
@@ -386,7 +390,7 @@ impl Agent {
             };
             tokio::select! {
                 () = &mut shutdown => break,
-                () = self.inner.stop.notified() => break,
+                () = wait_for_stop(&self.inner.stop) => break,
                 accepted = accept => match accepted {
                     Ok(connection) => {
                         backoff.succeeded();
@@ -409,6 +413,7 @@ impl Agent {
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             }
         }
+        self.inner.stop.send_replace(true);
         drop(server);
         let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
             while tasks.join_next().await.is_some() {}
@@ -418,6 +423,10 @@ impl Agent {
             tasks.abort_all();
         }
         self.close_all().await;
+        let helper_stopping = *self.inner.helper_stop.borrow();
+        if !helper_stopping && let Err(error) = self.stop_helper().await {
+            warn!("{error}");
+        }
     }
 
     async fn respond(&self, mut connection: Connection) {
@@ -449,14 +458,9 @@ impl Agent {
             Request::Credentials(id) => self.credentials(id).await,
             Request::Verification(id) => self.verification(id).await,
             Request::Dismiss(id, serial) => self.dismiss(id, serial).await.map(|()| Vec::new()),
-            Request::Stop => {
-                self.inner.stop.notify_one();
-                let terminals = self.close_all().await;
-                Ok(vec![
-                    ipc::agent_pid_line(),
-                    ipc::closed_terminals_line(terminals),
-                ])
-            }
+            Request::Stop => self.stop().await.map(|terminals| {
+                vec![ipc::agent_pid_line(), ipc::closed_terminals_line(terminals)]
+            }),
             Request::Log { after } => return self.inner.options.logbook.response(after),
             Request::Config => ipc::config_line(&self.inner.options.config)
                 .map(|line| vec![line])
@@ -470,6 +474,25 @@ impl Agent {
             Ok(lines) => Response::Ok(lines),
             Err(error) => Response::Error(error),
         }
+    }
+
+    async fn stop(&self) -> Result<usize, String> {
+        self.inner.stop.send_replace(true);
+        let terminals = self.close_all().await;
+        self.stop_helper().await?;
+        Ok(terminals)
+    }
+
+    async fn stop_helper(&self) -> Result<(), String> {
+        self.inner.helper_stop.send_replace(true);
+        tokio::time::timeout(HELPER_EXIT_TIMEOUT, self.inner.engine.wait_for_exit())
+            .await
+            .map_err(|_| {
+                format!(
+                    "the transparent engine did not exit within {} seconds",
+                    HELPER_EXIT_TIMEOUT.as_secs()
+                )
+            })
     }
 
     async fn launch(&self, request: LaunchRequest, mode: Mode) -> Result<Vec<String>, String> {
@@ -556,13 +579,22 @@ impl Agent {
     }
 
     fn allow_launch(&self) -> Result<(), String> {
+        self.check_stopping()?;
         let allowed = self.launches().allow(Instant::now());
         allowed.then_some(()).ok_or_else(|| self.rate_limited())
     }
 
     fn would_allow_launch(&self) -> Result<(), String> {
+        self.check_stopping()?;
         let allowed = self.launches().would_allow(Instant::now());
         allowed.then_some(()).ok_or_else(|| self.rate_limited())
+    }
+
+    fn check_stopping(&self) -> Result<(), String> {
+        if *self.inner.stop.borrow() {
+            return Err(AGENT_STOPPING.to_owned());
+        }
+        Ok(())
     }
 
     fn launches(&self) -> std::sync::MutexGuard<'_, LaunchLimiter> {
@@ -631,6 +663,7 @@ impl Agent {
     }
 
     async fn ensure_engine(&self) -> Result<(), String> {
+        self.check_stopping()?;
         let starter = match self.inner.registry.begin() {
             Begin::Running(_) => return Ok(()),
             Begin::Join(joiner) => return joiner.outcome().await,
@@ -640,10 +673,15 @@ impl Agent {
             }),
         };
         let generation = starter.generation();
+        let started = tokio::select! {
+            biased;
+            () = wait_for_stop(&self.inner.stop) => Err(AGENT_STOPPING.to_owned()),
+            started = self.inner.engine.start(self.inner.options.dscp) => started,
+        };
         let Started {
             mut stopped,
             listener,
-        } = match self.inner.engine.start(self.inner.options.dscp).await {
+        } = match started {
             Ok(started) => started,
             Err(error) => {
                 warn!("starting the transparent engine failed: {error}");
@@ -656,7 +694,8 @@ impl Agent {
             message = &mut stopped => Some(message),
             () = std::future::ready(()) => None,
         };
-        if let Some(message) = gone {
+        if let Some(stopped) = gone {
+            let message = stopped.message;
             warn!("the transparent engine stopped as it started: {message}");
             self.engine_stopped(&message);
             return starter.finish(Err(message));
@@ -681,15 +720,20 @@ impl Agent {
     async fn watch_engine(
         self,
         generation: Generation,
-        stopped: Boxed<'static, String>,
+        stopped: Boxed<'static, EngineStopped>,
         shutdown: oneshot::Sender<()>,
     ) {
-        let message = stopped.await;
+        let EngineStopped { message, capture } = tokio::select! {
+            biased;
+            () = wait_for_stop(&self.inner.helper_stop) => return,
+            stopped = stopped => stopped,
+        };
         warn!("the transparent engine stopped: {message}; closing its transparent sessions");
         self.engine_stopped(&message);
         let registry = self.inner.registry.clone();
         let stopping = tokio::task::spawn_blocking(move || registry.stop(generation));
         self.close_stopped(stopping, shutdown).await;
+        drop(capture);
     }
 
     async fn close_stopped(
@@ -931,6 +975,7 @@ impl Agent {
 
     async fn approve(&self, token: ConfirmToken) -> Result<Vec<String>, String> {
         let mut pending = self.inner.launching.lock().await;
+        self.check_stopping()?;
         let answered = Self::answered(&mut pending, token)?;
         let known = self.known().await?;
         let mut asked = Asked {
@@ -1229,6 +1274,7 @@ impl Agent {
     }
 
     async fn close(&self, id: SessionId) -> Result<(), String> {
+        let _launching = self.inner.launching.lock().await;
         let browser = self.inner.browsers.lock().await.remove(&id);
         if let Some(browser) = browser {
             let _ = browser.close.send(());
@@ -1249,6 +1295,7 @@ impl Agent {
     }
 
     pub async fn close_all(&self) -> usize {
+        let _launching = self.inner.launching.lock().await;
         let browsers = std::mem::take(&mut *self.inner.browsers.lock().await);
         for (_, browser) in browsers {
             let _ = browser.close.send(());
@@ -1267,6 +1314,10 @@ impl Agent {
         sessions.close_all().await;
         count
     }
+}
+
+async fn wait_for_stop(signal: &watch::Sender<bool>) {
+    let _ = signal.subscribe().wait_for(|stopping| *stopping).await;
 }
 
 fn transparent_launch(request: &LaunchRequest, known: &Known) -> Result<Launch, String> {

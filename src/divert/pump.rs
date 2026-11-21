@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ pub const PACKET_BUFFER_BYTES: usize = 40 + 0xFFFF;
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
 pub const GRACE_PERIOD: Duration = Duration::from_secs(5);
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+const STOP_ACK_TIMEOUT: Duration = Duration::from_secs(25);
 
 pub struct Received<A> {
     pub length: usize,
@@ -89,6 +91,14 @@ impl Shared {
             state = clock.wait_until(&self.changed, state, deadline);
         }
     }
+
+    fn wait_for_agent_to_close<C: Clock>(&self, clock: &C) {
+        let deadline = clock.now() + STOP_ACK_TIMEOUT;
+        let mut state = self.lock();
+        while !state.gone && clock.now() < deadline {
+            state = clock.wait_until(&self.changed, state, deadline);
+        }
+    }
 }
 
 trait Clock: Sync {
@@ -140,17 +150,28 @@ where
     let shared = Arc::new(Shared::default());
     let watcher = Arc::clone(&shared);
     // Not joined: the wait cannot be interrupted, and the helper exits once the pump returns.
-    thread::Builder::new().spawn(move || {
+    let watching = thread::Builder::new().spawn(move || {
         let _gone = OnDrop(|| watcher.signal(|state| state.gone = true));
         liveness.wait_until_gone();
-    })?;
+    });
     let shared = &*shared;
-    thread::scope(|scope| {
-        thread::Builder::new()
-            .spawn_scoped(scope, move || supervise(shared, port, report, stuck, clock))?;
-        let _ended = OnDrop(|| shared.signal(|state| state.ended = true));
-        forward(port, engine, shared, clock)
-    })
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        watching?;
+        thread::scope(|scope| {
+            let report = &mut *report;
+            thread::Builder::new()
+                .spawn_scoped(scope, move || supervise(shared, port, report, stuck, clock))?;
+            let _ended = OnDrop(|| shared.signal(|state| state.ended = true));
+            forward(port, engine, shared, clock)
+        })
+    }));
+    if !matches!(outcome, Ok(Ok(())))
+        && !shared.lock().gone
+        && panic::catch_unwind(AssertUnwindSafe(|| send(report, &Event::Stopping))).is_ok()
+    {
+        shared.wait_for_agent_to_close(clock);
+    }
+    outcome.unwrap_or_else(|panic| panic::resume_unwind(panic))
 }
 
 struct OnDrop<F: FnMut()>(F);
@@ -236,14 +257,20 @@ fn supervise<P: DivertPort, W: Write, S: FnOnce(), C: Clock>(
         } else if state.ended || now >= next_report {
             let (snapshot, ended) = (state.snapshot, state.ended);
             drop(state);
-            let failed = snapshot != reported && send(report, &Event::Counters(snapshot)).is_err();
+            let written = if snapshot != reported {
+                send(report, &Event::Counters(snapshot))
+            } else {
+                Ok(())
+            };
             if ended {
                 return;
             }
-            reported = snapshot;
+            if written.is_ok() {
+                reported = snapshot;
+            }
             next_report = now + REPORT_INTERVAL;
             state = shared.lock();
-            state.gone |= failed;
+            state.gone |= written.is_err_and(|error| error.kind() != io::ErrorKind::TimedOut);
         } else {
             state = clock.wait_until(&shared.changed, state, next_report);
         }
@@ -566,6 +593,13 @@ mod tests {
             self.gone.send(false).unwrap();
         }
 
+        fn stopping(&self) {
+            eventually(
+                || self.lines.0.lock().unwrap().ends_with(b"stopping\n"),
+                "the agent was not told to stop before releasing capture",
+            );
+        }
+
         fn watch_panics(&self) {
             self.gone.send(true).unwrap();
         }
@@ -598,8 +632,9 @@ mod tests {
             reader.finish().unwrap();
             events
                 .into_iter()
-                .map(|event| match event {
-                    Event::Counters(snapshot) => snapshot,
+                .filter_map(|event| match event {
+                    Event::Counters(snapshot) => Some(snapshot),
+                    Event::Stopping => None,
                     other => panic!("not a counter line: {other:?}"),
                 })
                 .collect()
@@ -707,6 +742,8 @@ mod tests {
         harness.send(outbound(TestPacket::client(SYN)));
         harness.send(Step::Fail);
         harness.send(outbound(TestPacket::client(ACK)));
+        harness.stopping();
+        harness.agent_gone();
         let error = harness.finished().unwrap_err();
         assert_eq!(error.to_string(), "receive failed");
         assert_eq!(harness.port.receives.lock().unwrap().len(), 2);
@@ -725,6 +762,8 @@ mod tests {
     fn a_received_length_beyond_the_buffer_is_a_fatal_receive_error() {
         let harness = Harness::start();
         harness.send(Step::Oversized);
+        harness.stopping();
+        harness.agent_gone();
         let error = harness.finished().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(harness.port.injected(), []);
@@ -803,6 +842,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_receive_holds_capture_until_the_agent_closes_its_pipe() {
+        let harness = Harness::start();
+        harness.send(Step::Fail);
+        harness.stopping();
+        assert!(matches!(
+            harness.result.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(harness.port.shut_down(), None);
+        harness.agent_gone();
+        assert!(harness.finished().is_err());
+    }
+
+    #[test]
+    fn a_failed_receive_releases_capture_after_the_stop_deadline() {
+        let harness = Harness::start();
+        harness.send(Step::Fail);
+        harness.stopping();
+        harness.clock.wait_for_deadline(STOP_ACK_TIMEOUT);
+        harness.clock.advance_to(STOP_ACK_TIMEOUT);
+        assert!(harness.finished().is_err());
+    }
+
+    #[test]
     fn a_fatal_error_skips_the_grace_period() {
         let harness = Harness::start();
         harness.send(outbound(TestPacket::client(SYN)));
@@ -849,6 +912,8 @@ mod tests {
         harness.send(outbound(TestPacket::client(SYN)));
         harness.processed(1);
         harness.send(Step::Panic);
+        harness.stopping();
+        harness.agent_gone();
         assert!(harness.panicked());
         assert_eq!(harness.port.shut_down(), None);
         assert_eq!(harness.captured(), [1]);

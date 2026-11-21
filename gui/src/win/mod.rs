@@ -469,12 +469,13 @@ impl App {
     fn end_prompt(&self) -> Option<confirm::Prompt> {
         let update = self.update.as_ref()?;
         let names = sessions::Names::new(&update.gateways);
-        confirm::prompt(self.ending?, &update.state, &names, self.unlisted())
-    }
-
-    fn unlisted(&self) -> u64 {
-        self.update.as_ref().map_or(0, |update| update.unlisted)
-            + u64::from(self.launches.opening())
+        confirm::prompt(
+            self.ending?,
+            &update.state,
+            &names,
+            update.unlisted,
+            self.launches.opening(),
+        )
     }
 
     fn modal(&self) -> bool {
@@ -802,11 +803,14 @@ impl App {
     }
 
     fn order(&mut self, command: Command) -> bool {
-        let unlisted = self.unlisted();
-        let asked = self
-            .update
-            .as_ref()
-            .and_then(|update| confirm::asks(&command, &update.state, unlisted));
+        let asked = self.update.as_ref().and_then(|update| {
+            confirm::asks(
+                &command,
+                &update.state,
+                update.unlisted,
+                self.launches.opening(),
+            )
+        });
         let Some(ending) = asked else {
             self.send(command);
             return false;

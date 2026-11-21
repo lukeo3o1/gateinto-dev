@@ -233,14 +233,14 @@ pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Optio
     }
 }
 
-async fn run<F, R>(command: Command, send: &F) -> (Option<Note>, bool)
+async fn run<F, R>(command: Command, send: &F) -> (Option<Note>, Option<u64>)
 where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
     let request = match command.request() {
         Ok(request) => request,
-        Err(error) => return (Some(Note::Agent(error)), false),
+        Err(error) => return (Some(Note::Agent(error)), None),
     };
     let reply = send(request).await;
     if let Ok(Response::Ok(lines)) = &reply
@@ -248,26 +248,28 @@ where
     {
         drop(wiped(reply));
         let _ = send(Request::Deny(token)).await;
-        return (Some(CONFIRMATION.into()), false);
+        return (Some(CONFIRMATION.into()), None);
     }
-    let ok = matches!(reply, Ok(Response::Ok(_)));
-    (failure(command, reply), ok)
+    let terminal = match (&command, &reply) {
+        (Command::Terminal(..), Ok(Response::Ok(lines))) => lines.iter().find_map(|line| {
+            line.strip_prefix("session: ")
+                .and_then(|id| id.parse().ok())
+        }),
+        _ => None,
+    };
+    (failure(command, reply), terminal)
 }
 
 type Answers = RefCell<Desk<oneshot::Sender<Answer>>>;
 type Linking<'a> = Pin<Box<dyn Future<Output = Option<Note>> + 'a>>;
-type Opening<'a> = Pin<Box<dyn Future<Output = (Option<Note>, bool)> + 'a>>;
+type Opening<'a> = Pin<Box<dyn Future<Output = (Option<Note>, Option<u64>)> + 'a>>;
 
 fn open<'a, F, R>(command: Command, send: &'a F) -> Opening<'a>
 where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>> + 'a,
 {
-    Box::pin(async move {
-        let terminal = matches!(command, Command::Terminal(..));
-        let (note, ok) = run(command, send).await;
-        (note, terminal && ok)
-    })
+    Box::pin(run(command, send))
 }
 
 fn unlinked(error: RequestError) -> Note {
@@ -568,7 +570,11 @@ pub async fn serve_with<F, R, S>(
                 opening = queued.pop_front().map(|command| open(command, &send));
                 failure = note;
                 launched += 1;
-                unlisted += u64::from(terminal);
+                if let Some(id) = terminal
+                    && !polled.0.ids().contains(&id)
+                {
+                    unlisted += 1;
+                }
             }
             note = finish(&mut linking) => {
                 linking = None;
@@ -1271,6 +1277,7 @@ mod tests {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
                 Request::Launch(..) => Response::Ok(lines.clone()),
+                Request::Terminal(_) => Response::Ok(vec!["session: 1".to_owned()]),
                 _ => Response::Ok(Vec::new()),
             }))
         }
@@ -1444,6 +1451,44 @@ mod tests {
                 launched(polled(None))
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_already_returned_by_list_is_not_unlisted_when_its_reply_arrives() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Terminal(
+            "office".parse().unwrap(),
+            Mode::Transparent,
+        ))
+        .unwrap();
+        let begun = tokio::time::Instant::now();
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            |request| async move {
+                let lines = match request {
+                    Request::Terminal(_) => {
+                        tokio::time::sleep(Duration::from_millis(2100)).await;
+                        vec!["session: 1".to_owned()]
+                    }
+                    Request::List if begun.elapsed() >= POLL => vec![
+                        r#"{"id":1,"kind":"terminal","gateway":"office","upstream":"proxy.example:443","listen":"127.0.0.1:8080","route":"all","auth":"os_user","started":1,"tunnels":0}"#.to_owned(),
+                    ],
+                    _ => Vec::new(),
+                };
+                Ok(Response::Ok(lines))
+            },
+            loaded,
+            unprobed,
+            |update| updates.push(update),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(2500), run).await.is_err());
+        let latest = updates.last().unwrap();
+        assert_eq!(latest.state.ids(), [1]);
+        assert_eq!(latest.launched, 1);
+        assert_eq!(latest.unlisted, 0);
     }
 
     #[tokio::test(start_paused = true)]

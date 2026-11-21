@@ -450,13 +450,13 @@ msiexec /x gateinto.msi /qn
 | Gateways added from links, `%APPDATA%\Gateinto\gateways\*.toml` | **kept** |
 | The user's own Chrome and Edge profiles, other programs' keys | never touched |
 
-Before files are removed, the uninstaller runs `gateinto.exe stop --remove-stale-profiles` as
-the installing user. A running agent closes every session, ends their browsers, deletes their
-profiles and exits; `stop` waits up to 15 seconds until the agent process has exited, so
-`gateinto.exe` is no longer in use when Windows Installer removes it. Then the Gateinto-marked profile directories left by a crashed agent are
-deleted. A profile still held open by a running browser cannot be deleted and is left in
-place. The step's failure does not stop the uninstall, for example when no agent is running.
-Only directories that Gateinto created and marked are deleted.
+Before Windows Installer checks for files in use, it runs
+`gateinto.exe stop --remove-stale-profiles` as the installing user. A running agent closes its
+sessions, ends their browsers, waits for its transparent helper to release the installed files
+and exits. The command also removes Gateinto-marked browser profiles left by a crashed agent.
+Profiles held open by a running browser stay in place. The installer stops if the command
+fails. The uninstall can continue when the agent is already stopped or the executable is
+missing.
 
 During an interactive uninstall a console window may flash briefly while `gateinto.exe stop`
 runs, because `gateinto.exe` is a console program. A major upgrade (installing a newer MSI over
@@ -485,15 +485,11 @@ the GUI the same way but keeps the `Gateinto App` value and its StartupApproved 
 **Start the app at sign-in** stays on. Only an old version that already has this step runs
 it during an upgrade. Installing never runs the GUI.
 
-After a transparent session, the agent's elevated helper runs until the agent stops, and for
-about 5 seconds after that; while it runs, `gateinto.exe` and `WinDivert.dll` are in use, so
-Windows Installer may need a restart to finish removing them (with `/norestart`, `msiexec` then
-exits with 3010) or leave them behind. Run `gateinto stop` and wait about 10 seconds before
-uninstalling or upgrading to avoid this. The package adds no restart of its own. The WinDivert
-driver does not block the uninstall: WinDivert's documentation says that its files can be
-deleted while the driver runs and that the driver is then removed at the next restart, or with
-`sc stop WinDivert` and `sc delete WinDivert` at an elevated prompt once no process uses it.
-None of this is verified on Windows.
+Removing only the Transparent feature also stops the agent and waits for the elevated helper
+to release `gateinto.exe` and `WinDivert.dll`. The package adds no restart of its own.
+WinDivert's documentation says its driver files can be deleted while the driver runs and
+that the driver is then removed at the next restart, or with `sc stop WinDivert` and
+`sc delete WinDivert` at an elevated prompt once no process uses it.
 
 An uninstall does not revoke anything and does not delete the device identity.
 
@@ -883,11 +879,16 @@ lifecycle check passes, the run keeps the MSI it installed as the `gateinto-msi-
 from the CI release build without `-Version`, so it has the `Cargo.toml` version like a
 [local build](#releases), and it is not signed.
 
-The CI MSI has no transparent sessions feature, so no job installs the WinDivert files; the
-release workflow builds its MSIs with them but installs none.
+The CI `msi` jobs on `windows-latest` build both architectures with the pinned WinDivert
+files. They check that the files are absent by default, that enabling the feature installs
+the expected digests and registry markers, and that feature removal stops a running agent and
+keeps the main application. They also check the feature across repair, same-version upgrade,
+uninstall, and a reinstall with `TRANSPARENT=1`. The compatibility workflow continues to
+exercise the package built without WinDivert.
 
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
-runners are Windows Server), the transparent sessions feature, a `gateinto://` link clicked in a real browser, opening the GUI from
+runners are Windows Server), MSI operations with the elevated transparent helper running, a
+`gateinto://` link clicked in a real browser, opening the GUI from
 the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
 keeping `Gateinto App` across an upgrade between two versions. The checks that close the GUI and
 remove or keep `Gateinto App` on uninstall passed in CI for x64 and x86; closing the GUI was

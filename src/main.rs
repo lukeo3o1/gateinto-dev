@@ -1635,7 +1635,7 @@ async fn agent_request(request: Request) -> Result {
     print_response(ipc::send(&endpoint, &request).await?)
 }
 
-const AGENT_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+const AGENT_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn closed_terminals_message(lines: &[String]) -> Option<String> {
     match ipc::closed_terminals(lines)? {
@@ -1650,7 +1650,7 @@ async fn stop_and_wait() -> Result<Result<u32, RequestError>, String> {
     let lines = match ipc::send(&endpoint, &Request::Stop).await {
         Ok(Response::Ok(lines)) => lines,
         Ok(Response::Error(message)) => return Err(message),
-        Err(error @ (RequestError::NotRunning | RequestError::Closed)) => return Ok(Err(error)),
+        Err(error @ RequestError::NotRunning) => return Ok(Err(error)),
         Err(error) => return Err(error.to_string()),
     };
     let pid = ipc::agent_pid(&lines).ok_or("the agent did not report its process id")?;

@@ -161,6 +161,7 @@ impl Error for StartError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
     Closed,
+    EngineFailed,
     Protocol(ProtocolError),
     Exited(Exit),
 }
@@ -169,6 +170,7 @@ impl fmt::Display for Stopped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Closed => f.write_str("the pipe of the transparent engine closed"),
+            Self::EngineFailed => f.write_str("the transparent engine stopped processing packets"),
             Self::Protocol(error) => {
                 write!(
                     f,
@@ -224,7 +226,15 @@ impl<P: Platform> Supervisor<P> {
             pipe,
             reader,
             exited,
+            stopping: rest.contains(&Event::Stopping),
         })
+    }
+
+    pub async fn wait_for_exit(&self) {
+        let previous = self.previous().clone();
+        if let Some(mut previous) = previous {
+            ended(&mut previous).await;
+        }
     }
 
     fn previous(&self) -> MutexGuard<'_, Option<Ended>> {
@@ -236,27 +246,36 @@ pub struct Running<P> {
     pipe: P,
     reader: StatusReader,
     exited: Ended,
+    stopping: bool,
 }
 
 impl<P: Pipe> Running<P> {
-    pub async fn stopped(self) -> Stopped {
-        let Self {
-            mut pipe,
-            mut reader,
-            mut exited,
-        } = self;
+    pub async fn wait_for_stop(&mut self) -> Stopped {
+        if self.stopping {
+            return Stopped::EngineFailed;
+        }
         tokio::select! {
             biased;
-            stopped = counters(&mut pipe, &mut reader) => stopped,
-            exit = ended(&mut exited) => Stopped::Exited(exit),
+            stopped = counters(&mut self.pipe, &mut self.reader) => stopped,
+            exit = ended(&mut self.exited) => Stopped::Exited(exit),
         }
+    }
+
+    #[cfg(test)]
+    async fn stopped(mut self) -> Stopped {
+        self.wait_for_stop().await
     }
 }
 
 async fn counters<P: Pipe>(pipe: &mut P, reader: &mut StatusReader) -> Stopped {
     loop {
         match events(pipe, reader).await {
-            Ok(events) => events.iter().for_each(log),
+            Ok(events) => {
+                events.iter().for_each(log);
+                if events.contains(&Event::Stopping) {
+                    return Stopped::EngineFailed;
+                }
+            }
             Err(End::Closed) => return Stopped::Closed,
             Err(End::Protocol(error)) => return Stopped::Protocol(error),
         }
@@ -371,6 +390,7 @@ async fn status<P: Pipe>(pipe: &mut P, reader: &mut StatusReader, pid: u32) -> S
         Ok(mut events) => match events.remove(0) {
             Event::Ready => Status::Ready(events),
             Event::Failed(code) => Status::Refused(StartError::Failed(code)),
+            Event::Stopping => Status::Refused(StartError::Protocol(ProtocolError::UnknownLine)),
             Event::Counters(_) => {
                 Status::Refused(StartError::Protocol(ProtocolError::CountersBeforeReady))
             }
@@ -1018,6 +1038,24 @@ mod tests {
         assert_eq!(
             Stopped::Closed.to_string(),
             "the pipe of the transparent engine closed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_and_stopping_in_one_read_preserve_the_pipe_until_the_agent_drops_it() {
+        let mut harness = Harness::new();
+        let started = harness.start();
+        let mut helper = harness.helper().await;
+        helper.connect_as(HELPER);
+        helper.write("ready\nstopping\n").await.unwrap();
+        let mut running = started.await.unwrap().unwrap();
+
+        assert_eq!(running.wait_for_stop().await, Stopped::EngineFailed);
+        assert!(helper.write("ignored").await.is_ok());
+        drop(running);
+        assert_eq!(
+            helper.write("ignored").await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
         );
     }
 

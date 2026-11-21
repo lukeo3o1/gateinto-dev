@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, ERROR_IO_PENDING, FALSE, FreeLibrary,
-    GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, SetLastError, TRUE,
+    GetLastError, HANDLE, HMODULE, INVALID_HANDLE_VALUE, SetLastError, TRUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, ReadFile, SECURITY_IDENTIFICATION, WriteFile,
@@ -29,7 +30,7 @@ use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateEventW, CreateMutexW, INFINITE, OpenProcess, PROCESS_SYNCHRONIZE,
-    WaitForMultipleObjects,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
 use windows_sys::core::BOOL;
 
@@ -43,6 +44,7 @@ use crate::token::Handle;
 
 const MUTEX: &str = r"Global\Gateinto-divert";
 const NETSH_TIMEOUT: Duration = Duration::from_secs(10);
+const PIPE_WRITE_TIMEOUT_MS: u32 = 2000;
 const LAYER_NETWORK: c_int = 0;
 const PARAM_VERSION_MAJOR: c_int = 3;
 const PARAM_VERSION_MINOR: c_int = 4;
@@ -124,7 +126,11 @@ impl Platform for Windows {
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return Err(last_error());
         }
-        Ok(Port { handle, library })
+        Ok(Port {
+            handle,
+            library,
+            shutting_down: AtomicBool::new(false),
+        })
     }
 
     fn driver_version(&mut self, port: &Port) -> Option<DriverVersion> {
@@ -270,6 +276,7 @@ unsafe fn symbol<T: Copy>(module: &Module, name: &CStr) -> Result<T, u32> {
 struct Port {
     handle: HANDLE,
     library: Library,
+    shutting_down: AtomicBool,
 }
 
 // SAFETY: WinDivert documents using one handle from several threads at once (Performance,
@@ -304,7 +311,13 @@ impl DivertPort for Port {
             )
         };
         if received == 0 {
-            return Err(recv_error(io::Error::last_os_error()));
+            let error = io::Error::last_os_error();
+            return Err(match recv_error(error) {
+                RecvError::Shutdown if !self.shutting_down.load(Ordering::Acquire) => {
+                    RecvError::Failed(io::Error::other("WinDivert stopped receiving unexpectedly"))
+                }
+                result => result,
+            });
         }
         Ok(Received {
             length: length as usize,
@@ -333,6 +346,7 @@ impl DivertPort for Port {
     }
 
     fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
         // SAFETY: the handle is open and SHUTDOWN_BOTH is a valid WINDIVERT_SHUTDOWN value.
         unsafe { (self.library.shutdown)(self.handle, SHUTDOWN_BOTH) };
     }
@@ -371,8 +385,20 @@ impl Write for Pipe {
 
 fn finish(handle: HANDLE, overlapped: &OVERLAPPED, started: BOOL) -> io::Result<u32> {
     // SAFETY: GetLastError only reads the calling thread's error code.
-    if started == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
-        return Err(io::Error::last_os_error());
+    if started == 0 {
+        if unsafe { GetLastError() } != ERROR_IO_PENDING {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the write's event and OVERLAPPED remain live through cancellation and completion.
+        if unsafe { WaitForSingleObject(overlapped.hEvent, PIPE_WRITE_TIMEOUT_MS) } != WAIT_OBJECT_0
+        {
+            let mut transferred = 0;
+            unsafe {
+                CancelIoEx(handle, overlapped);
+                GetOverlappedResult(handle, overlapped, &mut transferred, TRUE);
+            }
+            return Err(io::ErrorKind::TimedOut.into());
+        }
     }
     let mut transferred = 0;
     // SAFETY: overlapped belongs to an operation on handle, and TRUE waits until it has finished.

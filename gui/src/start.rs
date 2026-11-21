@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn the_installer_puts_the_gui_beside_the_command() {
         let folder = r#"Directory="INSTALLFOLDER""#;
-        assert!(component_of(&format!(r#"Name="{CLI}""#)).contains(folder));
+        assert!(component_of(&format!(r#"<File Id="GateintoExe" Name="{CLI}""#)).contains(folder));
         assert!(component_of(GUI_FILE).contains(folder));
     }
 

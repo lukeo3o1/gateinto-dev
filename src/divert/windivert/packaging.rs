@@ -5,6 +5,7 @@ const VERIFY: &str = include_str!("../../../packaging/wix/windivert.ps1");
 const BUILD: &str = include_str!("../../../packaging/wix/build.ps1");
 const WXS: &str = include_str!("../../../packaging/wix/gateinto.wxs");
 const FETCH: &str = include_str!("../../../.github/scripts/fetch-windivert.ps1");
+const CI: &str = include_str!("../../../.github/workflows/ci.yml");
 const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
 const DESIGN: &str = include_str!("../../../docs/design/transparent-session.md");
 
@@ -164,6 +165,9 @@ fn the_installer_packages_the_manifest_files_of_each_arch_only_when_built_with_w
             X86_ONLY,
             "<?endif?>",
             "<?endif?>",
+            "<?ifdef WinDivertDir?>",
+            "<?else?>",
+            "<?endif?>",
         ]
     );
     let feature = transparent_feature();
@@ -215,6 +219,35 @@ fn the_transparent_feature_is_off_unless_transparent_is_1_like_autostart() {
     let transparent = WXS.find(r#"<Feature Id="Transparent""#).unwrap();
     assert!(WXS.find(r#"<Feature Id="Main""#).unwrap() < transparent);
     assert!(transparent < WXS.rfind("</Feature>").unwrap());
+}
+
+#[test]
+fn removing_an_installed_transparent_feature_checks_that_the_agent_exited_before_file_validation() {
+    let stop = elements(WXS, "CustomAction")
+        .into_iter()
+        .find(|element| attribute(element, "Id") == Some("StopAgent"))
+        .unwrap();
+    assert_eq!(attribute(stop, "Execute"), Some("immediate"));
+    assert_eq!(attribute(stop, "Return"), Some("check"));
+    assert_eq!(attribute(stop, "FileRef"), Some("GateintoExe"));
+    let actions: Vec<_> = elements(WXS, "Custom")
+        .into_iter()
+        .filter(|element| attribute(element, "Action") == Some("StopAgent"))
+        .collect();
+    assert_eq!(actions.len(), 2);
+    let conditions: Vec<_> = actions
+        .iter()
+        .map(|action| {
+            assert_eq!(attribute(action, "Before"), Some("InstallValidate"));
+            attribute(action, "Condition").unwrap()
+        })
+        .collect();
+    for condition in &conditions {
+        assert!(condition.starts_with("GATEINTOEXISTS AND (WIX_UPGRADE_DETECTED OR"));
+        assert!(condition.contains("&amp;Main = 2 AND !Main = 3"));
+    }
+    assert!(conditions[0].contains("&amp;Transparent = 2 AND !Transparent = 3"));
+    assert!(!conditions[1].contains("Transparent"));
 }
 
 #[test]
@@ -286,4 +319,20 @@ fn the_release_verifies_the_archive_before_extracting_and_builds_each_msi_with_w
     assert!(fetched < built);
     assert_eq!(RELEASE.matches("packaging/wix/build.ps1").count(), 1);
     assert!(RELEASE[built..].contains(&format!("-WinDivert {directory}")));
+}
+
+#[test]
+fn ci_tests_both_msi_builds_with_the_pinned_windivert_files() {
+    let (_, msi) = CI.split_once("\n  msi:\n").unwrap();
+    let fetched = msi.find(".github/scripts/fetch-windivert.ps1").unwrap();
+    let builds: Vec<_> = msi.match_indices("packaging/wix/build.ps1").collect();
+    assert_eq!(builds.len(), 2);
+    for (at, _) in builds {
+        assert!(at > fetched);
+        assert!(
+            msi[at..].lines().next().unwrap().contains("-WinDivert "),
+            "{msi}"
+        );
+    }
+    assert!(msi.contains("-WinDivertArch $env:MSI_ARCH"));
 }

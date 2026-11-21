@@ -26,6 +26,7 @@ fn dscp() -> Dscp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Event {
     HelperStarted(Dscp),
+    AwaitHelperExit,
     Ready,
     Job,
     Tagged(Dscp),
@@ -68,7 +69,8 @@ struct Helpers {
     checks: Threads,
     check_panics: bool,
     plans: Mutex<VecDeque<Plan>>,
-    stops: Mutex<Vec<oneshot::Sender<String>>>,
+    stops: Mutex<Vec<oneshot::Sender<EngineStopped>>>,
+    exit: Mutex<Option<oneshot::Receiver<()>>>,
     served: Served,
 }
 
@@ -83,7 +85,7 @@ impl Helpers {
         open
     }
 
-    fn running(&self) -> Boxed<'static, String> {
+    fn running(&self) -> Boxed<'static, EngineStopped> {
         let (stop, stopped) = oneshot::channel();
         self.stops.lock().unwrap().push(stop);
         Box::pin(async move {
@@ -95,8 +97,18 @@ impl Helpers {
     }
 
     fn stop(&self, message: &str) {
+        self.report_stop(message, None);
+    }
+
+    fn report_stop(&self, message: &str, capture: Option<Box<dyn Send>>) {
         let stop = self.stops.lock().unwrap().pop().expect("a helper runs");
-        stop.send(message.to_owned()).unwrap();
+        assert!(
+            stop.send(EngineStopped {
+                message: message.to_owned(),
+                capture
+            })
+            .is_ok()
+        );
     }
 
     fn served(&self) -> Vec<(Generation, bool)> {
@@ -124,7 +136,10 @@ impl Engine for Helpers {
             let stopped = match plan {
                 Plan::Ready => self.running(),
                 Plan::Fails(message) => return Err(message),
-                Plan::StopsAtOnce(message) => Box::pin(std::future::ready(message)),
+                Plan::StopsAtOnce(message) => Box::pin(std::future::ready(EngineStopped {
+                    message,
+                    capture: None,
+                })),
                 Plan::Gated(gate) => {
                     gate.await
                         .unwrap_or_else(|_| Err("the gate was dropped".to_owned()))?;
@@ -136,6 +151,16 @@ impl Engine for Helpers {
                 stopped,
                 listener: Box::new(FakeListener(self.served.clone())),
             })
+        })
+    }
+
+    fn wait_for_exit(&self) -> Boxed<'_, ()> {
+        let exit = self.exit.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(exit) = exit {
+                self.events.push(Event::AwaitHelperExit);
+                let _ = exit.await;
+            }
         })
     }
 }
@@ -791,6 +816,73 @@ async fn a_helper_that_stops_before_registration_refuses_it_without_waiting_for_
 }
 
 #[tokio::test]
+async fn closing_a_browser_while_it_starts_keeps_its_job_registered_until_it_can_stop() {
+    let (spawn_gate, opener) = gate();
+    let h = harness(|setup| setup.processes.spawn_gate = spawn_gate);
+    let launching = tokio::spawn({
+        let agent = h.agent.clone();
+        async move { answer(&agent, browser(Mode::Transparent)).await }
+    });
+    let release = opener.entered().await;
+    let generation = running(&h.agent);
+    let id = registered(&h.agent, generation)[0];
+    let closing = answer(&h.agent, Request::Close(id));
+    tokio::pin!(closing);
+    assert!(matches!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(closing.as_mut().poll(cx))).await,
+        std::task::Poll::Pending
+    ));
+    let still_registered = registered(&h.agent, generation);
+    release.send(()).unwrap();
+    launching.await.unwrap().unwrap();
+    closing.await.unwrap();
+    assert_eq!(still_registered, [id]);
+    assert!(h.agent.inner.browsers.lock().await.is_empty());
+    assert!(session_ids(&h.agent).await.is_empty());
+}
+
+#[tokio::test]
+async fn stopping_cancels_a_launch_waiting_for_administrator_approval() {
+    let h = plain();
+    let approval = h.helpers.gated();
+    let launching = tokio::spawn({
+        let agent = h.agent.clone();
+        async move { answer(&agent, terminal(Mode::Transparent)).await }
+    });
+    until("the launch waits for administrator approval", || async {
+        h.events.count(Event::HelperStarted(dscp())) == 1
+    })
+    .await;
+    answer(&h.agent, Request::Stop).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), launching).await;
+    assert!(approval.send(Ok(())).is_err());
+    assert!(result.unwrap().unwrap().is_err());
+    assert_eq!(h.events.count(Event::Spawned), 0);
+    assert!(session_ids(&h.agent).await.is_empty());
+}
+
+#[tokio::test]
+async fn stop_replies_after_closing_sessions_and_waiting_for_the_helper_to_exit() {
+    let h = plain();
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+    let (exited, exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(exit);
+    let stopping = tokio::spawn({
+        let agent = h.agent.clone();
+        async move { answer(&agent, Request::Stop).await }
+    });
+    until("stop waits for the helper to exit", || async {
+        h.events.count(Event::AwaitHelperExit) == 1
+    })
+    .await;
+    assert!(session_ids(&h.agent).await.is_empty());
+    assert!(!stopping.is_finished());
+    exited.send(()).unwrap();
+    let response = stopping.await.unwrap().unwrap();
+    assert_eq!(ipc::closed_terminals(&response), Some(1));
+}
+
+#[tokio::test]
 async fn a_launch_that_holds_the_mark_when_the_helper_stops_is_closed_once_it_started() {
     for request in both() {
         let (spawn_gate, opener) = gate();
@@ -801,12 +893,17 @@ async fn a_launch_that_holds_the_mark_when_the_helper_stops_is_closed_once_it_st
         });
         let release = opener.entered().await;
 
-        h.helpers.stop(STOPPED);
+        let (capture, mut released) = oneshot::channel::<()>();
+        h.helpers.report_stop(STOPPED, Some(Box::new(capture)));
         until("the handler stopped the engine", || async {
             h.agent.inner.registry.phase() == Phase::Stopped
         })
         .await;
         assert_eq!(h.events.count(Event::Spawned), 0);
+        assert_eq!(
+            released.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
         release.send(()).unwrap();
 
         assert!(launching.await.unwrap().is_ok());
@@ -817,6 +914,12 @@ async fn a_launch_that_holds_the_mark_when_the_helper_stops_is_closed_once_it_st
                 && h.agent.inner.terminals.lock().await.is_empty()
         })
         .await;
+        assert!(
+            tokio::time::timeout(PATIENCE, released)
+                .await
+                .unwrap()
+                .is_err()
+        );
     }
 }
 

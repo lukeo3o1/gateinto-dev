@@ -126,6 +126,7 @@ impl fmt::Display for ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Ready,
+    Stopping,
     Failed(ErrorCode),
     Counters(Snapshot),
 }
@@ -134,6 +135,7 @@ impl Event {
     pub fn line(&self) -> String {
         let mut line = match self {
             Self::Ready => "ready".to_owned(),
+            Self::Stopping => "stopping".to_owned(),
             Self::Failed(code) => format!("error {code}"),
             Self::Counters(snapshot) => {
                 let mut line = "counters".to_owned();
@@ -150,6 +152,8 @@ impl Event {
     fn parse(line: &str) -> Result<Self, ProtocolError> {
         if line == "ready" {
             Ok(Self::Ready)
+        } else if line == "stopping" {
+            Ok(Self::Stopping)
         } else if let Some(code) = line.strip_prefix("error ") {
             ErrorCode::parse(code)
                 .map(Self::Failed)
@@ -265,10 +269,12 @@ impl StatusReader {
             (Status::Failed, _) => return Err(ProtocolError::LineAfterError),
             (Status::Waiting, Event::Ready) => Status::Ready,
             (Status::Waiting, Event::Failed(_)) => Status::Failed,
+            (Status::Waiting, Event::Stopping) => return Err(ProtocolError::UnknownLine),
             (Status::Waiting, Event::Counters(_)) => {
                 return Err(ProtocolError::CountersBeforeReady);
             }
             (Status::Ready, Event::Counters(_)) => Status::Ready,
+            (Status::Ready, Event::Stopping) => Status::Failed,
             (Status::Ready, _) => return Err(ProtocolError::SecondStatus),
         };
         Ok(event)

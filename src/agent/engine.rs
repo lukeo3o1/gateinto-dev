@@ -15,11 +15,19 @@ pub(super) type Registry = State<SessionId, Job>;
 pub(super) trait Engine: Send + Sync + 'static {
     fn available(&self) -> Availability;
     fn start(&self, dscp: Dscp) -> Boxed<'_, Result<Started, String>>;
+    fn wait_for_exit(&self) -> Boxed<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 pub(super) struct Started {
-    pub(super) stopped: Boxed<'static, String>,
+    pub(super) stopped: Boxed<'static, EngineStopped>,
     pub(super) listener: Box<dyn Listener>,
+}
+
+pub(super) struct EngineStopped {
+    pub(super) message: String,
+    pub(super) capture: Option<Box<dyn Send>>,
 }
 
 pub(super) trait Listener: Send {
@@ -62,7 +70,7 @@ mod windows {
 
     use tokio::net::TcpListener;
 
-    use super::{Boxed, Engine, Listener, Registry, Started};
+    use super::{Boxed, Engine, EngineStopped, Listener, Registry, Started};
     use crate::divert::Dscp;
     use crate::proxy::{self, Attribution};
     use crate::transparent::availability::{self, Availability};
@@ -97,7 +105,7 @@ mod windows {
                 let reserved = listener::reserve().map_err(|error| {
                     format!("reserving a port for the transparent listener failed: {error}")
                 })?;
-                let running = self
+                let mut running = self
                     .supervisor
                     .start(reserved.port(), dscp)
                     .await
@@ -106,13 +114,23 @@ mod windows {
                     format!("listening for transparent connections failed: {error}")
                 })?;
                 Ok(Started {
-                    stopped: Box::pin(async move { running.stopped().await.to_string() }),
+                    stopped: Box::pin(async move {
+                        let message = running.wait_for_stop().await.to_string();
+                        EngineStopped {
+                            message,
+                            capture: Some(Box::new(running)),
+                        }
+                    }),
                     listener: Box::new(Listening {
                         listener,
                         attribution: Arc::new(attribution),
                     }),
                 })
             })
+        }
+
+        fn wait_for_exit(&self) -> Boxed<'_, ()> {
+            Box::pin(self.supervisor.wait_for_exit())
         }
     }
 

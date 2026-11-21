@@ -63,9 +63,11 @@ The shortcut is not advertised and sits directly in the Start Menu's `Programs` 
 package creates no Start Menu folder of its own. It belongs to the GUI's component, whose key path
 is the `HKCU` marker value `Gui`, as a per-user component with a shortcut needs. Keeping the
 shortcut with its target file avoids a cross-component file reference (ICE69).
-The package never runs the GUI or the agent after installing. Its custom actions are deferred,
-impersonated, ignore failures, run before `RemoveFiles` and only when `REMOVE~="ALL"`:
-`StopAgent` (`gateinto.exe stop --remove-stale-profiles`); `UninstallGui`
+The package never starts the GUI or the agent after installing. `StopAgent`
+(`gateinto.exe stop --remove-stale-profiles`) runs before `InstallValidate`. See
+[Files in use and the driver](#files-in-use-and-the-driver).
+The two deferred GUI actions run as the installing user before `RemoveFiles` when
+`REMOVE~="ALL"` and ignore failures. `UninstallGui`
 (`gateinto-gui.exe --uninstall`) when `NOT UPGRADINGPRODUCTCODE`, which closes a running GUI of
 the user and deletes the GUI's own `Gateinto App` Run value and its StartupApproved entry if the
 value runs the installed GUI; and `QuitGui` (`gateinto-gui.exe --quit`) when a major upgrade
@@ -84,8 +86,8 @@ folder, so each is expected to replace the other; swapping between them is untes
 MSI (`0.0.0`) over a local build with the `Cargo.toml` version (for example `0.1.0`) is a
 downgrade and is refused; uninstall the local build first. ICE validation can report ICE61
 ("This product should remove only older versions of itself") as a warning for this; it is
-expected, and `build.ps1` does not treat warnings as errors. CI does not yet install one build
-over another of the same version or of the other architecture.
+expected, and `build.ps1` does not treat warnings as errors. CI tests same-version upgrades
+within each architecture.
 
 ## Build
 
@@ -146,9 +148,8 @@ and starts its driver when the helper first opens it, after the administrator ap
 first transparent session. Without the files, Gateinto works as before and `gateinto status`
 says that transparent sessions are unavailable.
 
-Only an MSI built with `-WinDivert` has the feature. The release workflow builds both release
-MSIs that way; the CI `msi` job and a local build without `-WinDivert` do not, and
-`TRANSPARENT=1` does nothing there.
+Only an MSI built with `-WinDivert` has the feature. The release workflow and the CI `msi` job
+build both architectures with it. On a build without `-WinDivert`, `TRANSPARENT=1` has no effect.
 
 [windivert.txt](windivert.txt) lists the release archive with its URL and the files of each
 architecture with their SHA-256 digests. [windivert.ps1](windivert.ps1) reads it and checks a
@@ -172,12 +173,12 @@ msiexec /i gateinto.msi /qn ADDLOCAL=Transparent   # add the WinDivert files
 msiexec /i gateinto.msi /qn REMOVE=Transparent     # remove them
 ```
 
-Both change only the named feature. Every build has its own product code, so the MSI of another
-build is a major upgrade instead; on a major upgrade `ADDLOCAL` installs only the named features
+Both change only the named feature. Removing it stops the agent and its transparent helper
+before removing the files. Every build has its own product code, so the MSI of another build is
+a major upgrade instead. On a major upgrade `ADDLOCAL` installs only the named features
 and their parents, which would drop Autostart. Upgrade first and then run the new MSI again with
 `ADDLOCAL` or `REMOVE`, or uninstall and install again with or without `TRANSPARENT=1`; the
-uninstall keeps the device key and the config file. This follows the Windows Installer
-documentation and is not verified on Windows.
+uninstall keeps the device key and the config file.
 
 ### Upgrades
 
@@ -186,20 +187,15 @@ the new version the state it had in the old one, so the feature stays installed 
 an upgrade, like Autostart, and `TRANSPARENT=1` is then ignored. `TRANSPARENT=1` decides only
 when the installed version has no `Transparent` feature: at a first install, or when upgrading
 from a build without it (any build from before the feature, or one built without `-WinDivert`).
-Upgrading to an MSI built without `-WinDivert` removes the files. Not verified on Windows.
+Upgrading to an MSI built without `-WinDivert` removes the files.
 
 ### Files in use and the driver
 
-The uninstall removes the WinDivert files and markers with the rest. `StopAgent` waits only for
-the agent to exit. An agent that ran a transparent session keeps its elevated helper, an
-elevated `gateinto.exe` that has loaded `WinDivert.dll`, until the agent stops; the helper then
-keeps dropping packets for its 5 s grace period, deletes its firewall rule and exits. While it
-runs, `gateinto.exe` and `WinDivert.dll` are in use, and Windows Installer may need a restart to
-finish removing them (`/norestart` then exits with 3010) or leave them behind. The same holds
-for a major upgrade, whose removal of the old version runs `StopAgent` too. `REMOVE=Transparent`
-does not run `StopAgent` at all, because it runs only when the whole product is removed. Running
-`gateinto stop` and waiting about 10 seconds before uninstalling, upgrading or removing the
-feature avoids this. The package has no reboot action. Not verified on Windows.
+Before validating files for removal, `StopAgent` stops the agent and waits for its elevated
+helper to exit and release `gateinto.exe` and `WinDivert.dll`. This runs for
+`REMOVE=Transparent`, a full uninstall and a major upgrade. If the stop fails, the installer
+stops before it removes the files. An installation with a missing `gateinto.exe` can still be
+removed. The package has no reboot action.
 
 The driver itself does not block removal: WinDivert's documentation says that its files can be
 deleted while the driver runs, and that the driver is then removed at the next restart, or by
@@ -212,12 +208,11 @@ verified on Windows.
 
 Use Settings → Apps → Installed apps → Gateinto → Uninstall, or `msiexec /x gateinto.msi /qn`.
 
-Before removing files, a deferred custom action runs
+Before checking files for removal, a custom action runs
 `gateinto.exe stop --remove-stale-profiles` as the installing user. That closes the agent's
 listeners and sessions, ends their browsers and deletes the Gateinto browser profiles
-under `%LOCALAPPDATA%\Gateinto\profiles`. Failures are ignored, for example when no agent is
-running. `stop` waits up to 15 seconds for the agent process to exit, so `gateinto.exe` is not
-in use when its file is removed. The uninstall then removes the files and registry entries
+under `%LOCALAPPDATA%\Gateinto\profiles`. It also succeeds when the agent is already stopped.
+The uninstall then removes the files and registry entries
 listed above. During an interactive uninstall a console window may flash briefly for this
 step. A major upgrade runs the old version's step too, which stops the agent without starting
 it again.
@@ -255,12 +250,13 @@ CI (`windows-latest`, Microsoft Software Key Storage Provider) builds an x64 MSI
 checks that the GUI and its Start Menu shortcut are installed and removed and that installing
 starts nothing, that uninstalling closes a running GUI (when the runner shows its window) and
 removes only the GUI's own `Gateinto App` sign-in value, and checks that the SPKI survives a reinstall and changes only after a
-purge. The config template checks in that script (created on the first install, kept with an
-edited content across `msiexec /fa`, `msiexec /f`, a same-version major upgrade to a second build
-and back, both uninstalls, a reinstall and another `msiexec /fa`) were added after the last
-recorded CI run and have not run on Windows yet. The transparent sessions feature has not been built or installed on Windows: WiX is not
-available where it was written, the release workflow is the only job that builds it, and no job
-installs it. The following are not verified by CI and need manual testing: opening the GUI from the
+purge. It also checks that the config template is created on first install and preserved
+across repair, upgrade, uninstall and reinstall. The CI `msi` job checks that the WinDivert
+files are absent by default, match the pinned digests when installed, survive repair and a
+same-version major upgrade, and are removed by feature removal and uninstall. It checks that
+feature removal stops a running agent and leaves the main application installed. Testing file
+removal while the elevated helper is running requires a Windows test with an active transparent
+session. The following also need manual testing: opening the GUI from the
 shortcut, closing the GUI during an interactive uninstall or an upgrade, keeping `Gateinto App`
 across an upgrade between two versions, TPM keys, interactive
 install, the Windows 10/11 matrix, the x86 MSI on real 32-bit Windows (it is untested on Windows

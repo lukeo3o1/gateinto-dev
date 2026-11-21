@@ -379,6 +379,7 @@ table! {
     CloseTerminalAsk => "Close {0}{1} on {2}? Its shell and everything started from it end, and unsaved work there is lost.", "要關閉「{2}」上的 {0}{1} 嗎？它的殼層及從中啟動的所有程式都會結束，未儲存的工作將會遺失。";
     StopTerminalAsk => "Stop the agent? 1 terminal session is open. Stopping closes it: its shell and everything started from it end, and unsaved work there is lost.", "要停止代理程式嗎？目前有 1 個終端機工作階段開啟中。停止會關閉它：它的殼層及從中啟動的所有程式都會結束，未儲存的工作將會遺失。";
     StopTerminalsAsk => "Stop the agent? {0} terminal sessions are open. Stopping closes them: their shells and everything started from them end, and unsaved work there is lost.", "要停止代理程式嗎？目前有 {0} 個終端機工作階段開啟中。停止會關閉它們：它們的殼層及從中啟動的所有程式都會結束，未儲存的工作將會遺失。";
+    StopOpeningTerminalAsk => "Stop the agent? A terminal launch is pending. Stopping cancels it and closes any open terminal sessions, including their shells and everything started from them. Unsaved work in those terminals will be lost.", "要停止代理程式嗎？有一個終端機工作階段正在啟動。停止會取消啟動並關閉所有已開啟的終端機工作階段，其殼層和從中啟動的程式都會結束，未儲存的工作將會遺失。";
 }
 
 impl Text {

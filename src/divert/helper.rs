@@ -1035,6 +1035,7 @@ mod tests {
     fn a_panic_in_the_engine_closes_the_handle_deletes_the_rule_and_fails() {
         let mut fake = Fake {
             receive_panics: true,
+            agent_gone: true,
             ..Fake::default()
         };
         assert_eq!(run_fake(&mut fake), EXIT_ENGINE_FAILED);
