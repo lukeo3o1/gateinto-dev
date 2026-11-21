@@ -376,7 +376,7 @@ The full protocol, limits and guarantees are in
   mode), prints a notice that administrator approval may be asked on stderr
   before sending, and waits the full 300 seconds for the answer even from
   an agent it has just started. `session terminal --agent --transparent`
-  never starts an agent and has no GUI to avoid: it adds `mode=transparent`
+  never starts an agent or hands off to the GUI: it adds `mode=transparent`
   to the terminal request, prints the same notice before sending and waits
   300 seconds for the answer. A transparent request answered with
   the parser's exact `invalid launch request` or `invalid terminal request`

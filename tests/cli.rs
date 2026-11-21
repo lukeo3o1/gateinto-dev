@@ -1267,6 +1267,7 @@ fn only_a_proxy_open_is_handed_to_the_gui() {
     use std::os::unix::fs::PermissionsExt;
 
     const BUSY: i32 = 26;
+    const ATTEMPTS: u32 = 500;
     let link = "gateinto://connect?profile=office&auth=session_credentials";
     for (transparent, asked, answer, notice, error) in [
         (
@@ -1295,8 +1296,14 @@ fn only_a_proxy_open_is_handed_to_the_gui() {
         )
         .unwrap();
         std::fs::set_permissions(&gui, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut attempts = 0;
         while let Err(error) = std::process::Command::new(&gui).arg("--probe").status() {
             assert_eq!(error.raw_os_error(), Some(BUSY), "{error}");
+            attempts += 1;
+            assert!(
+                attempts < ATTEMPTS,
+                "the fake GUI was still busy (ETXTBSY) after {attempts} attempts"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let mut command = gateinto_command();

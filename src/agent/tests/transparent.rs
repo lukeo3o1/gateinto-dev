@@ -1382,13 +1382,31 @@ async fn a_start_abandoned_by_its_request_is_named_as_the_engine_error() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_engine_error_is_stored_before_the_engine_counts_as_stopped() {
     let h = plain();
     answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
     let launching = h.agent.inner.launching.lock().await;
+    let (agent, helpers) = (h.agent.clone(), h.helpers.clone());
 
-    h.helpers.stop(STOPPED);
+    let stopped_unstored = tokio::task::spawn_blocking(move || {
+        let error = agent.engine_error();
+        helpers.stop(STOPPED);
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while agent.inner.registry.phase() != Phase::Stopped && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let stopped = agent.inner.registry.phase() == Phase::Stopped;
+        drop(error);
+        stopped
+    })
+    .await
+    .unwrap();
+    assert!(
+        !stopped_unstored,
+        "the engine counted as stopped before its error was stored"
+    );
+
     until("the engine stopped", || async {
         h.agent.inner.registry.phase() == Phase::Stopped
     })
