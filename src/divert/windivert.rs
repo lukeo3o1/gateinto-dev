@@ -111,6 +111,9 @@ const fn nibble(digit: u8) -> u8 {
 }
 
 #[cfg(test)]
+mod packaging;
+
+#[cfg(test)]
 mod tests {
     use std::io;
     use std::mem::{align_of, offset_of, size_of};

@@ -14,6 +14,9 @@
 
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="AUTOSTART" Secure="yes" />
+<?ifdef WinDivertDir?>
+    <Property Id="TRANSPARENT" Secure="yes" />
+<?endif?>
     <Property Id="CONFIGEXISTS" Secure="yes">
       <DirectorySearch Id="ConfigFolderSearch" Path="[AppDataFolder]Gateinto" Depth="0">
         <FileSearch Id="ConfigFileSearch" Name="gateinto.toml" />
@@ -68,6 +71,24 @@
           <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Gateinto" Type="string" Value="&quot;[INSTALLFOLDER]gateinto.exe&quot; agent --detach" KeyPath="yes" />
         </Component>
       </Feature>
+
+<?ifdef WinDivertDir?>
+      <Feature Id="Transparent" Title="Transparent sessions (WinDivert driver)" Level="2">
+        <Level Value="1" Condition="TRANSPARENT = &quot;1&quot;" />
+        <Component Id="WinDivert" Directory="INSTALLFOLDER" Guid="5CF50596-CE05-4C55-A581-0EBF57A7060A">
+          <File Id="WinDivertDll" Name="WinDivert.dll" Source="$(var.WinDivertDir)\WinDivert.dll" KeyPath="no" />
+          <File Id="WinDivert64Sys" Name="WinDivert64.sys" Source="$(var.WinDivertDir)\WinDivert64.sys" KeyPath="no" />
+          <File Id="WinDivertLicense" Name="WinDivert-LICENSE.txt" Source="$(var.WinDivertDir)\WinDivert-LICENSE.txt" KeyPath="no" />
+          <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="WinDivert" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+<?if $(sys.BUILDARCH) = "x86" ?>
+        <Component Id="WinDivert32" Directory="INSTALLFOLDER" Guid="6FF041C7-5E54-41B4-AB61-1BA6197A40D2">
+          <File Id="WinDivert32Sys" Name="WinDivert32.sys" Source="$(var.WinDivertDir)\WinDivert32.sys" KeyPath="no" />
+          <RegistryValue Root="HKCU" Key="Software\Gateinto\Installer" Name="WinDivert32" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+<?endif?>
+      </Feature>
+<?endif?>
     </Feature>
 
     <CustomAction

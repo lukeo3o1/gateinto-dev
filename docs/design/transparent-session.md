@@ -22,7 +22,10 @@ and `Launcher::tag`, the configuration (`[transparent] dscp`), the IPC
 `transparent` request, the `status` lines, the `session list` marking and
 the CLI flags (`gateinto session terminal --agent --transparent`, `gateinto
 open --transparent`), and the GUI's mode choice, its marking of transparent
-sessions and its engine row in Settings.
+sessions and its engine row in Settings. Step 6a, packaging, is implemented:
+the optional MSI feature with the pinned WinDivert files and their license,
+which the release workflow downloads and checks; no MSI with it has been
+built or installed yet.
 `Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
 and listener socket, the agent side of the helper, the agent's Windows
 engine, the availability probes on Windows and the GUI's window code, and
@@ -156,7 +159,10 @@ not change.
   - the `netsh` command lines (`divert::firewall`);
   - the pinned WinDivert release (`helper::DRIVER_VERSION` 2.2, the file
     digests in `src/divert/windivert.rs`) and the `WINDIVERT_ADDRESS`
-    layout (`windivert::Address`), compiled on Windows and in tests;
+    layout (`windivert::Address`), compiled on Windows and in tests; the
+    packaging manifest `packaging/wix/windivert.txt` is checked against
+    those digests by the unit tests in `src/divert/windivert/packaging.rs`
+    (see [WinDivert distribution](#windivert-distribution));
   - the Windows implementation of the seams (`src/divert/windows.rs`) and
     the hidden subcommand `gateinto divert` (`src/main.rs`), Windows only.
 
@@ -286,8 +292,9 @@ not change.
     (the helper's process handle);
   - `transparent::availability` (`src/transparent/availability.rs`, with
     the Windows probes in `src/transparent/availability/windows.rs`):
-    `available()`, `Availability` (`available` or `unavailable: <reason>`)
-    and `Reason`; see [CLI, IPC, GUI and status](#cli-ipc-gui-and-status);
+    `available()`, `Availability` (`available` or `unavailable: <reason>`),
+    `Reason`, and the cache of the last verified files (`Stamp`,
+    `Verified`); see [CLI, IPC, GUI and status](#cli-ipc-gui-and-status);
   - `job::parameters`, the command-line quoting of `src/job.rs` for a
     parameter string without the executable;
   - the agent wiring (`src/agent.rs`, `src/agent/engine.rs`):
@@ -840,8 +847,9 @@ runtime's shutdown.
   that packets from processes still being killed are dropped or refused
   rather than leaked, then closes the handle, deletes the firewall rule and
   exits. The 5 s is a margin, not a measurement. Closing the handle restores
-  normal networking; the driver unloads when the last handle closes, or at
-  reboot. A fatal engine error (any receive error other than the shutdown)
+  normal networking; according to WinDivert's documentation the driver
+  stays loaded until the next reboot (see [WinDivert
+  distribution](#windivert-distribution)). A fatal engine error (any receive error other than the shutdown)
   ends the helper the same way, without the grace period. The helper closes
   the handle before it deletes the rule, and releases the mutex only after
   that, because the next helper adds a rule of the same name.
@@ -1250,8 +1258,30 @@ verification; gateway policies keyed on host names will not match.
 
 - `WinDivert.dll` and the driver (`WinDivert64.sys`, and for x86 also
   `WinDivert32.sys`) of one pinned WinDivert release are installed next to
-  `gateinto.exe` by an optional MSI feature *(proposed)*. They are never
-  linked into `gateinto.exe` and never loaded by the agent or the GUI.
+  `gateinto.exe` by an optional MSI feature. They are never linked into
+  `gateinto.exe` and never loaded by the agent or the GUI.
+- The feature is `Transparent`, "Transparent sessions (WinDivert driver)",
+  inside `Main` in `packaging/wix/gateinto.wxs`: level 2, so off by default,
+  and level 1 when `TRANSPARENT=1`, like `Autostart` with `AUTOSTART=1`. It
+  installs the files of the MSI's arch and the release's `LICENSE` as
+  `WinDivert-LICENSE.txt`, with `HKCU` key paths like the other components.
+  It exists only in an MSI built with `build.ps1 -WinDivert <dir>`
+  (`<?ifdef WinDivertDir?>`); without the option the MSI is built as
+  before. The release workflow always passes it: for each arch,
+  `.github/scripts/fetch-windivert.ps1` downloads the zip, checks its
+  digest before opening it, extracts only that arch's files and the
+  license, and checks each digest again; `build.ps1` checks them once more
+  and refuses a directory with any other entry. Both scripts read the
+  names and digests from `packaging/wix/windivert.txt` through
+  `packaging/wix/windivert.ps1`, and the unit tests in
+  `src/divert/windivert/packaging.rs` check that manifest against
+  `src/divert/windivert.rs` and the zip digest below, and that the `.wxs`
+  packages exactly the manifest's files per arch. The binaries are never
+  committed. On a major upgrade Windows Installer keeps the feature's
+  state (`MigrateFeatureStates`) and `TRANSPARENT=1` has no effect, except
+  from a build without the feature; `ADDLOCAL=Transparent` or
+  `REMOVE=Transparent` with the installed build's MSI adds or removes it
+  later (not verified; see `packaging/wix/README.md`).
 - The pinned release is WinDivert 2.2.2, `WinDivert-2.2.2-A.zip` from the
   upstream GitHub release (SHA-256
   `63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15`; the
@@ -1292,14 +1322,28 @@ verification; gateway policies keyed on host names will not match.
   driver is already loaded: `WinDivertOpen` then uses that driver. The
   helper therefore reads the driver version after opening the handle and
   refuses any version other than the pinned one (`error driver-version`).
-- The driver is installed and started by the first `WinDivertOpen` and
-  unloads when the last handle closes, or at reboot.
+- The driver is installed and started by the first `WinDivertOpen`. WinDivert's
+  documentation (`doc/WinDivert.html` in the zip, "Uninstalling") says
+  that its files can be deleted while the driver runs, that the driver is
+  then removed at the next reboot, and that `sc stop WinDivert` and `sc
+  delete WinDivert`, once no process uses WinDivert, remove it earlier. So
+  the driver does not block removing the feature or uninstalling; the files
+  that can be in use are `gateinto.exe` and `WinDivert.dll`, while the
+  elevated helper runs. The MSI's `StopAgent` stops the agent before
+  `RemoveFiles`, but the helper outlives it by its grace period and the
+  firewall rule delete, so Windows Installer may need a restart to remove
+  them; the MSI schedules no restart of its own. `REMOVE=Transparent` does
+  not stop the agent. Neither is verified on Windows.
 - Without the files, or with a digest mismatch, Gateinto works as today;
   `status` and the error for a transparent request say which file is
   missing or differs.
-- License: WinDivert is dual-licensed LGPL-3.0 or GPL-2.0. Gateinto loads an
-  unmodified DLL dynamically and ships its license text and the exact
-  upstream release next to it; Gateinto's own license is unchanged.
+- License: the release's `LICENSE` says "WinDivert is dual-licensed under
+  your choice of the GNU Lesser General Public License (LGPL) Version 3 or
+  the GNU General Public License (GPL) Version 2". Gateinto loads the
+  unmodified DLL dynamically and installs the unmodified upstream files
+  with that license text next to them as `WinDivert-LICENSE.txt`; the
+  README's "Third-party software" names them. Gateinto's own license is
+  unchanged.
 
 ### Firewall
 
@@ -1416,8 +1460,8 @@ of the [Implementation plan](#implementation-plan)).
   last helper error, the one that stopped the engine or made its last start
   fail; a successful start clears it, so it is sent only with `stopped`.
   The request starts nothing; the agent checks the availability through
-  the engine seam in `spawn_blocking`, because on Windows it opens and
-  hashes the WinDivert files. The client (`ipc::transparent_status`)
+  the engine seam in `spawn_blocking`, because on Windows it opens the
+  WinDivert files and hashes them when they changed. The client (`ipc::transparent_status`)
   ignores lines with keys it does not know, so a later agent can add some,
   and refuses an answer with a line without `: `, a missing or repeated
   `availability` or `engine` line, an unknown value or an empty reason or
@@ -1501,7 +1545,18 @@ of the [Implementation plan](#implementation-plan)).
   (see [Needs verification](#needs-verification)); then the pinned files
   next to the executable, all opened before any is hashed, naming the first
   one missing ("WinDivert64.sys is missing next to gateinto.exe") or whose
-  SHA-256 differs or cannot be read. `RtlGetVersion` and `IsWow64Process2`
+  SHA-256 differs or cannot be read. The GUI asks every 2 s, so
+  `available()` keeps, for the life of the process, the `Stamp` of every
+  file it last found matching (`GetFileInformationByHandle` on the open
+  file: volume serial number, file index, size and last write time) and
+  skips the hashing while every stamp is unchanged; a changed or missing
+  stamp hashes all files again, and a mismatch forgets them. The version,
+  ARM64 and the opens are checked every time. A file rewritten in place
+  with its old size and last write time put back would still count as
+  available; that is acceptable because the answer only informs: the
+  helper verifies the digests itself, through handles that deny writing,
+  before it loads anything (see [WinDivert
+  distribution](#windivert-distribution)). `RtlGetVersion` and `IsWow64Process2`
   are looked up at runtime (`GetModuleHandleW`, `GetProcAddress`), so
   neither becomes a static import, and `IsWow64Process2`, which Windows 7
   lacks, is only asked for after the version check passed.
@@ -2052,7 +2107,11 @@ whose run has ended is not waited for. The availability check over a fake
 probe: supported versions with the pinned files, older versions and an
 unknown version probe nothing else, ARM64 before any file, a missing or
 refused file named before any digest, the first file that differs or cannot
-be read named, and "not Windows" off Windows.
+be read named, and "not Windows" off Windows; files whose stamps are
+unchanged since they matched are not hashed again (an unreadable file still
+counts), a change of any stamp field, a file without a stamp and a mismatch
+make the next check hash again, and a cached match still needs a supported
+version, no ARM64 and every file present.
 
 **Agent side of the helper on Windows** (`src/transparent/helper/windows.rs`,
 `src/transparent/availability/windows.rs`, unelevated; type-checked from
@@ -2062,8 +2121,10 @@ arrives; one instance, a second client gets `ERROR_PIPE_BUSY`; a second
 server of the same name cannot be created; the options are duplex,
 first-instance and reject remote clients; the server handle is not
 inheritable; the pid and exit code of a process handle; the version from
-`RtlGetVersion`, not ARM64 on the runners, and the WinDivert files missing
-beside the test executable. `ShellExecuteExW` is not called by unit tests,
+`RtlGetVersion`, not ARM64 on the runners, the WinDivert files missing
+beside the test executable, and a file's stamp, equal for two opens of the
+file, different for another file, and with the same volume and index but a
+new size after a rewrite. `ShellExecuteExW` is not called by unit tests,
 since it would raise a UAC prompt on a desktop; it is left for the
 integration test.
 
@@ -2154,9 +2215,9 @@ tunnels are open, the agent killed while tunnels are open.
    lock is taken; a pipe break closes every transparent session of its
    generation; no downgrade to proxy
    mode; the residual window is documented.
-7. **WinDivert distribution.** Optional component, loaded at runtime by the
-   helper only, pinned version, SHA-256 digests checked through held
-   handles, driver version checked after opening.
+7. **WinDivert distribution.** Optional MSI feature (`TRANSPARENT=1`),
+   loaded at runtime by the helper only, pinned version, SHA-256 digests
+   checked through held handles, driver version checked after opening.
 8. **Firewall.** One fixed-name inbound rule for the helper's lifetime,
    added and removed with `netsh advfirewall firewall` by absolute path,
    exit code only; the cleanup delete ignores its exit code; `INetFwPolicy2`
@@ -2266,9 +2327,13 @@ code to pass it, then a refactor.
    and the CLI flags (`session terminal --agent --transparent`, `open
    --transparent`), and the GUI's mode choice, approval notice, too-old
    message, marking of transparent sessions and engine row in Settings.
-6. **Packaging and user documentation.** The optional MSI feature with the
-   WinDivert files and license, and the security model, threat model,
-   security boundaries, install and compatibility pages.
+6. **Packaging and user documentation**, in two parts:
+   - 6a. **Packaging** (implemented; not built or installed on Windows).
+     The optional MSI feature with the WinDivert files and license, the
+     release workflow's download and checks, `build.ps1 -WinDivert`, the
+     manifest tests, the availability cache, and the install page.
+   - 6b. **Security and compatibility pages.** The security model, threat
+     model, security boundaries and compatibility pages.
 7. **Windows CI integration test** on an elevated runner.
 
 ## Needs verification

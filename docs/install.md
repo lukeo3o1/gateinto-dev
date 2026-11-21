@@ -122,6 +122,7 @@ prompt, for the user who runs it:
 msiexec /i gateinto.msi                   # interactive
 msiexec /i gateinto.msi /qn               # silent
 msiexec /i gateinto.msi /qn AUTOSTART=1   # silent, also start the agent at logon
+msiexec /i gateinto.msi /qn TRANSPARENT=1 # silent, also install the WinDivert files
 ```
 
 It installs:
@@ -144,6 +145,10 @@ It installs:
   background process and waits until it accepts requests; if an agent already runs it does
   nothing. The agent runs without a console; a console window may flash briefly at logon. It
   is off by default;
+- optionally, when `TRANSPARENT=1` is set, the files of WinDivert 2.2.2 that transparent
+  sessions need, next to `gateinto.exe`: `WinDivert.dll`, `WinDivert64.sys`, in the x86 MSI also
+  `WinDivert32.sys`, and WinDivert's license as `WinDivert-LICENSE.txt`. It is off by default;
+  see [Transparent sessions](#transparent-sessions);
 - the config file `%APPDATA%\Gateinto\gateinto.toml`, only when no file of that name exists
   yet. It is a template ([packaging/wix/gateinto.toml](../packaging/wix/gateinto.toml)) based on
   [config.example.toml](../config.example.toml) in which every setting is commented out, so
@@ -159,6 +164,43 @@ and none of its custom actions creates a key: the installer never creates a key 
 `SYSTEM` or as an elevated installer account; `gateinto setup` does that later. Windows
 Installer runs a per-user package as the installing user, so the config template lands in that
 user's own `%APPDATA%`.
+
+### Transparent sessions
+
+[Transparent sessions](../README.md#transparent-sessions-from-the-command-line) need the files of
+the pinned WinDivert 2.2.2 release next to `gateinto.exe`. The release MSIs install them with the
+optional feature **Transparent sessions (WinDivert driver)**, which is off by default:
+
+```powershell
+msiexec /i gateinto.msi /qn TRANSPARENT=1
+```
+
+The feature installs `WinDivert.dll` and `WinDivert64.sys`, in the x86 MSI also
+`WinDivert32.sys` (an x86 `gateinto.exe` on 64-bit Windows loads the 64-bit driver), and the
+license of the release as `WinDivert-LICENSE.txt`, all in `%LOCALAPPDATA%\Programs\Gateinto`. The
+release workflow downloads them from WinDivert's GitHub release and checks their SHA-256 digests,
+the same digests the helper checks before it loads them. Installing them needs no
+administrator rights and loads no driver: WinDivert installs and starts its driver the first
+time a transparent session starts the elevated helper, after an administrator approval. Then
+`gateinto status` prints `transparent-sessions: available` on a supported Windows. An MSI built
+locally without `build.ps1 -WinDivert` has no such feature (see
+[packaging/wix](../packaging/wix/README.md#transparent-sessions-windivert)).
+
+To add or remove the feature later, run the MSI file of the installed build again (Installed
+apps offers no Modify):
+
+```powershell
+msiexec /i gateinto.msi /qn ADDLOCAL=Transparent   # add the WinDivert files
+msiexec /i gateinto.msi /qn REMOVE=Transparent     # remove them
+```
+
+With the MSI of another build, which is an upgrade, upgrade first and then run that MSI again
+with `ADDLOCAL` or `REMOVE`, or uninstall and install again with or without `TRANSPARENT=1`;
+the device key and the config file are kept. An upgrade keeps the feature installed or not as it
+was, and ignores `TRANSPARENT=1`, except when the installed build has no such feature. Run
+`gateinto stop` and wait about 10 seconds before removing the feature: `REMOVE=Transparent`
+does not stop the agent, and `WinDivert.dll` stays in use while its helper runs. This follows
+Windows Installer's documentation and is not verified on Windows.
 
 ### Why per-user
 
@@ -348,7 +390,8 @@ Transparent choice ask for (see
 [the README](../README.md#transparent-sessions-from-the-command-line)): `available`, or
 `unavailable: <reason>` (not Windows, Windows older than Windows 10 1607
 or Windows Server 2016, Windows on ARM64, or a WinDivert file missing next to `gateinto.exe` or
-different from the pinned one; the installer does not ship these files yet). It is printed whether
+different from the pinned one; the MSI installs these files only with its
+[transparent sessions feature](#transparent-sessions)). It is printed whether
 or not the agent runs. While the agent runs, `transparent-engine` is `running`, `starting`, `stopped`
 or `stopped: <error>`, the error that stopped the transparent engine or made its last start fail;
 `unknown: the agent is too old; restart it` comes from an agent older than this line. A transparent
@@ -397,6 +440,7 @@ msiexec /x gateinto.msi /qn
 | Install folder in the user `PATH` | removed |
 | `gateinto://` handler (`HKCU\Software\Classes\gateinto`) | removed |
 | Logon autostart entry created by the installer | removed |
+| WinDivert files of the transparent sessions feature | removed (a WinDivert driver that was loaded stays loaded until the next restart, see below) |
 | Uninstall entry | removed |
 | Running agent, its listeners, tunnels and sessions | closed (see below) |
 | Gateinto browser profiles in `%LOCALAPPDATA%\Gateinto\profiles` | deleted |
@@ -440,6 +484,16 @@ A major upgrade removes the old version with `gateinto-gui.exe --quit` instead: 
 the GUI the same way but keeps the `Gateinto App` value and its StartupApproved entry, so
 **Start the app at sign-in** stays on. Only an old version that already has this step runs
 it during an upgrade. Installing never runs the GUI.
+
+After a transparent session, the agent's elevated helper runs until the agent stops, and for
+about 5 seconds after that; while it runs, `gateinto.exe` and `WinDivert.dll` are in use, so
+Windows Installer may need a restart to finish removing them (with `/norestart`, `msiexec` then
+exits with 3010) or leave them behind. Run `gateinto stop` and wait about 10 seconds before
+uninstalling or upgrading to avoid this. The package adds no restart of its own. The WinDivert
+driver does not block the uninstall: WinDivert's documentation says that its files can be
+deleted while the driver runs and that the driver is then removed at the next restart, or with
+`sc stop WinDivert` and `sc delete WinDivert` at an elevated prompt once no process uses it.
+None of this is verified on Windows.
 
 An uninstall does not revoke anything and does not delete the device identity.
 
@@ -829,8 +883,11 @@ lifecycle check passes, the run keeps the MSI it installed as the `gateinto-msi-
 from the CI release build without `-Version`, so it has the `Cargo.toml` version like a
 [local build](#releases), and it is not signed.
 
+The CI MSI has no transparent sessions feature, so no job installs the WinDivert files; the
+release workflow builds its MSIs with them but installs none.
+
 Not verified: TPM keys, interactive install and uninstall, Windows 10 and 11 client editions (the
-runners are Windows Server), a `gateinto://` link clicked in a real browser, opening the GUI from
+runners are Windows Server), the transparent sessions feature, a `gateinto://` link clicked in a real browser, opening the GUI from
 the Start Menu shortcut, closing the GUI during an interactive uninstall or an upgrade, and
 keeping `Gateinto App` across an upgrade between two versions. The checks that close the GUI and
 remove or keep `Gateinto App` on uninstall passed in CI for x64 and x86; closing the GUI was

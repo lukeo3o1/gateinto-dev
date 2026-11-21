@@ -54,7 +54,15 @@ impl fmt::Display for Reason {
 pub fn available() -> Availability {
     #[cfg(windows)]
     {
-        check(&mut windows::Probe, crate::divert::windivert::FILES)
+        static VERIFIED: std::sync::Mutex<Verified> = std::sync::Mutex::new(Verified(None));
+        let mut verified = VERIFIED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        check(
+            &mut windows::Probe,
+            crate::divert::windivert::FILES,
+            &mut verified,
+        )
     }
     #[cfg(not(windows))]
     {
@@ -70,27 +78,45 @@ struct Version {
 }
 
 #[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    volume: u32,
+    index: u64,
+    size: u64,
+    modified: u64,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+struct Verified(Option<Vec<Stamp>>);
+
+#[cfg(any(windows, test))]
 trait Probe {
     type File: Read;
 
     fn version(&mut self) -> Option<Version>;
     fn arm64(&mut self) -> bool;
     fn open(&mut self, name: &str) -> io::Result<Self::File>;
+    fn stamp(&mut self, file: &Self::File) -> Option<Stamp>;
 }
 
 #[cfg(any(windows, test))]
 const FIRST_BUILD: u32 = 14393;
 
 #[cfg(any(windows, test))]
-fn check<P: Probe>(probe: &mut P, pinned: &[PinnedFile]) -> Availability {
-    match refusal(probe, pinned) {
+fn check<P: Probe>(probe: &mut P, pinned: &[PinnedFile], verified: &mut Verified) -> Availability {
+    match refusal(probe, pinned, verified) {
         Ok(()) => Availability::Available,
         Err(reason) => Availability::Unavailable(reason),
     }
 }
 
 #[cfg(any(windows, test))]
-fn refusal<P: Probe>(probe: &mut P, pinned: &[PinnedFile]) -> Result<(), Reason> {
+fn refusal<P: Probe>(
+    probe: &mut P,
+    pinned: &[PinnedFile],
+    verified: &mut Verified,
+) -> Result<(), Reason> {
     let supported = probe.version().is_some_and(|version| {
         version.major > 10 || version.major == 10 && version.build >= FIRST_BUILD
     });
@@ -108,11 +134,20 @@ fn refusal<P: Probe>(probe: &mut P, pinned: &[PinnedFile]) -> Result<(), Reason>
                 .map_err(|_| Reason::FilesMissing(file.name))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let stamps = opened
+        .iter()
+        .map(|file| probe.stamp(file))
+        .collect::<Option<Vec<_>>>();
+    if stamps.is_some() && stamps == verified.0 {
+        return Ok(());
+    }
+    verified.0 = None;
     for (file, pinned) in opened.into_iter().zip(pinned) {
         if !sha256_matches(file, &pinned.sha256) {
             return Err(Reason::DigestMismatch(pinned.name));
         }
     }
+    verified.0 = stamps;
     Ok(())
 }
 
@@ -155,14 +190,18 @@ mod tests {
         version: Option<Version>,
         arm64: bool,
         files: HashMap<&'static str, Stored>,
+        stamps: HashMap<&'static str, Stamp>,
         asked: Vec<Asked>,
     }
 
-    struct FakeFile(Option<&'static [u8]>);
+    struct FakeFile {
+        name: &'static str,
+        bytes: Option<&'static [u8]>,
+    }
 
     impl Read for FakeFile {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            match &mut self.0 {
+            match &mut self.bytes {
                 Some(bytes) => bytes.read(buffer),
                 None => Err(io::Error::other("unreadable")),
             }
@@ -188,11 +227,25 @@ mod tests {
                 .get_key_value(name)
                 .ok_or(io::ErrorKind::NotFound)?;
             self.asked.push(Asked::Open(name));
-            match stored {
-                Stored::Bytes(bytes) => Ok(FakeFile(Some(bytes))),
-                Stored::Unreadable => Ok(FakeFile(None)),
-                Stored::Refused => Err(io::ErrorKind::PermissionDenied.into()),
-            }
+            let bytes = match stored {
+                Stored::Bytes(bytes) => Some(bytes),
+                Stored::Unreadable => None,
+                Stored::Refused => return Err(io::ErrorKind::PermissionDenied.into()),
+            };
+            Ok(FakeFile { name, bytes })
+        }
+
+        fn stamp(&mut self, file: &FakeFile) -> Option<Stamp> {
+            self.stamps.get(file.name).copied()
+        }
+    }
+
+    fn stamp(index: u64) -> Stamp {
+        Stamp {
+            volume: 0x1234_5678,
+            index,
+            size: 4096,
+            modified: 133_000_000_000_000_000,
         }
     }
 
@@ -204,12 +257,129 @@ mod tests {
                 (LIBRARY, Stored::Bytes(b"library")),
                 (DRIVER, Stored::Bytes(b"driver")),
             ]),
+            stamps: HashMap::from([(LIBRARY, stamp(1)), (DRIVER, stamp(2))]),
             asked: Vec::new(),
         }
     }
 
     fn checked(fake: &mut Fake) -> Availability {
-        check(fake, &release())
+        check(fake, &release(), &mut Verified::default())
+    }
+
+    fn verified(fake: &mut Fake) -> Verified {
+        let mut verified = Verified::default();
+        assert_eq!(
+            check(fake, &release(), &mut verified),
+            Availability::Available
+        );
+        verified
+    }
+
+    #[test]
+    fn files_whose_stamps_are_unchanged_since_they_were_verified_are_not_hashed_again() {
+        let mut fake = windows(10, 26100);
+        let mut verified = verified(&mut fake);
+        fake.files.insert(DRIVER, Stored::Unreadable);
+        fake.asked.clear();
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Available
+        );
+        assert_eq!(
+            fake.asked,
+            [
+                Asked::Version,
+                Asked::Arm64,
+                Asked::Open(LIBRARY),
+                Asked::Open(DRIVER)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_change_of_any_stamp_field_hashes_the_files_again() {
+        let changes: [fn(&mut Stamp); 4] = [
+            |stamp| stamp.volume += 1,
+            |stamp| stamp.index += 1,
+            |stamp| stamp.size += 1,
+            |stamp| stamp.modified += 1,
+        ];
+        for (at, change) in changes.into_iter().enumerate() {
+            let mut fake = windows(10, 26100);
+            let mut verified = verified(&mut fake);
+            fake.files.insert(DRIVER, Stored::Bytes(b"changed"));
+            change(fake.stamps.get_mut(DRIVER).unwrap());
+            assert_eq!(
+                check(&mut fake, &release(), &mut verified),
+                Availability::Unavailable(Reason::DigestMismatch(DRIVER)),
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_without_a_stamp_is_hashed_on_every_check() {
+        let mut fake = windows(10, 26100);
+        fake.stamps.remove(LIBRARY);
+        let mut verified = verified(&mut fake);
+        fake.files.insert(LIBRARY, Stored::Bytes(b"changed"));
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::DigestMismatch(LIBRARY))
+        );
+    }
+
+    #[test]
+    fn a_mismatch_forgets_the_verified_files() {
+        let mut fake = windows(10, 26100);
+        let mut verified = verified(&mut fake);
+        fake.files.insert(DRIVER, Stored::Bytes(b"changed"));
+        fake.stamps.insert(DRIVER, stamp(3));
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::DigestMismatch(DRIVER))
+        );
+        fake.stamps.insert(DRIVER, stamp(2));
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::DigestMismatch(DRIVER))
+        );
+        fake.files.insert(DRIVER, Stored::Bytes(b"driver"));
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Available
+        );
+    }
+
+    #[test]
+    fn verified_files_still_count_only_on_a_supported_system_with_every_file_present() {
+        let mut fake = windows(10, 26100);
+        let mut verified = verified(&mut fake);
+        fake.files.remove(DRIVER);
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::FilesMissing(DRIVER))
+        );
+        fake.files.insert(DRIVER, Stored::Refused);
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::FilesMissing(DRIVER))
+        );
+        fake.files.insert(DRIVER, Stored::Bytes(b"driver"));
+        fake.arm64 = true;
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::Arm64)
+        );
+        fake.arm64 = false;
+        fake.version = Some(Version {
+            major: 10,
+            build: 14392,
+        });
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::TooOld)
+        );
     }
 
     #[test]

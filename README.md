@@ -67,7 +67,10 @@ GUI nor the agent, and does not turn on the GUI's own **Start the app at
 sign-in** value. Uninstalling or upgrading closes a running GUI of the
 current user and stops the agent. A full uninstall also removes the GUI's
 `Gateinto App` sign-in value when it opens the installed GUI; an upgrade
-keeps it. See [docs/install.md](docs/install.md).
+keeps it. With `TRANSPARENT=1`, the release MSI also installs the WinDivert
+files that transparent sessions need; this is off by default (see
+[transparent sessions](docs/install.md#transparent-sessions)). See
+[docs/install.md](docs/install.md).
 
 ## Releases
 
@@ -398,7 +401,9 @@ share only the device key.
 ### Transparent sessions from the command line
 
 Windows only, pre-release and not yet verified on real Windows; see
-[the design](docs/design/transparent-session.md).
+[the design](docs/design/transparent-session.md). They need the WinDivert
+files next to `gateinto.exe`, which the release MSI installs only with
+`TRANSPARENT=1` (see [docs/install.md](docs/install.md#transparent-sessions)).
 
 - `gateinto open --transparent -- <uri>` and `gateinto session terminal
   --agent --gateway <name> --transparent` ask the agent for a transparent
@@ -1153,3 +1158,16 @@ Design notes: [architecture](docs/architecture.md),
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+### Third-party software
+
+The release MSIs can install, only with their optional transparent sessions
+feature, the unmodified files of [WinDivert](https://github.com/basil00/WinDivert)
+2.2.2 by basil: `WinDivert.dll` and its driver, `WinDivert64.sys`, and in the
+x86 MSI also `WinDivert32.sys`. WinDivert is dual-licensed under your choice
+of the GNU Lesser General Public License (LGPL) Version 3 or the GNU General
+Public License (GPL) Version 2; its license text is installed next to them as
+`WinDivert-LICENSE.txt`. The driver's Authenticode chain is a Sectigo EV
+certificate, as recorded in
+[the design](docs/design/transparent-session.md#windivert-distribution).
+Gateinto does not link WinDivert: it loads `WinDivert.dll` at run time.

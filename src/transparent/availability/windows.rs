@@ -2,8 +2,12 @@ use std::ffi::CStr;
 use std::fs::File;
 use std::io;
 use std::mem;
+use std::os::windows::io::AsRawHandle;
 
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::SystemInformation::{
     IMAGE_FILE_MACHINE, IMAGE_FILE_MACHINE_ARM64, OSVERSIONINFOW,
@@ -11,7 +15,7 @@ use windows_sys::Win32::System::SystemInformation::{
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::core::BOOL;
 
-use super::Version;
+use super::{Stamp, Version};
 
 type GetVersionFn = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> i32;
 type MachinesFn =
@@ -45,6 +49,22 @@ impl super::Probe for Probe {
         let image = std::env::current_exe()?;
         let directory = image.parent().ok_or(io::ErrorKind::NotFound)?;
         File::open(directory.join(name))
+    }
+
+    fn stamp(&mut self, file: &File) -> Option<Stamp> {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the handle belongs to file, which outlives the call; info is a valid out pointer.
+        let read = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+        let high_low = |high: u32, low: u32| u64::from(high) << 32 | u64::from(low);
+        (read != 0).then(|| Stamp {
+            volume: info.dwVolumeSerialNumber,
+            index: high_low(info.nFileIndexHigh, info.nFileIndexLow),
+            size: high_low(info.nFileSizeHigh, info.nFileSizeLow),
+            modified: high_low(
+                info.ftLastWriteTime.dwHighDateTime,
+                info.ftLastWriteTime.dwLowDateTime,
+            ),
+        })
     }
 }
 
@@ -108,5 +128,21 @@ mod tests {
             available(),
             Availability::Unavailable(Reason::FilesMissing("WinDivert.dll"))
         );
+    }
+
+    #[test]
+    fn a_stamp_names_the_file_and_changes_when_it_is_rewritten() {
+        let path = std::env::temp_dir().join(format!("gateinto-stamp-{}", std::process::id()));
+        std::fs::write(&path, b"first").unwrap();
+        let first = Probe.stamp(&File::open(&path).unwrap()).unwrap();
+        assert_eq!(Probe.stamp(&File::open(&path).unwrap()), Some(first));
+        let image = File::open(std::env::current_exe().unwrap()).unwrap();
+        assert_ne!(Probe.stamp(&image).unwrap().index, first.index);
+        std::fs::write(&path, b"second").unwrap();
+        let second = Probe.stamp(&File::open(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((second.volume, second.index), (first.volume, first.index));
+        assert_eq!((first.size, second.size), (5, 6));
+        assert!(second.modified >= first.modified);
     }
 }
