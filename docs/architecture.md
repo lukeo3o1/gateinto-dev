@@ -532,15 +532,23 @@ The full protocol, limits and guarantees are in
   poll (`gui/src/worker.rs`); `agent::Transparent` keeps the answer, and a
   refused or failed request leaves it unreported without touching the rest
   of the refresh. Only for `availability: available` does the Gateways page
-  header show a Proxy | Transparent choice (`Transparent::offer`,
-  `gui/src/board/gateways.rs`), which applies to Start browser and Open
-  terminal of every card: `Command::Launch` and `Command::Terminal` carry
-  the `Mode`, so a transparent one adds `mode=transparent` and `ipc::send`
-  waits 300 seconds for it. The Sessions page's Start browser, the tray and
-  `gateinto://` links send `Mode::Proxy`. While a transparent start is
+  show a Proxy | Transparent choice (`Transparent::offer`,
+  `gui/src/board/gateways.rs`) on the row of Add gateway, under the
+  full-width subtitle, which applies to Start browser and Open terminal of
+  every card: `Command::Launch` and `Command::Terminal` carry the `Mode`, so
+  a transparent one adds `mode=transparent` and `ipc::send` waits 300
+  seconds for it. `Transparent::start` decides the mode of each start by
+  where it comes from (`agent::Origin`): a Gateways card gets the chosen mode
+  while it is offered, and the Sessions page's Start browser, the tray and
+  `gateinto://` links always get `Mode::Proxy`. While a transparent start is
   pending, the Gateways and Sessions subtitles say that starting the engine
-  may ask for administrator approval (`Launches::notice`); the worker
-  handles the launch to its answer before it polls again. A transparent
+  may ask for administrator approval (`Launches::notice`). The worker keeps
+  one launch or terminal request in flight (`opening`) beside its polls,
+  links and other commands, as it does for a link's `linking`. The window
+  sends no other start while one is pending (`Launches::busy`); a launch or
+  terminal that reaches the worker meanwhile all the same waits in order and
+  is sent when the one in flight is answered, and closing the window drops
+  them. A transparent
   request answered as by an older agent
   (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
   transparent sessions; restart it", checked before the terminal's

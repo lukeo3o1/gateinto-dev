@@ -344,10 +344,13 @@ See [install.md](install.md).
   list` or the GUI's Sessions page before asking again.
 - The GUI's Gateways page has no Proxy | Transparent choice: the agent is
   not running, is too old to answer, or reports transparent sessions as
-  unavailable. Settings' **Transparent sessions** row and
-  `transparent-sessions` in `gateinto status` give the reason. The Sessions
-  page's Start browser, the tray flyout and `gateinto://` links always start
-  proxy sessions.
+  unavailable. When the agent reports them as unavailable, Settings'
+  **Transparent sessions** row gives its reason. When no agent is running,
+  or the running one is too old to answer, that row is absent; start the
+  agent, or restart an older one, and `transparent-sessions` in `gateinto
+  status` says whether this machine can run them. The Sessions page's Start
+  browser, the tray flyout and `gateinto://` links always start proxy
+  sessions.
 - `refusing to delete the device key without confirmation: no terminal ...`:
   `reset` was run from a script. Pass `--confirm-spki` with the first 16 or
   more hex digits of `spki-sha256` from `gateinto status`.

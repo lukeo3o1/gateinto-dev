@@ -38,11 +38,13 @@ the code yet; every other name refers to the code at the time of writing.
 
 ## Summary
 
-A transparent session routes every outbound TCP connection of the processes
-in a session's job object through the session's gateway, without depending on
-the application honouring proxy settings. The session keeps its proxy
-settings (`--proxy-server` for a browser, the proxy variables for a
-terminal); transparent routing catches every connection that ignores them.
+A transparent session routes every outbound IPv4 TCP connection of the
+processes in a session's job object through the session's proxy, and so
+along its gateway route, without depending on the application honouring
+proxy settings; every other packet they send (UDP and QUIC, ICMP, and all
+IPv6) is dropped, not relayed. The session keeps its proxy settings
+(`--proxy-server` for a browser, the proxy variables for a terminal);
+transparent routing catches every IPv4 TCP connection that ignores them.
 The agent tags the session's job with a DSCP value through
 `SetInformationJobObject(JobObjectNetRateControlInformation)`; Windows then
 marks every IPv4 and IPv6 packet those processes send, from the first SYN
@@ -1426,26 +1428,41 @@ of the [Implementation plan](#implementation-plan)).
   `transparent` after `config` (`worker::poll`), and `agent::Transparent`
   keeps the answer; a refused or failed request is `Unreported` and leaves
   the rest of the refresh as it was.
-  - The Gateways page shows a "Proxy | Transparent" choice in its header,
-    between the subtitle and Add gateway, only when the answer is
-    `availability: available` (`Transparent::offer`). It is one choice for
+  - The Gateways page shows a "Proxy | Transparent" choice under its
+    subtitle, at the left of the row that holds Add gateway, only when the
+    answer is `availability: available` (`Transparent::offer`). The subtitle
+    has the whole width of the page above that row, so the approval notice
+    and failures such as the older-agent message fit at the minimum window
+    size; the cards start under the row whether or not the choice is shown,
+    so they do not move when it appears or goes. It is one choice for
     both Start browser and Open terminal of every gateway card, the only
     place that offers both, so it needs no new menu or dialog. It is drawn
     as the segmented control of Settings and is its own arrow-key group.
-    Its tooltip says what the mode does and that starting the engine may
-    ask for administrator approval. When the choice is hidden (unavailable,
+    Its tooltip says that every IPv4 TCP connection of the browser or
+    terminal follows the gateway's route, that other traffic, such as UDP
+    and IPv6, is blocked, and that starting the engine may ask for
+    administrator approval. When the choice is hidden (unavailable,
     an older agent, an error, no agent) both buttons send proxy-mode
     requests; the choice is kept in memory only and comes back with the
     availability.
   - `Command::Launch` and `Command::Terminal` carry the `Mode` into the IPC
     request, so `ipc::send` applies the 300 s limit; the GUI has no timeout
-    of its own. The Sessions page's Start browser, the tray flyout and
-    `gateinto://` links always send `Mode::Proxy`.
+    of its own. `Transparent::start` gives each start its mode by where it
+    comes from (`agent::Origin`): a Gateways card gets the chosen mode while
+    it is offered and `Mode::Proxy` otherwise; the Sessions page's Start
+    browser, the tray flyout and `gateinto://` links always get
+    `Mode::Proxy`.
   - While a transparent start is pending (`Launches::notice`), the
     Gateways and Sessions subtitles say "Starting the transparent engine
-    may ask for administrator approval". The worker runs a launch to its
-    answer before it polls again, as for proxy-mode launches, so the lists
-    are not refreshed during the wait.
+    may ask for administrator approval". The worker keeps one launch or
+    terminal request in flight beside its polls, as it keeps a link's
+    request, so the lists keep refreshing and other commands (Close, Stop,
+    credentials, verification, Start, links and their answers) are handled
+    during the wait; an approved link sends its own proxy-mode launch. The
+    window sends no other start while one is pending (`Launches::busy`); a
+    launch or terminal that reaches the worker meanwhile all the same waits
+    in order and is sent once the one in flight is answered; closing the
+    window drops both.
   - A transparent request refused as sent to an older agent
     (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
     transparent sessions; restart it"; proxy-mode answers keep their
@@ -1957,12 +1974,25 @@ request leaves the gateways, sessions and config of the refresh intact,
 transparent launch and terminal commands send `mode=transparent`, links
 send proxy-mode launches even while transparent sessions are available,
 and only a transparent request refused as sent to an older agent is named
-too old (`worker.rs`); the choice is offered only for `available`, never
-for `unavailable`, an error, an older agent or no agent (`agent.rs`); the
-choice sits between the subtitle and Add gateway, is worded in both
-languages, maps to its mode for the pointer and is its own focus group
-(`board/gateways.rs`, `pointer.rs`, `focus.rs`); a pending transparent
-start shows the approval notice (`gateways.rs`); the Transparent tooltip
+too old; with a paused clock and an agent that never answers a
+transparent launch, the polls go on every 2 s, a Close sent meanwhile
+reaches the agent, a link shows its prompt, a second launch waits until the
+first is answered, the answer brings its failure and the launch count in
+the next update, and closing the window drops the pending launch and those
+queued behind it (`worker.rs`); the choice is offered only for
+`available`, never for `unavailable`, an error, an older agent or no
+agent, and only a gateway card starts in the chosen mode, the tray, the
+Sessions picker and a link always in proxy mode (`agent.rs`
+`Transparent::start`); the choice sits under the full-width subtitle at
+the left of the Add gateway row, is worded in both languages, maps to its
+mode for the pointer and is its own focus group, and at the minimum window
+the subtitle fits the approval notice and the older-agent message while the
+choice is shown, in both languages (`board/gateways.rs`, `pointer.rs`,
+`focus.rs`);
+a pending transparent start shows the approval notice (`gateways.rs`
+`Launches::notice`); the Transparent tooltip says that IPv4 TCP follows
+the gateway's route, that UDP and IPv6 are blocked and that the engine
+may ask for administrator approval, and does not claim every connection
 (`board.rs`); a transparent session is marked and a proxy one is not
 (`sessions.rs`, `board.rs`); the engine row in each state
 (`settings.rs`, `board/settings.rs`); every new text exists in English and

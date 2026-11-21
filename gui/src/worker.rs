@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use zeroize::Zeroize;
 
-use crate::agent::{AgentState, Config, Transparent};
+use crate::agent::{AgentState, Config, Origin, Transparent};
 use crate::approval::{self, Answer, Desk};
 use crate::credentials::{self, Reveal};
 use crate::device::{KeyState, Probe, System};
@@ -255,6 +256,19 @@ where
 
 type Answers = RefCell<Desk<oneshot::Sender<Answer>>>;
 type Linking<'a> = Pin<Box<dyn Future<Output = Option<Note>> + 'a>>;
+type Opening<'a> = Pin<Box<dyn Future<Output = (Option<Note>, bool)> + 'a>>;
+
+fn open<'a, F, R>(command: Command, send: &'a F) -> Opening<'a>
+where
+    F: Fn(Request) -> R,
+    R: Future<Output = Result<Response, RequestError>> + 'a,
+{
+    Box::pin(async move {
+        let terminal = matches!(command, Command::Terminal(..));
+        let (note, ok) = run(command, send).await;
+        (note, terminal && ok)
+    })
+}
 
 fn unlinked(error: RequestError) -> Note {
     match error {
@@ -265,6 +279,7 @@ fn unlinked(error: RequestError) -> Note {
 
 async fn link<F, R>(
     launch: LaunchRequest,
+    mode: Mode,
     send: &F,
     ticket: u64,
     answered: oneshot::Receiver<Answer>,
@@ -275,7 +290,7 @@ where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
-    let reply = match send(Request::Launch(launch.clone(), Mode::Proxy)).await {
+    let reply = match send(Request::Launch(launch.clone(), mode)).await {
         Ok(reply) => reply,
         Err(error) => return Some(unlinked(error)),
     };
@@ -308,9 +323,9 @@ fn refused(error: ApprovalError) -> Option<Note> {
     }
 }
 
-async fn finish<T>(pending: &mut Option<Pin<Box<T>>>) -> Option<Note>
+async fn finish<T>(pending: &mut Option<Pin<Box<T>>>) -> T::Output
 where
-    T: Future<Output = Option<Note>> + ?Sized,
+    T: Future + ?Sized,
 {
     match pending {
         Some(pending) => pending.await,
@@ -426,6 +441,8 @@ pub async fn serve_with<F, R, S>(
     let mut journal = Journal::default();
     let answers = Answers::default();
     let mut linking: Option<Linking<'_>> = None;
+    let mut opening: Option<Opening<'_>> = None;
+    let mut queued = VecDeque::new();
     let mut starting: Option<Pin<Box<S>>> = None;
     let mut unstarted: Option<Note> = None;
     let mut checking: Option<(u64, u64)> = None;
@@ -521,8 +538,9 @@ pub async fn serve_with<F, R, S>(
                         if let Some(superseded) = linking.take() {
                             failure = superseded.await;
                         }
+                        let mode = polled.2.start(Origin::Link);
                         linking = Some(Box::pin(link(
-                            launch, &send, ticket, answered, &answers, &prompt,
+                            launch, mode, &send, ticket, answered, &answers, &prompt,
                         )));
                         continue;
                     }
@@ -533,18 +551,24 @@ pub async fn serve_with<F, R, S>(
                         }
                         continue;
                     }
-                    Command::Close(_)
-                    | Command::Dismiss(..)
-                    | Command::Stop
-                    | Command::Launch(..)
-                    | Command::Terminal(..) => {}
+                    Command::Launch(..) | Command::Terminal(..) => {
+                        if opening.is_none() {
+                            opening = Some(open(command, &send));
+                        } else {
+                            queued.push_back(command);
+                        }
+                        continue;
+                    }
+                    Command::Close(_) | Command::Dismiss(..) | Command::Stop => {}
                 }
                 checking = checking.filter(|(id, _)| !verification::ends(&command, *id));
-                let terminal = matches!(command, Command::Terminal(..));
-                let (note, ok) = run(command, &send).await;
+                failure = run(command, &send).await.0;
+            }
+            (note, terminal) = finish(&mut opening) => {
+                opening = queued.pop_front().map(|command| open(command, &send));
                 failure = note;
-                launched += u64::from(launch);
-                unlisted += u64::from(terminal && ok);
+                launched += 1;
+                unlisted += u64::from(terminal);
             }
             note = finish(&mut linking) => {
                 linking = None;
@@ -1277,7 +1301,10 @@ mod tests {
             unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), launched(polled(None))]);
+        assert_eq!(
+            updates,
+            [polled(None), polled(None), launched(polled(None))]
+        );
         assert_eq!(
             *log.borrow(),
             [
@@ -1314,7 +1341,10 @@ mod tests {
             unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), unlisted(launched(polled(None)))]);
+        assert_eq!(
+            updates,
+            [polled(None), polled(None), unlisted(launched(polled(None)))]
+        );
         assert_eq!(
             *log.borrow(),
             [
@@ -1352,7 +1382,13 @@ mod tests {
         };
         assert_eq!(
             updates,
-            [polled(None), launched(polled(None)), unlisted(twice)]
+            [
+                polled(None),
+                polled(None),
+                polled(None),
+                launched(polled(None)),
+                unlisted(twice)
+            ]
         );
         let launch = Request::Launch(
             LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap(),
@@ -1403,6 +1439,7 @@ mod tests {
             updates,
             [
                 polled(None),
+                polled(None),
                 unlisted(launched(polled(None))),
                 launched(polled(None))
             ]
@@ -1432,7 +1469,11 @@ mod tests {
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
             updates,
-            [polled(None), launched(polled(said("no such gateway")))]
+            [
+                polled(None),
+                polled(None),
+                launched(polled(said("no such gateway")))
+            ]
         );
     }
 
@@ -1489,7 +1530,11 @@ mod tests {
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
             updates,
-            [polled(None), launched(polled(Some(CONFIRMATION.into())))]
+            [
+                polled(None),
+                polled(None),
+                launched(polled(Some(CONFIRMATION.into())))
+            ]
         );
         assert_eq!(
             *log.borrow(),
@@ -1500,6 +1545,159 @@ mod tests {
                 launch("office"),
                 Request::Deny(token.parse().unwrap())
             ]
+        );
+    }
+
+    type Replying = Pin<Box<dyn Future<Output = Result<Response, RequestError>>>>;
+
+    fn since(begun: tokio::time::Instant) -> u64 {
+        begun.elapsed().as_millis() as u64
+    }
+
+    fn polls_at(at: u64) -> Vec<(u64, Request)> {
+        polls(1).into_iter().map(|request| (at, request)).collect()
+    }
+
+    fn transparent(name: &str) -> Request {
+        Request::Launch(
+            LaunchRequest::new(name, LaunchAuth::SessionCredentials.as_str()).unwrap(),
+            Mode::Transparent,
+        )
+    }
+
+    fn holding(
+        log: &RefCell<Vec<(u64, Request)>>,
+        begun: tokio::time::Instant,
+        reply: oneshot::Receiver<Result<Response, RequestError>>,
+    ) -> impl Fn(Request) -> Replying {
+        let reply = RefCell::new(Some(reply));
+        move |request| {
+            log.borrow_mut().push((since(begun), request.clone()));
+            match request {
+                Request::Launch(_, Mode::Transparent) => {
+                    let reply = reply.borrow_mut().take().expect("one transparent launch");
+                    Box::pin(async move {
+                        match reply.await {
+                            Ok(reply) => reply,
+                            Err(_) => std::future::pending().await,
+                        }
+                    })
+                }
+                Request::Launch(launch, Mode::Proxy) if launch == link() => {
+                    let mut lines = proposed().echo();
+                    lines.push(ipc::confirm_line(&token()));
+                    Box::pin(std::future::ready(Ok(Response::Ok(lines))))
+                }
+                _ => Box::pin(std::future::ready(Ok(Response::Ok(Vec::new())))),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn polls_links_and_other_commands_go_on_while_a_launch_waits_for_the_agent() {
+        let begun = tokio::time::Instant::now();
+        let log = RefCell::new(Vec::new());
+        let (answer, reply) = oneshot::channel();
+        let (tx, rx) = unbounded_channel();
+        let office = || "office".parse::<GatewayName>().unwrap();
+        tx.send(Command::Launch(office(), Mode::Transparent))
+            .unwrap();
+        let prompts = RefCell::new(Vec::new());
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            holding(&log, begun, reply),
+            loaded,
+            unprobed,
+            |u| updates.push((since(begun), u.launched, u.failure)),
+            unrevealed,
+            |prompt| prompts.borrow_mut().push((since(begun), prompt)),
+        );
+        let feed = async {
+            for (at, command) in [
+                (500, Command::Launch(office(), Mode::Proxy)),
+                (1_000, Command::Close(5)),
+                (1_500, Command::Link(link())),
+            ] {
+                tokio::time::sleep_until(begun + Duration::from_millis(at)).await;
+                tx.send(command).unwrap();
+            }
+            tokio::time::sleep_until(begun + Duration::from_secs(5)).await;
+            let refused = Response::Error(ipc::INVALID_LAUNCH_REQUEST.to_owned());
+            answer.send(Ok(refused)).unwrap();
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            timeout(Duration::from_millis(6_500), async {
+                tokio::join!(run, feed)
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            *log.borrow(),
+            [
+                polls_at(0),
+                vec![
+                    (0, transparent("office")),
+                    (1_000, Request::Close(SessionId::from(5))),
+                    (1_500, Request::Launch(link(), Mode::Proxy)),
+                ],
+                polls_at(2_000),
+                polls_at(4_000),
+                vec![(5_000, launch("office"))],
+                polls_at(6_000),
+            ]
+            .concat()
+        );
+        assert_eq!(*prompts.borrow(), [(1_500, Prompt::Ask(1, proposed()))]);
+        let too_old = Some(Note::from(Text::TransparentTooOld));
+        assert_eq!(
+            updates,
+            [
+                (0, 0, None),
+                (0, 0, None),
+                (500, 0, None),
+                (1_000, 0, None),
+                (1_500, 0, None),
+                (2_000, 0, None),
+                (4_000, 0, None),
+                (5_000, 1, too_old),
+                (5_000, 2, None),
+                (6_000, 2, None),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_the_window_drops_a_pending_launch_and_those_queued_behind_it() {
+        let begun = tokio::time::Instant::now();
+        let log = RefCell::new(Vec::new());
+        let (_answer, reply) = oneshot::channel();
+        let (tx, rx) = unbounded_channel();
+        let office = || "office".parse::<GatewayName>().unwrap();
+        tx.send(Command::Launch(office(), Mode::Transparent))
+            .unwrap();
+        tx.send(Command::Terminal(office(), Mode::Proxy)).unwrap();
+        let run = serve(
+            rx,
+            holding(&log, begun, reply),
+            loaded,
+            unprobed,
+            |_| {},
+            unrevealed,
+            unprompted,
+        );
+        let close = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(tx);
+        };
+        timeout(Duration::from_secs(2), async { tokio::join!(run, close) })
+            .await
+            .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            [polls_at(0), vec![(0, transparent("office"))]].concat()
         );
     }
 

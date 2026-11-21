@@ -57,7 +57,7 @@ use zeroize::Zeroizing;
 use self::approval::Approval;
 use self::icon::Owned;
 use crate::add::{self, Form, Keyed, Units};
-use crate::agent::Config;
+use crate::agent::{Config, Origin, Transparent};
 use crate::board::{self, Board, board, tips};
 use crate::confirm::{self, Ending};
 use crate::credentials::{self, Dialog, Field};
@@ -878,11 +878,11 @@ impl App {
         self.invalidate();
     }
 
-    fn chosen(&self) -> ipc::Mode {
-        self.update
-            .as_ref()
-            .and_then(|update| update.transparent.offer(self.mode))
-            .unwrap_or_default()
+    fn mode_for(&self, origin: Origin) -> ipc::Mode {
+        match &self.update {
+            Some(update) => update.transparent.start(origin),
+            None => Transparent::Unreported.start(origin),
+        }
     }
 
     fn choose_mode(&mut self, mode: ipc::Mode) {
@@ -1233,11 +1233,15 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::StartBrowser(row)) => {
-            with_app(hwnd, |app| app.launch(row, app.chosen()));
+            with_app(hwnd, |app| {
+                app.launch(row, app.mode_for(Origin::Gateways(app.mode)))
+            });
             return;
         }
         Some(Action::OpenTerminal(row)) => {
-            with_app(hwnd, |app| app.open_terminal(row, app.chosen()));
+            with_app(hwnd, |app| {
+                app.open_terminal(row, app.mode_for(Origin::Gateways(app.mode)))
+            });
             return;
         }
         Some(Action::Mode(mode)) => {
@@ -1266,7 +1270,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 app.dismiss();
                 match choice {
                     Some(Choice::Launch(row)) => {
-                        app.launch(row, ipc::Mode::Proxy);
+                        app.launch(row, app.mode_for(Origin::Sessions));
                     }
                     Some(Choice::Details(id)) => app.session_gateway(id),
                     Some(Choice::Portal(id)) => return app.portal(id),

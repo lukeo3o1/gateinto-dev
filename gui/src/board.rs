@@ -648,16 +648,37 @@ mod tests {
     }
 
     #[test]
-    fn the_transparent_mode_explains_itself_and_the_approval_it_may_need() {
+    fn the_transparent_mode_explains_what_it_relays_blocks_and_the_approval_it_may_need() {
         let r = Rect::new(1, 2, 3, 4);
         let targets = [
             (r, Zone::Mode(gateinto::ipc::Mode::Proxy)),
             (r, Zone::Mode(gateinto::ipc::Mode::Transparent)),
         ];
         assert_eq!(tips(&targets), [(r, tr(Text::TransparentTip))]);
-        assert!(tr(Text::TransparentTip).contains("administrator approval"));
+        let tip = tr(Text::TransparentTip);
+        assert!(tip.contains("administrator approval"));
+        assert!(
+            tip.contains(
+                "every IPv4 TCP connection of the browser or terminal follows the gateway's route"
+            ),
+            "{tip}"
+        );
+        assert!(
+            tip.contains("other traffic, such as UDP and IPv6, is blocked"),
+            "{tip}"
+        );
+        assert!(!tip.contains("every connection"), "{tip}");
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
-        assert!(tips(&targets)[0].1.contains("系統管理員核准"));
+        let tip = tips(&targets)[0].1;
+        assert!(tip.contains("系統管理員核准"));
+        assert!(
+            tip.contains("每個 IPv4 TCP 連線都依閘道的路由轉送"),
+            "{tip}"
+        );
+        assert!(
+            tip.contains("其他流量（例如 UDP 與 IPv6）會被封鎖"),
+            "{tip}"
+        );
     }
 
     #[test]

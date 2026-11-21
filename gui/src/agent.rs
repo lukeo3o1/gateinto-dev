@@ -70,6 +70,14 @@ impl Config {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Gateways(Mode),
+    Tray,
+    Sessions,
+    Link,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Transparent {
     #[default]
@@ -92,6 +100,13 @@ impl Transparent {
                 ..
             }) => Some(chosen),
             Self::Reported(_) | Self::Unreported => None,
+        }
+    }
+
+    pub fn start(&self, origin: Origin) -> Mode {
+        match origin {
+            Origin::Gateways(chosen) => self.offer(chosen).unwrap_or(Mode::Proxy),
+            Origin::Tray | Origin::Sessions | Origin::Link => Mode::Proxy,
         }
     }
 }
@@ -260,6 +275,29 @@ mod tests {
         assert_eq!(unavailable, Transparent::Reported(missing));
         assert_eq!(unavailable.offer(Mode::Transparent), None);
         assert_eq!(unavailable.offer(Mode::Proxy), None);
+    }
+
+    #[test]
+    fn only_a_gateway_card_starts_in_the_chosen_mode_and_only_when_it_is_offered() {
+        let available = answered(&status(
+            TransparentAvailability::Available,
+            TransparentEngine::Stopped(None),
+        ));
+        let unavailable = answered(&status(
+            TransparentAvailability::Unavailable("the engine is not installed".to_owned()),
+            TransparentEngine::Stopped(None),
+        ));
+        for chosen in [Mode::Proxy, Mode::Transparent] {
+            assert_eq!(available.start(Origin::Gateways(chosen)), chosen);
+            for transparent in [&unavailable, &Transparent::Unreported] {
+                assert_eq!(transparent.start(Origin::Gateways(chosen)), Mode::Proxy);
+            }
+        }
+        for transparent in [&available, &unavailable, &Transparent::Unreported] {
+            for origin in [Origin::Tray, Origin::Sessions, Origin::Link] {
+                assert_eq!(transparent.start(origin), Mode::Proxy, "{origin:?}");
+            }
+        }
     }
 
     #[test]

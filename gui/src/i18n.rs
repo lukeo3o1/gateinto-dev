@@ -282,7 +282,7 @@ table! {
     VerificationRequired => "Verification required", "需要驗證";
     Proxy => "Proxy", "代理";
     Transparent => "Transparent", "透明";
-    TransparentTip => "Transparent: every connection of the browser or terminal goes through the gateway, even from apps that ignore the proxy settings. Starting the transparent engine may ask for administrator approval.", "透明：瀏覽器或終端機的每個連線都經由閘道，即使應用程式忽略代理設定也一樣。啟動透明引擎時可能會要求系統管理員核准。";
+    TransparentTip => "Transparent: every IPv4 TCP connection of the browser or terminal follows the gateway's route, even from apps that ignore the proxy settings; other traffic, such as UDP and IPv6, is blocked. Starting the transparent engine may ask for administrator approval.", "透明：瀏覽器或終端機的每個 IPv4 TCP 連線都依閘道的路由轉送，即使應用程式忽略代理設定也一樣；其他流量（例如 UDP 與 IPv6）會被封鎖。啟動透明引擎時可能會要求系統管理員核准。";
     ShowVerification => "Show verification", "顯示驗證";
     VerificationTitle => "Gateway verification", "閘道驗證";
     AskingVerification => "Asking the agent for this session's verification…", "正在向代理程式索取此工作階段的驗證…";
