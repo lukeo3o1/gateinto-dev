@@ -416,8 +416,8 @@ The full protocol, limits and guarantees are in
   that cannot hold it, it shows a fixed message instead and no Allow button,
   so the details are never cut off (`gui/src/board/approval.rs`). Not yet
   verified on Windows.
-- The GUI worker asks the agent for `list` (and `config`, and the log page
-  while the Log page is open) at most once every 2 seconds
+- The GUI worker asks the agent for `list` (and `config`, `transparent`, and
+  the log page while the Log page is open) at most once every 2 seconds
   (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
   change, a dialog answer, a credentials reveal, a link or a start delivers
   the last polled state at once, and a command that changes the agent (a
@@ -528,6 +528,27 @@ The full protocol, limits and guarantees are in
   request is pending or accepted since that list, first ask in a dialog with
   Cancel first (`gui/src/confirm.rs`); closing a browser row does not. This
   is unit-tested but not yet verified on Windows.
+- While the agent runs, the worker sends `transparent` after `config` on each
+  poll (`gui/src/worker.rs`); `agent::Transparent` keeps the answer, and a
+  refused or failed request leaves it unreported without touching the rest
+  of the refresh. Only for `availability: available` does the Gateways page
+  header show a Proxy | Transparent choice (`Transparent::offer`,
+  `gui/src/board/gateways.rs`), which applies to Start browser and Open
+  terminal of every card: `Command::Launch` and `Command::Terminal` carry
+  the `Mode`, so a transparent one adds `mode=transparent` and `ipc::send`
+  waits 300 seconds for it. The Sessions page's Start browser, the tray and
+  `gateinto://` links send `Mode::Proxy`. While a transparent start is
+  pending, the Gateways and Sessions subtitles say that starting the engine
+  may ask for administrator approval (`Launches::notice`); the worker
+  handles the launch to its answer before it polls again. A transparent
+  request answered as by an older agent
+  (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
+  transparent sessions; restart it", checked before the terminal's
+  `invalid request` check, which proxy-mode requests keep. A transparent
+  session has a Transparent pill after its number (`gui/src/sessions.rs`,
+  `gui/src/board.rs`), and Settings ends the Agent card with the
+  availability or the engine's state (`settings::transparent`). This is
+  unit-tested but not yet verified on Windows.
 
 ### Terminal sessions in the agent
 
@@ -628,7 +649,7 @@ The full protocol, limits and guarantees are in
 | `gui/src/add.rs`, `gui/src/naming.rs` | The GUI's Add for gateways on this device: the form, its limits and route choice, the disclosure, the generated identifier and the store write. |
 | `gui/src/log.rs`, `gui/src/board/log.rs`, `gui/src/wrap.rs` | The GUI's log view: the journal of agent log events, the filter, copying, and the drawn rows. A long message wraps onto continuation lines under its message column: `wrap.rs` breaks at the last space that fits and cuts tokens wider than a line, measured with per-character advances of the mono font. Shown scopes and messages drop text direction controls and the invisible U+200B, U+2060 and U+FEFF, and show control characters and the U+2028 and U+2029 separators as spaces; copying keeps the text as it was. |
 | `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
-| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
+| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the transparent-sessions row (availability or the engine's state), the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
 
 ## Local 200 only after upstream 2xx

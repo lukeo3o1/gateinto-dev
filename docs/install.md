@@ -343,7 +343,8 @@ only name, host, port, default route (`mixed`, the default, or `gateway`) and so
 URLs and credentials are not printed. `gateinto gateway list` adds each portal's origin, never
 its path or query. Sessions come from the running agent, the same table as `gateinto session list`.
 `transparent-sessions` says whether this computer can run transparent sessions, which
-`gateinto open --transparent` and `gateinto session terminal --agent --transparent` ask for (see
+`gateinto open --transparent`, `gateinto session terminal --agent --transparent` and the GUI's
+Transparent choice ask for (see
 [the README](../README.md#transparent-sessions-from-the-command-line)): `available`, or
 `unavailable: <reason>` (not Windows, Windows older than Windows 10 1607
 or Windows Server 2016, Windows on ARM64, or a WinDivert file missing next to `gateinto.exe` or
@@ -351,7 +352,9 @@ different from the pinned one; the installer does not ship these files yet). It 
 or not the agent runs. While the agent runs, `transparent-engine` is `running`, `starting`, `stopped`
 or `stopped: <error>`, the error that stopped the transparent engine or made its last start fail;
 `unknown: the agent is too old; restart it` comes from an agent older than this line. A transparent
-session's `PROGRAM` cell ends with `(transparent)`.
+session's `PROGRAM` cell ends with `(transparent)`. The GUI shows the same availability and engine
+state in the **Transparent sessions** row of Settings, and marks a transparent session with
+**Transparent** on its Sessions page.
 `uri-handler` is `not registered`, `gateinto: <command>` or `another program: <command>`.
 On Linux, `status` also prints `uri-handler-warning` when Gateinto's desktop file is installed
 but another installed default overrides it or no installed default is found,

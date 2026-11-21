@@ -11,7 +11,7 @@ adoption into a session's proxy (`Proxy::adopter`), the attribution
 (`os_user::original`, `Attribution`), the listener socket
 (`transparent::listener`), the engine state with the registry and the
 session marks (`transparent::state`) and the listener's dispatch loop
-(`transparent::serve`). Step 5 is partly implemented: the agent side of the
+(`transparent::serve`). Step 5 is implemented: the agent side of the
 helper (`transparent::helper`: starting it through `ShellExecuteExW`, the
 liveness pipe server, its status line and noticing when it stops), the
 availability check (`transparent::availability`), and the agent wiring: the
@@ -21,12 +21,12 @@ operations](#order-of-operations), over an engine seam (`src/agent/engine.rs`)
 and `Launcher::tag`, the configuration (`[transparent] dscp`), the IPC
 `transparent` request, the `status` lines, the `session list` marking and
 the CLI flags (`gateinto session terminal --agent --transparent`, `gateinto
-open --transparent`). The GUI does not ask for a transparent session yet:
-its option is the rest of step 5.
+open --transparent`), and the GUI's mode choice, its marking of transparent
+sessions and its engine row in Settings.
 `Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
 and listener socket, the agent side of the helper, the agent's Windows
-engine and the availability probes on Windows, and their tests have only
-been type-checked from Linux until Windows CI runs them; the helper has
+engine, the availability probes on Windows and the GUI's window code, and
+their tests have only been type-checked from Linux until Windows CI runs them; the helper has
 never opened a WinDivert handle and `ShellExecuteExW` has never been
 called. The design rests on premises that have
 not been verified: the evidence is two experiments on GitHub-hosted Windows
@@ -1351,9 +1351,8 @@ with `netsh`.**
 
 The IPC mode, `SessionInfo::transparent`, the availability check, the
 `transparent` status request, the `session list` marking, the `status`
-lines and the CLI flags exist; the GUI option and the GUI's marking are
-*(proposed)*, the rest of step 5 of the
-[Implementation plan](#implementation-plan).
+lines, the CLI flags, the GUI's mode choice and its marking exist (step 5
+of the [Implementation plan](#implementation-plan)).
 
 - CLI: `gateinto session terminal --agent --transparent` and
   `gateinto open --transparent -- <uri>`. `--transparent` of
@@ -1406,7 +1405,7 @@ lines and the CLI flags exist; the GUI option and the GUI's marking are
   parser has no field for it (`mode`, `transparent` and any other unknown
   field fail as `UnknownField`). An older agent answers `invalid launch
   request` or `invalid terminal request`; the CLI says the agent is too old
-  for transparent sessions, and the GUI is to say so too *(proposed)*.
+  for transparent sessions, and so does the GUI.
 - IPC status: the request `transparent`, without arguments, answers `ok`
   with `key: value` lines, in the style of the other answers:
   `availability: available` or `availability: unavailable: <reason>`, and
@@ -1423,9 +1422,40 @@ lines and the CLI flags exist; the GUI option and the GUI's marking are
   error. An older agent answers `error: invalid request`, its answer to any
   request it does not know, which the client reads as "the agent is too
   old; restart it".
-- GUI: a "Transparent" option for Open terminal and Start browser, offered
-  only when the agent reports transparent sessions as available *(proposed)*;
-  the GUI does not mark transparent sessions yet *(proposed)*.
+- GUI (`gateinto-gui`): while the agent runs, each refresh asks
+  `transparent` after `config` (`worker::poll`), and `agent::Transparent`
+  keeps the answer; a refused or failed request is `Unreported` and leaves
+  the rest of the refresh as it was.
+  - The Gateways page shows a "Proxy | Transparent" choice in its header,
+    between the subtitle and Add gateway, only when the answer is
+    `availability: available` (`Transparent::offer`). It is one choice for
+    both Start browser and Open terminal of every gateway card, the only
+    place that offers both, so it needs no new menu or dialog. It is drawn
+    as the segmented control of Settings and is its own arrow-key group.
+    Its tooltip says what the mode does and that starting the engine may
+    ask for administrator approval. When the choice is hidden (unavailable,
+    an older agent, an error, no agent) both buttons send proxy-mode
+    requests; the choice is kept in memory only and comes back with the
+    availability.
+  - `Command::Launch` and `Command::Terminal` carry the `Mode` into the IPC
+    request, so `ipc::send` applies the 300 s limit; the GUI has no timeout
+    of its own. The Sessions page's Start browser, the tray flyout and
+    `gateinto://` links always send `Mode::Proxy`.
+  - While a transparent start is pending (`Launches::notice`), the
+    Gateways and Sessions subtitles say "Starting the transparent engine
+    may ask for administrator approval". The worker runs a launch to its
+    answer before it polls again, as for proxy-mode launches, so the lists
+    are not refreshed during the wait.
+  - A transparent request refused as sent to an older agent
+    (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
+    transparent sessions; restart it"; proxy-mode answers keep their
+    handling, including the terminal's `invalid request` check.
+  - A session with `transparent` has a "Transparent" pill after its number
+    on the Sessions page; proxy sessions have no mark, for the same reason
+    `session list` has no mode column.
+  - The Agent card of Settings ends with a "Transparent sessions" row:
+    "Unavailable: <reason>", or "Available · engine running", "starting",
+    "stopped" or "stopped: <error>"; it has no row while unreported.
 - `SessionInfo` has `transparent: bool`, serialized only when true and set
   by the agent for its transparent browser and terminal sessions.
   `session list` and the session table of `status` append ` (transparent)`
@@ -1919,7 +1949,26 @@ binary: `transparent-sessions: unavailable: transparent sessions need
 Windows` without an agent and no engine line, and `transparent-engine:
 stopped` from a running agent. The fuzz target `ipc-line` checks that an
 accepted status re-encodes to itself, with seeds for the request and two
-answers. The demo GUI agent answers available with the engine stopped.
+answers. The demo GUI agent answers available with the engine running.
+
+Implemented with step 5 for the GUI (`gui/src`): the worker asks
+`transparent` on each poll only while the agent runs, a failed or refused
+request leaves the gateways, sessions and config of the refresh intact,
+transparent launch and terminal commands send `mode=transparent`, links
+send proxy-mode launches even while transparent sessions are available,
+and only a transparent request refused as sent to an older agent is named
+too old (`worker.rs`); the choice is offered only for `available`, never
+for `unavailable`, an error, an older agent or no agent (`agent.rs`); the
+choice sits between the subtitle and Add gateway, is worded in both
+languages, maps to its mode for the pointer and is its own focus group
+(`board/gateways.rs`, `pointer.rs`, `focus.rs`); a pending transparent
+start shows the approval notice (`gateways.rs`); the Transparent tooltip
+(`board.rs`); a transparent session is marked and a proxy one is not
+(`sessions.rs`, `board.rs`); the engine row in each state
+(`settings.rs`, `board/settings.rs`); every new text exists in English and
+Traditional Chinese (`i18n.rs`); and the demo offers the choice with the
+engine running, refuses transparent starts like proxy ones and shows one
+transparent terminal session (`demo.rs`).
 
 Implemented with step 5 for the CLI: in `src/ipc.rs`, only transparent
 launch and terminal requests choose the 300 s limit, a timeout names the
@@ -2168,7 +2217,8 @@ code to pass it, then a refactor.
    engine state with its generations, the registry of transparent sessions
    and the session marks (`transparent::state`); and the listener's
    dispatch loop with its in-flight bound (`transparent::serve`).
-5. **Agent wiring** (partly implemented). On-demand helper with
+5. **Agent wiring** (implemented; the Windows parts type-checked from
+   Linux only). On-demand helper with
    `ShellExecuteExW`, the order of operations, fail-closed handling,
    `[transparent]`, the CLI flags, the IPC mode, the GUI option,
    `SessionInfo::transparent` and the `status` lines; `Win32_UI_Shell` in
@@ -2184,8 +2234,8 @@ code to pass it, then a refactor.
    stop-watcher and fail-closed handling), `[transparent] dscp`, the IPC
    `transparent` request, the `status` lines, the `session list` marking
    and the CLI flags (`session terminal --agent --transparent`, `open
-   --transparent`). Left: the GUI option and the GUI's marking of
-   transparent sessions.
+   --transparent`), and the GUI's mode choice, approval notice, too-old
+   message, marking of transparent sessions and engine row in Settings.
 6. **Packaging and user documentation.** The optional MSI feature with the
    WinDivert files and license, and the security model, threat model,
    security boundaries, install and compatibility pages.

@@ -53,6 +53,7 @@ pub fn tips(targets: &[(Rect, Zone)]) -> Vec<(Rect, &'static str)> {
             Zone::CloseTerminal(_) => Some((r, tr(crate::confirm::CLOSE))),
             Zone::More(_) => Some((r, tr(MORE_TIP))),
             Zone::OpenTerminal(_) => Some((r, tr(crate::gateways::OPEN_TERMINAL))),
+            Zone::Mode(gateinto::ipc::Mode::Transparent) => Some((r, tr(Text::TransparentTip))),
             Zone::TogglePassword(false) => Some((r, tr(Text::ShowPassword))),
             Zone::TogglePassword(true) => Some((r, tr(Text::HidePassword))),
             Zone::Info(text) => Some((r, tr(text))),
@@ -487,7 +488,16 @@ impl<'a, M: Measure> Painter<'a, M> {
             t.text,
         );
         let number = Rect::new(first.x + w, first.y, first.w - w, first.h);
-        self.text(Font::Small, row.number.clone(), number, t.muted);
+        match row.transparent {
+            Some(mark) => {
+                let n = self.m.width(Font::Small, &row.number).min(number.w);
+                let shown = Rect { w: n, ..number };
+                self.text(Font::Small, row.number.clone(), shown, t.muted);
+                let x = (shown.right() + s.px(PILL_GAP)).min(first.right());
+                self.pill(x, first, mark);
+            }
+            None => self.text(Font::Small, row.number.clone(), number, t.muted),
+        }
         let second = line2(c.session);
         match row.verification {
             Some(marker) => {
@@ -638,6 +648,19 @@ mod tests {
     }
 
     #[test]
+    fn the_transparent_mode_explains_itself_and_the_approval_it_may_need() {
+        let r = Rect::new(1, 2, 3, 4);
+        let targets = [
+            (r, Zone::Mode(gateinto::ipc::Mode::Proxy)),
+            (r, Zone::Mode(gateinto::ipc::Mode::Transparent)),
+        ];
+        assert_eq!(tips(&targets), [(r, tr(Text::TransparentTip))]);
+        assert!(tr(Text::TransparentTip).contains("administrator approval"));
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert!(tips(&targets)[0].1.contains("系統管理員核准"));
+    }
+
+    #[test]
     fn the_sessions_page_speaks_chinese() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         let mut idle = row(2);
@@ -703,6 +726,38 @@ mod tests {
             !plain
                 .iter()
                 .any(|op| matches!(op, Op::Text(_, s, ..) if s == "Verification required"))
+        );
+    }
+
+    #[test]
+    fn a_transparent_session_shows_a_pill_after_its_number() {
+        let mut marked = row(1);
+        marked.transparent = Some("Transparent");
+        let ops = draw(&running(vec![marked])).ops;
+        let at = |want: &str| {
+            ops.iter()
+                .find_map(|op| match op {
+                    Op::Text(font, s, r, c) if s == want => Some((*font, *r, *c)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (_, title, _) = at("Chrome");
+        let (_, number, _) = at(" #1");
+        let (font, label, ink) = at("Transparent");
+        assert_eq!((font, ink), (Font::Pill, T.pill_text));
+        assert_eq!(number.w, Chars.width(Font::Small, " #1"));
+        assert!(label.x >= number.right() + S.px(PILL_GAP));
+        assert_eq!(label.y + label.h / 2, title.y + title.h / 2);
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            Op::Round(r, _, c) if *c == T.tile && r.x == number.right() + S.px(PILL_GAP)
+        )));
+        let plain = draw(&running(vec![row(1)])).ops;
+        assert!(
+            !plain
+                .iter()
+                .any(|op| matches!(op, Op::Text(_, s, ..) if s == "Transparent"))
         );
     }
 
@@ -808,6 +863,7 @@ mod tests {
             uptime: "5 min".to_owned(),
             active: true,
             verification: None,
+            transparent: None,
         }
     }
 

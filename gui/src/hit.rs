@@ -24,6 +24,7 @@ pub enum Zone {
     More(u64),
     StartBrowser(usize),
     OpenTerminal(usize),
+    Mode(gateinto::ipc::Mode),
     GatewayCard(usize),
     Picker,
     Entry(usize),

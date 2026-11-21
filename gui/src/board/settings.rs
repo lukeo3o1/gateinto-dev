@@ -41,14 +41,15 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let gap = s.px(14.0);
     let top = line.bottom() + gap;
     let view = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0));
-    let rows = page.agent.as_ref().map_or(1, Vec::len) as i32;
+    let rows =
+        page.agent.as_ref().map_or(1, Vec::len) as i32 + i32::from(page.transparent.is_some());
     let app_h = card_height(s, 4);
     let agent_h = card_height(s, rows);
     let offset = p.scroll(view, app_h + gap + agent_h);
     let app = Rect::new(content.x, top - offset, content.w, app_h);
     p.app(app, page);
     let agent = Rect::new(content.x, app.bottom() + gap, content.w, agent_h);
-    p.agent(agent, &page.agent, page.source);
+    p.agent(agent, page);
     p.finish()
 }
 
@@ -213,13 +214,8 @@ impl<M: Measure> Painter<'_, M> {
         self.text(font, value, value_r, t.muted);
     }
 
-    fn agent(
-        &mut self,
-        card: Rect,
-        agent: &Result<Vec<(&'static str, String)>, String>,
-        source: Text,
-    ) {
-        let (s, t) = (self.s, self.t);
+    fn agent(&mut self, card: Rect, page: &Page) {
+        let (s, t, source) = (self.s, self.t, page.source);
         let heading = self.section(card, AGENT);
         let w = self.m.width(Font::Small, tr(source)).min(heading.w);
         let label = Rect::new(heading.right() - w, heading.y, w, heading.h);
@@ -227,17 +223,28 @@ impl<M: Measure> Painter<'_, M> {
         let glyph = Rect::new(label.x - s.px(6.0) - glyph, heading.y, glyph, heading.h);
         self.icon(icons::LOCK, glyph, 13.0, t.muted);
         self.text(Font::Small, source, label, t.muted);
-        match agent {
+        let shown = match &page.agent {
             Ok(rows) => {
                 for (i, (label, value)) in rows.iter().enumerate() {
                     let row = self.line(heading, i as i32);
                     self.pair(row, label, value.clone(), Font::Body);
                 }
+                rows.len() as i32
             }
             Err(error) => {
                 let row = self.line(heading, 0);
                 self.text(Font::Body, error.clone(), row, t.muted);
+                1
             }
+        };
+        if let Some(state) = &page.transparent {
+            let row = self.line(heading, shown);
+            self.pair(
+                row,
+                tr(Text::TransparentSessions),
+                state.clone(),
+                Font::Body,
+            );
         }
     }
 }
@@ -290,6 +297,7 @@ mod tests {
             agent_start: AgentStart::On,
             theme: Choice::System,
             language: Language::System,
+            transparent: None,
         }
     }
 
@@ -595,6 +603,47 @@ mod tests {
         assert!(
             !ops.iter()
                 .any(|op| matches!(op, Op::Text(_, t, ..) if t == tr(FROM_CONFIG)))
+        );
+    }
+
+    #[test]
+    fn the_transparent_engine_state_is_the_last_agent_row() {
+        let mut p = page(true);
+        p.transparent = Some("Available · engine running".to_owned());
+        let y = AGENT_Y;
+        let ops = draw(&p).ops;
+        let card = inside(&ops, Rect::new(248, y, 764, 320));
+        let last = y + 48 + 5 * 44;
+        assert_eq!(
+            card[card.len() - 3..],
+            [
+                Op::Fill(Rect::new(268, last, 724, 1), T.border),
+                text(
+                    Font::Body,
+                    "Transparent sessions",
+                    Rect::new(268, last, 140, 44),
+                    T.text
+                ),
+                text(
+                    Font::Body,
+                    "Available · engine running",
+                    Rect::new(810, last, 182, 44),
+                    T.muted
+                ),
+            ]
+        );
+        assert!(ops.contains(&Op::Round(Rect::new(248, y, 764, 320), 12.0, T.border)));
+        p.agent = Err("config file c.toml: broken".to_owned());
+        let ops = draw(&p).ops;
+        let card = inside(&ops, Rect::new(248, y, 764, 144));
+        assert_eq!(
+            card[card.len() - 2],
+            text(
+                Font::Body,
+                "Transparent sessions",
+                Rect::new(268, y + 48 + 44, 140, 44),
+                T.text
+            )
         );
     }
 

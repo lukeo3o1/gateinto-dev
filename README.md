@@ -406,7 +406,8 @@ Windows only, pre-release and not yet verified on real Windows; see
   terminal` requires `--agent`; `gateinto session browser` has no such
   option, and a `gateinto://` link cannot ask for one. A launch that would
   need a gateway confirmation is refused; add the gateway or use its saved
-  route first. The GUI does not offer transparent sessions yet.
+  route first. The GUI offers them too; see
+  [Transparent sessions in the GUI](#transparent-sessions-in-the-gui).
 - The first transparent session of an agent starts the transparent engine,
   which may ask for administrator approval, so the command first prints
   `starting the transparent engine may ask for administrator approval` on
@@ -782,8 +783,8 @@ Rules:
   know the key; this has not been tried.
 - `[transparent] dscp` is the DSCP value, 1 to 63 (default 43), that the
   agent tags the traffic of transparent sessions with; `gateinto open
-  --transparent` and `gateinto session terminal --agent --transparent`
-  request such sessions, and the GUI does not yet. The agent reads it once when
+  --transparent`, `gateinto session terminal --agent --transparent` and the
+  GUI's **Transparent** choice request such sessions. The agent reads it once when
   it starts. Traffic that a program or QoS policy tags with the same value
   outside Gateinto is expected to be captured and dropped or closed while the
   transparent engine runs (from the first transparent session until the agent
@@ -1047,6 +1048,33 @@ sessions are open, one is being opened, or one was accepted but is not
 listed yet, and then says how many it closed. Closing a browser session does
 not ask. In the demo nothing is started. This is unit-tested but has not
 been tried on a real Windows desktop.
+
+## Transparent sessions in the GUI
+
+Windows only, pre-release and not yet verified on real Windows; see
+[the design](docs/design/transparent-session.md). While the agent runs, the
+GUI asks it on every refresh whether transparent sessions are available. Only
+when it answers `available` does the Gateways page show a **Proxy |
+Transparent** choice next to Add gateway. The choice applies to Start browser
+and Open terminal of every gateway card, and its tooltip says that starting the
+transparent engine may ask for administrator approval. When the agent says
+they are unavailable, does not know the request, fails to answer it or is not
+running, the choice is hidden and both buttons start proxy sessions. The
+Sessions page's Start browser, the tray flyout and `gateinto://` links always
+start proxy sessions.
+
+While a transparent start is pending, the Gateways and Sessions pages say
+`Starting the transparent engine may ask for administrator approval`. The GUI
+waits for the agent's answer as `gateinto open --transparent` does, up to 300
+seconds, and does not refresh its lists meanwhile. An agent from before
+transparent sessions is named: `the agent is too old for transparent sessions;
+restart it`. A transparent session has a **Transparent** mark after its number
+on the Sessions page. The Agent card in Settings ends with a **Transparent
+sessions** row: unavailable with the agent's reason, or available with the
+state of the transparent engine (running, starting, stopped, or stopped with
+its error). The demo offers the choice, reports the engine as running and
+shows one transparent terminal session; it starts nothing. This is
+unit-tested but has not been tried on a real Windows desktop.
 
 ## Verification status
 

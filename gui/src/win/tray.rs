@@ -482,7 +482,7 @@ fn act(main: HWND, action: Option<Action>) {
     match action {
         Some(Action::StartBrowser(row)) => {
             with_app(main, |app| {
-                if app.launch(row) {
+                if app.launch(row, gateinto::ipc::Mode::Proxy) {
                     app.panel.notice.wait();
                 }
                 app.refresh_flyout();

@@ -49,6 +49,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use gateinto::clock::unix_now;
 use gateinto::config::{self, GatewayName};
+use gateinto::ipc;
 use gateinto::link::{handoff as reply, store};
 use gateinto::uri::LaunchRequest;
 use zeroize::Zeroizing;
@@ -158,6 +159,7 @@ struct App {
     icons: Icons,
     update: Option<Update>,
     launches: Launches,
+    mode: ipc::Mode,
     link: Link,
     tips: Tips,
     config: settings::ConfigView,
@@ -215,6 +217,7 @@ impl App {
             popup: None,
             update: None,
             launches: Launches::default(),
+            mode: ipc::Mode::default(),
             link: if demo {
                 Link::demo(hwnd)
             } else {
@@ -266,17 +269,21 @@ impl App {
             &self.fonts,
         );
         let failure = update.failure.as_ref().map(Note::shown);
+        let notice = self.launches.notice().map(tr).or(failure);
         let mut board = match v.nav.selected() {
             NavPage::Settings => {
-                let page = settings::page(
-                    &self.config,
-                    &update.agent,
-                    failure,
-                    self.sign_in,
-                    self.agent_start,
-                    self.theme,
-                    self.language,
-                );
+                let page = settings::Page {
+                    transparent: settings::transparent(&update.transparent),
+                    ..settings::page(
+                        &self.config,
+                        &update.agent,
+                        failure,
+                        self.sign_in,
+                        self.agent_start,
+                        self.theme,
+                        self.language,
+                    )
+                };
                 board::settings::board(l, s, t, v, &page, m)
             }
             NavPage::Device => {
@@ -291,7 +298,10 @@ impl App {
             }
             NavPage::Gateways => {
                 let busy = self.launches.busy();
-                let page = gateways::page(&update.gateways, &update.state, failure, busy);
+                let page = gateways::Page {
+                    mode: update.transparent.offer(self.mode),
+                    ..gateways::page(&update.gateways, &update.state, notice, busy)
+                };
                 board::gateways::board(l, s, t, v, &page, m)
             }
             _ => board(
@@ -301,7 +311,7 @@ impl App {
                 v,
                 &sessions::page(
                     &update.state,
-                    failure,
+                    notice,
                     unix_now(),
                     self.launches.busy(),
                     &update.starting,
@@ -868,25 +878,39 @@ impl App {
         self.invalidate();
     }
 
-    fn launch(&mut self, row: usize) -> bool {
-        self.pend(row, Launches::start, Command::Launch)
+    fn chosen(&self) -> ipc::Mode {
+        self.update
+            .as_ref()
+            .and_then(|update| update.transparent.offer(self.mode))
+            .unwrap_or_default()
     }
 
-    fn open_terminal(&mut self, row: usize) -> bool {
-        self.pend(row, Launches::terminal, Command::Terminal)
+    fn choose_mode(&mut self, mode: ipc::Mode) {
+        self.mode = mode;
+        self.retarget();
+        self.invalidate();
+    }
+
+    fn launch(&mut self, row: usize, mode: ipc::Mode) -> bool {
+        self.pend(row, mode, Launches::start, Command::Launch)
+    }
+
+    fn open_terminal(&mut self, row: usize, mode: ipc::Mode) -> bool {
+        self.pend(row, mode, Launches::terminal, Command::Terminal)
     }
 
     fn pend(
         &mut self,
         row: usize,
-        start: fn(&mut Launches, &[GatewayName], usize) -> Option<GatewayName>,
-        command: fn(GatewayName) -> Command,
+        mode: ipc::Mode,
+        start: fn(&mut Launches, &[GatewayName], usize, ipc::Mode) -> Option<GatewayName>,
+        command: fn(GatewayName, ipc::Mode) -> Command,
     ) -> bool {
         let names = self.update.as_ref().map(|u| gateways::names(&u.gateways));
-        let Some(name) = start(&mut self.launches, &names.unwrap_or_default(), row) else {
+        let Some(name) = start(&mut self.launches, &names.unwrap_or_default(), row, mode) else {
             return false;
         };
-        self.link.send(command(name));
+        self.link.send(command(name, mode));
         self.retarget();
         self.invalidate();
         true
@@ -1143,6 +1167,7 @@ fn hit_code(zone: Zone) -> u32 {
         | Zone::More(_)
         | Zone::StartBrowser(_)
         | Zone::OpenTerminal(_)
+        | Zone::Mode(_)
         | Zone::GatewayCard(_)
         | Zone::Picker
         | Zone::Entry(_)
@@ -1208,11 +1233,16 @@ fn perform(hwnd: HWND, action: Option<Action>) {
             return;
         }
         Some(Action::StartBrowser(row)) => {
-            with_app(hwnd, |app| app.launch(row));
+            with_app(hwnd, |app| app.launch(row, app.chosen()));
             return;
         }
         Some(Action::OpenTerminal(row)) => {
-            with_app(hwnd, |app| app.open_terminal(row));
+            with_app(hwnd, |app| app.open_terminal(row, app.chosen()));
+            return;
+        }
+        Some(Action::Mode(mode)) => {
+            with_app(hwnd, |app| app.choose_mode(mode));
+            rehover(hwnd);
             return;
         }
         Some(Action::GatewayDetails(row)) => {
@@ -1236,7 +1266,7 @@ fn perform(hwnd: HWND, action: Option<Action>) {
                 app.dismiss();
                 match choice {
                     Some(Choice::Launch(row)) => {
-                        app.launch(row);
+                        app.launch(row, ipc::Mode::Proxy);
                     }
                     Some(Choice::Details(id)) => app.session_gateway(id),
                     Some(Choice::Portal(id)) => return app.portal(id),

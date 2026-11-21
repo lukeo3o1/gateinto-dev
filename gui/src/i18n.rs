@@ -259,6 +259,12 @@ table! {
     ConnectTimeout => "Connect timeout", "連線逾時";
     IdleTimeout => "Idle timeout", "閒置逾時";
     HeaderLimit => "Request header limit", "請求標頭上限";
+    TransparentSessions => "Transparent sessions", "透明工作階段";
+    EngineRunning => "Available · engine running", "可用 · 引擎執行中";
+    EngineStarting => "Available · engine starting", "可用 · 引擎啟動中";
+    EngineStopped => "Available · engine stopped", "可用 · 引擎已停止";
+    EngineFailed => "Available · engine stopped: {0}", "可用 · 引擎已停止：{0}";
+    TransparentUnavailable => "Unavailable: {0}", "無法使用：{0}";
     Light => "Light", "淺色";
     Dark => "Dark", "深色";
     CredentialsTitle => "Session credentials", "工作階段登入資訊";
@@ -274,6 +280,9 @@ table! {
     DialogNames => "sign-in dialog names {0}", "登入對話框會顯示 {0}";
     CredentialsWarning => "Enter these only in the proxy sign-in prompt for {0}. Never enter them in a website's sign-in page or dialog.", "只能在 {0} 的代理登入提示中輸入。切勿在網站的登入頁面或對話框中輸入。";
     VerificationRequired => "Verification required", "需要驗證";
+    Proxy => "Proxy", "代理";
+    Transparent => "Transparent", "透明";
+    TransparentTip => "Transparent: every connection of the browser or terminal goes through the gateway, even from apps that ignore the proxy settings. Starting the transparent engine may ask for administrator approval.", "透明：瀏覽器或終端機的每個連線都經由閘道，即使應用程式忽略代理設定也一樣。啟動透明引擎時可能會要求系統管理員核准。";
     ShowVerification => "Show verification", "顯示驗證";
     VerificationTitle => "Gateway verification", "閘道驗證";
     AskingVerification => "Asking the agent for this session's verification…", "正在向代理程式索取此工作階段的驗證…";
@@ -362,6 +371,8 @@ table! {
     Confirmation => "the agent asked to confirm this gateway; open the gateway's link again to confirm it", "代理程式要求確認此閘道；請重新開啟該閘道的連結以確認";
     TerminalTitle => "Terminal", "終端機";
     TerminalTooOld => "the agent is too old for terminal sessions; restart it", "代理程式版本過舊，不支援終端機工作階段；請重新啟動它";
+    TransparentTooOld => "the agent is too old for transparent sessions; restart it", "代理程式版本過舊，不支援透明工作階段；請重新啟動它";
+    TransparentStarting => "Starting the transparent engine may ask for administrator approval", "啟動透明引擎時可能會要求系統管理員核准";
     ClosedTerminal => "Closed 1 terminal session", "已關閉 1 個終端機工作階段";
     ClosedTerminals => "Closed {0} terminal sessions", "已關閉 {0} 個終端機工作階段";
     CloseTerminal => "Close terminal", "關閉終端機";

@@ -1,8 +1,10 @@
+use gateinto::ipc::Mode;
+
 use super::{Board, PILL_GAP, Painter};
 use crate::fonts::{Font, Measure};
 use crate::gateways::{ADD, EMPTY, FOOTNOTE, Page, Row, START};
 use crate::hit::Zone;
-use crate::i18n::tr;
+use crate::i18n::{Text, tr};
 use crate::icons;
 use crate::layout::{Layout, Rect};
 use crate::nav::Page as NavPage;
@@ -21,13 +23,31 @@ pub fn board(l: &Layout, s: Scale, t: &Theme, v: &View, page: &Page, m: &impl Me
     let content = l.content;
     let header = Rect::new(content.x, content.y, content.w, s.px(32.0));
     let add = p.button(header, header.right(), tr(ADD));
+    let room = Rect {
+        w: add.x - s.px(16.0) - header.x,
+        ..header
+    };
+    let modes = page.mode.map(|chosen| {
+        [Mode::Proxy, Mode::Transparent].map(|mode| {
+            let label = tr(match mode {
+                Mode::Proxy => Text::Proxy,
+                Mode::Transparent => Text::Transparent,
+            });
+            (label, Zone::Mode(mode), mode == chosen)
+        })
+    });
+    let group = modes.map(|parts| (p.segment_group(room, &parts, true), parts));
+    let end = group.map_or(room.right(), |(group, _)| group.x - s.px(16.0));
     let subtitle = Rect::new(
         content.x,
         content.y + (header.h - s.px(18.0)) / 2,
-        add.x - s.px(16.0) - content.x,
+        end - content.x,
         s.px(18.0),
     );
     p.text(Font::Body, page.subtitle.clone(), subtitle, t.muted);
+    if let Some((group, parts)) = group {
+        p.segment_parts(group, &parts);
+    }
     p.outlined(add, icons::PLUS, tr(ADD), Zone::AddGateway);
     let top = header.bottom() + s.px(12.0);
     let mut bottom = content.bottom();
@@ -180,6 +200,7 @@ mod tests {
     use crate::scene::Op;
     use crate::scroll::Pane;
     use crate::theme::Theme;
+    use gateinto::ipc::Mode;
 
     const T: Theme = Theme::LIGHT;
     const S: Scale = Scale { dpi: 96 };
@@ -205,6 +226,7 @@ mod tests {
             empty: rows.is_empty(),
             launch: true,
             terminal: false,
+            mode: None,
             rows,
         }
     }
@@ -237,6 +259,73 @@ mod tests {
             let b = draw(&page);
             assert_eq!(b.targets[0], ADDING);
             assert_eq!(b.ops[2..6], add_button());
+        }
+    }
+
+    #[test]
+    fn an_offered_mode_choice_sits_between_the_subtitle_and_add_gateway() {
+        let proxy = Rect::new(702, 83, 59, 26);
+        let transparent = Rect::new(763, 83, 101, 26);
+        let (proxy_label, transparent_label) =
+            (Rect::new(714, 83, 35, 26), Rect::new(775, 83, 77, 26));
+        for chosen in [Mode::Proxy, Mode::Transparent] {
+            let page = Page {
+                mode: Some(chosen),
+                ..listed(vec![row("office", false)])
+            };
+            let b = draw(&page);
+            assert_eq!(
+                b.targets[..3],
+                [
+                    (proxy, Zone::Mode(Mode::Proxy)),
+                    (transparent, Zone::Mode(Mode::Transparent)),
+                    ADDING
+                ]
+            );
+            let narrowed = Rect::new(248, 87, 435, 18);
+            assert_eq!(b.ops[1], text(Font::Body, SUBTITLE, narrowed, T.muted));
+            assert_eq!(
+                b.ops[2],
+                Op::Round(Rect::new(699, 80, 168, 32), 7.0, T.tile)
+            );
+            let parts = match chosen {
+                Mode::Proxy => [
+                    Op::Round(proxy, 5.0, T.card),
+                    text(Font::SmallStrong, "Proxy", proxy_label, T.text),
+                    text(Font::Small, "Transparent", transparent_label, T.muted),
+                ],
+                Mode::Transparent => [
+                    text(Font::Small, "Proxy", proxy_label, T.muted),
+                    Op::Round(transparent, 5.0, T.card),
+                    text(Font::SmallStrong, "Transparent", transparent_label, T.text),
+                ],
+            };
+            assert_eq!(b.ops[3..6], parts);
+            assert_eq!(b.ops[6..10], add_button());
+        }
+        let hidden = draw(&listed(vec![row("office", false)]));
+        assert!(
+            !hidden
+                .targets
+                .iter()
+                .any(|(_, zone)| matches!(zone, Zone::Mode(_)))
+        );
+    }
+
+    #[test]
+    fn the_mode_choice_is_worded_in_the_chosen_language() {
+        let _zh = speaking(Language::Chinese);
+        let page = Page {
+            mode: Some(Mode::Proxy),
+            ..listed(vec![])
+        };
+        let ops = draw(&page).ops;
+        for label in ["代理", "透明"] {
+            assert!(
+                ops.iter()
+                    .any(|op| matches!(op, Op::Text(_, s, ..) if s == label)),
+                "{label}"
+            );
         }
     }
 
@@ -278,6 +367,7 @@ mod tests {
             footnote: false,
             launch: false,
             terminal: false,
+            mode: None,
         };
         let ops = draw(&page).ops;
         assert_eq!(
