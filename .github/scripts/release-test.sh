@@ -795,7 +795,7 @@ done
 
 no_analyze=$(mktemp -d "$area/no-analyze.XXXXXX")
 for tool in /usr/bin/* /bin/*; do
-  if [[ ${tool##*/} != systemd-analyze && ! -e $no_analyze/${tool##*/} ]]; then
+  if [[ ${tool##*/} != systemd-analyze && ! -e $no_analyze/${tool##*/} && ! -L $no_analyze/${tool##*/} ]]; then
     ln -s "$tool" "$no_analyze/"
   fi
 done
