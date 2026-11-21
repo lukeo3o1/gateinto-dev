@@ -390,10 +390,13 @@ else
   pass 'install from the package directory'
 fi
 
+# Ubuntu's multicall sleep cannot run after being copied under a different name.
+sleep_binary=$(command -v gnusleep || command -v sleep)
+
 home=$(new_home)
 bin=$home/.local/bin
 mkdir -m 0755 "$bin"
-cp "$(command -v sleep)" "$bin/gateinto"
+cp "$sleep_binary" "$bin/gateinto"
 owned "$bin"
 if ! start_as_user "$bin/gateinto" 60; then
   fail 'install over a running gateinto' 'the copy of sleep did not start within 5 seconds'
@@ -632,7 +635,7 @@ not_started='the copy of sleep did not start within 5 seconds'
 home=$(new_home)
 bin=$home/.local/bin
 mkdir -m 0755 "$bin"
-cp "$(command -v sleep)" "$bin/gateinto"
+cp "$sleep_binary" "$bin/gateinto"
 owned "$bin"
 before=$(snapshot "$home")
 sleep_error=$(as_user env -i HOME="$home" PATH="$system_path" "$bin/gateinto" stop 2>&1 > /dev/null || true)
@@ -647,7 +650,7 @@ elif [[ "$(cat "$work/stderr")" != "$sleep_error"$'\n'"$still_running_message" ]
   fail "$name" "stderr is $(cat "$work/stderr")"
 elif [[ -s $work/stdout ]]; then
   fail "$name" "printed on stdout: $(cat "$work/stdout")"
-elif ! cmp -s "$bin/gateinto" "$(command -v sleep)" || [[ "$(snapshot "$home")" != "$before" ]]; then
+elif ! cmp -s "$bin/gateinto" "$sleep_binary" || [[ "$(snapshot "$home")" != "$before" ]]; then
   fail "$name" 'changed something'
 else
   pass "$name"
@@ -657,7 +660,7 @@ stop_running
 home=$(unit_home file)
 bin=$home/.local/bin
 mv "$bin/gateinto" "$bin/.stub"
-cp "$(command -v sleep)" "$bin/gateinto"
+cp "$sleep_binary" "$bin/gateinto"
 owned "$bin"
 : > "$area/stop-prints"
 before=$(snapshot "$home")
@@ -683,7 +686,7 @@ stop_running
 
 home=$(installed_home)
 bin=$home/.local/bin
-cp "$(command -v sleep)" "$bin/gateinto-old"
+cp "$sleep_binary" "$bin/gateinto-old"
 owned "$bin"
 name='uninstall while another copy of gateinto runs'
 if ! start_as_user "$bin/gateinto-old" 600; then
