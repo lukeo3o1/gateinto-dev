@@ -125,13 +125,11 @@ fn pseudo_header(packet: &[u8], ip_header: usize, total: usize) -> u64 {
 }
 
 fn sum(data: &[u8]) -> u64 {
-    let chunks = data.chunks_exact(2);
-    let odd = chunks
-        .remainder()
-        .first()
-        .map_or(0, |&byte| u64::from(byte) << 8);
-    chunks
-        .map(|pair| u64::from(u16::from_be_bytes([pair[0], pair[1]])))
+    let (pairs, rest) = data.as_chunks::<2>();
+    let odd = rest.first().map_or(0, |&byte| u64::from(byte) << 8);
+    pairs
+        .iter()
+        .map(|&pair| u64::from(u16::from_be_bytes(pair)))
         .sum::<u64>()
         + odd
 }
