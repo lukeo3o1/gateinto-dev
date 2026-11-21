@@ -491,12 +491,13 @@ mod tests {
     use std::ffi::OsStr;
     use std::fs;
     use std::process::{Command, Stdio};
-    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
     use windows_sys::Win32::Foundation::{ERROR_MOD_NOT_FOUND, ERROR_PROC_NOT_FOUND};
 
     use super::*;
@@ -710,13 +711,19 @@ mod tests {
             .unwrap()
     }
 
-    fn watching(watch: Watch) -> mpsc::Receiver<()> {
-        let (gone, watched) = mpsc::channel();
+    fn watching(watch: Watch) -> oneshot::Receiver<()> {
+        let (gone, watched) = oneshot::channel();
         thread::spawn(move || {
             watch.wait_until_gone();
             let _ = gone.send(());
         });
         watched
+    }
+
+    // A dropped tokio pipe closes its handle only once the runtime has processed the read it
+    // cancelled, so waiting must keep the runtime running.
+    async fn gone_within(watched: &mut oneshot::Receiver<()>, time: Duration) -> bool {
+        matches!(timeout(time, watched).await, Ok(Ok(())))
     }
 
     #[tokio::test]
@@ -732,16 +739,17 @@ mod tests {
         let (name, mut server) = agent_pipe();
         let (mut pipe, watch) = connect_to(name, own_pid()).await.unwrap();
         server.connect().await.unwrap();
-        let watched = watching(watch);
+        let mut watched = watching(watch);
         pipe.write_all(b"ready\n").unwrap();
         let mut line = [0; 6];
         server.read_exact(&mut line).await.unwrap();
         assert_eq!(&line, b"ready\n");
-        assert!(watched.recv_timeout(Duration::from_millis(200)).is_err());
+        assert!(!gone_within(&mut watched, Duration::from_millis(200)).await);
         drop(server);
-        watched
-            .recv_timeout(PATIENCE)
-            .expect("the closed pipe was not noticed");
+        assert!(
+            gone_within(&mut watched, PATIENCE).await,
+            "the closed pipe was not noticed"
+        );
         assert!(pipe.write_all(b"counters\n").is_err());
     }
 
@@ -750,12 +758,13 @@ mod tests {
         let (name, mut server) = agent_pipe();
         let (_pipe, watch) = connect_to(name, own_pid()).await.unwrap();
         server.connect().await.unwrap();
-        let watched = watching(watch);
-        assert!(watched.recv_timeout(Duration::from_millis(200)).is_err());
+        let mut watched = watching(watch);
+        assert!(!gone_within(&mut watched, Duration::from_millis(200)).await);
         server.write_all(b"x").await.unwrap();
-        watched
-            .recv_timeout(PATIENCE)
-            .expect("the byte was not noticed");
+        assert!(
+            gone_within(&mut watched, PATIENCE).await,
+            "the byte was not noticed"
+        );
     }
 
     #[tokio::test]
@@ -770,12 +779,13 @@ mod tests {
             .spawn()
             .unwrap();
         let watch = watch(pipe.file, agent.id()).unwrap();
-        let watched = watching(watch);
-        assert!(watched.recv_timeout(Duration::from_millis(200)).is_err());
+        let mut watched = watching(watch);
+        assert!(!gone_within(&mut watched, Duration::from_millis(200)).await);
         drop(agent.stdin.take());
         agent.wait().unwrap();
-        watched
-            .recv_timeout(PATIENCE)
-            .expect("the end of the agent was not noticed");
+        assert!(
+            gone_within(&mut watched, PATIENCE).await,
+            "the end of the agent was not noticed"
+        );
     }
 }
