@@ -563,6 +563,37 @@ mod tests {
     }
 
     #[test]
+    fn a_link_cannot_ask_for_a_transparent_session() {
+        for query in [
+            "profile=a&mode=transparent",
+            "mode=transparent&profile=a",
+            "profile=a&mode=proxy",
+            "profile=a&transparent=1",
+            "profile=a&transparent=true",
+            "profile=a&route=transparent",
+            "profile=a&auth=transparent",
+            "profile=a&kind=transparent",
+            "profile=a&mode%3Dtransparent",
+            "profile=a%20mode%3Dtransparent",
+            "profile=a&route=mixed%20mode%3Dtransparent",
+        ] {
+            let uri = format!("gateinto://connect?{query}");
+            assert!(parse(&uri).is_err(), "{uri:?}");
+        }
+        let link = parse(
+            "gateinto://connect?profile=a&url=https%3A%2F%2Fp.example%2F%3Fmode%3Dtransparent\
+             &portal=https%3A%2F%2Fp.example%2F",
+        )
+        .unwrap();
+        let line = crate::ipc::Request::Launch(link.clone(), crate::ipc::Mode::Proxy).to_string();
+        assert!(!line.ends_with(" mode=transparent"), "{line}");
+        assert_eq!(
+            line.parse(),
+            Ok(crate::ipc::Request::Launch(link, crate::ipc::Mode::Proxy))
+        );
+    }
+
+    #[test]
     fn injection_attempts_are_rejected() {
         let long = "a".repeat(65);
         for profile in [

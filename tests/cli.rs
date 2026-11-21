@@ -460,6 +460,7 @@ fn status_is_read_only_and_reports_what_it_can() {
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
+             transparent-sessions: unavailable: transparent sessions need Windows\n\
              uri-handler: not supported on this platform\n",
             default_config(&isolated_root()).display(),
             default_config(&isolated_root())
@@ -486,6 +487,7 @@ fn status_on_linux_reports_the_device_key_terminals_and_os_user_as_they_are() {
              config: none (no file at {}; pass --config to use another file)\n\
              linked-gateways: none (no directory at {})\n\
              agent: not running\n\
+             transparent-sessions: unavailable: transparent sessions need Windows\n\
              uri-handler: not registered\n\
              terminal-sessions: not supported on Linux yet\n\
              os-user: not offered by any session on Linux yet; pidfd_open is available",
@@ -512,6 +514,7 @@ fn status_on_linux_reports_the_device_key_terminals_and_os_user_as_they_are() {
     assert_eq!(
         order,
         [
+            "transparent-sessions",
             "uri-handler",
             "terminal-sessions",
             "terminal-containment",
@@ -960,10 +963,12 @@ fn setup_reports_a_damaged_gateway_file_and_continues() {
 #[cfg(unix)]
 mod fake_agent {
     use std::ffi::OsString;
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::process::{Command, Output};
+    use std::process::{Command, Output, Stdio};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
     use gateinto::ipc::{self, Endpoint, Response, Server};
@@ -1001,6 +1006,16 @@ mod fake_agent {
             &self,
             args: &[&str],
             answer: Response,
+            command: Command,
+        ) -> (Output, Option<String>) {
+            self.run_after_notice(args, "", answer, command)
+        }
+
+        pub fn run_after_notice(
+            &self,
+            args: &[&str],
+            notice: &str,
+            answer: Response,
             mut command: Command,
         ) -> (Output, Option<String>) {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1017,19 +1032,61 @@ mod fake_agent {
                 let _entered = runtime.enter();
                 Server::bind(&endpoint).unwrap()
             };
-            let answering = runtime.spawn(async move {
-                let mut connection = server.accept().await.unwrap();
-                let request = ipc::read_request(&mut connection).await.unwrap();
-                ipc::write_response(&mut connection, &answer).await.unwrap();
-                request.to_string()
+            let stderr = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+            let answering = runtime.spawn({
+                let stderr = stderr.clone();
+                let notice = notice.as_bytes().to_vec();
+                async move {
+                    let mut connection = server.accept().await.unwrap();
+                    let request = ipc::read_request(&mut connection).await.unwrap();
+                    let shown = tokio::task::spawn_blocking(move || {
+                        let (text, written) = &*stderr;
+                        let (text, _) = written
+                            .wait_timeout_while(text.lock().unwrap(), ANSWER_TIMEOUT, |text| {
+                                !text.starts_with(&notice)
+                            })
+                            .unwrap();
+                        text.starts_with(&notice)
+                    })
+                    .await
+                    .unwrap();
+                    let answer = if shown {
+                        answer
+                    } else {
+                        Response::Error("asked before the notice was shown".to_owned())
+                    };
+                    ipc::write_response(&mut connection, &answer).await.unwrap();
+                    request.to_string()
+                }
             });
-            let output = command
+            let mut child = command
                 .args(args)
                 .env("XDG_RUNTIME_DIR", &self.dir)
                 .env("GATEINTO_INSTANCE", &self.instance)
-                .stdin(std::process::Stdio::null())
-                .output()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
                 .unwrap();
+            let reading = std::thread::spawn({
+                let stderr = stderr.clone();
+                let mut pipe = child.stderr.take().unwrap();
+                move || {
+                    let mut chunk = [0; 4096];
+                    loop {
+                        let read = pipe.read(&mut chunk).unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        let (text, written) = &*stderr;
+                        text.lock().unwrap().extend_from_slice(&chunk[..read]);
+                        written.notify_all();
+                    }
+                }
+            });
+            let mut output = child.wait_with_output().unwrap();
+            reading.join().unwrap();
+            output.stderr = std::mem::take(&mut *stderr.0.lock().unwrap());
             let answered =
                 runtime.block_on(async { tokio::time::timeout(ANSWER_TIMEOUT, answering).await });
             (output, answered.ok().map(|request| request.unwrap()))
@@ -1154,6 +1211,174 @@ fn an_agent_too_old_for_verification_is_named() {
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         "error: the agent is too old for verification; restart it\n"
+    );
+}
+
+#[cfg(unix)]
+const TRANSPARENT_NOTICE: &str =
+    "starting the transparent engine may ask for administrator approval\n";
+
+#[cfg(unix)]
+#[test]
+fn an_agent_too_old_for_transparent_sessions_is_named() {
+    let link = "gateinto://connect?profile=office&auth=session_credentials";
+    for (args, refusal, asked) in [
+        (
+            &[
+                "session",
+                "terminal",
+                "--agent",
+                "--gateway",
+                "office",
+                "--transparent",
+            ][..],
+            "invalid terminal request",
+            "terminal office route=saved mode=transparent",
+        ),
+        (
+            &["open", "--transparent", "--", link][..],
+            "invalid launch request",
+            "launch office session_credentials route=saved mode=transparent",
+        ),
+    ] {
+        let agent = fake_agent::FakeAgent::new();
+        let (output, request) = agent.run_after_notice(
+            args,
+            TRANSPARENT_NOTICE,
+            gateinto::ipc::Response::Error(refusal.to_owned()),
+            gateinto_command(),
+        );
+        assert_eq!(request.as_deref(), Some(asked), "{args:?}");
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "{TRANSPARENT_NOTICE}error: the agent is too old for transparent sessions; restart it\n"
+            ),
+            "{args:?}"
+        );
+    }
+}
+
+#[cfg(all(unix, feature = "test-hooks"))]
+#[test]
+fn only_a_proxy_open_is_handed_to_the_gui() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const BUSY: i32 = 26;
+    const ATTEMPTS: u32 = 500;
+    let link = "gateinto://connect?profile=office&auth=session_credentials";
+    for (transparent, asked, answer, notice, error) in [
+        (
+            false,
+            "list",
+            gateinto::ipc::Response::Ok(Vec::new()),
+            "",
+            "",
+        ),
+        (
+            true,
+            "launch office session_credentials route=saved mode=transparent",
+            gateinto::ipc::Response::Error("transparent sessions are unavailable: x".to_owned()),
+            TRANSPARENT_NOTICE,
+            "error: transparent sessions are unavailable: x\n",
+        ),
+    ] {
+        let agent = fake_agent::FakeAgent::new();
+        let (gui, handed) = (agent.file("gui"), agent.file("handed"));
+        std::fs::write(
+            &gui,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\nprintf '%s\\n' \"$@\" > '{}'\necho handed\n",
+                handed.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gui, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut attempts = 0;
+        while let Err(error) = std::process::Command::new(&gui).arg("--probe").status() {
+            assert_eq!(error.raw_os_error(), Some(BUSY), "{error}");
+            attempts += 1;
+            assert!(
+                attempts < ATTEMPTS,
+                "the fake GUI was still busy (ETXTBSY) after {attempts} attempts"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut command = gateinto_command();
+        command.env("GATEINTO_TEST_GUI", &gui);
+        let args = if transparent {
+            &["open", "--transparent", "--", link][..]
+        } else {
+            &["open", "--", link][..]
+        };
+        let (output, request) = agent.run_after_notice(args, notice, answer, command);
+        assert_eq!(request.as_deref(), Some(asked), "{args:?}");
+        assert_eq!(output.status.success(), !transparent, "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("{notice}{error}")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&handed).ok(),
+            (!transparent).then(|| format!("--open\n{link}\n")),
+            "{args:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_proxy_terminal_refused_as_invalid_keeps_the_agent_message() {
+    let agent = fake_agent::FakeAgent::new();
+    let (output, request) = agent.run(
+        &["session", "terminal", "--agent", "--gateway", "office"],
+        gateinto::ipc::Response::Error("invalid terminal request".to_owned()),
+        gateinto_command(),
+    );
+    assert_eq!(request.as_deref(), Some("terminal office route=saved"));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: invalid terminal request\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_started_transparent_terminal_is_marked() {
+    let agent = fake_agent::FakeAgent::new();
+    let (output, request) = agent.run_after_notice(
+        &[
+            "session",
+            "terminal",
+            "--agent",
+            "--gateway",
+            "office",
+            "--transparent",
+        ],
+        TRANSPARENT_NOTICE,
+        gateinto::ipc::Response::Ok(vec![
+            "session: 4".to_owned(),
+            "gateway: office".to_owned(),
+            "shell: powershell".to_owned(),
+        ]),
+        gateinto_command(),
+    );
+    assert_eq!(
+        request.as_deref(),
+        Some("terminal office route=saved mode=transparent")
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "session: 4\nmode: transparent\ngateway: office\nshell: powershell\n"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        TRANSPARENT_NOTICE
     );
 }
 

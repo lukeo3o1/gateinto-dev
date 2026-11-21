@@ -132,6 +132,10 @@ jobs:
           dotnet tool install --global wix --version $env:WIX_VERSION
           if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix exited with $LASTEXITCODE" }
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
+      - name: Fetch and verify WinDivert 2.2.2 for the ${{ matrix.msi-arch }} MSI
+        env:
+          MSI_ARCH: ${{ matrix.msi-arch }}
+        run: .github/scripts/fetch-windivert.ps1 -Arch $env:MSI_ARCH -Output (Join-Path $env:RUNNER_TEMP 'windivert')
       - name: Build the ${{ matrix.msi-arch }} MSI
         env:
           MSI_ARCH: ${{ matrix.msi-arch }}
@@ -139,7 +143,8 @@ jobs:
           $msi = Join-Path $PWD "dist\gateinto-$env:SHORT_SHA-$env:RELEASE_TARGET.msi"
           pwsh packaging/wix/build.ps1 -Binary "target\$env:RELEASE_TARGET\release\gateinto.exe" `
             -GuiBinary "target\$env:RELEASE_TARGET\release\gateinto-gui.exe" -Output $msi `
-            -Arch $env:MSI_ARCH -Version $env:RELEASE_VERSION -DisplayVersion $env:GATEINTO_BUILD_VERSION
+            -Arch $env:MSI_ARCH -Version $env:RELEASE_VERSION -DisplayVersion $env:GATEINTO_BUILD_VERSION `
+            -WinDivert (Join-Path $env:RUNNER_TEMP 'windivert')
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
           .github/scripts/write-sha256.ps1 -Path $msi
       - uses: actions/upload-artifact@v7

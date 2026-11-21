@@ -349,6 +349,7 @@ pub struct IssuedCertificate {
 pub enum Behavior {
     Tunnel,
     TunnelWithBanner(&'static [u8]),
+    TunnelTo(SocketAddr, &'static [u8]),
     Status(u16),
     Challenge(&'static str),
     ChallengeNamingFirst(&'static str),
@@ -417,6 +418,9 @@ impl UpstreamProxy {
                         Behavior::Tunnel => tunnel(tls, &head, &rest, b"").await,
                         Behavior::TunnelWithBanner(banner) => {
                             tunnel(tls, &head, &rest, banner).await
+                        }
+                        Behavior::TunnelTo(destination, banner) => {
+                            tunnel_to(tls, &destination.to_string(), &rest, banner).await
                         }
                         Behavior::Status(code) => {
                             let response = format!(
@@ -504,11 +508,17 @@ where
     let _ = upstream.shutdown().await;
 }
 
-async fn tunnel<S>(mut upstream: S, head: &str, rest: &[u8], banner: &[u8])
+async fn tunnel<S>(upstream: S, head: &str, rest: &[u8], banner: &[u8])
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let target = head.split(' ').nth(1).unwrap().to_owned();
+    tunnel_to(upstream, head.split(' ').nth(1).unwrap(), rest, banner).await
+}
+
+async fn tunnel_to<S>(mut upstream: S, target: &str, rest: &[u8], banner: &[u8])
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut target = TcpStream::connect(target).await.unwrap();
     let mut response = b"HTTP/1.1 200 Connection established\r\n\r\n".to_vec();
     response.extend_from_slice(banner);

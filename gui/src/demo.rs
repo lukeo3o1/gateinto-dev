@@ -6,7 +6,8 @@ use gateinto::config::{ConfigFile, GatewayName};
 use gateinto::identity::device_key::{Backend, KeyName};
 use gateinto::ipc::{
     BrowserKind, LogEvent, LogLevel, LogPage, Request, RequestError, Response, SessionAuth,
-    SessionInfo, SessionKind, SessionRoute,
+    SessionInfo, SessionKind, SessionRoute, TransparentAvailability, TransparentEngine,
+    TransparentStatus,
 };
 use gateinto::link::{Known, KnownGateway, Source};
 use gateinto::proxy::Verification;
@@ -35,6 +36,7 @@ pub const AGENT_START: AgentStart = AgentStart::On;
 const PROFILE: &str = "g-4f0c2a9d7e1b83c56a0d9e2f4b7c1a3e5d8f0b2c4a6e8d1f3b5c7e9a0c2e4d";
 const PID: u32 = 4242;
 const VERIFYING: u64 = 5;
+const TRANSPARENT: u64 = 7;
 const FINGERPRINT: &str = "9c4e1a7f3b2d8e6c0a5f9b1d7e3c2a8f6b4d0e9c1a7f5b3d2e8c6a4f0b9d1e7c";
 const CONFIG: &str = r#"
 [gateways.office]
@@ -203,6 +205,7 @@ fn sessions(now: u64) -> Vec<SessionInfo> {
             browser: s.browser,
             shell: s.shell.map(str::to_owned),
             verification: s.id == VERIFYING,
+            transparent: s.id == TRANSPARENT,
         })
         .collect()
 }
@@ -244,7 +247,14 @@ pub fn answer(request: Request, now: u64) -> Response {
         Request::Verification(id) => {
             Response::Error(format!("session {id} has no pending verification"))
         }
-        Request::Launch(_)
+        Request::Transparent => Response::Ok(
+            TransparentStatus {
+                availability: TransparentAvailability::Available,
+                engine: TransparentEngine::Running,
+            }
+            .to_lines(),
+        ),
+        Request::Launch(..)
         | Request::Terminal(_)
         | Request::Close(_)
         | Request::Dismiss(..)
@@ -257,7 +267,7 @@ pub fn answer(request: Request, now: u64) -> Response {
 
 pub fn refusal(command: &Command) -> Option<Text> {
     match command {
-        Command::Launch(_) | Command::Terminal(_) | Command::Link(_) => Some(NOT_STARTED),
+        Command::Launch(..) | Command::Terminal(..) | Command::Link(_) => Some(NOT_STARTED),
         Command::Close(_) => Some(NOT_REVOKED),
         Command::Stop => Some(NOT_STOPPED),
         Command::Start => Some(AGENT_NOT_STARTED),
@@ -354,7 +364,7 @@ mod tests {
     use std::cell::RefCell;
     use std::time::Duration;
 
-    use gateinto::ipc::{LogPage, SessionAuth, SessionInfo, SessionKind};
+    use gateinto::ipc::{LogPage, Mode, SessionAuth, SessionInfo, SessionKind};
     use gateinto::sessions::SessionId;
     use gateinto::uri::{LaunchAuth, LaunchRequest};
     use tokio::sync::mpsc::unbounded_channel;
@@ -407,6 +417,27 @@ mod tests {
     }
 
     #[test]
+    fn the_demo_agent_offers_transparent_sessions_with_its_engine_running() {
+        assert_eq!(
+            gateinto::ipc::transparent_status(answer(Request::Transparent, NOW)),
+            Ok(TransparentStatus {
+                availability: TransparentAvailability::Available,
+                engine: TransparentEngine::Running,
+            })
+        );
+    }
+
+    #[test]
+    fn the_sample_terminal_is_the_one_transparent_session() {
+        let transparent: Vec<(u64, SessionKind)> = listed()
+            .iter()
+            .filter(|s| s.transparent)
+            .map(|s| (s.id, s.kind))
+            .collect();
+        assert_eq!(transparent, [(7, SessionKind::Terminal)]);
+    }
+
+    #[test]
     fn the_sample_sessions_cover_each_browser_a_terminal_and_some_relay_traffic() {
         let sessions = listed();
         let browsers = sessions.iter().filter(|s| s.kind == SessionKind::Browser);
@@ -439,10 +470,11 @@ mod tests {
         let launch = LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap();
         let token = || "0123456789abcdef0123456789abcdef".parse().unwrap();
         for request in [
-            Request::Launch(launch),
+            Request::Launch(launch, Mode::Proxy),
             Request::Terminal(gateinto::ipc::TerminalRequest {
                 gateway: "office".parse().unwrap(),
                 route: None,
+                mode: Mode::Proxy,
             }),
             Request::Close(SessionId::from(3)),
             Request::Stop,
@@ -456,10 +488,16 @@ mod tests {
 
     #[test]
     fn the_window_refuses_every_action_before_it_reaches_the_sample_agent() {
-        let launch = Command::Launch("office".parse().unwrap());
+        let launch = Command::Launch("office".parse().unwrap(), Mode::Proxy);
         assert_eq!(refusal(&launch), Some(NOT_STARTED));
-        let terminal = Command::Terminal("office".parse().unwrap());
+        let terminal = Command::Terminal("office".parse().unwrap(), Mode::Proxy);
         assert_eq!(refusal(&terminal), Some(NOT_STARTED));
+        for transparent in [
+            Command::Launch("office".parse().unwrap(), Mode::Transparent),
+            Command::Terminal("office".parse().unwrap(), Mode::Transparent),
+        ] {
+            assert_eq!(refusal(&transparent), Some(NOT_STARTED));
+        }
         assert_eq!(refusal(&Command::Close(3)), Some(NOT_REVOKED));
         assert_eq!(refusal(&Command::Stop), Some(NOT_STOPPED));
         assert_eq!(refusal(&Command::Start), Some(AGENT_NOT_STARTED));
@@ -540,7 +578,8 @@ mod tests {
         tx.send(Command::Probe).unwrap();
         tx.send(Command::Credentials(3, 1)).unwrap();
         tx.send(Command::Verification(VERIFYING, 2)).unwrap();
-        tx.send(Command::Launch("office".parse().unwrap())).unwrap();
+        tx.send(Command::Launch("office".parse().unwrap(), Mode::Proxy))
+            .unwrap();
         let updates = RefCell::new(Vec::<Update>::new());
         let reveals = RefCell::new(Vec::new());
         let run = serve_with(
@@ -634,7 +673,7 @@ mod tests {
     fn demo_refusals_and_the_title_read_in_chinese_when_shown() {
         let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
         let shown = |command| refusal(&command).map(crate::i18n::tr);
-        let launch = Command::Launch("office".parse().unwrap());
+        let launch = Command::Launch("office".parse().unwrap(), Mode::Proxy);
         assert_eq!(shown(launch), Some("示範：未啟動任何項目"));
         assert_eq!(shown(Command::Close(3)), Some("示範：未撤銷任何項目"));
         assert_eq!(shown(Command::Stop), Some("示範：未停止代理程式"));

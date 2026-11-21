@@ -23,11 +23,14 @@ pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const INSTANCE_VARIABLE: &str = "GATEINTO_INSTANCE";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub const TRANSPARENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+pub const INVALID_LAUNCH_REQUEST: &str = "invalid launch request";
+pub const INVALID_TERMINAL_REQUEST: &str = "invalid terminal request";
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    Launch(LaunchRequest),
+    Launch(LaunchRequest, Mode),
     Terminal(TerminalRequest),
     Approve(ConfirmToken),
     Deny(ConfirmToken),
@@ -39,12 +42,55 @@ pub enum Request {
     Stop,
     Log { after: u64 },
     Config,
+    Transparent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalRequest {
     pub gateway: GatewayName,
     pub route: Option<Route>,
+    pub mode: Mode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Proxy,
+    Transparent,
+}
+
+const TRANSPARENT: &str = "mode=transparent";
+
+impl Request {
+    pub fn is_transparent(&self) -> bool {
+        matches!(
+            self,
+            Self::Launch(_, Mode::Transparent)
+                | Self::Terminal(TerminalRequest {
+                    mode: Mode::Transparent,
+                    ..
+                })
+        )
+    }
+
+    pub fn timeout(&self) -> Duration {
+        if self.is_transparent() {
+            TRANSPARENT_REQUEST_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        }
+    }
+}
+
+pub fn agent_too_old_for_transparent(request: &Request, error: &str) -> bool {
+    match request {
+        Request::Launch(_, Mode::Transparent) => error == INVALID_LAUNCH_REQUEST,
+        Request::Terminal(TerminalRequest {
+            mode: Mode::Transparent,
+            ..
+        }) => error == INVALID_TERMINAL_REQUEST,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,7 +167,7 @@ impl std::error::Error for ProtocolError {}
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Launch(request) => {
+            Self::Launch(request, mode) => {
                 f.write_str("launch ")?;
                 if let Some(profile) = &request.profile {
                     write!(f, "{profile} ")?;
@@ -141,12 +187,15 @@ impl fmt::Display for Request {
                 if let Some(portal) = &request.portal {
                     write!(f, " portal={portal}")?;
                 }
-                Ok(())
+                mode.fmt(f)
             }
-            Self::Terminal(request) => match request.route {
-                None => write!(f, "terminal {} route=saved", request.gateway),
-                Some(route) => write!(f, "terminal {} route={route}", request.gateway),
-            },
+            Self::Terminal(request) => {
+                match request.route {
+                    None => write!(f, "terminal {} route=saved", request.gateway)?,
+                    Some(route) => write!(f, "terminal {} route={route}", request.gateway)?,
+                }
+                request.mode.fmt(f)
+            }
             Self::Approve(token) => write!(f, "approve {token}"),
             Self::Deny(token) => write!(f, "deny {token}"),
             Self::List => f.write_str("list"),
@@ -157,6 +206,7 @@ impl fmt::Display for Request {
             Self::Stop => f.write_str("stop"),
             Self::Log { after } => write!(f, "log {after}"),
             Self::Config => f.write_str("config"),
+            Self::Transparent => f.write_str("transparent"),
         }
     }
 }
@@ -171,13 +221,13 @@ impl FromStr for Request {
             ["launch", profile, auth @ "session_credentials", link @ ..] => {
                 let request = launch(Some(profile), auth, link)
                     .filter(|request| request.to_string() == line)
-                    .ok_or(ProtocolError("invalid launch request"))?;
+                    .ok_or(ProtocolError(INVALID_LAUNCH_REQUEST))?;
                 Ok(request)
             }
             ["launch", auth @ "session_credentials", link @ ..] => {
                 let request = launch(None, auth, link)
                     .filter(|request| request.to_string() == line)
-                    .ok_or(ProtocolError("invalid launch request"))?;
+                    .ok_or(ProtocolError(INVALID_LAUNCH_REQUEST))?;
                 Ok(request)
             }
             ["launch", "basic_tofu", ..] | ["launch", _, "basic_tofu", ..] => Err(ProtocolError(
@@ -185,7 +235,7 @@ impl FromStr for Request {
             )),
             ["terminal", ..] => terminal(&words)
                 .filter(|request| request.to_string() == line)
-                .ok_or(ProtocolError("invalid terminal request")),
+                .ok_or(ProtocolError(INVALID_TERMINAL_REQUEST)),
             ["approve", token] => token.parse().map(Self::Approve),
             ["deny", token] => token.parse().map(Self::Deny),
             ["list"] => Ok(Self::List),
@@ -198,6 +248,7 @@ impl FromStr for Request {
             },
             ["stop"] => Ok(Self::Stop),
             ["config"] => Ok(Self::Config),
+            ["transparent"] => Ok(Self::Transparent),
             ["log", word] => canonical(word)
                 .map(|after| Self::Log { after })
                 .ok_or(invalid),
@@ -212,7 +263,24 @@ fn canonical(word: &str) -> Option<u64> {
         .filter(|number: &u64| number.to_string() == word)
 }
 
-fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Proxy => Ok(()),
+            Self::Transparent => write!(f, " {TRANSPARENT}"),
+        }
+    }
+}
+
+fn mode<'a, 'b>(words: &'a [&'b str]) -> (&'a [&'b str], Mode) {
+    match words.split_last() {
+        Some((&TRANSPARENT, rest)) => (rest, Mode::Transparent),
+        _ => (words, Mode::Proxy),
+    }
+}
+
+fn launch(profile: Option<&str>, auth: &str, words: &[&str]) -> Option<Request> {
+    let (link, mode) = mode(words);
     let mut values = [None; 4];
     let mut next = 0;
     for word in link {
@@ -234,10 +302,11 @@ fn launch(profile: Option<&str>, auth: &str, link: &[&str]) -> Option<Request> {
             ..request
         }),
     }
-    .map(Request::Launch)
+    .map(|request| Request::Launch(request, mode))
 }
 
 fn terminal(words: &[&str]) -> Option<Request> {
+    let (words, mode) = mode(words);
     let ["terminal", gateway, route] = words else {
         return None;
     };
@@ -248,6 +317,7 @@ fn terminal(words: &[&str]) -> Option<Request> {
     Some(Request::Terminal(TerminalRequest {
         gateway: gateway.parse().ok()?,
         route,
+        mode,
     }))
 }
 
@@ -409,6 +479,134 @@ pub fn config_source(lines: &[String]) -> Option<ConfigSource> {
     }
     let path = PathBuf::from(text);
     path.is_absolute().then_some(ConfigSource::File(path))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentStatus {
+    pub availability: TransparentAvailability,
+    pub engine: TransparentEngine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentAvailability {
+    Available,
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentEngine {
+    Running,
+    Starting,
+    Stopped(Option<String>),
+}
+
+const AVAILABILITY: &str = "availability";
+const ENGINE: &str = "engine";
+
+impl TransparentStatus {
+    pub fn to_lines(&self) -> Vec<String> {
+        vec![
+            format!("{AVAILABILITY}: {}", self.availability),
+            format!("{ENGINE}: {}", self.engine),
+        ]
+    }
+
+    pub fn parse(lines: &[String]) -> Option<Self> {
+        let mut availability = None;
+        let mut engine = None;
+        for line in lines {
+            let (key, value) = line.split_once(": ")?;
+            match key {
+                AVAILABILITY => first(&mut availability, TransparentAvailability::parse(value)?)?,
+                ENGINE => first(&mut engine, TransparentEngine::parse(value)?)?,
+                _ => {}
+            }
+        }
+        Some(Self {
+            availability: availability?,
+            engine: engine?,
+        })
+    }
+}
+
+fn first<T>(slot: &mut Option<T>, value: T) -> Option<()> {
+    slot.replace(value).is_none().then_some(())
+}
+
+fn word_and_detail(value: &str) -> Option<(&str, Option<&str>)> {
+    match value.split_once(": ") {
+        None => Some((value, None)),
+        Some((_, "")) => None,
+        Some((word, detail)) => Some((word, Some(detail))),
+    }
+}
+
+impl TransparentAvailability {
+    fn parse(value: &str) -> Option<Self> {
+        match word_and_detail(value)? {
+            ("available", None) => Some(Self::Available),
+            ("unavailable", Some(reason)) => Some(Self::Unavailable(reason.to_owned())),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TransparentAvailability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Available => f.write_str("available"),
+            Self::Unavailable(reason) => write!(f, "unavailable: {reason}"),
+        }
+    }
+}
+
+impl TransparentEngine {
+    fn parse(value: &str) -> Option<Self> {
+        match word_and_detail(value)? {
+            ("running", None) => Some(Self::Running),
+            ("starting", None) => Some(Self::Starting),
+            ("stopped", error) => Some(Self::Stopped(error.map(str::to_owned))),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TransparentEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => f.write_str("running"),
+            Self::Starting => f.write_str("starting"),
+            Self::Stopped(None) => f.write_str("stopped"),
+            Self::Stopped(Some(error)) => write!(f, "stopped: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentError {
+    TooOld,
+    Agent(String),
+    Malformed,
+}
+
+impl fmt::Display for TransparentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooOld => f.write_str("the agent is too old; restart it"),
+            Self::Agent(error) => f.write_str(error),
+            Self::Malformed => f.write_str("invalid transparent status from the agent"),
+        }
+    }
+}
+
+impl std::error::Error for TransparentError {}
+
+pub fn transparent_status(response: Response) -> Result<TransparentStatus, TransparentError> {
+    match response {
+        Response::Ok(lines) => TransparentStatus::parse(&lines).ok_or(TransparentError::Malformed),
+        Response::Error(error) if error == INVALID_REQUEST => Err(TransparentError::TooOld),
+        Response::Error(error) => Err(TransparentError::Agent(error)),
+    }
 }
 
 pub const AGENT_PID: &str = "agent-pid: ";
@@ -648,7 +846,7 @@ pub fn taken_pipe(endpoint: &Endpoint, owned_by_user: io::Result<bool>) -> BindE
 pub enum RequestError {
     NotRunning,
     Closed,
-    TimedOut,
+    TimedOut(Duration),
     UntrustedServer(String),
     Io(io::Error),
     Protocol(ProtocolError),
@@ -659,10 +857,10 @@ impl fmt::Display for RequestError {
         match self {
             Self::NotRunning => f.write_str("no agent is running"),
             Self::Closed => f.write_str("the agent closed the connection without an answer"),
-            Self::TimedOut => write!(
+            Self::TimedOut(limit) => write!(
                 f,
                 "the agent did not answer within {} seconds",
-                REQUEST_TIMEOUT.as_secs()
+                limit.as_secs()
             ),
             Self::UntrustedServer(reason) => write!(
                 f,
@@ -684,7 +882,7 @@ impl From<io::Error> for RequestError {
 }
 
 pub async fn send(endpoint: &Endpoint, request: &Request) -> Result<Response, RequestError> {
-    send_with_timeout(endpoint, request, REQUEST_TIMEOUT).await
+    send_with_timeout(endpoint, request, request.timeout()).await
 }
 
 pub async fn send_with_timeout(
@@ -694,7 +892,7 @@ pub async fn send_with_timeout(
 ) -> Result<Response, RequestError> {
     tokio::time::timeout(limit, exchange(endpoint, request))
         .await
-        .unwrap_or(Err(RequestError::TimedOut))
+        .unwrap_or(Err(RequestError::TimedOut(limit)))
 }
 
 fn closed_or_io(error: io::Error) -> RequestError {
@@ -1051,7 +1249,7 @@ mod windows {
                 Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                     match busy_retry_delay(deadline, Instant::now()) {
                         Some(delay) => tokio::time::sleep(delay).await,
-                        None => return Err(RequestError::TimedOut),
+                        None => return Err(RequestError::TimedOut(REQUEST_TIMEOUT)),
                     }
                 }
                 Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
@@ -1139,7 +1337,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn launch(profile: &str) -> Request {
-        Request::Launch(LaunchRequest::new(profile, "session_credentials").unwrap())
+        Request::Launch(
+            LaunchRequest::new(profile, "session_credentials").unwrap(),
+            Mode::Proxy,
+        )
     }
 
     #[test]
@@ -1231,7 +1432,7 @@ mod tests {
         ] {
             let request: Request = line.parse().unwrap();
             assert_eq!(request.to_string(), line);
-            let Request::Launch(launch) = request else {
+            let Request::Launch(launch, _) = request else {
                 panic!("not launch")
             };
             assert!(!launch.to_string().contains("profile="));
@@ -1244,7 +1445,7 @@ mod tests {
         let line = "launch session_credentials session_credentials";
         let request: Request = line.parse().unwrap();
         assert_eq!(request.to_string(), line);
-        let Request::Launch(launch) = request else {
+        let Request::Launch(launch, _) = request else {
             panic!("not launch")
         };
         assert_eq!(launch.profile.unwrap().as_str(), "session_credentials");
@@ -1271,7 +1472,7 @@ mod tests {
             assert!(error.contains("session_credentials"), "{error}");
         }
         let line = "launch basic_tofu session_credentials";
-        let Request::Launch(launch) = line.parse().unwrap() else {
+        let Request::Launch(launch, _) = line.parse().unwrap() else {
             panic!("not launch")
         };
         assert_eq!(launch.profile.unwrap().as_str(), "basic_tofu");
@@ -1289,7 +1490,7 @@ mod tests {
         ] {
             let parsed: Request = line.parse().unwrap();
             assert_eq!(parsed.to_string(), line);
-            let Request::Launch(link) = parsed else {
+            let Request::Launch(link, _) = parsed else {
                 panic!("not a launch")
             };
             assert_eq!(link.route, route, "{line}");
@@ -1325,6 +1526,7 @@ mod tests {
             ),
             (Request::Stop, "stop"),
             (Request::Config, "config"),
+            (Request::Transparent, "transparent"),
             (Request::Log { after: 0 }, "log 0"),
             (Request::Log { after: u64::MAX }, "log 18446744073709551615"),
         ] {
@@ -1337,6 +1539,7 @@ mod tests {
         Request::Terminal(TerminalRequest {
             gateway: "office".parse().unwrap(),
             route,
+            mode: Mode::Proxy,
         })
     }
 
@@ -1393,6 +1596,183 @@ mod tests {
         );
     }
 
+    fn transparent_terminal(route: Option<Route>) -> Request {
+        Request::Terminal(TerminalRequest {
+            gateway: "office".parse().unwrap(),
+            route,
+            mode: Mode::Transparent,
+        })
+    }
+
+    #[test]
+    fn transparent_requests_end_with_their_mode_word_and_round_trip() {
+        let transparent = |request: Request| match request {
+            Request::Launch(link, _) => Request::Launch(link, Mode::Transparent),
+            other => other,
+        };
+        for (request, line) in [
+            (
+                transparent(launch("office")),
+                "launch office session_credentials route=saved mode=transparent",
+            ),
+            (
+                Request::Launch(
+                    LaunchRequest {
+                        route: Some(Route::Gateway),
+                        ..LaunchRequest::new("office", "session_credentials").unwrap()
+                    },
+                    Mode::Transparent,
+                ),
+                "launch office session_credentials mode=transparent",
+            ),
+            (
+                transparent(linked_launch()),
+                "launch corp session_credentials route=saved url=https://p.example/app?a=b&c=d \
+                 gateway=proxy.example:443 portal=https://p.example/ mode=transparent",
+            ),
+            (
+                transparent_terminal(None),
+                "terminal office route=saved mode=transparent",
+            ),
+            (
+                transparent_terminal(Some(Route::Mixed)),
+                "terminal office route=mixed mode=transparent",
+            ),
+        ] {
+            assert_eq!(request.to_string(), line);
+            assert_eq!(line.parse::<Request>(), Ok(request));
+        }
+    }
+
+    #[test]
+    fn the_mode_word_is_accepted_only_once_at_the_end_and_only_as_transparent() {
+        for line in [
+            "launch office session_credentials mode=transparent route=mixed",
+            "launch office session_credentials mode=transparent url=https://p.example/",
+            "launch office mode=transparent session_credentials",
+            "launch mode=transparent office session_credentials",
+            "launch office session_credentials mode=transparent mode=transparent",
+            "launch office session_credentials mode=proxy",
+            "launch office session_credentials mode=Transparent",
+            "launch office session_credentials mode=",
+            "launch office session_credentials mode",
+            "launch office session_credentials transparent",
+            "launch office session_credentials mode=transparent ",
+            "launch office session_credentials  mode=transparent",
+            "launch session_credentials mode=transparent",
+        ] {
+            assert!(line.parse::<Request>().is_err(), "{line:?}");
+        }
+        for line in [
+            "terminal office mode=transparent route=saved",
+            "terminal office mode=transparent",
+            "terminal mode=transparent office route=saved",
+            "terminal office route=saved mode=transparent mode=transparent",
+            "terminal office route=saved mode=proxy",
+            "terminal office route=saved mode=Transparent",
+            "terminal office route=saved mode=",
+            "terminal office route=saved mode",
+            "terminal office route=saved transparent",
+            "terminal office route=saved mode=transparent ",
+            "terminal office route=saved  mode=transparent",
+        ] {
+            assert_eq!(
+                line.parse::<Request>(),
+                Err(ProtocolError("invalid terminal request")),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn requests_without_the_mode_word_are_in_proxy_mode() {
+        for line in [
+            "launch office session_credentials",
+            "launch corp session_credentials route=saved url=https://p.example/",
+        ] {
+            let Ok(Request::Launch(_, mode)) = line.parse() else {
+                panic!("not a launch: {line}")
+            };
+            assert_eq!(mode, Mode::Proxy);
+        }
+        let Ok(Request::Terminal(terminal)) = "terminal office route=saved".parse() else {
+            panic!("not a terminal")
+        };
+        assert_eq!(terminal.mode, Mode::Proxy);
+        assert_eq!(Mode::default(), Mode::Proxy);
+    }
+
+    fn transparent_launch() -> Request {
+        Request::Launch(
+            LaunchRequest::new("office", "session_credentials").unwrap(),
+            Mode::Transparent,
+        )
+    }
+
+    fn proxy_terminal() -> Request {
+        Request::Terminal(TerminalRequest {
+            gateway: "office".parse().unwrap(),
+            route: None,
+            mode: Mode::Proxy,
+        })
+    }
+
+    #[test]
+    fn only_transparent_launches_and_terminals_wait_for_the_transparent_timeout() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(TRANSPARENT_REQUEST_TIMEOUT, Duration::from_secs(300));
+        for request in [transparent_launch(), transparent_terminal(None)] {
+            assert!(request.is_transparent(), "{request}");
+            assert_eq!(request.timeout(), TRANSPARENT_REQUEST_TIMEOUT, "{request}");
+        }
+        for request in [
+            launch("office"),
+            proxy_terminal(),
+            Request::List,
+            Request::Transparent,
+            Request::Stop,
+        ] {
+            assert!(!request.is_transparent(), "{request}");
+            assert_eq!(request.timeout(), REQUEST_TIMEOUT, "{request}");
+        }
+    }
+
+    #[test]
+    fn a_timeout_names_the_limit_that_was_waited() {
+        assert_eq!(
+            RequestError::TimedOut(REQUEST_TIMEOUT).to_string(),
+            "the agent did not answer within 60 seconds"
+        );
+        assert_eq!(
+            RequestError::TimedOut(TRANSPARENT_REQUEST_TIMEOUT).to_string(),
+            "the agent did not answer within 300 seconds"
+        );
+    }
+
+    #[test]
+    fn only_a_transparent_request_refused_as_invalid_was_sent_to_an_older_agent() {
+        assert_eq!(INVALID_LAUNCH_REQUEST, "invalid launch request");
+        assert_eq!(INVALID_TERMINAL_REQUEST, "invalid terminal request");
+        let too_old = agent_too_old_for_transparent;
+        assert!(too_old(&transparent_launch(), INVALID_LAUNCH_REQUEST));
+        assert!(too_old(
+            &transparent_terminal(None),
+            INVALID_TERMINAL_REQUEST
+        ));
+        for (request, error) in [
+            (transparent_launch(), INVALID_TERMINAL_REQUEST),
+            (transparent_launch(), INVALID_REQUEST),
+            (transparent_terminal(None), INVALID_LAUNCH_REQUEST),
+            (transparent_terminal(None), INVALID_REQUEST),
+            (transparent_terminal(None), "invalid terminal request: x"),
+            (launch("office"), INVALID_LAUNCH_REQUEST),
+            (proxy_terminal(), INVALID_TERMINAL_REQUEST),
+            (Request::List, INVALID_REQUEST),
+        ] {
+            assert!(!too_old(&request, error), "{request}: {error}");
+        }
+    }
+
     fn linked_launch() -> Request {
         Request::Launch(
             LaunchRequest::new("corp", "session_credentials")
@@ -1403,6 +1783,7 @@ mod tests {
                     Some("https://p.example/"),
                 )
                 .unwrap(),
+            Mode::Proxy,
         )
     }
 
@@ -1415,6 +1796,7 @@ mod tests {
                 .unwrap()
                 .with_link(Some("https://p.example/"), None, None)
                 .unwrap(),
+            Mode::Proxy,
         );
         for (request, line) in [
             (
@@ -1485,6 +1867,7 @@ mod tests {
                 .unwrap()
                 .with_link(Some(&url), Some(&format!("{host}:65535")), Some(&url))
                 .unwrap(),
+            Mode::Transparent,
         );
         let line = request.to_string();
         assert!(line.len() + 1 < MAX_REQUEST_BYTES, "{}", line.len());
@@ -1742,10 +2125,167 @@ mod tests {
             "config ",
             "config x",
             "CONFIG",
+            "transparent ",
+            "transparent x",
+            " transparent",
+            "TRANSPARENT",
             "open gateinto://connect?profile=office",
         ] {
             assert!(line.parse::<Request>().is_err(), "{line:?}");
         }
+    }
+
+    fn lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_transparent_status_round_trips_as_key_lines() {
+        for (status, expected) in [
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine: TransparentEngine::Running,
+                },
+                ["availability: available", "engine: running"],
+            ),
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine: TransparentEngine::Starting,
+                },
+                ["availability: available", "engine: starting"],
+            ),
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Unavailable(
+                        "transparent sessions need Windows".to_owned(),
+                    ),
+                    engine: TransparentEngine::Stopped(None),
+                },
+                [
+                    "availability: unavailable: transparent sessions need Windows",
+                    "engine: stopped",
+                ],
+            ),
+            (
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine: TransparentEngine::Stopped(Some(
+                        "the transparent engine failed (exit code 5): stopped: x".to_owned(),
+                    )),
+                },
+                [
+                    "availability: available",
+                    "engine: stopped: the transparent engine failed (exit code 5): stopped: x",
+                ],
+            ),
+        ] {
+            assert_eq!(status.to_lines(), lines(&expected));
+            assert_eq!(TransparentStatus::parse(&lines(&expected)), Some(status));
+        }
+    }
+
+    #[test]
+    fn the_transparent_status_reads_in_any_order_and_skips_unknown_keys() {
+        assert_eq!(
+            TransparentStatus::parse(&lines(&[
+                "helper: 2",
+                "engine: starting",
+                "availability: unavailable: x",
+                "engine-since: 3",
+            ])),
+            Some(TransparentStatus {
+                availability: TransparentAvailability::Unavailable("x".to_owned()),
+                engine: TransparentEngine::Starting,
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_transparent_statuses_are_refused() {
+        for broken in [
+            &[][..],
+            &["availability: available"],
+            &["engine: running"],
+            &[
+                "availability: available",
+                "engine: running",
+                "engine: running",
+            ],
+            &[
+                "availability: available",
+                "availability: available",
+                "engine: running",
+            ],
+            &["availability: availabl", "engine: running"],
+            &["availability: Available", "engine: running"],
+            &["availability: available ", "engine: running"],
+            &["availability: unavailable", "engine: running"],
+            &["availability: unavailable: ", "engine: running"],
+            &["availability: unavailable:x", "engine: running"],
+            &["availability:available", "engine: running"],
+            &["availability: available", "engine: run"],
+            &["availability: available", "engine: running: x"],
+            &["availability: available", "engine: starting: x"],
+            &["availability: available", "engine: stopped: "],
+            &["availability: available", "engine: stopped:x"],
+            &["availability: available", "engine: Stopped"],
+            &["availability: available", "engine: running", "garbage"],
+            &["availability: available", "engine: running", ""],
+            &["availability: available", "engine: running", "{\"id\":1}"],
+        ] {
+            assert_eq!(TransparentStatus::parse(&lines(broken)), None, "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn a_transparent_answer_is_read_or_named_as_too_old_or_malformed() {
+        let status = TransparentStatus {
+            availability: TransparentAvailability::Available,
+            engine: TransparentEngine::Running,
+        };
+        assert_eq!(
+            transparent_status(Response::Ok(status.to_lines())),
+            Ok(status)
+        );
+        assert_eq!(
+            transparent_status(Response::Error(INVALID_REQUEST.to_owned())),
+            Err(TransparentError::TooOld)
+        );
+        assert_eq!(
+            transparent_status(Response::Error("busy".to_owned())),
+            Err(TransparentError::Agent("busy".to_owned()))
+        );
+        assert_eq!(
+            transparent_status(Response::Ok(lines(&["engine: running"]))),
+            Err(TransparentError::Malformed)
+        );
+        assert_eq!(
+            TransparentError::TooOld.to_string(),
+            "the agent is too old; restart it"
+        );
+        assert_eq!(
+            TransparentError::Agent("busy".to_owned()).to_string(),
+            "busy"
+        );
+        assert_eq!(
+            TransparentError::Malformed.to_string(),
+            "invalid transparent status from the agent"
+        );
+    }
+
+    #[test]
+    fn an_agent_answers_a_request_it_does_not_know_as_an_invalid_request() {
+        let answer = match "transparency".parse::<Request>() {
+            Err(error) => Response::Error(error.to_string()),
+            Ok(request) => panic!("{request:?}"),
+        };
+        assert_eq!(answer.encode(), "error: invalid request\n");
+        assert_eq!(
+            transparent_status(Response::decode(&answer.encode()).unwrap()),
+            Err(TransparentError::TooOld)
+        );
     }
 
     #[test]

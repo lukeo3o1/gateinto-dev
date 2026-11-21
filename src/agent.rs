@@ -14,8 +14,10 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use crate::browser::{self, BrowserProcess, ProfileDir};
 use crate::clock::unix_now;
 use crate::config::GatewayName;
+use crate::divert::Dscp;
 use crate::ipc::{
-    self, BrowserKind, ConfirmToken, Connection, Request, Response, Server, TerminalRequest,
+    self, BrowserKind, ConfirmToken, Connection, Mode, Request, Response, Server, TerminalRequest,
+    TransparentAvailability, TransparentEngine, TransparentStatus,
 };
 use crate::job::{Job, SpawnError};
 use crate::link::{self, Ask, Confirm, Decision, Known, Launch, LinkedGateway, Resolution};
@@ -23,7 +25,13 @@ use crate::logbook::Logbook;
 use crate::proxy::{self, LocalAuth};
 use crate::sessions::{SessionConfig, SessionId, SessionKind, SessionManager};
 use crate::terminal::{self, Shell, Variables};
+use crate::transparent::availability::Availability;
+use crate::transparent::state::{Begin, Generation, Mark, Phase};
 use crate::uri::LaunchRequest;
+
+mod engine;
+
+use engine::{Boxed, Engine, Registry, Started};
 
 const MAX_CONNECTIONS: usize = 8;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,6 +42,15 @@ const PROFILE_REMOVAL_ATTEMPTS: u32 = 40;
 const PROFILE_REMOVAL_DELAY: Duration = Duration::from_millis(250);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const ACCEPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const TERMINALS_UNSUPPORTED: &str =
+    "terminal sessions from the agent are not supported on this platform";
+const CONFIRMATION_REFUSED: &str = "a transparent session is not started for a request that \
+                                    needs a gateway confirmation; add the gateway or use its \
+                                    saved route first";
+const NO_BROWSER_JOB: &str = "a transparent browser session needs a job object, which could not \
+                              be created; nothing was started";
+const NO_HOME: &str =
+    "the agent has no absolute USERPROFILE to start the shell in; nothing was started";
 
 fn accept_retry_delay(failures: u32) -> Duration {
     match failures.checked_sub(1) {
@@ -135,6 +152,13 @@ pub struct AgentOptions {
     pub limits: AgentLimits,
     pub logbook: Logbook,
     pub config: ipc::ConfigSource,
+    pub dscp: Dscp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineStatus {
+    pub phase: Phase,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -154,6 +178,14 @@ impl LaunchLimiter {
     }
 
     fn allow(&mut self, now: Instant) -> bool {
+        let allowed = self.would_allow(now);
+        if allowed {
+            self.recent.push_back(now);
+        }
+        allowed
+    }
+
+    fn would_allow(&mut self, now: Instant) -> bool {
         while self
             .recent
             .front()
@@ -161,22 +193,20 @@ impl LaunchLimiter {
         {
             self.recent.pop_front();
         }
-        if self.recent.len() >= self.limit {
-            return false;
-        }
-        self.recent.push_back(now);
-        true
+        self.recent.len() < self.limit
     }
 }
 
 struct Browser {
     name: Option<BrowserKind>,
+    transparent: bool,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
 
 struct Terminal {
     shell: String,
+    transparent: bool,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -208,6 +238,7 @@ trait Launcher: Send + Sync + 'static {
         spawn: TerminalSpawn,
         job: &Arc<Job>,
     ) -> Result<BrowserProcess, SpawnError>;
+    fn tag(&self, job: &Job, dscp: Dscp) -> io::Result<()>;
 }
 
 struct System;
@@ -264,18 +295,41 @@ impl Launcher for System {
             "terminal sessions from the agent are only available on Windows",
         )))
     }
+
+    #[cfg(windows)]
+    fn tag(&self, job: &Job, dscp: Dscp) -> io::Result<()> {
+        job.set_dscp_tag(dscp)
+    }
+
+    #[cfg(not(windows))]
+    fn tag(&self, _: &Job, _: Dscp) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "DSCP tags on job objects are only available on Windows",
+        ))
+    }
 }
 
 struct Inner {
     profiles: Box<dyn Profiles>,
     launcher: Arc<dyn Launcher>,
+    engine: Arc<dyn Engine>,
     options: AgentOptions,
     sessions: Mutex<SessionManager>,
     browsers: Mutex<BTreeMap<SessionId, Browser>>,
     terminals: Mutex<BTreeMap<SessionId, Terminal>>,
     launches: std::sync::Mutex<LaunchLimiter>,
     launching: Mutex<Option<Pending>>,
+    registry: Arc<Registry>,
+    engine_error: std::sync::Mutex<Option<String>>,
     stop: Notify,
+}
+
+impl Inner {
+    async fn close_session(&self, id: SessionId) -> bool {
+        self.registry.unregister(&id);
+        self.sessions.lock().await.close(id).await
+    }
 }
 
 #[derive(Clone)]
@@ -285,25 +339,29 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(options: AgentOptions, profiles: impl Profiles) -> Self {
-        Self::with_launcher(options, profiles, Arc::new(System))
+        Self::with_seams(options, profiles, Arc::new(System), engine::system())
     }
 
-    fn with_launcher(
+    fn with_seams(
         options: AgentOptions,
         profiles: impl Profiles,
         launcher: Arc<dyn Launcher>,
+        engine: Arc<dyn Engine>,
     ) -> Self {
         let limiter = LaunchLimiter::new(options.limits.launches, options.limits.launch_window);
         Self {
             inner: Arc::new(Inner {
                 profiles: Box::new(profiles),
                 launcher,
+                engine,
                 options,
                 sessions: Mutex::new(SessionManager::new()),
                 browsers: Mutex::new(BTreeMap::new()),
                 terminals: Mutex::new(BTreeMap::new()),
                 launches: std::sync::Mutex::new(limiter),
                 launching: Mutex::new(None),
+                registry: Arc::new(Registry::new()),
+                engine_error: std::sync::Mutex::new(None),
                 stop: Notify::new(),
             }),
         }
@@ -382,7 +440,7 @@ impl Agent {
 
     pub async fn handle(&self, request: Request) -> Response {
         let result = match request {
-            Request::Launch(request) => self.launch(request).await,
+            Request::Launch(request, mode) => self.launch(request, mode).await,
             Request::Terminal(request) => self.terminal(request).await,
             Request::Approve(token) => self.approve(token).await,
             Request::Deny(token) => self.deny(token).await.map(|()| Vec::new()),
@@ -403,6 +461,10 @@ impl Agent {
             Request::Config => ipc::config_line(&self.inner.options.config)
                 .map(|line| vec![line])
                 .ok_or_else(|| "the config path cannot be sent over IPC".to_owned()),
+            Request::Transparent => self
+                .transparent_status()
+                .await
+                .map(|status| status.to_lines()),
         };
         match result {
             Ok(lines) => Response::Ok(lines),
@@ -410,7 +472,10 @@ impl Agent {
         }
     }
 
-    async fn launch(&self, request: LaunchRequest) -> Result<Vec<String>, String> {
+    async fn launch(&self, request: LaunchRequest, mode: Mode) -> Result<Vec<String>, String> {
+        if mode == Mode::Transparent {
+            return self.launch_transparent(request).await;
+        }
         let mut pending = self.inner.launching.lock().await;
         let limits = &self.inner.options.limits;
         if let Err(error) = self.allow_launch() {
@@ -418,12 +483,15 @@ impl Agent {
             return Err(error);
         }
         self.check_capacity().await?;
-        let known = self.inner.profiles.known()?;
+        let known = self.known().await?;
         let resolution = link::resolve(&request, &known, &mut Decision::Defer, unix_now())
             .map_err(|error| error.to_string())?;
         let ask = match resolution {
             Resolution::Launch(launch) => {
-                return self.start(launch).await.map(|lines| warned(lines, &known));
+                return self
+                    .start(launch, Mode::Proxy)
+                    .await
+                    .map(|lines| warned(lines, &known));
             }
             Resolution::Confirm(ask) => ask,
         };
@@ -462,62 +530,242 @@ impl Agent {
         Ok(warned(lines, &known))
     }
 
+    async fn launch_transparent(&self, request: LaunchRequest) -> Result<Vec<String>, String> {
+        if let Err(error) = self.would_allow_launch() {
+            warn!(gateway = ?request.profile, "refused a browser launch: rate limit reached");
+            return Err(error);
+        }
+        self.check_transparent().await?;
+        self.check_capacity().await?;
+        let launch = transparent_launch(&request, &self.known().await?)?;
+        // Discarded: the linked gateways, the CA file, the client certificate and the browser
+        // executable can change while the helper starts, so `start` builds the plan again.
+        self.browser_plan(&launch.profile).await?;
+        self.ensure_engine().await?;
+        let _pending = self.inner.launching.lock().await;
+        if let Err(error) = self.allow_launch() {
+            warn!(gateway = ?request.profile, "refused a browser launch: rate limit reached");
+            return Err(error);
+        }
+        self.check_capacity().await?;
+        let known = self.known().await?;
+        let launch = transparent_launch(&request, &known)?;
+        self.start(launch, Mode::Transparent)
+            .await
+            .map(|lines| warned(lines, &known))
+    }
+
     fn allow_launch(&self) -> Result<(), String> {
-        let allowed = self
-            .inner
+        let allowed = self.launches().allow(Instant::now());
+        allowed.then_some(()).ok_or_else(|| self.rate_limited())
+    }
+
+    fn would_allow_launch(&self) -> Result<(), String> {
+        let allowed = self.launches().would_allow(Instant::now());
+        allowed.then_some(()).ok_or_else(|| self.rate_limited())
+    }
+
+    fn launches(&self) -> std::sync::MutexGuard<'_, LaunchLimiter> {
+        self.inner
             .launches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .allow(Instant::now());
-        if allowed {
-            return Ok(());
-        }
+    }
+
+    fn rate_limited(&self) -> String {
         let limits = &self.inner.options.limits;
-        Err(format!(
+        format!(
             "too many launch requests; at most {} are accepted every {} seconds",
             limits.launches,
             limits.launch_window.as_secs()
-        ))
+        )
+    }
+
+    pub fn transparent_engine(&self) -> EngineStatus {
+        EngineStatus {
+            phase: self.inner.registry.phase(),
+            last_error: self.engine_error().clone(),
+        }
+    }
+
+    fn engine_error(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.inner
+            .engine_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn transparent_availability(&self) -> Result<Availability, String> {
+        let engine = self.inner.engine.clone();
+        tokio::task::spawn_blocking(move || engine.available())
+            .await
+            .map_err(|error| {
+                format!("checking whether transparent sessions are available failed: {error}")
+            })
+    }
+
+    async fn transparent_status(&self) -> Result<TransparentStatus, String> {
+        let availability = match self.transparent_availability().await? {
+            Availability::Available => TransparentAvailability::Available,
+            Availability::Unavailable(reason) => {
+                TransparentAvailability::Unavailable(reason.to_string())
+            }
+        };
+        let EngineStatus { phase, last_error } = self.transparent_engine();
+        let engine = match phase {
+            Phase::Running(_) => TransparentEngine::Running,
+            Phase::Starting(_) => TransparentEngine::Starting,
+            Phase::Stopped => TransparentEngine::Stopped(last_error),
+        };
+        Ok(TransparentStatus {
+            availability,
+            engine,
+        })
+    }
+
+    async fn check_transparent(&self) -> Result<(), String> {
+        match self.transparent_availability().await? {
+            Availability::Available => Ok(()),
+            unavailable => Err(format!("transparent sessions are {unavailable}")),
+        }
+    }
+
+    async fn ensure_engine(&self) -> Result<(), String> {
+        let starter = match self.inner.registry.begin() {
+            Begin::Running(_) => return Ok(()),
+            Begin::Join(joiner) => return joiner.outcome().await,
+            Begin::Start(starter) => starter.on_abandon({
+                let agent = self.clone();
+                move |error| agent.engine_stopped(error)
+            }),
+        };
+        let generation = starter.generation();
+        let Started {
+            mut stopped,
+            listener,
+        } = match self.inner.engine.start(self.inner.options.dscp).await {
+            Ok(started) => started,
+            Err(error) => {
+                warn!("starting the transparent engine failed: {error}");
+                self.engine_stopped(&error);
+                return starter.finish(Err(error));
+            }
+        };
+        let gone = tokio::select! {
+            biased;
+            message = &mut stopped => Some(message),
+            () = std::future::ready(()) => None,
+        };
+        if let Some(message) = gone {
+            warn!("the transparent engine stopped as it started: {message}");
+            self.engine_stopped(&message);
+            return starter.finish(Err(message));
+        }
+        *self.engine_error() = None;
+        let (shutdown, shut) = oneshot::channel::<()>();
+        tokio::spawn(self.clone().watch_engine(generation, stopped, shutdown));
+        // Fails only once the watcher above has stopped this generation: nothing to release.
+        starter.finish(Ok(()))?;
+        info!("started the transparent engine");
+        let shut: Boxed<'static, ()> = Box::pin(async move {
+            let _ = shut.await;
+        });
+        tokio::spawn(listener.serve(self.inner.registry.clone(), generation, shut));
+        Ok(())
+    }
+
+    fn engine_stopped(&self, message: &str) {
+        *self.engine_error() = Some(message.to_owned());
+    }
+
+    async fn watch_engine(
+        self,
+        generation: Generation,
+        stopped: Boxed<'static, String>,
+        shutdown: oneshot::Sender<()>,
+    ) {
+        let message = stopped.await;
+        warn!("the transparent engine stopped: {message}; closing its transparent sessions");
+        self.engine_stopped(&message);
+        let registry = self.inner.registry.clone();
+        let stopping = tokio::task::spawn_blocking(move || registry.stop(generation));
+        self.close_stopped(stopping, shutdown).await;
+    }
+
+    async fn close_stopped(
+        &self,
+        stopping: JoinHandle<Vec<SessionId>>,
+        shutdown: oneshot::Sender<()>,
+    ) {
+        let stopped = stopping.await;
+        drop(shutdown);
+        // A launch that registered before the stop adds its session to `browsers` or `terminals`
+        // only when it ends, and a close before that would miss its process.
+        drop(self.inner.launching.lock().await);
+        let closing = match stopped {
+            Ok(closing) => closing,
+            Err(error) => {
+                warn!(
+                    "stopping the transparent sessions failed: {error}; closing every \
+                     transparent session"
+                );
+                self.transparent_sessions().await
+            }
+        };
+        for id in closing {
+            let _ = self.close(id).await;
+        }
+    }
+
+    async fn transparent_sessions(&self) -> Vec<SessionId> {
+        let mut ids: Vec<SessionId> = (self.inner.terminals.lock().await)
+            .iter()
+            .filter_map(|(&id, terminal)| terminal.transparent.then_some(id))
+            .collect();
+        ids.extend(
+            (self.inner.browsers.lock().await)
+                .iter()
+                .filter_map(|(&id, browser)| browser.transparent.then_some(id)),
+        );
+        ids
     }
 
     async fn terminal(&self, request: TerminalRequest) -> Result<Vec<String>, String> {
-        let _launching = self.inner.launching.lock().await;
+        let transparent = request.mode == Mode::Transparent;
         let gateway = request.gateway;
+        if transparent {
+            self.check_transparent_terminal(&gateway).await?;
+            self.ensure_engine().await?;
+        }
+        let _launching = self.inner.launching.lock().await;
         if let Err(error) = self.allow_launch() {
             warn!(%gateway, "refused a terminal: rate limit reached");
             return Err(error);
         }
         let launcher = self.inner.launcher.clone();
         if !launcher.terminals() {
-            return Err(
-                "terminal sessions from the agent are not supported on this platform".to_owned(),
-            );
+            return Err(TERMINALS_UNSUPPORTED.to_owned());
         }
-        let limit = self.inner.options.limits.max_terminal_sessions;
         // Held until the terminal is registered, so that a close or stop arriving while the
         // shell starts waits for it instead of missing it. Lock order: launching, terminals,
-        // sessions.
+        // sessions, engine state, session mark.
         let mut terminals = self.inner.terminals.lock().await;
-        if terminals.len() >= limit {
-            return Err(format!(
-                "{limit} terminal sessions are already open; close one first"
-            ));
-        }
-        let known = self.inner.profiles.known()?;
-        let plan = self.inner.profiles.terminal_session(&gateway)?;
+        self.check_terminal_capacity(terminals.len())?;
+        let known = self.known().await?;
+        let plan = self.terminal_plan(&gateway).await?;
         let route = terminal::terminal_route(request.route, plan.route);
         let inherited = launcher.environment();
         let Some(current_dir) = home_dir(&inherited) else {
-            return Err(
-                "the agent has no absolute USERPROFILE to start the shell in; nothing was started"
-                    .to_owned(),
-            );
+            return Err(NO_HOME.to_owned());
         };
         let job =
             terminal::terminal_job(launcher.terminal_job()).map_err(|error| error.to_string())?;
+        if transparent {
+            self.tag(&job).await?;
+        }
         let mut proxy = terminal::terminal_proxy(plan.proxy, route, job.clone());
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        let (id, listen) = {
+        let (id, listen, mark) = {
             let mut sessions = self.inner.sessions.lock().await;
             let id = sessions
                 .start(SessionConfig {
@@ -531,7 +779,12 @@ impl Agent {
                 .session(id)
                 .expect("the session just started")
                 .local_addr();
-            (id, listen)
+            let mark = if transparent {
+                Some(self.register(&mut sessions, id, &job).await?)
+            } else {
+                None
+            };
+            (id, listen, mark)
         };
         let span = info_span!("session", %id, kind = %SessionKind::Terminal, gateway = %gateway);
         let (environment, _) =
@@ -547,7 +800,7 @@ impl Agent {
         };
         let spawned = tokio::task::spawn_blocking({
             let job = job.clone();
-            move || launcher.spawn_terminal(spawn, &job)
+            move || launched(mark.as_deref(), || launcher.spawn_terminal(spawn, &job))
         })
         .await
         .map_err(|error| SpawnError::Process(io::Error::other(error)))
@@ -555,13 +808,15 @@ impl Agent {
         let child = match spawned {
             Ok(child) => child,
             Err(error) => {
-                self.inner.sessions.lock().await.close(id).await;
+                self.inner.close_session(id).await;
                 let message = format!("starting {} failed: {error}", executable.display());
                 span.in_scope(|| warn!("{message}"));
                 return Err(message);
             }
         };
-        span.in_scope(|| info!(shell = %executable.display(), "started a shell for the session"));
+        span.in_scope(
+            || info!(shell = %executable.display(), transparent, "started a shell for the session"),
+        );
         let shell = executable
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -579,8 +834,86 @@ impl Agent {
         let (close, closed) = oneshot::channel();
         let task =
             tokio::spawn(watch_terminal(self.inner.clone(), id, child, closed).instrument(span));
-        terminals.insert(id, Terminal { shell, close, task });
+        terminals.insert(
+            id,
+            Terminal {
+                shell,
+                transparent,
+                close,
+                task,
+            },
+        );
         Ok(lines)
+    }
+
+    async fn check_transparent_terminal(&self, gateway: &GatewayName) -> Result<(), String> {
+        if let Err(error) = self.would_allow_launch() {
+            warn!(%gateway, "refused a terminal: rate limit reached");
+            return Err(error);
+        }
+        if !self.inner.launcher.terminals() {
+            return Err(TERMINALS_UNSUPPORTED.to_owned());
+        }
+        self.check_transparent().await?;
+        let open = self.inner.terminals.lock().await.len();
+        self.check_terminal_capacity(open)?;
+        // Discarded: the CA file, the client certificate and the shell executable can change
+        // while the helper starts, so `terminal` builds the plan again.
+        self.terminal_plan(gateway).await?;
+        home_dir(&self.inner.launcher.environment())
+            .map(drop)
+            .ok_or_else(|| NO_HOME.to_owned())
+    }
+
+    async fn terminal_plan(&self, gateway: &GatewayName) -> Result<TerminalSessionPlan, String> {
+        let (inner, gateway) = (self.inner.clone(), gateway.clone());
+        tokio::task::spawn_blocking(move || inner.profiles.terminal_session(&gateway))
+            .await
+            .map_err(|error| format!("building the terminal session plan failed: {error}"))?
+    }
+
+    fn check_terminal_capacity(&self, open: usize) -> Result<(), String> {
+        let limit = self.inner.options.limits.max_terminal_sessions;
+        if open >= limit {
+            return Err(format!(
+                "{limit} terminal sessions are already open; close one first"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn register(
+        &self,
+        sessions: &mut SessionManager,
+        id: SessionId,
+        job: &Arc<Job>,
+    ) -> Result<Arc<Mark>, String> {
+        let adopter = sessions
+            .session(id)
+            .expect("the session just started")
+            .adopter();
+        match self.inner.registry.register(id, job.clone(), adopter) {
+            Ok(mark) => Ok(mark),
+            Err(refusal) => {
+                sessions.close(id).await;
+                Err(format!("{refusal}; nothing was started"))
+            }
+        }
+    }
+
+    async fn tag(&self, job: &Arc<Job>) -> Result<(), String> {
+        let dscp = self.inner.options.dscp;
+        let (launcher, job) = (self.inner.launcher.clone(), job.clone());
+        tokio::task::spawn_blocking(move || launcher.tag(&job, dscp))
+            .await
+            .map_err(io::Error::other)
+            .and_then(|tagged| tagged)
+            .map_err(|error| {
+                format!(
+                    "setting the DSCP tag {dscp} on the job of the session failed: {error}; \
+                     nothing was started"
+                )
+            })
     }
 
     fn answered(pending: &mut Option<Pending>, token: ConfirmToken) -> Result<Pending, String> {
@@ -599,7 +932,7 @@ impl Agent {
     async fn approve(&self, token: ConfirmToken) -> Result<Vec<String>, String> {
         let mut pending = self.inner.launching.lock().await;
         let answered = Self::answered(&mut pending, token)?;
-        let known = self.inner.profiles.known()?;
+        let known = self.known().await?;
         let mut asked = Asked {
             ask: &answered.ask,
             approved: false,
@@ -621,7 +954,7 @@ impl Agent {
             return Err("the gateway could not be approved".to_owned());
         };
         if let Some(gateway) = &launch.add {
-            self.inner.profiles.link(gateway)?;
+            self.link(gateway).await?;
             info!(
                 gateway = %gateway.name,
                 address = %gateway.address,
@@ -637,7 +970,9 @@ impl Agent {
                 None => error,
             });
         }
-        self.start(launch).await.map(|lines| warned(lines, &known))
+        self.start(launch, Mode::Proxy)
+            .await
+            .map(|lines| warned(lines, &known))
     }
 
     async fn deny(&self, token: ConfirmToken) -> Result<(), String> {
@@ -664,15 +999,46 @@ impl Agent {
         Ok(())
     }
 
-    async fn start(&self, launch: Launch) -> Result<Vec<String>, String> {
+    async fn known(&self) -> Result<Known, String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.profiles.known())
+            .await
+            .map_err(|error| format!("reading the gateways failed: {error}"))?
+    }
+
+    async fn link(&self, gateway: &LinkedGateway) -> Result<(), String> {
+        let (inner, gateway) = (self.inner.clone(), gateway.clone());
+        tokio::task::spawn_blocking(move || inner.profiles.link(&gateway))
+            .await
+            .map_err(|error| format!("storing the gateway failed: {error}"))?
+    }
+
+    async fn browser_plan(
+        &self,
+        profile: &GatewayName,
+    ) -> Result<(BrowserSessionPlan, PathBuf), String> {
+        let (inner, profile) = (self.inner.clone(), profile.clone());
+        tokio::task::spawn_blocking(move || {
+            let plan = inner.profiles.browser_session(&profile)?;
+            let executable = browser::find_browser(inner.options.browser.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok((plan, executable))
+        })
+        .await
+        .map_err(|error| format!("building the browser session plan failed: {error}"))?
+    }
+
+    async fn start(&self, launch: Launch, mode: Mode) -> Result<Vec<String>, String> {
+        let transparent = mode == Mode::Transparent;
         let profile = launch.profile;
-        let plan = self.inner.profiles.browser_session(&profile)?;
-        let executable = browser::find_browser(self.inner.options.browser.as_deref())
-            .map_err(|e| e.to_string())?;
+        let (plan, executable) = self.browser_plan(&profile).await?;
         let mut proxy = plan.proxy;
         proxy.listen = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         proxy.route = launch.route;
         let mut job = self.inner.launcher.job();
+        if transparent {
+            self.tag(job.as_ref().ok_or(NO_BROWSER_JOB)?).await?;
+        }
         let mut sessions = self.inner.sessions.lock().await;
         let (id, listen, realm, credentials, span, dir, child) = loop {
             let local_auth = browser_local_auth(job.is_some());
@@ -695,11 +1061,18 @@ impl Agent {
                 launch_credentials(local_auth, session.credentials().map(ipc::credential_lines)),
             );
             let span = info_span!("session", %id, kind = %SessionKind::Browser, gateway = %profile);
+            let mark = match job.as_ref().filter(|_| transparent) {
+                Some(job) => Some(self.register(&mut sessions, id, job).await?),
+                None => None,
+            };
             let started = match ProfileDir::create(&self.inner.options.profiles_root, id) {
                 Ok(dir) => {
                     let args =
                         browser::browser_args(dir.path(), listen, launch.start_page.as_ref());
-                    match self.spawn_browser(&executable, args, job.clone()).await {
+                    match self
+                        .spawn_browser(&executable, args, job.clone(), mark)
+                        .await
+                    {
                         Ok(child) => Ok((dir, child)),
                         Err(error) => {
                             let _ = dir.remove();
@@ -711,7 +1084,7 @@ impl Agent {
             };
             match started {
                 Ok((dir, child)) => break (id, listen, realm, credentials, span, dir, child),
-                Err(SpawnError::Job(error)) if job.is_some() => {
+                Err(SpawnError::Job(error)) if job.is_some() && !transparent => {
                     sessions.close(id).await;
                     span.in_scope(|| {
                         warn!(
@@ -722,6 +1095,7 @@ impl Agent {
                     job = None;
                 }
                 Err(error) => {
+                    self.inner.registry.unregister(&id);
                     sessions.close(id).await;
                     let message = format!("starting {} failed: {error}", executable.display());
                     span.in_scope(|| warn!("{message}"));
@@ -734,6 +1108,7 @@ impl Agent {
             info!(
                 browser = %executable.display(),
                 profile = %dir.path().display(),
+                transparent,
                 "started a browser for the session"
             )
         });
@@ -753,7 +1128,15 @@ impl Agent {
         let mut browsers = self.inner.browsers.lock().await;
         let task = tokio::spawn(watch(self.inner.clone(), id, child, dir, closed).instrument(span));
         let name = browser::browser_name(&executable);
-        browsers.insert(id, Browser { name, close, task });
+        browsers.insert(
+            id,
+            Browser {
+                name,
+                transparent,
+                close,
+                task,
+            },
+        );
         Ok(lines)
     }
 
@@ -762,30 +1145,35 @@ impl Agent {
         executable: &Path,
         args: Vec<OsString>,
         job: Option<Arc<Job>>,
+        mark: Option<Arc<Mark>>,
     ) -> Result<BrowserProcess, SpawnError> {
         let launcher = self.inner.launcher.clone();
         let executable = executable.to_owned();
-        tokio::task::spawn_blocking(move || launcher.spawn(&executable, args, job.as_ref()))
-            .await
-            .map_err(|error| SpawnError::Process(std::io::Error::other(error)))?
+        tokio::task::spawn_blocking(move || {
+            launched(mark.as_deref(), || {
+                launcher.spawn(&executable, args, job.as_ref())
+            })
+        })
+        .await
+        .map_err(|error| SpawnError::Process(std::io::Error::other(error)))?
     }
 
     async fn list(&self) -> Vec<String> {
-        let names: BTreeMap<SessionId, BrowserKind> = self
+        let browsers: BTreeMap<SessionId, (Option<BrowserKind>, bool)> = self
             .inner
             .browsers
             .lock()
             .await
             .iter()
-            .filter_map(|(&id, browser)| Some((id, browser.name?)))
+            .map(|(&id, browser)| (id, (browser.name, browser.transparent)))
             .collect();
-        let shells: BTreeMap<SessionId, String> = self
+        let terminals: BTreeMap<SessionId, (String, bool)> = self
             .inner
             .terminals
             .lock()
             .await
             .iter()
-            .map(|(&id, terminal)| (id, terminal.shell.clone()))
+            .map(|(&id, terminal)| (id, (terminal.shell.clone(), terminal.transparent)))
             .collect();
         self.inner
             .sessions
@@ -793,8 +1181,12 @@ impl Agent {
             .await
             .sessions()
             .map(|session| {
-                let mut info = session.info(names.get(&session.id()).copied());
-                info.shell = shells.get(&session.id()).cloned();
+                let browser = browsers.get(&session.id());
+                let terminal = terminals.get(&session.id());
+                let mut info = session.info(browser.and_then(|(name, _)| *name));
+                info.shell = terminal.map(|(shell, _)| shell.clone());
+                info.transparent = browser.is_some_and(|(_, transparent)| *transparent)
+                    || terminal.is_some_and(|(_, transparent)| *transparent);
                 info.to_line()
             })
             .collect()
@@ -849,7 +1241,7 @@ impl Agent {
             let _ = terminal.task.await;
             return Ok(());
         }
-        if self.inner.sessions.lock().await.close(id).await {
+        if self.inner.close_session(id).await {
             Ok(())
         } else {
             Err(format!("no session {id}"))
@@ -868,9 +1260,33 @@ impl Agent {
             let _ = terminal.close.send(());
             let _ = terminal.task.await;
         }
-        self.inner.sessions.lock().await.close_all().await;
+        let mut sessions = self.inner.sessions.lock().await;
+        for session in sessions.sessions() {
+            self.inner.registry.unregister(&session.id());
+        }
+        sessions.close_all().await;
         count
     }
+}
+
+fn transparent_launch(request: &LaunchRequest, known: &Known) -> Result<Launch, String> {
+    match link::resolve(request, known, &mut Decision::Defer, unix_now())
+        .map_err(|error| error.to_string())?
+    {
+        Resolution::Launch(launch) => Ok(launch),
+        Resolution::Confirm(_) => Err(CONFIRMATION_REFUSED.to_owned()),
+    }
+}
+
+fn launched<T>(
+    mark: Option<&Mark>,
+    spawn: impl FnOnce() -> Result<T, SpawnError>,
+) -> Result<T, SpawnError> {
+    let _launch = mark
+        .map(Mark::launch)
+        .transpose()
+        .map_err(|closing| SpawnError::Process(io::Error::other(closing)))?;
+    spawn()
 }
 
 fn warned(mut lines: Vec<String>, known: &Known) -> Vec<String> {
@@ -911,8 +1327,9 @@ async fn watch(
         }
     }
     drop(child);
-    inner.sessions.lock().await.close(id).await;
-    remove_profile(&profile).await;
+    inner.close_session(id).await;
+    let path = profile.path().to_owned();
+    remove_profile(&path, move || profile.remove()).await;
     inner.browsers.lock().await.remove(&id);
 }
 
@@ -943,7 +1360,7 @@ async fn watch_terminal(
         }
     }
     drop(child);
-    inner.sessions.lock().await.close(id).await;
+    inner.close_session(id).await;
     inner.terminals.lock().await.remove(&id);
 }
 
@@ -955,13 +1372,19 @@ fn home_dir(environment: &Variables) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
-async fn remove_profile(profile: &ProfileDir) {
+async fn remove_profile(path: &Path, remove: impl Fn() -> io::Result<()> + Send + Sync + 'static) {
+    let remove = Arc::new(remove);
     for attempt in 1..=PROFILE_REMOVAL_ATTEMPTS {
-        match profile.remove() {
+        let removing = remove.clone();
+        let removed = tokio::task::spawn_blocking(move || removing())
+            .await
+            .map_err(io::Error::other)
+            .and_then(|removed| removed);
+        match removed {
             Ok(()) => return,
             Err(error) if attempt == PROFILE_REMOVAL_ATTEMPTS => warn!(
                 "removing the browser profile {} failed: {error}; the next agent start retries",
-                profile.path().display()
+                path.display()
             ),
             Err(_) => tokio::time::sleep(PROFILE_REMOVAL_DELAY).await,
         }
@@ -1098,6 +1521,31 @@ mod tests {
         assert!(!limiter.allow(Instant::now()));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn profile_removal_runs_off_the_async_worker_and_pauses_between_attempts() {
+        let worker = std::thread::current().id();
+        let attempts: Arc<std::sync::Mutex<Vec<std::thread::ThreadId>>> = Arc::default();
+        let recorded = attempts.clone();
+        let started = tokio::time::Instant::now();
+        remove_profile(Path::new("profile"), move || {
+            let mut attempts = recorded.lock().unwrap();
+            attempts.push(std::thread::current().id());
+            if attempts.len() < 3 {
+                Err(io::Error::other("in use"))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts.iter().all(|thread| *thread != worker));
+        assert_eq!(started.elapsed(), PROFILE_REMOVAL_DELAY * 2);
+    }
+
+    #[cfg(unix)]
+    mod transparent;
+
     #[cfg(unix)]
     mod no_job_retry {
         use std::io;
@@ -1173,6 +1621,10 @@ mod tests {
             ) -> Result<BrowserProcess, SpawnError> {
                 Err(SpawnError::Process(io::Error::other("not used")))
             }
+
+            fn tag(&self, _: &Job, _: Dscp) -> io::Result<()> {
+                Err(io::Error::other("not used"))
+            }
         }
 
         pub(super) fn proxy_config() -> proxy::Config {
@@ -1198,26 +1650,31 @@ mod tests {
         async fn a_refused_job_closes_the_session_and_retries_with_session_credentials_only() {
             let root = std::env::temp_dir().join(format!("gateinto-no-job-{}", std::process::id()));
             let launcher = Arc::new(JobFailsOnce::default());
-            let agent = Agent::with_launcher(
+            let agent = Agent::with_seams(
                 AgentOptions {
                     browser: Some(PathBuf::from("/bin/sleep")),
                     profiles_root: root.clone(),
                     limits: AgentLimits::default(),
                     logbook: Default::default(),
                     config: ipc::ConfigSource::Defaults,
+                    dscp: Dscp::DEFAULT,
                 },
                 Plan(proxy_config()),
                 launcher.clone(),
+                engine::system(),
             );
             let logs = crate::test_logs::capture();
 
             let lines = agent
-                .start(Launch {
-                    route: proxy::Route::Gateway,
-                    profile: "work".parse().unwrap(),
-                    start_page: None,
-                    add: None,
-                })
+                .start(
+                    Launch {
+                        route: proxy::Route::Gateway,
+                        profile: "work".parse().unwrap(),
+                        start_page: None,
+                        add: None,
+                    },
+                    Mode::Proxy,
+                )
                 .await
                 .unwrap();
             let warnings = logs.lines(" WARN ");
@@ -1425,6 +1882,10 @@ mod tests {
                     Spawn::Fails => Err(SpawnError::Process(io::Error::other("not found"))),
                 }
             }
+
+            fn tag(&self, _: &Job, _: Dscp) -> io::Result<()> {
+                Err(io::Error::other("not used"))
+            }
         }
 
         fn agent_with(
@@ -1433,7 +1894,7 @@ mod tests {
         ) -> (Agent, Arc<Terminals>, Arc<Gateways>) {
             let launcher = Arc::new(launcher);
             let gateways = Arc::new(Gateways::default());
-            let agent = Agent::with_launcher(
+            let agent = Agent::with_seams(
                 AgentOptions {
                     browser: Some(PathBuf::from("/bin/sleep")),
                     profiles_root: std::env::temp_dir()
@@ -1441,9 +1902,11 @@ mod tests {
                     limits,
                     logbook: Default::default(),
                     config: ipc::ConfigSource::Defaults,
+                    dscp: Dscp::DEFAULT,
                 },
                 SharedGateways(gateways.clone()),
                 launcher.clone(),
+                engine::system(),
             );
             (agent, launcher, gateways)
         }
@@ -1479,6 +1942,7 @@ mod tests {
             Request::Terminal(TerminalRequest {
                 gateway: gateway.parse().unwrap(),
                 route,
+                mode: Mode::Proxy,
             })
         }
 
@@ -1677,7 +2141,9 @@ mod tests {
             answer(&agent, request("office", None)).await.unwrap();
             answer(&agent, request("office", None)).await.unwrap();
             let launch = LaunchRequest::new("office", "session_credentials").unwrap();
-            let error = answer(&agent, Request::Launch(launch)).await.unwrap_err();
+            let error = answer(&agent, Request::Launch(launch, Mode::Proxy))
+                .await
+                .unwrap_err();
             assert!(error.starts_with("too many launch requests"), "{error}");
             agent.close_all().await;
         }
@@ -1838,12 +2304,15 @@ mod tests {
             answer(&agent, request("office", None)).await.unwrap();
             answer(&agent, request("office", None)).await.unwrap();
             agent
-                .start(Launch {
-                    route: proxy::Route::Gateway,
-                    profile: "office".parse().unwrap(),
-                    start_page: None,
-                    add: None,
-                })
+                .start(
+                    Launch {
+                        route: proxy::Route::Gateway,
+                        profile: "office".parse().unwrap(),
+                        start_page: None,
+                        add: None,
+                    },
+                    Mode::Proxy,
+                )
                 .await
                 .unwrap();
             assert_eq!(session_ids(&agent).await.len(), 3);

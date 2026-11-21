@@ -55,6 +55,7 @@ fn group(zone: Zone) -> Option<u8> {
         Zone::Entry(_) => Some(3),
         Zone::Language(_) => Some(4),
         Zone::AddRoute(_) => Some(5),
+        Zone::Mode(_) => Some(6),
         _ => None,
     }
 }
@@ -524,6 +525,22 @@ mod tests {
         );
         f.clicked(Zone::Theme(Choice::Dark), &stops);
         assert_eq!(f.arrow(&stops, true), Some(Zone::Theme(Choice::System)));
+    }
+
+    #[test]
+    fn mode_parts_are_their_own_arrow_group() {
+        use gateinto::ipc::Mode;
+        let stops = [
+            stop(Zone::Mode(Mode::Proxy)),
+            stop(Zone::Mode(Mode::Transparent)),
+            stop(Zone::AddGateway),
+        ];
+        let mut f = Focus::default();
+        f.clicked(Zone::Mode(Mode::Proxy), &stops);
+        assert_eq!(f.arrow(&stops, true), Some(Zone::Mode(Mode::Transparent)));
+        assert_eq!(f.arrow(&stops, true), Some(Zone::Mode(Mode::Proxy)));
+        assert_eq!(f.arrow(&stops, false), Some(Zone::Mode(Mode::Transparent)));
+        assert_eq!(f.tab(&stops, false), Some(Zone::AddGateway));
     }
 
     #[test]

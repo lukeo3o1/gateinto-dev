@@ -3,6 +3,8 @@ use std::fmt;
 use std::io;
 
 #[cfg(windows)]
+pub(crate) use windows::wait_for;
+#[cfg(windows)]
 pub use windows::{Process, SpawnOptions};
 
 #[cfg(target_os = "linux")]
@@ -47,6 +49,14 @@ impl Job {
     pub(crate) fn handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
         self.handle.0
     }
+
+    #[cfg(not(windows))]
+    pub(crate) fn terminate(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "job objects can only be terminated on Windows",
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -88,21 +98,40 @@ fn command_line(executable: &[u16], args: &[Vec<u16>]) -> io::Result<Vec<u16>> {
             "the executable path contains a quote",
         ));
     }
-    if executable.contains(&0) || args.iter().any(|arg| arg.contains(&0)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the command line contains a NUL character",
-        ));
+    if executable.contains(&0) {
+        return Err(nul_in_command_line());
     }
     let mut line = vec![QUOTE];
     line.extend_from_slice(executable);
     line.push(QUOTE);
-    for arg in args {
+    if !args.is_empty() {
         line.push(u16::from(b' '));
+    }
+    line.extend(parameters(args)?);
+    Ok(line)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn parameters(args: &[Vec<u16>]) -> io::Result<Vec<u16>> {
+    if args.iter().any(|arg| arg.contains(&0)) {
+        return Err(nul_in_command_line());
+    }
+    let mut line = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            line.push(u16::from(b' '));
+        }
         quote(arg, &mut line);
     }
     line.push(0);
     Ok(line)
+}
+
+fn nul_in_command_line() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "the command line contains a NUL character",
+    )
 }
 
 fn quote(arg: &[u16], line: &mut Vec<u16>) {
@@ -147,9 +176,12 @@ mod windows {
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_NET_RATE_CONTROL_DSCP_TAG, JOB_OBJECT_NET_RATE_CONTROL_ENABLE,
+        JOB_OBJECT_NET_RATE_CONTROL_FLAGS, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_NET_RATE_CONTROL_INFORMATION,
         JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+        JobObjectNetRateControlInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_CONSOLE, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
@@ -163,9 +195,12 @@ mod windows {
     use tracing::warn;
 
     use super::{Job, SpawnError, command_line};
+    use crate::divert::Dscp;
     use crate::token::Handle;
 
     const TERMINATED: u32 = 1;
+    const DSCP_TAGGED: JOB_OBJECT_NET_RATE_CONTROL_FLAGS =
+        JOB_OBJECT_NET_RATE_CONTROL_ENABLE | JOB_OBJECT_NET_RATE_CONTROL_DSCP_TAG;
     const EXIT_WAIT_MILLISECONDS: u32 = 5_000;
     const EMPTY_TIMEOUT: Duration = Duration::from_secs(5);
     const EMPTY_POLL: Duration = Duration::from_millis(10);
@@ -499,7 +534,53 @@ mod windows {
             Ok(info.ActiveProcesses)
         }
 
-        fn terminate(&self) -> io::Result<()> {
+        pub fn set_dscp_tag(&self, dscp: Dscp) -> io::Result<()> {
+            let control = JOBOBJECT_NET_RATE_CONTROL_INFORMATION {
+                MaxBandwidth: 0,
+                ControlFlags: DSCP_TAGGED,
+                DscpTag: dscp.value(),
+            };
+            // SAFETY: control is a JOBOBJECT_NET_RATE_CONTROL_INFORMATION of the given size.
+            if unsafe {
+                SetInformationJobObject(
+                    self.handle(),
+                    JobObjectNetRateControlInformation,
+                    (&raw const control).cast(),
+                    size_of_val(&control) as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let read = self.net_rate_control()?;
+            if read.ControlFlags & DSCP_TAGGED != DSCP_TAGGED || read.DscpTag != dscp.value() {
+                return Err(io::Error::other(format!(
+                    "the job reports DSCP tag {} with flags {:#x} instead of DSCP tag {dscp}",
+                    read.DscpTag, read.ControlFlags
+                )));
+            }
+            Ok(())
+        }
+
+        fn net_rate_control(&self) -> io::Result<JOBOBJECT_NET_RATE_CONTROL_INFORMATION> {
+            let mut control = JOBOBJECT_NET_RATE_CONTROL_INFORMATION::default();
+            // SAFETY: control is a JOBOBJECT_NET_RATE_CONTROL_INFORMATION of the given size.
+            if unsafe {
+                QueryInformationJobObject(
+                    self.handle(),
+                    JobObjectNetRateControlInformation,
+                    (&raw mut control).cast(),
+                    size_of_val(&control) as u32,
+                    null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(control)
+        }
+
+        pub(crate) fn terminate(&self) -> io::Result<()> {
             // SAFETY: the job handle stays open while self lives.
             if unsafe { TerminateJobObject(self.handle(), TERMINATED) } == 0 {
                 return Err(io::Error::last_os_error());
@@ -525,7 +606,7 @@ mod windows {
         }
     }
 
-    fn wait_for(process: &Handle) -> io::Result<ExitStatus> {
+    pub(crate) fn wait_for(process: &Handle) -> io::Result<ExitStatus> {
         // SAFETY: process is an open process handle.
         if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
             return Err(io::Error::last_os_error());
@@ -750,6 +831,42 @@ mod windows {
             process.kill().await.unwrap();
             assert_eq!(job.active_processes().unwrap(), 0);
         }
+
+        fn limit_flags(job: &Job) -> u32 {
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            // SAFETY: limits is a JOBOBJECT_EXTENDED_LIMIT_INFORMATION of the given size.
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    job.handle(),
+                    JobObjectExtendedLimitInformation,
+                    (&raw mut limits).cast(),
+                    size_of_val(&limits) as u32,
+                    null_mut(),
+                )
+            };
+            assert_ne!(queried, 0, "{}", io::Error::last_os_error());
+            limits.BasicLimitInformation.LimitFlags
+        }
+
+        #[test]
+        fn a_dscp_tag_set_on_a_job_is_read_back_and_keeps_kill_on_close() {
+            let job = Job::new().unwrap();
+            job.set_dscp_tag(Dscp::DEFAULT).unwrap();
+            let control = job.net_rate_control().unwrap();
+            assert_eq!(control.ControlFlags & DSCP_TAGGED, DSCP_TAGGED);
+            assert_eq!(control.DscpTag, 43);
+            assert_ne!(limit_flags(&job) & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
+        }
+
+        #[test]
+        fn the_last_dscp_tag_set_on_a_job_wins() {
+            let job = Job::new().unwrap();
+            job.set_dscp_tag(Dscp::new(10).unwrap()).unwrap();
+            job.set_dscp_tag(Dscp::new(63).unwrap()).unwrap();
+            let control = job.net_rate_control().unwrap();
+            assert_eq!(control.ControlFlags & DSCP_TAGGED, DSCP_TAGGED);
+            assert_eq!(control.DscpTag, 63);
+        }
     }
 }
 
@@ -774,6 +891,7 @@ mod tests {
             line(r"C:\Program Files\Edge\msedge.exe", &["a", "--flag=1"]).unwrap(),
             r#""C:\Program Files\Edge\msedge.exe" a --flag=1"#
         );
+        assert_eq!(line("x", &[]).unwrap(), r#""x""#);
     }
 
     #[test]
@@ -794,6 +912,23 @@ mod tests {
                 "{arg}"
             );
         }
+    }
+
+    #[test]
+    fn parameters_are_quoted_like_a_command_line_without_the_executable() {
+        let args: Vec<Vec<u16>> = ["divert", "--pipe", r"\\.\pipe\x", "a b", "", r#"a"b"#]
+            .iter()
+            .map(|arg| wide(arg))
+            .collect();
+        let mut line = parameters(&args).unwrap();
+        assert_eq!(line.pop(), Some(0));
+        assert_eq!(
+            String::from_utf16(&line).unwrap(),
+            r#"divert --pipe \\.\pipe\x "a b" "" "a\"b""#
+        );
+        assert_eq!(parameters(&[]).unwrap(), [0]);
+        let error = parameters(&[wide("a\0b")]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

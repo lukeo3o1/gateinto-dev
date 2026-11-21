@@ -54,3 +54,17 @@ path = "fuzz_targets/proxy-authenticate.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "divert-engine"
+path = "fuzz_targets/divert-engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "divert-status"
+path = "fuzz_targets/divert-status.rs"
+test = false
+doc = false
+bench = false

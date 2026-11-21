@@ -68,6 +68,8 @@ pub struct SessionInfo {
     pub shell: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub verification: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transparent: bool,
 }
 
 impl SessionInfo {
@@ -205,6 +207,7 @@ mod tests {
             browser,
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 
@@ -304,6 +307,23 @@ mod tests {
             "{line}"
         );
         assert_eq!(SessionInfo::parse_list(&[line]).unwrap(), [flagged]);
+    }
+
+    #[test]
+    fn a_transparent_session_is_flagged_and_a_proxy_mode_session_omits_the_flag() {
+        let line = info(None).to_line();
+        assert!(!line.contains("transparent"), "{line}");
+        assert!(!SessionInfo::parse_list(&[line]).unwrap()[0].transparent);
+        let transparent = SessionInfo {
+            transparent: true,
+            ..info(None)
+        };
+        let line = transparent.to_line();
+        assert!(
+            line.ends_with(r#""tunnels":2,"transparent":true}"#),
+            "{line}"
+        );
+        assert_eq!(SessionInfo::parse_list(&[line]).unwrap(), [transparent]);
     }
 
     #[test]

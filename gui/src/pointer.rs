@@ -19,6 +19,7 @@ pub enum Action {
     More(u64),
     StartBrowser(usize),
     OpenTerminal(usize),
+    Mode(gateinto::ipc::Mode),
     GatewayDetails(usize),
     OpenPicker,
     Choose(usize),
@@ -84,6 +85,7 @@ pub fn action(zone: Zone) -> Option<Action> {
         Zone::More(id) => Some(Action::More(id)),
         Zone::StartBrowser(row) => Some(Action::StartBrowser(row)),
         Zone::OpenTerminal(row) => Some(Action::OpenTerminal(row)),
+        Zone::Mode(mode) => Some(Action::Mode(mode)),
         Zone::GatewayCard(row) => Some(Action::GatewayDetails(row)),
         Zone::Picker => Some(Action::OpenPicker),
         Zone::Entry(i) => Some(Action::Choose(i)),
@@ -531,6 +533,18 @@ mod tests {
         assert!(p.moved(zone));
         assert!(p.down(zone));
         assert_eq!(p.up(zone), Some(Action::Theme(Choice::Dark)));
+    }
+
+    #[test]
+    fn a_mode_part_chooses_its_mode() {
+        use gateinto::ipc::Mode;
+        for mode in [Mode::Proxy, Mode::Transparent] {
+            let mut p = Pointer::default();
+            let zone = Zone::Mode(mode);
+            assert!(p.moved(zone));
+            assert!(p.down(zone));
+            assert_eq!(p.up(zone), Some(Action::Mode(mode)));
+        }
     }
 
     #[test]

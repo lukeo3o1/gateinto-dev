@@ -85,7 +85,7 @@ fn ended(state: &AgentState, ending: Ending, unlisted: u64) -> Option<(Vec<&Sess
 
 #[cfg(test)]
 mod tests {
-    use gateinto::ipc::{SessionAuth, SessionRoute};
+    use gateinto::ipc::{Mode, SessionAuth, SessionRoute};
 
     use super::*;
     use crate::i18n::{Language, Note, speaking};
@@ -104,6 +104,7 @@ mod tests {
             browser: None,
             shell: shell.map(str::to_owned),
             verification: false,
+            transparent: false,
         }
     }
 
@@ -116,7 +117,7 @@ mod tests {
     }
 
     fn launch() -> Command {
-        Command::Launch("office".parse().unwrap())
+        Command::Launch("office".parse().unwrap(), Mode::Proxy)
     }
 
     #[test]
@@ -165,7 +166,9 @@ mod tests {
         let state = running(2);
         for command in [
             launch(),
-            Command::Terminal("office".parse().unwrap()),
+            Command::Launch("office".parse().unwrap(), Mode::Transparent),
+            Command::Terminal("office".parse().unwrap(), Mode::Proxy),
+            Command::Terminal("office".parse().unwrap(), Mode::Transparent),
             Command::Start,
             Command::Probe,
         ] {

@@ -45,6 +45,7 @@ pub struct Row {
     pub uptime: String,
     pub active: bool,
     pub verification: Option<&'static str>,
+    pub transparent: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +201,7 @@ pub fn row(session: &SessionInfo, now: u64, names: &Names) -> Row {
         uptime: uptime(session.started, now),
         active: session.tunnels > 0,
         verification: session.verification.then(|| tr(Text::VerificationRequired)),
+        transparent: session.transparent.then(|| tr(Text::Transparent)),
     }
 }
 
@@ -271,6 +273,7 @@ mod tests {
             browser: Some(BrowserKind::Edge),
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 
@@ -547,6 +550,7 @@ mod tests {
                 uptime: "3 min".to_owned(),
                 active: true,
                 verification: None,
+                transparent: None,
             }
         );
         assert!(!row(&session(7, 0), 1_000, &NO_NAMES).active);
@@ -564,6 +568,22 @@ mod tests {
         assert_eq!(
             row(&flagged, 1_000, &NO_NAMES).verification,
             Some("需要驗證")
+        );
+    }
+
+    #[test]
+    fn a_transparent_session_is_marked_and_a_proxy_session_is_not() {
+        assert_eq!(row(&session(7, 0), 1_000, &NO_NAMES).transparent, None);
+        let mut transparent = session(7, 0);
+        transparent.transparent = true;
+        assert_eq!(
+            row(&transparent, 1_000, &NO_NAMES).transparent,
+            Some("Transparent")
+        );
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(
+            row(&transparent, 1_000, &NO_NAMES).transparent,
+            Some("透明")
         );
     }
 

@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroU16;
@@ -21,7 +23,7 @@ use gateinto::identity::device_key::{
     self, Backend, InitOptions, KeyError, KeyName, KeyStore, Provenance, SpkiConfirmation,
 };
 use gateinto::ipc::{
-    self, ConfigSource, Endpoint, Request, RequestError, Response, Server, SessionInfo,
+    self, ConfigSource, Endpoint, Mode, Request, RequestError, Response, Server, SessionInfo,
     TerminalRequest,
 };
 use gateinto::lifecycle::{self, Purge};
@@ -100,6 +102,9 @@ enum Command {
         doc = "is no device key, so it deletes nothing"
     )]
     Reset(ResetArgs),
+    #[cfg(windows)]
+    #[command(hide = true)]
+    Divert(DivertArgs),
 }
 
 #[derive(Args)]
@@ -129,6 +134,19 @@ struct StatusArgs {
     /// Name of the persisted CNG key [default: gateinto-device-v1]
     #[arg(long)]
     name: Option<KeyName>,
+}
+
+#[cfg(windows)]
+#[derive(Args)]
+struct DivertArgs {
+    #[arg(long, allow_hyphen_values = true)]
+    pipe: Option<OsString>,
+    #[arg(long, allow_hyphen_values = true)]
+    agent_pid: Option<OsString>,
+    #[arg(long, allow_hyphen_values = true)]
+    port: Option<OsString>,
+    #[arg(long, allow_hyphen_values = true)]
+    dscp: Option<OsString>,
 }
 
 #[derive(Args)]
@@ -219,6 +237,12 @@ struct OpenArgs {
     #[command(flatten)]
     config: ConfigArg,
 
+    /// Ask for a transparent session instead of a local proxy (Windows only); starting the
+    /// transparent engine may ask for administrator approval, and the link is not handed to the
+    /// Gateinto window
+    #[arg(long)]
+    transparent: bool,
+
     /// Launch URI such as gateinto://connect?profile=<gateway>; put -- before it
     uri: String,
 }
@@ -294,7 +318,7 @@ struct TerminalSessionArgs {
     upstream: UpstreamArgs,
 
     /// Ask the running agent to start the shell in a new console window and return; takes only
-    /// --gateway and --route, and never starts an agent
+    /// --gateway, --route and --transparent, and never starts an agent
     #[arg(
         long,
         requires = "gateway",
@@ -314,6 +338,11 @@ struct TerminalSessionArgs {
     /// mixed
     #[arg(long, value_enum, default_value_t = RouteArg::Saved)]
     route: RouteArg,
+
+    /// With --agent, ask for a transparent session instead of a local proxy (Windows only);
+    /// starting the transparent engine may ask for administrator approval
+    #[arg(long, requires = "agent")]
+    transparent: bool,
 
     /// Shell to start instead of [terminal] shell from --config or the default shell; a bare
     /// name is searched in PATH only, never in the current directory
@@ -565,6 +594,21 @@ fn tls_mode_parser() -> impl clap::builder::TypedValueParser<Value = TlsMode> {
 }
 
 fn main() -> ExitCode {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            if error.use_stderr() && arguments.get(1).is_some_and(|arg| arg == "open") {
+                prompt::show_launch_error(&error.to_string());
+            }
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    #[cfg(windows)]
+    if let Command::Divert(args) = &cli.command {
+        return divert(args);
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -578,24 +622,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = runtime.block_on(run());
+    let code = runtime.block_on(run(cli));
     // A prompt still open on a blocking thread waits for the user; exiting must not.
     runtime.shutdown_background();
     code
 }
 
-async fn run() -> ExitCode {
-    let arguments: Vec<_> = std::env::args_os().collect();
-    let cli = match Cli::try_parse_from(&arguments) {
-        Ok(cli) => cli,
-        Err(error) => {
-            let _ = error.print();
-            if error.use_stderr() && arguments.get(1).is_some_and(|arg| arg == "open") {
-                prompt::show_launch_error(&error.to_string());
-            }
-            return ExitCode::from(error.exit_code() as u8);
-        }
-    };
+async fn run(cli: Cli) -> ExitCode {
     let opening = matches!(&cli.command, Command::Open(_));
     let result = match cli.command {
         Command::CheckUpstream(args) => check_upstream(args).await,
@@ -615,6 +648,8 @@ async fn run() -> ExitCode {
         Command::Setup(args) => setup(args),
         Command::Status(args) => status(args).await,
         Command::Reset(args) => reset(args).await,
+        #[cfg(windows)]
+        Command::Divert(_) => unreachable!("the divert helper runs before the runtime is built"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -691,6 +726,27 @@ fn key_info<S: ClientIdentityStore>(store: &S, name: &KeyName, args: KeyInfoArgs
         )?
     );
     Ok(())
+}
+
+#[cfg(windows)]
+fn divert(args: &DivertArgs) -> ExitCode {
+    std::panic::set_hook(Box::new(|_| {}));
+    ExitCode::from(gateinto::divert::windows::run(&helper_arguments(args)))
+}
+
+#[cfg(windows)]
+fn helper_arguments(args: &DivertArgs) -> gateinto::divert::helper::Arguments<'_> {
+    gateinto::divert::helper::Arguments {
+        pipe: text_or_empty(args.pipe.as_deref()),
+        agent_pid: text_or_empty(args.agent_pid.as_deref()),
+        port: text_or_empty(args.port.as_deref()),
+        dscp: text_or_empty(args.dscp.as_deref()),
+    }
+}
+
+#[cfg(windows)]
+fn text_or_empty(value: Option<&OsStr>) -> &str {
+    value.and_then(OsStr::to_str).unwrap_or("")
 }
 
 fn init_logging(default_filter: &str) {
@@ -852,6 +908,7 @@ fn terminal_request(args: &TerminalSessionArgs) -> Option<Request> {
     Some(Request::Terminal(TerminalRequest {
         gateway,
         route: args.route.requested(),
+        mode: mode(args.transparent),
     }))
 }
 
@@ -867,7 +924,9 @@ fn agent_terminal_answer(response: Response) -> Result<Vec<String>, String> {
 
 async fn agent_terminal(request: Request) -> Result {
     let endpoint = Endpoint::for_current_user()?;
-    for line in agent_terminal_answer(ipc::send(&endpoint, &request).await?)? {
+    announce(&request);
+    let response = transparent_answer(&request, ipc::send(&endpoint, &request).await?);
+    for line in agent_terminal_answer(response)? {
         println!("{line}");
     }
     Ok(())
@@ -1045,6 +1104,27 @@ impl ConfigProfiles {
     }
 }
 
+fn installed_gui() -> Result<Option<PathBuf>> {
+    if let Some(gui) = test_gui() {
+        return Ok(Some(gui));
+    }
+    Ok(if cfg!(windows) {
+        handoff::installed(&std::env::current_exe()?)
+    } else {
+        None
+    })
+}
+
+#[cfg(feature = "test-hooks")]
+fn test_gui() -> Option<PathBuf> {
+    std::env::var_os("GATEINTO_TEST_GUI").map(PathBuf::from)
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn test_gui() -> Option<PathBuf> {
+    None
+}
+
 #[cfg(feature = "test-hooks")]
 fn linked_test_ca() -> Option<PathBuf> {
     std::env::var_os("GATEINTO_TEST_LINKED_CA_FILE").map(PathBuf::from)
@@ -1120,6 +1200,22 @@ fn agent_config(path: Option<PathBuf>) -> std::io::Result<ConfigSource> {
     })
 }
 
+fn agent_options(
+    file: &ConfigFile,
+    config: ConfigSource,
+    profiles_root: PathBuf,
+    logbook: Logbook,
+) -> AgentOptions {
+    AgentOptions {
+        browser: file.browser.executable.clone(),
+        profiles_root,
+        limits: AgentLimits::default(),
+        logbook,
+        config,
+        dscp: file.transparent.dscp(),
+    }
+}
+
 async fn agent(args: ConfigArg) -> Result {
     let shutdown = shutdown_signal();
     let config = agent_config(args.path().map(|(path, _)| path))?;
@@ -1136,13 +1232,7 @@ async fn agent(args: ConfigArg) -> Result {
     let server = Server::bind(&endpoint)?;
     let profiles_root = browser::profiles_root()
         .ok_or("cannot find the per-user application data directory for browser profiles")?;
-    let options = AgentOptions {
-        browser: file.browser.executable.clone(),
-        profiles_root,
-        limits: AgentLimits::default(),
-        logbook,
-        config,
-    };
+    let options = agent_options(&file, config, profiles_root, logbook);
     let profiles = ConfigProfiles {
         file: file.clone(),
         linked: linked_store(),
@@ -1170,6 +1260,53 @@ async fn agent_detach(config: Option<&Path>) -> Result {
 
 const AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_START_ATTEMPTS: u32 = 3;
+const TRANSPARENT_NOTICE: &str =
+    "starting the transparent engine may ask for administrator approval";
+const TOO_OLD_FOR_TRANSPARENT: &str = "the agent is too old for transparent sessions; restart it";
+const TRANSPARENT_LINE: &str = "mode: transparent";
+
+fn mode(transparent: bool) -> Mode {
+    if transparent {
+        Mode::Transparent
+    } else {
+        Mode::Proxy
+    }
+}
+
+fn offered_gui(request: &Request, installed: Option<PathBuf>) -> Option<PathBuf> {
+    installed.filter(|_| !request.is_transparent())
+}
+
+fn announce(request: &Request) {
+    if request.is_transparent() {
+        eprintln!("{TRANSPARENT_NOTICE}");
+    }
+}
+
+fn transparent_answer(request: &Request, response: Response) -> Response {
+    match response {
+        Response::Error(error) if ipc::agent_too_old_for_transparent(request, &error) => {
+            Response::Error(TOO_OLD_FOR_TRANSPARENT.to_owned())
+        }
+        Response::Ok(mut lines) if request.is_transparent() => {
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with("session: "))
+                .map_or(0, |at| at + 1);
+            lines.insert(at, TRANSPARENT_LINE.to_owned());
+            Response::Ok(lines)
+        }
+        response => response,
+    }
+}
+
+fn starting_agent_limit(request: &Request, remaining: Duration) -> Duration {
+    if request.is_transparent() {
+        request.timeout()
+    } else {
+        remaining.max(Duration::from_secs(1))
+    }
+}
 
 fn agent_start_help(config: Option<&Path>) -> String {
     match config {
@@ -1185,11 +1322,8 @@ async fn open(args: OpenArgs) -> Result {
     let launch = args.uri.parse::<LaunchRequest>()?;
     let endpoint = Endpoint::for_current_user()?;
     let config = args.config.config.as_deref();
-    let gui = if cfg!(windows) {
-        handoff::installed(&std::env::current_exe()?)
-    } else {
-        None
-    };
+    let request = Request::Launch(launch.clone(), mode(args.transparent));
+    let gui = offered_gui(&request, installed_gui()?);
     let ensure_agent = async || -> Result {
         match ipc::send(&endpoint, &Request::List).await {
             Err(RequestError::NotRunning | RequestError::Closed) => {
@@ -1211,7 +1345,7 @@ async fn open(args: OpenArgs) -> Result {
         Handoff::Pending => return Err(handoff::PENDING_HELP.into()),
         Handoff::Kept => {}
     }
-    let request = Request::Launch(launch.clone());
+    announce(&request);
     let response = match ipc::send(&endpoint, &request).await {
         Err(RequestError::NotRunning | RequestError::Closed) => {
             start_agent_and_send(&endpoint, &request, config).await?
@@ -1227,7 +1361,8 @@ async fn open(args: OpenArgs) -> Result {
             .await
             .unwrap_or_else(|error| Err(error.to_string()))
     };
-    print_launched(approval::settle(&launch, response, send, ask).await?).await
+    let settled = approval::settle(&launch, response, send, ask).await?;
+    print_launched(transparent_answer(&request, settled)).await
 }
 
 fn spawn_agent(config: Option<&Path>) -> Result<std::process::Child> {
@@ -1285,21 +1420,46 @@ fn stop_inheriting_standard_handles() {
     }
 }
 
+trait Started {
+    fn exited(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl Started for std::process::Child {
+    fn exited(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+}
+
 async fn start_agent_and_send(
     endpoint: &Endpoint,
     request: &Request,
     config: Option<&Path>,
 ) -> Result<Response> {
+    send_while_starting(
+        request,
+        config,
+        || spawn_agent(config),
+        async |limit| ipc::send_with_timeout(endpoint, request, limit).await,
+    )
+    .await
+}
+
+async fn send_while_starting<S: Started>(
+    request: &Request,
+    config: Option<&Path>,
+    spawn: impl Fn() -> Result<S>,
+    send: impl AsyncFn(Duration) -> Result<Response, RequestError>,
+) -> Result<Response> {
     let deadline = Instant::now() + AGENT_START_TIMEOUT;
-    let mut child = spawn_agent(config)?;
+    let mut child = spawn()?;
     let mut started = 1;
     let mut delay = Duration::from_millis(25);
     loop {
         tokio::time::sleep(delay).await;
-        let exited = child.try_wait()?;
+        let exited = child.exited()?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let limit = remaining.max(Duration::from_secs(1));
-        match ipc::send_with_timeout(endpoint, request, limit).await {
+        let limit = starting_agent_limit(request, remaining);
+        match send(limit).await {
             Err(RequestError::NotRunning | RequestError::Closed) => {}
             result => return Ok(result?),
         }
@@ -1311,7 +1471,7 @@ async fn start_agent_and_send(
                 )
                 .into());
             }
-            child = spawn_agent(config)?;
+            child = spawn()?;
             started += 1;
         }
         if Instant::now() >= deadline {
@@ -1739,9 +1899,16 @@ async fn status(args: StatusArgs) -> Result {
     println!("key-name: {name}");
     print_device_key(&name);
     print_config(&args.config, &file);
-    let agent = match Endpoint::for_current_user() {
-        Ok(endpoint) => ipc::send(&endpoint, &Request::List).await,
-        Err(error) => Err(RequestError::Io(error)),
+    let (agent, engine) = match Endpoint::for_current_user() {
+        Ok(endpoint) => {
+            let agent = ipc::send(&endpoint, &Request::List).await;
+            let engine = match agent {
+                Ok(_) => Some(ipc::send(&endpoint, &Request::Transparent).await),
+                Err(_) => None,
+            };
+            (agent, engine)
+        }
+        Err(error) => (Err(RequestError::Io(error)), None),
     };
     match agent {
         Ok(Response::Ok(lines)) => match listed_sessions(&lines) {
@@ -1757,12 +1924,29 @@ async fn status(args: StatusArgs) -> Result {
         Err(RequestError::NotRunning | RequestError::Closed) => println!("agent: not running"),
         Err(error) => println!("agent: unknown: {error}"),
     }
+    println!(
+        "transparent-sessions: {}",
+        gateinto::transparent::availability::available()
+    );
+    if let Some(engine) = engine {
+        println!("{}", transparent_engine_line(engine));
+    }
     print_handler();
     #[cfg(target_os = "linux")]
     for line in lifecycle::current_linux_status() {
         println!("{line}");
     }
     Ok(())
+}
+
+fn transparent_engine_line(answer: Result<Response, RequestError>) -> String {
+    let engine = answer
+        .map_err(|error| error.to_string())
+        .and_then(|response| ipc::transparent_status(response).map_err(|error| error.to_string()));
+    match engine {
+        Ok(status) => format!("transparent-engine: {}", status.engine),
+        Err(error) => format!("transparent-engine: unknown: {error}"),
+    }
 }
 
 async fn stop_agent() -> Result<(), String> {
@@ -1901,9 +2085,93 @@ mod tests {
         assert!(agent_config(Some(PathBuf::new())).is_err());
     }
 
+    #[test]
+    fn the_agent_takes_the_browser_and_the_transparent_mark_from_the_config_file() {
+        let file = ConfigFile::parse(
+            "[browser]\nexecutable = \"/opt/chrome\"\n[transparent]\ndscp = 10\n",
+        )
+        .unwrap();
+        let options = agent_options(
+            &file,
+            ConfigSource::Defaults,
+            PathBuf::from("profiles"),
+            Logbook::default(),
+        );
+        assert_eq!(options.dscp, Dscp::new(10).unwrap());
+        assert_eq!(options.browser, Some(PathBuf::from("/opt/chrome")));
+        assert_eq!(options.profiles_root, PathBuf::from("profiles"));
+        assert_eq!(options.config, ConfigSource::Defaults);
+        let options = agent_options(
+            &ConfigFile::default(),
+            ConfigSource::Defaults,
+            PathBuf::from("profiles"),
+            Logbook::default(),
+        );
+        assert_eq!(options.dscp, Dscp::DEFAULT);
+        assert_eq!(options.browser, None);
+    }
+
     use super::*;
+    use gateinto::divert::Dscp;
 
     const NEWER_SESSION: &str = r#"{"added_later":[1],"id":3,"kind":"browser","gateway":"main","upstream":"[::1]:443","listen":"127.0.0.1:8080","route":"mixed","auth":"os_user","started":1700000000,"tunnels":2,"browser":"firefox"}"#;
+
+    #[cfg(windows)]
+    fn divert_args<I: Into<std::ffi::OsString>>(flags: impl IntoIterator<Item = I>) -> DivertArgs {
+        let args = ["gateinto".into(), "divert".into()]
+            .into_iter()
+            .chain(flags.into_iter().map(Into::into));
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::Divert(args) => args,
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_divert_helper_gets_its_arguments_raw_and_empty_when_missing() {
+        use gateinto::divert::helper::Arguments;
+        use std::os::windows::ffi::OsStringExt;
+
+        let empty = Arguments {
+            pipe: "",
+            agent_pid: "",
+            port: "",
+            dscp: "",
+        };
+        assert_eq!(helper_arguments(&divert_args::<&str>([])), empty);
+        let given = divert_args([
+            "--pipe",
+            r"\\.\pipe\x",
+            "--agent-pid",
+            "+12",
+            "--port",
+            "-1",
+            "--dscp",
+            "043",
+        ]);
+        assert_eq!(
+            helper_arguments(&given),
+            Arguments {
+                pipe: r"\\.\pipe\x",
+                agent_pid: "+12",
+                port: "-1",
+                dscp: "043",
+            }
+        );
+        let unpaired = std::ffi::OsString::from_wide(&[0xD800]);
+        let wide = divert_args([std::ffi::OsString::from("--port"), unpaired]);
+        assert_eq!(helper_arguments(&wide), empty);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_divert_helper_is_not_listed_in_the_help() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("divert"), "{help}");
+    }
 
     #[test]
     fn only_the_session_table_is_followed_by_verification_notes() {
@@ -2094,6 +2362,7 @@ args = ["-l"]
             Some(Request::Terminal(TerminalRequest {
                 gateway: "office".parse().unwrap(),
                 route: Some(gateinto::proxy::Route::Mixed),
+                mode: Mode::Proxy,
             }))
         );
         assert_eq!(terminal_request(&terminal_args(&[]).unwrap()), None);
@@ -2110,6 +2379,177 @@ args = ["-l"]
                 .chain(flags.iter().copied())
                 .collect();
             assert!(terminal_args(&flags).is_err(), "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn a_transparent_terminal_is_asked_of_the_agent_only() {
+        let args = terminal_args(&["--agent", "--gateway", "office", "--transparent"]).unwrap();
+        assert_eq!(
+            terminal_request(&args),
+            Some(Request::Terminal(TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: None,
+                mode: Mode::Transparent,
+            }))
+        );
+        for flags in [
+            &["--transparent"][..],
+            &["--gateway", "office", "--transparent"],
+            &["--transparent", "--shell", "sh"],
+        ] {
+            let error = terminal_args(flags).err().unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{flags:?}"
+            );
+            assert!(error.to_string().contains("--agent"), "{error}");
+        }
+    }
+
+    fn open_args(flags: &[&str]) -> OpenArgs {
+        let args = ["gateinto", "open"].iter().chain(flags);
+        match Cli::try_parse_from(args).unwrap().command {
+            Command::Open(args) => args,
+            _ => unreachable!(),
+        }
+    }
+
+    const LINK: &str = "gateinto://connect?profile=office";
+
+    fn launch(mode: Mode) -> Request {
+        Request::Launch(LINK.parse().unwrap(), mode)
+    }
+
+    #[test]
+    fn open_asks_for_a_transparent_session_only_when_told_to() {
+        assert_eq!(mode(open_args(&["--", LINK]).transparent), Mode::Proxy);
+        let args = open_args(&["--transparent", "--", LINK]);
+        assert_eq!(mode(args.transparent), Mode::Transparent);
+        assert_eq!(args.uri, LINK);
+    }
+
+    #[test]
+    fn a_transparent_launch_is_not_handed_to_the_gui() {
+        let gui = Some(PathBuf::from("gateinto-gui.exe"));
+        let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
+        assert_eq!(offered_gui(&proxy, gui.clone()), gui);
+        assert_eq!(offered_gui(&transparent, gui), None);
+        assert_eq!(offered_gui(&proxy, None), None);
+    }
+
+    struct Starting;
+
+    impl Started for Starting {
+        fn exited(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            Ok(None)
+        }
+    }
+
+    async fn limits_while_starting(request: &Request) -> Vec<Duration> {
+        let limits = std::sync::Mutex::new(Vec::new());
+        let answer = send_while_starting(
+            request,
+            None,
+            || Ok(Starting),
+            async |limit| {
+                let mut limits = limits.lock().unwrap();
+                limits.push(limit);
+                if limits.len() < 3 {
+                    Err(RequestError::NotRunning)
+                } else {
+                    Ok(Response::Ok(Vec::new()))
+                }
+            },
+        )
+        .await;
+        assert_eq!(answer.unwrap(), Response::Ok(Vec::new()), "{request}");
+        limits.into_inner().unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transparent_request_to_an_agent_just_started_waits_for_the_transparent_timeout() {
+        assert_eq!(
+            limits_while_starting(&launch(Mode::Transparent)).await,
+            [ipc::TRANSPARENT_REQUEST_TIMEOUT; 3]
+        );
+        let limits = limits_while_starting(&launch(Mode::Proxy)).await;
+        assert_eq!(limits.len(), 3);
+        assert!(
+            limits.iter().all(|limit| *limit <= AGENT_START_TIMEOUT),
+            "{limits:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_transparent_request_to_a_starting_agent_waits_for_the_transparent_timeout() {
+        let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
+        for remaining in [Duration::ZERO, Duration::from_secs(20)] {
+            assert_eq!(
+                starting_agent_limit(&transparent, remaining),
+                ipc::TRANSPARENT_REQUEST_TIMEOUT
+            );
+        }
+        assert_eq!(
+            starting_agent_limit(&proxy, Duration::from_secs(20)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            starting_agent_limit(&proxy, Duration::from_millis(200)),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn a_transparent_answer_is_marked_and_an_older_agent_is_named() {
+        let (proxy, transparent) = (launch(Mode::Proxy), launch(Mode::Transparent));
+        let lines = |lines: &[&str]| lines.iter().map(|line| (*line).to_owned()).collect();
+        assert_eq!(
+            transparent_answer(
+                &transparent,
+                Response::Ok(lines(&["session: 4", "gateway: office"]))
+            ),
+            Response::Ok(lines(&[
+                "session: 4",
+                "mode: transparent",
+                "gateway: office"
+            ]))
+        );
+        assert_eq!(
+            transparent_answer(&transparent, Response::Ok(lines(&["gateway: office"]))),
+            Response::Ok(lines(&["mode: transparent", "gateway: office"]))
+        );
+        assert_eq!(
+            transparent_answer(&proxy, Response::Ok(lines(&["session: 4"]))),
+            Response::Ok(lines(&["session: 4"]))
+        );
+        let refused = |error: &str| Response::Error(error.to_owned());
+        let too_old = refused("the agent is too old for transparent sessions; restart it");
+        assert_eq!(
+            transparent_answer(&transparent, refused(ipc::INVALID_LAUNCH_REQUEST)),
+            too_old
+        );
+        let terminal = |mode| {
+            Request::Terminal(TerminalRequest {
+                gateway: "office".parse().unwrap(),
+                route: None,
+                mode,
+            })
+        };
+        assert_eq!(
+            transparent_answer(
+                &terminal(Mode::Transparent),
+                refused(ipc::INVALID_TERMINAL_REQUEST)
+            ),
+            too_old
+        );
+        for (request, error) in [
+            (&proxy, ipc::INVALID_LAUNCH_REQUEST),
+            (&terminal(Mode::Proxy), ipc::INVALID_TERMINAL_REQUEST),
+            (&transparent, "transparent sessions are unavailable: x"),
+        ] {
+            assert_eq!(transparent_answer(request, refused(error)), refused(error));
         }
     }
 
@@ -2152,6 +2592,54 @@ args = ["-l"]
     }
 
     #[test]
+    fn the_transparent_engine_line_names_the_phase_or_why_it_is_unknown() {
+        use gateinto::ipc::{TransparentAvailability, TransparentEngine, TransparentStatus};
+        let engine = |engine| {
+            Ok(Response::Ok(
+                TransparentStatus {
+                    availability: TransparentAvailability::Available,
+                    engine,
+                }
+                .to_lines(),
+            ))
+        };
+        let failed = "the transparent engine failed (exit code 5)";
+        for (answer, line) in [
+            (engine(TransparentEngine::Running), "running".to_owned()),
+            (engine(TransparentEngine::Starting), "starting".to_owned()),
+            (
+                engine(TransparentEngine::Stopped(None)),
+                "stopped".to_owned(),
+            ),
+            (
+                engine(TransparentEngine::Stopped(Some(failed.to_owned()))),
+                format!("stopped: {failed}"),
+            ),
+            (
+                Ok(Response::Error(ipc::INVALID_REQUEST.to_owned())),
+                "unknown: the agent is too old; restart it".to_owned(),
+            ),
+            (
+                Ok(Response::Error("busy".to_owned())),
+                "unknown: busy".to_owned(),
+            ),
+            (
+                Ok(Response::Ok(vec!["engine: running".to_owned()])),
+                "unknown: invalid transparent status from the agent".to_owned(),
+            ),
+            (
+                Err(RequestError::Closed),
+                "unknown: the agent closed the connection without an answer".to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                transparent_engine_line(answer),
+                format!("transparent-engine: {line}")
+            );
+        }
+    }
+
+    #[test]
     fn stop_names_the_terminals_it_closed() {
         assert_eq!(closed_terminals_message(&[ipc::agent_pid_line()]), None);
         assert_eq!(
@@ -2172,6 +2660,17 @@ args = ["-l"]
     fn the_session_table_shows_an_unknown_browser() {
         let table = session_list_lines(&[NEWER_SESSION.to_owned()], false, 1_700_000_045).unwrap();
         assert!(table[1].ends_with("45s     unknown"), "{table:?}");
+    }
+
+    #[test]
+    fn the_session_table_marks_a_transparent_session_from_the_agent_line() {
+        let transparent =
+            NEWER_SESSION.replace(r#""tunnels":2,"#, r#""tunnels":2,"transparent":true,"#);
+        let table = session_list_lines(&[transparent], false, 1_700_000_045).unwrap();
+        assert!(
+            table[1].ends_with("45s     unknown (transparent)"),
+            "{table:?}"
+        );
     }
 
     fn key_init_temp_path() -> std::path::PathBuf {

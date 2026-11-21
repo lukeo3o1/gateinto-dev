@@ -212,7 +212,9 @@ How that is bounded:
   the user and SYSTEM. Clients refuse a pipe that another user owns. On Unix
   the socket is `0600` in a `0700` directory that must belong to the user.
   The agent answers one short request per connection with size limits and a
-  timeout, and clients give up after 60 seconds.
+  timeout. Clients wait 300 seconds for the answer to a transparent `launch`
+  or `terminal` and 60 seconds for every other request, and on Windows always
+  stop retrying a busy pipe after 60 seconds.
 - **Isolation of each launch.** Every launch is a new session with its own
   port, realm, local proxy credentials and client certificate, and a new browser
   profile directory, so a launched browser does not share cookies, cache or

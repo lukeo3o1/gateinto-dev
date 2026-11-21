@@ -210,6 +210,32 @@ with `TCP_TABLE_OWNER_PID_CONNECTIONS`, `OpenProcess`, a second table lookup
 while the process handle is held, `OpenProcessToken`, `EqualSid` against the
 agent's own user SID and, when the session has a job, `IsProcessInJob`.
 
+For transparent sessions, `os_user::original` matches a connection accepted
+by the transparent listener (peer `R:p`, local `L:T`) to the row of the
+application's socket, `L:p` to `R`, from both tables, compared canonically.
+A direct dial is refused first (`SelfTarget`): a loopback peer, or any row,
+whatever its pid, from the peer's address to the listener's, which is the
+dialer's own socket, in any state. A dialer that reset its connection
+leaves no row, and its reset also ends the listener's accepted socket, so
+every reading must also contain the listener's own row (local `L:T`, remote
+`R:p`, an owning process, and the state `ESTABLISHED` or `CLOSE_WAIT` that
+`Row` carries from the table), or the connection is not found. Rows without an owning process or
+with remote port 0 are not candidates, and the same socket listed in both
+tables counts once.
+Candidates whose owner is another user or outside every transparent job are
+discarded; any other refusal (an owner in the jobs of several sessions, a
+lookup error, the deadline) ends the whole lookup with that denial, so an
+owner that cannot be attributed cannot let another row win. Exactly one must
+remain, and its remote port is the original destination; when none is
+admitted, the first refusal is the denial. `Attribution`
+(`src/proxy/os_user/windows.rs`) admits an owner with the agent's user SID
+whose process is in the job of exactly one of the transparent sessions it is
+given (`IsProcessInJob`), reads the tables again while the owners' handles
+are held, retries like the `os_user` lookup and stops at its deadline.
+It implements the `Attribute` seam of the transparent listener's dispatch
+loop (`src/transparent/serve.rs`), to which the agent's Windows engine
+(`src/agent/engine.rs`) hands it.
+
 On Windows the agent creates one job object per browser session (`src/job.rs`:
 `CreateJobObjectW` without a name or inheritable handle, with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), passes it to the session as
@@ -226,7 +252,9 @@ answers carry no credentials, so `gateinto open` shows no prompt, and
 `credentials <id>` still returns them. When no job can be created or the browser
 cannot be put in one, the agent logs one warning for that launch, closes that
 attempt's session and starts a new one with only `session_credentials` and the
-browser outside any job; its `launch` answer carries the credentials.
+browser outside any job; its `launch` answer carries the credentials. A
+transparent browser session has no such fallback: without a job, or when the
+browser cannot be put in it, the launch fails and its session is closed.
 
 ## Agent, launch URIs and browser sessions
 
@@ -294,7 +322,12 @@ The full protocol, limits and guarantees are in
   suffixed by `GATEINTO_INSTANCE` when it is set), the `Server` that only one
   agent can bind (on Unix under a lock file), and `send` for clients, which
   checks on Windows that the pipe is owned by the same user and gives up
-  after 60 seconds.
+  after 60 seconds, or 300 seconds for a transparent launch or terminal
+  request (`Request::timeout`), whose answer can wait for the UAC prompt of
+  the transparent engine, and on Windows always stops retrying a busy pipe
+  after 60 seconds; `RequestError::TimedOut` names the limit that ran
+  out. The agent has no deadline for handling a request or writing its
+  answer, only for reading the request line (10 seconds).
 - `agent::Agent` owns a `SessionManager` and one watch task per browser
   session. `Agent::serve` first deletes profile directories left by an
   earlier agent, then accepts at most 8 connections at a time, answers one
@@ -307,7 +340,11 @@ The full protocol, limits and guarantees are in
   known gateways, stores an approved one and turns a gateway name into the
   proxy configuration of a browser session; `main.rs` implements it with the
   loaded configuration file and `LinkedStore` (read again for every launch),
-  the tests with in-process fixtures. The agent forces the session to
+  the tests with in-process fixtures. The agent calls it only in
+  `spawn_blocking`: `LinkedStore` reads, writes and syncs files in the
+  per-user configuration directory (`%APPDATA%` on Windows, which can be
+  redirected to a network share), and building a plan reads the CA file
+  and can sign with the device key. The agent forces the session to
   `127.0.0.1:0` and `SessionCredentials` whatever the profile says, and
   answers a launch with the session's credentials, which `gateinto open`
   shows.
@@ -318,8 +355,9 @@ The full protocol, limits and guarantees are in
   not 0 and the GUI shows as a note.
 - A browser's watch task waits for the browser process to exit or for a
   close request (`close <id>`, `stop`, Ctrl+C), kills the browser in the
-  second case, closes the session, deletes the profile directory (retrying
-  for about 10 seconds) and removes itself. `close` and `stop` answer only
+  second case, closes the session, deletes the profile directory (each
+  attempt in `spawn_blocking`, retrying for about 10 seconds with an async
+  pause between attempts) and removes itself. `close` and `stop` answer only
   after that is done.
 - `browser` finds Chrome or Edge, builds the argument list, starts the
   process without a shell (`tokio::process`, killed when the agent drops it)
@@ -333,6 +371,18 @@ The full protocol, limits and guarantees are in
   request; if no agent answers it starts one (Windows: `DETACHED_PROCESS`
   and `CREATE_NEW_PROCESS_GROUP`, standard handles made non-inheritable; Unix:
   a new process group) and retries with backoff for up to 30 seconds.
+  `--transparent` adds `mode=transparent` to the request, keeps the link
+  from the installed GUI (which would receive only the link and lose the
+  mode), prints a notice that administrator approval may be asked on stderr
+  before sending, and waits the full 300 seconds for the answer even from
+  an agent it has just started. `session terminal --agent --transparent`
+  never starts an agent or hands off to the GUI: it adds `mode=transparent`
+  to the terminal request, prints the same notice before sending and waits
+  300 seconds for the answer. A transparent request answered with
+  the parser's exact `invalid launch request` or `invalid terminal request`
+  comes from an older agent and is shown as "the agent is too old for
+  transparent sessions; restart it"; a successful answer gets a
+  `mode: transparent` line after its `session:` line.
 - The GUI (`gateinto-gui.exe`) starts an agent only when the user clicks
   Start agent, which it offers on the sessions page and in the tray flyout
   only while its last poll found no agent. It runs `gateinto.exe agent
@@ -366,8 +416,8 @@ The full protocol, limits and guarantees are in
   that cannot hold it, it shows a fixed message instead and no Allow button,
   so the details are never cut off (`gui/src/board/approval.rs`). Not yet
   verified on Windows.
-- The GUI worker asks the agent for `list` (and `config`, and the log page
-  while the Log page is open) at most once every 2 seconds
+- The GUI worker asks the agent for `list` (and `config`, `transparent`, and
+  the log page while the Log page is open) at most once every 2 seconds
   (`gui/src/worker.rs` `POLL`). No command polls sooner: a probe, a watch
   change, a dialog answer, a credentials reveal, a link or a start delivers
   the last polled state at once, and a command that changes the agent (a
@@ -478,12 +528,41 @@ The full protocol, limits and guarantees are in
   request is pending or accepted since that list, first ask in a dialog with
   Cancel first (`gui/src/confirm.rs`); closing a browser row does not. This
   is unit-tested but not yet verified on Windows.
+- While the agent runs, the worker sends `transparent` after `config` on each
+  poll (`gui/src/worker.rs`); `agent::Transparent` keeps the answer, and a
+  refused or failed request leaves it unreported without touching the rest
+  of the refresh. Only for `availability: available` does the Gateways page
+  show a Proxy | Transparent choice (`Transparent::offer`,
+  `gui/src/board/gateways.rs`) on the row of Add gateway, under the
+  full-width subtitle, which applies to Start browser and Open terminal of
+  every card: `Command::Launch` and `Command::Terminal` carry the `Mode`, so
+  a transparent one adds `mode=transparent` and `ipc::send` waits 300
+  seconds for it. `Transparent::start` decides the mode of each start by
+  where it comes from (`agent::Origin`): a Gateways card gets the chosen mode
+  while it is offered, and the Sessions page's Start browser, the tray and
+  `gateinto://` links always get `Mode::Proxy`. While a transparent start is
+  pending, the Gateways and Sessions subtitles say that starting the engine
+  may ask for administrator approval (`Launches::notice`). The worker keeps
+  one launch or terminal request in flight (`opening`) beside its polls,
+  links and other commands, as it does for a link's `linking`. The window
+  sends no other start while one is pending (`Launches::busy`); a launch or
+  terminal that reaches the worker meanwhile all the same waits in order and
+  is sent when the one in flight is answered, and closing the window drops
+  them. A transparent
+  request answered as by an older agent
+  (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
+  transparent sessions; restart it", checked before the terminal's
+  `invalid request` check, which proxy-mode requests keep. A transparent
+  session has a Transparent pill after its number (`gui/src/sessions.rs`,
+  `gui/src/board.rs`), and Settings ends the Agent card with the
+  availability or the engine's state (`settings::transparent`). This is
+  unit-tested but not yet verified on Windows.
 
 ### Terminal sessions in the agent
 
 ```text
- gateinto session terminal --agent --gateway <name> [--route ..]
-        |  "terminal <name> route=<saved|gateway|mixed>\n"
+ gateinto session terminal --agent --gateway <name> [--route ..] [--transparent]
+        |  "terminal <name> route=<saved|gateway|mixed>[ mode=transparent]\n"
         |  (no agent: fail, never start one)
         v
  gateinto agent ---- agent::Agent::terminal
@@ -520,6 +599,12 @@ The full protocol, limits and guarantees are in
   is not a browser wait until it is registered, so they see it. The `Launcher` trait
   is the test seam: `System` answers `terminals()` with `cfg!(windows)` and
   creates real jobs, the tests use fake jobs and record the spawns.
+  `Launcher::tag` sets the DSCP tag of a transparent session's job (on
+  Windows through `Job::set_dscp_tag`, which reads it back) on the blocking
+  thread pool; `SessionInfo` `transparent` marks a transparent session, and
+  is left out of the JSON when false. `session list` and the session table
+  of `status` append ` (transparent)` to such a session's `PROGRAM` cell
+  (`src/session_table.rs`).
 - On Windows the agent calls `SetConsoleCtrlHandler(NULL, FALSE)` once at
   start, so that its children do not inherit an "ignore Ctrl-C" attribute
   from the detached agent's new process group; a failure is logged as a
@@ -530,30 +615,39 @@ The full protocol, limits and guarantees are in
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `session verification`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`), the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open`, Ctrl+C handling. |
+| `src/main.rs` | Command line (`check-upstream`, `session browser`, `session terminal`, `session list`, `session close`, `session credentials`, `session verification`, `agent`, `open`, `stop`, `gateway list`, `gateway forget`, `uri register`, `uri unregister`, `key init`, `key info`, `setup`, `status`, `reset`, and on Windows the hidden `divert` that runs the elevated helper with its raw arguments and a silent panic hook, before the Tokio runtime is built), the default config file location, merging flags over the configuration file, logging setup, building `proxy::Config`, starting a browser session, running a terminal session in-process or asking the agent for one (`--agent`, with `--transparent` for a transparent one), the `--transparent` flag of `open` (not handed to the GUI, which the `test-hooks` variable `GATEINTO_TEST_GUI` can replace with a fake), the notice before a transparent request, the `mode: transparent` line of its answer and the older-agent message, the agent's `Profiles` from the configuration file (including the terminal plan from configuration-file gateways only), restoring Ctrl-C processing for the agent's children on Windows, starting a detached agent for `open` (`send_while_starting`, with the spawn and the request as seams), the `transparent-sessions` and `transparent-engine` lines of `status`, Ctrl+C handling. |
 | `src/lifecycle.rs` | `setup`, `status` and `reset` helpers: service account refusal and the elevation note, handler and gateway reporting (with their source), the files a config purge deletes, the purge warning and confirmation, and the purge order (confirm the SPKI, stop the agent, delete the key). |
 | `src/uri.rs` | Strict parser for `gateinto://` launch URIs and their canonical form. |
 | `src/link.rs` | Gateway addresses and portal origins, the resolution of a link against known gateways, and the confirmation text. |
 | `src/link/store.rs` | The per-gateway files in `gateways/`: file names from canonical addresses, safe loading, adding, forgetting (with the `gateway forget` decision shared with the GUI) and purging. |
 | `src/prompt.rs` | The confirmation in `gateinto open`: Windows message box, terminal prompt or refusal; the session credentials notice (message box, terminal or not shown); the pending verification text on a terminal or the fixed line without values; failed URI launch notifications on interactive Windows desktops without a persistent terminal or redirected stderr. |
-| `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. |
+| `src/ipc.rs` | Agent requests and responses, their line encoding, the per-user named pipe or Unix socket endpoint, server and client. A browser launch (`Request::Launch`, which carries the link type `LaunchRequest`) and a terminal request carry a `Mode` of their own; `Mode::Transparent` is the last word `mode=transparent` of the line, accepted once and only there, which a `gateinto://` link cannot produce. `Request::timeout` gives a transparent launch or terminal request 300 s (`TRANSPARENT_REQUEST_TIMEOUT`) and every other request 60 s (`REQUEST_TIMEOUT`); `send` applies it, and `RequestError::TimedOut` carries the limit. `agent_too_old_for_transparent` recognizes the parser's `invalid launch request` and `invalid terminal request` (`INVALID_LAUNCH_REQUEST`, `INVALID_TERMINAL_REQUEST`) as an older agent's answer to a transparent request. `TransparentStatus` is the answer to `transparent` (`availability` and `engine` lines, other keys ignored), and `transparent_status` reads it, names an `invalid request` from an older agent as too old and refuses a malformed answer. |
 | `src/logbook.rs` | The agent's in-memory logbook: a `tracing` layer that keeps the last 500 events at `info` and above, each message cut to 1000 characters and scoped to its session or module, and the page of events after a sequence number for the IPC `log` request. Never written to disk. |
-| `src/agent.rs` | The agent: launch validation, rate limit and session caps, browser and terminal sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. |
+| `src/agent.rs` | The agent: launch validation, rate limit and session caps, browser and terminal sessions and their watch tasks, `list`, `close`, `stop`, sweeping stale profiles. Reading the known gateways (`Agent::known`), storing an approved one (`Agent::link`) and deleting a closed browser's profile run in `spawn_blocking`. Transparent sessions: read-only pre-checks (`LaunchLimiter::would_allow`, the platform, availability, capacity and the gateway, refusing a browser request that needs a confirmation, then the browser plan and the browser executable (built in `spawn_blocking`, like the plan of every browser launch, and built again under `launching` because the linked gateways, the CA file, the client certificate and the browser executable can change while the helper starts), or the terminal plan (built in `spawn_blocking`, like the plan of every terminal launch, and built again under `launching` and `terminals` because the CA file, the client certificate and the shell executable can change while the helper starts) and the shell's absolute `USERPROFILE`), the engine start before any launch lock is taken (one start per generation shared by concurrent requests, a biased look at the running handle at the hand-over, then the stop-watcher and the listener's loop), the job, its DSCP tag (`Launcher::tag`, read back by `Job::set_dscp_tag` on Windows), registration with the session's adopter and the spawn under the session's mark (`launched`); the stop-watcher records the cause, stops its generation (`State::stop` in `spawn_blocking`), shuts that listener down, waits for a launch in progress (`launching`) and closes the sessions through `close`; if that blocking stop does not finish, it closes every transparent session instead. Every close path unregisters the session. The `transparent` request answers the availability, checked through the engine seam in `spawn_blocking`, and the engine's phase with the last helper error (`Agent::transparent_engine`), only while stopped; a successful start clears that error before the stop-watcher is spawned, and a failed start, a start abandoned because its request was cancelled (through `Starter::on_abandon`) and the stop-watcher record theirs before the phase becomes stopped, so a stopped engine reports what stopped it or made its last start fail, and a running one no error. No fallback to proxy mode, and none to a browser without a job. |
+| `src/agent/engine.rs` | The engine seam of the agent (`Engine`: availability and the start of one generation's helper and listener, yielding the helper's `stopped` future and a `Listener` that runs the dispatch loop until its shutdown). On Windows `Divert` keeps one `Supervisor<helper::Windows>` for the agent's lifetime, so a start waits for the previous generation's helper, and per start creates the `Attribution`, reserves the port, starts the helper, listens after `ready` and serves with the default handshake timeout; elsewhere the engine is unavailable. The agent tests replace it with a fake. |
 | `src/browser.rs` | Chrome and Edge discovery, browser arguments, process start, marked per-session profile directories and their safe deletion. |
 | `src/registration.rs`, `src/registry.rs` | The URI handler command string and its per-user registration in `HKCU\Software\Classes` (registry calls on Windows only). |
-| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, flag-over-file merge, defaults, relative path resolution. |
+| `src/config.rs` | TOML configuration file (`serde`, `toml`, unknown keys rejected), gateway profiles (with their validated `portal_url` and optional `display_name`) and their lookup by name, the refusal of the removed `[device_session]` section, the `[browser]` executable, the `[transparent]` DSCP value (`TransparentSection`, read once by the agent into `AgentOptions::dscp`; only a table is accepted, and the message line of its errors, after toml's `TOML parse error at line N, column M` and the excerpt, starts with `[transparent]`), flag-over-file merge, defaults, relative path resolution. |
 | `src/dns.rs` | Process-wide admission for queued/running OS DNS work, blocking-job-owned capacity, IP-literal bypass and resolved socket addresses shared by routing and gateway connections. |
-| `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). |
+| `src/sessions.rs` | `SessionManager`: starting a session (its own client certificate, TLS configuration and listener) and closing it (listener dropped, its tunnels aborted). A session keeps its proxy's adoption channel (`Session::adopter`) for transparent registration. |
 | `src/terminal.rs` | Terminal sessions: the shell (`--shell`, `[terminal] shell`, the platform default; a bare name is searched in `PATH` only, never in the current directory), the proxy variables and the Windows environment block, the route, the job and `os_user`-only proxy configuration, and supervising the shell through console control events. |
 | `src/check.rs` | `check-upstream`: one connection to the upstream, report of the negotiated TLS parameters, optional `CONNECT`. |
-| `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head. Pure functions over byte buffers, no I/O. |
-| `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. |
+| `src/http.rs` | Strict parsers for the local `CONNECT` request and the upstream response head, and the IP-literal `Authority` of a socket address (the original destination of a transparent connection). Pure functions over byte buffers, no I/O. |
+| `src/proxy/mod.rs` | Listener and accept loop of one session, until it is closed; connection limit, local authentication hook, per-connection state machine, upstream connect and post-handshake TLS mode check (`Endpoint`, shared with `check.rs`), status mapping, error responses. Streams handed in through `Adopter` (transparent sessions) are adopted under the same tunnel limit, without the owner lookup, a request head or local authentication and with no local status line, and are reset (RST) when no permit is free, the upstream fails or the session closes before they are taken. |
 | `src/proxy/challenge.rs` | The `Gateinto` challenge in an upstream `407`: the `Proxy-Authenticate` parser, `auth_uri`, `user_code` and `expires_in` validation, the certificate fingerprint and `verification_origins` checks. |
 | `src/proxy/verifications.rs` | A session's pending verification: at most one per session and 16 per agent, at most 8 stored targets, expiry, dismissal by serial, and removal when the certificate it names is no longer current. |
 | `src/proxy/session_credentials.rs` | `session_credentials` local proxy authentication of one session: credential generation, realm, strict Basic and base64 parsing, keyed constant-time comparison with the issued credentials, failure rate limit. |
 | `src/proxy/local_auth.rs` | The configured local authentication methods (`LocalAuth`) and the per-connection decision between `os_user` and `session_credentials`. |
-| `src/proxy/os_user.rs`, `src/proxy/os_user/windows.rs` | `os_user`: denial reasons, the owner lookup interface, TCP table row matching, and the Windows lookup of the owning process, its user SID and its job. |
-| `src/job.rs` | Job objects for browser and terminal sessions and starting a process inside one, optionally with its own environment block (Windows only); command-line quoting. |
+| `src/proxy/os_user.rs`, `src/proxy/os_user/windows.rs` | `os_user`: denial reasons, the owner lookup interface, TCP table row matching, and the Windows lookup of the owning process, its user SID and its job. For transparent sessions: the match of an accepted connection to the application's row and its original destination, refusing direct dials to the listener and connections whose listener row is missing (`original`), the kind of a denial for aggregate logs (`Denial::kind`), the session whose job holds an owner (`one_session`), the second reading and the retries under a deadline, and the Windows lookup over the jobs of the given sessions (`Attribution`). |
+| `src/job.rs` | Job objects for browser and terminal sessions and starting a process inside one, optionally with its own environment block, and tagging a job's network traffic with a DSCP value that is read back before the job is used (Windows only); command-line quoting, also as a parameter string without the executable (`parameters`, for `ShellExecuteExW`). |
+| `src/divert.rs`, `src/divert/engine.rs`, `src/divert/flows.rs`, `src/divert/packet.rs`, `src/divert/fuzzing.rs` | Platform-independent core of transparent sessions: the validated DSCP value (`Dscp`, 1 to 63, default 43), the default flow table capacity (`DEFAULT_CAPACITY`, 16384), the WinDivert filter text, IPv4/TCP parsing and the in-place rewrite with checksums recomputed in full (`packet.rs`), the bounded flow table with idle expiry, the linger of ended flows and at most one sweep per second while full (`flows.rs`), the per-packet step that reflects tagged client packets to the listener, restores its replies and drops and counts everything else, including TCP with IPv4 options (`engine.rs`), and the invariant checker of the `divert-engine` fuzz target (`fuzzing.rs`, only with `--cfg fuzzing` or in tests). Pure, without I/O or `unsafe`. |
+| `src/divert/protocol.rs`, `src/divert/pump.rs`, `src/divert/helper.rs`, `src/divert/firewall.rs` | Platform-independent part of the elevated `divert` helper. The liveness pipe protocol: the `ready`, `error <code>` and counter lines the helper writes, and `StatusReader`, the agent-side reader that accepts exactly one status line first, then only counter lines with every field in a fixed order and canonical decimals, lines of at most 1024 bytes in printable ASCII, and fails on anything else (`protocol.rs`, fuzzed by `divert-status`). The engine loop around `Engine` over the `DivertPort` seam: it injects exactly the received length, counts failed sends and continues, ends normally on `Shutdown` and fatally on any other receive error, publishes the counters to a snapshot that a reporter writes every 10 s when changed, and shuts the port down 5 s after the agent is gone (a `Liveness` wait or a failed write), with no grace period after a fatal error; a panic in the packet loop still ends it, a panic in the reporter shuts the port down, and a panic in the liveness wait counts as the agent gone; if the packet loop has not ended 5 s after the port was shut down (`SHUTDOWN_DEADLINE`), the pump calls the helper's give-up action (`pump.rs`). Argument validation (`PipeName`, `ListenerPort` in 49152 to 65535, agent pid, DSCP), the fixed exit codes, the pinned driver version (`DRIVER_VERSION`, 2.2), a SHA-256 check over a reader, and the helper sequence over the `Platform` seam that the Windows bindings implement: connect, validate, mutex, firewall rule, files, driver and version, `ready`, engine, then close the handle, delete the rule and release the mutex in that order, a panic after the rule was added counting as a fatal engine error; a failed `add` is followed by the same ignored `delete`, and the give-up action deletes the rule and ends the process with exit code 5 through the `Abandon` seam (`helper.rs`). The exact `netsh` command lines that delete and add the inbound rule `Gateinto-transparent-listener` and the check of the program path: on a drive (`X:\` or `\\?\X:\`), without `"`, `%` or control characters, not ending in `\` (`firewall.rs`). Without `unsafe`; only threads and locks, everything else goes through the seams. |
+| `src/divert/windivert.rs`, `src/divert/windows.rs` | The WinDivert 2.2.2 side of the `divert` helper. `windivert.rs` (Windows and tests only, so it is unit-tested on Linux): the `WINDIVERT_ADDRESS` layout (80 bytes, `Outbound` at bit 17, `IPChecksum` and `TCPChecksum` at 21 and 22 of the bit-field word), the inbound copy of a received address, `ERROR_NO_DATA` as the shutdown, and the pinned files with their SHA-256 digests per architecture, which the availability check of `src/transparent/availability.rs` also reads. `windows.rs` (Windows only): the `Platform` and `DivertPort` implementations. The overlapped liveness pipe with the server pid check and a wait on a one-byte read and the agent process; the `Global\Gateinto-divert` mutex (`create_lock`, which tests call with a random name); the WinDivert files opened with read sharing only, hashed and held; `WinDivert.dll` loaded by absolute path with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR \| LOAD_LIBRARY_SEARCH_SYSTEM32` and its six exports called `extern "C"`; `netsh` from the system directory, killed after 10 s; the give-up action, which runs that `netsh` delete and then `std::process::exit`. |
+| `src/transparent.rs`, `src/transparent/listener.rs`, `src/transparent/listener/windows.rs` | The transparent listener's socket. The port choice over the `Bind` seam: the system's ephemeral port when it is in 49152 to 65535, otherwise, after closing that socket, up to 64 independent random ports in that range (`PORT_ATTEMPTS`), skipping ports in use (`AddrInUse`) or excluded (`PermissionDenied`) and stopping at any other error (`listener.rs`). On Windows, `reserve` binds `0.0.0.0` with `SO_EXCLUSIVEADDRUSE` without listening, and `Reserved::listen` starts listening later, so the agent can hold the port before the helper is ready and listen only after it (`windows.rs`). The agent's Windows engine uses it. |
+| `src/transparent/state.rs` | The engine state of transparent sessions and their registry, under one `std::sync::Mutex`: `stopped`, `starting(g)` or `running(g)` with a generation per start (`State`, `Phase`). A start from `stopped` gets a `Starter`, requests during it a `Joiner` that receives the outcome of that generation only, and `Starter::finish` moves its own `starting(g)` to `running(g)` or `stopped` and changes nothing otherwise; a dropped `Starter` counts as a failed start and first passes its error to the hook set with `Starter::on_abandon`. The pipe-break handler `State::stop(g)` acts only on its own generation: under the lock it sets `stopped` and takes the sessions registered under `g`; after releasing it, it sets each session's mark to closing and terminates its job through the `Terminate` seam (`Job`; outside Windows it fails as unsupported), logging a failure or a panic and going on with the others, and returns all their keys. Registration only under `running(g)`, once per key; the snapshot of the jobs registered under one generation for attribution, and the adoption of a stream by a session of one generation, looked up and sent under the state lock so that no stop or unregister falls in between. A per-session `Mark` whose `Launch` guard is held while a process is spawned into the job and is refused once the mark is closing. The agent keeps one for its lifetime (`Inner::registry`). |
+| `src/transparent/serve.rs`, `src/transparent/serve/windows.rs` | The accept and dispatch loop of one generation's transparent listener over the `Attribute` seam (`Attribution` on Windows). A peer that can never be reflected (loopback, also IPv4-mapped, the accepted socket's own address, or any other address of this host) is reset before it takes a permit or reaches the attribution. Addresses of this host are the preferred and deprecated rows of the IPv4 unicast address table (`GetUnicastIpAddressTable` with `AF_INET`, `src/transparent/serve/windows.rs`), read per stream, and an IPv4-mapped peer is compared by its IPv4 address; a tentative, duplicate or invalid address and a table that cannot be read count as remote. Nothing is bound to a peer's address on Windows; elsewhere, where transparent sessions do not exist, a UDP bind to the peer's address stands in so that the check can be tested. Otherwise per stream a snapshot of the sessions registered under the loop's generation, the attribution in `spawn_blocking` under the handshake timeout, and the hand-over to the attributed session of that generation (`State::adopt`) with the original destination as an IP-literal `Authority`; a denial, a timeout, a panicked attribution, a session not registered under the generation or an adopter that hands the stream back resets it. At most 64 attributions in flight (`MAX_ATTRIBUTIONS`), each holding its permit until its blocking lookup returns; beyond that a stream is reset at once. The shutdown future ends the loop, drops the listener and aborts the dispatches in flight, which resets their streams. Refusals are logged at `debug` by the denial's kind only. The agent's Windows engine runs one loop per generation until that generation's helper stops. |
+| `src/transparent/helper.rs`, `src/transparent/helper/windows.rs` | The agent side of the elevated `divert` helper for one generation, over the `Platform`, `Pipe` and `Process` seams (`helper.rs`, platform-independent): `Supervisor::start` waits at most 25 s for the previous helper's process to end (`PREVIOUS_HELPER_TIMEOUT`, above the helper's worst-case end of about 20 s), creates the liveness pipe under a random `PipeName`, launches `divert --pipe <name> --agent-pid <pid> --port T --dscp N`, and then waits at most 60 s from the launch returning (`START_TIMEOUT`) for the helper to connect, checks the client's pid against the launched process before reading, and reads the first status line with `StatusReader`; a process that ends first is reported with an `error` line drained from the pipe within 1 s (`DRAIN_TIMEOUT`) or else with its exit code. `ready` returns `Running`, whose `stopped` completes once with the pipe closing, a protocol error or the process exit and logs counter lines at `debug` as aggregate fields; dropping it closes the pipe, and the supervisor keeps the process's exit for the next start. `StartError` names the cause per error code, exit code, timeout, declined prompt (`ERROR_CANCELLED`) and pid mismatch, without addresses, ports, pids or paths. On Windows (`windows.rs`): the pipe server (`Server`: `first_pipe_instance`, `reject_remote_clients`, duplex, one instance, a not inheritable handle, a DACL for the user and the Administrators group, `GetNamedPipeClientProcessId`), the launch (`ShellExecuteExW` with `runas`, `SW_HIDE`, `SEE_MASK_NOCLOSEPROCESS \| SEE_MASK_NOASYNC \| SEE_MASK_FLAG_NO_UI`, in `spawn_blocking`, without COM) and the process (`Elevated`: `GetProcessId`, and `job`'s wait on a thread of its own). The agent's Windows engine uses it. |
+| `src/transparent/availability.rs`, `src/transparent/availability/windows.rs` | Whether transparent sessions are available, as `available` or `unavailable: <reason>`: not Windows, a Windows version before 10.0.14393 (`RtlGetVersion`), ARM64 (a build that is neither x86 nor x64, or `IsWow64Process2` reporting an ARM64 machine), a missing WinDivert file or one whose digest differs, naming the file (`availability.rs` over a `Probe` seam, unit-tested on every platform). The Windows probe looks both functions up at runtime and opens the pinned files next to the executable (`windows.rs`). The agent's pre-check and its `transparent` answer read it through the engine seam in `spawn_blocking`; `gateinto status` calls it directly for its `transparent-sessions` line. |
 | `src/token.rs` | The current process token and the user SID of a token (Windows only), shared by the named pipe, the elevation check and `os_user`. |
 | `src/proxy/h2.rs`, `src/proxy/pool.rs` | Flow-controlled HTTP/2 CONNECT streams and the session's lazy upstream connection pool, on-demand PING liveness checks, certificate rotation and owned connection drivers. |
 | `src/proxy/routing.rs` | Per-session gateway/mixed mode, local DNS/IP comparison and bounded direct TCP attempt before gateway fallback. |
@@ -563,7 +657,7 @@ The full protocol, limits and guarantees are in
 | `gui/src/add.rs`, `gui/src/naming.rs` | The GUI's Add for gateways on this device: the form, its limits and route choice, the disclosure, the generated identifier and the store write. |
 | `gui/src/log.rs`, `gui/src/board/log.rs`, `gui/src/wrap.rs` | The GUI's log view: the journal of agent log events, the filter, copying, and the drawn rows. A long message wraps onto continuation lines under its message column: `wrap.rs` breaks at the last space that fits and cuts tokens wider than a line, measured with per-character advances of the mono font. Shown scopes and messages drop text direction controls and the invisible U+200B, U+2060 and U+FEFF, and show control characters and the U+2028 and U+2029 separators as spaces; copying keeps the text as it was. |
 | `gui/src/remove.rs` | The GUI's Remove for gateways added on this device: which gateways offer it, the confirmation text and the fixed refusal messages. |
-| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
+| `gui/src/settings.rs`, `gui/src/win/run.rs` | The GUI's Settings page: config values, the transparent-sessions row (availability or the engine's state), the app's own sign-in value, which it reads and writes, and the installer's agent sign-in value and its StartupApproved state, which it only reads and maps to On, Off or Unknown. |
 | `gui/src/start.rs` | The GUI's Start agent: finding `gateinto.exe` next to the GUI, the `agent --detach` command and the bounded wait for it. |
 
 ## Local 200 only after upstream 2xx

@@ -19,7 +19,9 @@ crypt32.dll CertFindCertificateInStore
 crypt32.dll CertFreeCertificateContext
 crypt32.dll CertOpenStore
 crypt32.dll CryptEncodeObjectEx
+iphlpapi.dll FreeMibTable
 iphlpapi.dll GetExtendedTcpTable
+iphlpapi.dll GetUnicastIpAddressTable
 kernel32.dll AcquireSRWLockExclusive
 kernel32.dll AcquireSRWLockShared
 kernel32.dll AddVectoredExceptionHandler
@@ -30,10 +32,12 @@ kernel32.dll CompareStringOrdinal
 kernel32.dll CompareStringW
 kernel32.dll ConnectNamedPipe
 kernel32.dll CreateDirectoryW
+kernel32.dll CreateEventW
 kernel32.dll CreateFileW
 kernel32.dll CreateIoCompletionPort
 kernel32.dll CreateJobObjectW
 kernel32.dll CreateMutexA
+kernel32.dll CreateMutexW
 kernel32.dll CreateNamedPipeW
 kernel32.dll CreateProcessW
 kernel32.dll CreateThread
@@ -86,10 +90,13 @@ kernel32.dll GetModuleFileNameW
 kernel32.dll GetModuleHandleA
 kernel32.dll GetModuleHandleExW
 kernel32.dll GetModuleHandleW
+kernel32.dll GetNamedPipeClientProcessId
+kernel32.dll GetNamedPipeServerProcessId
 kernel32.dll GetOEMCP
 kernel32.dll GetOverlappedResult
 kernel32.dll GetProcAddress
 kernel32.dll GetProcessHeap
+kernel32.dll GetProcessId
 kernel32.dll GetQueuedCompletionStatusEx
 kernel32.dll GetStartupInfoW
 kernel32.dll GetStdHandle
@@ -181,6 +188,7 @@ kernel32.dll UnhandledExceptionFilter
 kernel32.dll UnregisterWaitEx
 kernel32.dll UpdateProcThreadAttribute
 kernel32.dll VirtualProtect
+kernel32.dll WaitForMultipleObjects
 kernel32.dll WaitForSingleObject
 kernel32.dll WaitForSingleObjectEx
 kernel32.dll WakeAllConditionVariable
@@ -207,6 +215,7 @@ ntdll.dll NtOpenFile
 ntdll.dll NtReadFile
 ntdll.dll NtWriteFile
 ntdll.dll RtlNtStatusToDosError
+shell32.dll ShellExecuteExW
 user32.dll GetProcessWindowStation
 user32.dll GetUserObjectInformationW
 user32.dll MessageBoxW

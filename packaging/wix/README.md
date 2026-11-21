@@ -29,7 +29,8 @@ A machine-wide install for several users is not provided.
 | Install folder appended to the user `PATH` | `HKCU\Environment` | yes |
 | `gateinto://` handler | `HKCU\Software\Classes\gateinto`, command `"<INSTALLFOLDER>gateinto.exe" open -- "%1"` | yes, the whole key |
 | Logon autostart (optional, off by default) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Gateinto` = `"<INSTALLFOLDER>gateinto.exe" agent --detach` | yes |
-| Install markers (`InstallFolder`, `Gui`), the key paths of the components | `HKCU\Software\Gateinto\Installer` | yes |
+| WinDivert 2.2.2: `WinDivert.dll`, `WinDivert64.sys`, in the x86 MSI also `WinDivert32.sys`, and its license as `WinDivert-LICENSE.txt` (optional, off by default; see [Transparent sessions](#transparent-sessions-windivert)) | `%LOCALAPPDATA%\Programs\Gateinto`, next to `gateinto.exe` | yes |
+| Install markers (`InstallFolder`, `Gui`, with the transparent feature also `WinDivert` and in the x86 MSI `WinDivert32`), the key paths of the components | `HKCU\Software\Gateinto\Installer` | yes |
 | Config template `gateinto.toml`, only when no file of that name exists | `%APPDATA%\Gateinto\gateinto.toml` | no, permanent |
 | Marker `ConfigTemplate`, the key path of the template's component | `HKCU\Software\Gateinto\Installer` | no, permanent |
 | Uninstall entry | written by Windows Installer | yes |
@@ -91,8 +92,9 @@ over another of the same version or of the other architecture.
 The release workflow builds the MSI from the release's `gateinto.exe` and `gateinto-gui.exe` with the same `build.ps1` and
 WiX 5.0.2 and attaches an x64 MSI and an x86 MSI to each release (see
 [install](../../docs/install.md#releases)). It passes `-Version 0.0.0 -DisplayVersion
-0.0.0-<commit>`. To build it from a checkout instead you need the Rust toolchain, the .NET SDK
-and WiX v5:
+0.0.0-<commit>`, and `-WinDivert` with the WinDivert files it fetched and checked for the MSI's
+architecture (see [Transparent sessions](#transparent-sessions-windivert)). To build it from a
+checkout instead you need the Rust toolchain, the .NET SDK and WiX v5:
 
 ```powershell
 dotnet tool install --global wix --version 5.0.2
@@ -111,6 +113,11 @@ pwsh packaging/wix/build.ps1
 - `-Version X.Y.Z` sets the MSI version instead of the `Cargo.toml` one.
 - `-DisplayVersion <text>` names the product `Gateinto <text>` in **Installed apps**; without it
   the name is `Gateinto`.
+- `-WinDivert <dir>` adds the optional transparent sessions feature with the WinDivert files in
+  `<dir>`. The directory must hold exactly the files that [windivert.txt](windivert.txt) lists
+  for `-Arch`, with their SHA-256 digests; a missing, different or extra file fails the build.
+  `pwsh .github/scripts/fetch-windivert.ps1 -Arch <arch> -Output <dir>` downloads and checks
+  them. Without `-WinDivert` the MSI is built as before, without the feature.
 
 ## Install
 
@@ -118,11 +125,88 @@ pwsh packaging/wix/build.ps1
 msiexec /i gateinto.msi                         # interactive
 msiexec /i gateinto.msi /qn                     # silent
 msiexec /i gateinto.msi /qn AUTOSTART=1         # silent, start the agent at logon
+msiexec /i gateinto.msi /qn TRANSPARENT=1       # silent, with the WinDivert files
 ```
 
 After installing, open a new terminal (the install folder is appended to the user `PATH`) and
 run `gateinto setup` once as the user who will use Gateinto. It creates the
 device key, or reuses the existing one after a reinstall, and prints its `spki-sha256`.
+
+## Transparent sessions (WinDivert)
+
+The optional feature `Transparent`, titled **Transparent sessions (WinDivert driver)**, installs
+the files of the pinned WinDivert 2.2.2 release next to `gateinto.exe`, where the elevated
+helper of transparent sessions looks for them (see
+[the design](../../docs/design/transparent-session.md#windivert-distribution)): `WinDivert.dll`
+and `WinDivert64.sys`, in the x86 MSI also `WinDivert32.sys` (under WOW64 the 64-bit driver is
+loaded), and the release's `LICENSE` as `WinDivert-LICENSE.txt`. It is a child of the main
+feature, off by default (`Level="2"`), and `TRANSPARENT=1` turns it on at install, in the same
+way as `AUTOSTART=1`. Installing it starts nothing and installs no driver: WinDivert installs
+and starts its driver when the helper first opens it, after the administrator approval of the
+first transparent session. Without the files, Gateinto works as before and `gateinto status`
+says that transparent sessions are unavailable.
+
+Only an MSI built with `-WinDivert` has the feature. The release workflow builds both release
+MSIs that way; the CI `msi` job and a local build without `-WinDivert` do not, and
+`TRANSPARENT=1` does nothing there.
+
+[windivert.txt](windivert.txt) lists the release archive with its URL and the files of each
+architecture with their SHA-256 digests. [windivert.ps1](windivert.ps1) reads it and checks a
+downloaded archive or a directory of files against it. The release workflow runs
+[fetch-windivert.ps1](../../.github/scripts/fetch-windivert.ps1), which downloads
+`WinDivert-2.2.2-A.zip` from the upstream GitHub release, checks the archive's digest before
+opening it, extracts only the files of the MSI's architecture and checks each of them; any
+mismatch fails the job. The WinDivert binaries are never committed. A unit test
+(`src/divert/windivert/packaging.rs`) checks that `windivert.txt` has the digests pinned in
+`src/divert/windivert.rs` and the archive digest of the design, that `gateinto.wxs` packages
+exactly its files for each architecture and only when built with `-WinDivert`, and that the
+scripts and the release workflow take every name and digest from it.
+
+### Adding or removing it later
+
+The package sets `ARPNOMODIFY=1`, so Installed apps offers no Modify. Run the MSI file of the
+installed build again, which Windows Installer treats as a change of the installed product:
+
+```powershell
+msiexec /i gateinto.msi /qn ADDLOCAL=Transparent   # add the WinDivert files
+msiexec /i gateinto.msi /qn REMOVE=Transparent     # remove them
+```
+
+Both change only the named feature. Every build has its own product code, so the MSI of another
+build is a major upgrade instead; on a major upgrade `ADDLOCAL` installs only the named features
+and their parents, which would drop Autostart. Upgrade first and then run the new MSI again with
+`ADDLOCAL` or `REMOVE`, or uninstall and install again with or without `TRANSPARENT=1`; the
+uninstall keeps the device key and the config file. This follows the Windows Installer
+documentation and is not verified on Windows.
+
+### Upgrades
+
+`MajorUpgrade` migrates feature states: Windows Installer is designed to give each feature of
+the new version the state it had in the old one, so the feature stays installed or absent across
+an upgrade, like Autostart, and `TRANSPARENT=1` is then ignored. `TRANSPARENT=1` decides only
+when the installed version has no `Transparent` feature: at a first install, or when upgrading
+from a build without it (any build from before the feature, or one built without `-WinDivert`).
+Upgrading to an MSI built without `-WinDivert` removes the files. Not verified on Windows.
+
+### Files in use and the driver
+
+The uninstall removes the WinDivert files and markers with the rest. `StopAgent` waits only for
+the agent to exit. An agent that ran a transparent session keeps its elevated helper, an
+elevated `gateinto.exe` that has loaded `WinDivert.dll`, until the agent stops; the helper then
+keeps dropping packets for its 5 s grace period, deletes its firewall rule and exits. While it
+runs, `gateinto.exe` and `WinDivert.dll` are in use, and Windows Installer may need a restart to
+finish removing them (`/norestart` then exits with 3010) or leave them behind. The same holds
+for a major upgrade, whose removal of the old version runs `StopAgent` too. `REMOVE=Transparent`
+does not run `StopAgent` at all, because it runs only when the whole product is removed. Running
+`gateinto stop` and waiting about 10 seconds before uninstalling, upgrading or removing the
+feature avoids this. The package has no reboot action. Not verified on Windows.
+
+The driver itself does not block removal: WinDivert's documentation says that its files can be
+deleted while the driver runs, and that the driver is then removed at the next restart, or by
+`sc stop WinDivert` and `sc delete WinDivert` at an elevated prompt once no process uses
+WinDivert. After an uninstall or `REMOVE=Transparent` the driver can therefore stay loaded
+until the next restart, without the helper's handle and so without diverting anything. Not
+verified on Windows.
 
 ## Uninstall
 
@@ -174,7 +258,9 @@ removes only the GUI's own `Gateinto App` sign-in value, and checks that the SPK
 purge. The config template checks in that script (created on the first install, kept with an
 edited content across `msiexec /fa`, `msiexec /f`, a same-version major upgrade to a second build
 and back, both uninstalls, a reinstall and another `msiexec /fa`) were added after the last
-recorded CI run and have not run on Windows yet. The following are not verified by CI and need manual testing: opening the GUI from the
+recorded CI run and have not run on Windows yet. The transparent sessions feature has not been built or installed on Windows: WiX is not
+available where it was written, the release workflow is the only job that builds it, and no job
+installs it. The following are not verified by CI and need manual testing: opening the GUI from the
 shortcut, closing the GUI during an interactive uninstall or an upgrade, keeping `Gateinto App`
 across an upgrade between two versions, TPM keys, interactive
 install, the Windows 10/11 matrix, the x86 MSI on real 32-bit Windows (it is untested on Windows

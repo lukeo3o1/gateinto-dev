@@ -275,6 +275,7 @@ mod tests {
             browser: Some(BrowserKind::Chrome),
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 
