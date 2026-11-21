@@ -323,7 +323,8 @@ fn the_release_verifies_the_archive_before_extracting_and_builds_each_msi_with_w
 
 #[test]
 fn ci_tests_both_msi_builds_with_the_pinned_windivert_files() {
-    let (_, msi) = CI.split_once("\n  msi:\n").unwrap();
+    let ci = CI.replace("\r\n", "\n");
+    let (_, msi) = ci.split_once("\n  msi:\n").unwrap();
     let fetched = msi.find(".github/scripts/fetch-windivert.ps1").unwrap();
     let builds: Vec<_> = msi.match_indices("packaging/wix/build.ps1").collect();
     assert_eq!(builds.len(), 2);
