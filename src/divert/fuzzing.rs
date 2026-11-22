@@ -11,7 +11,7 @@ const CAPACITY: usize = 4;
 
 pub struct Checker {
     listener: u16,
-    remote_ports: HashMap<(Ipv4Addr, u16), u16>,
+    remote_ports: HashMap<(Ipv4Addr, Ipv4Addr, u16), u16>,
 }
 
 impl Checker {
@@ -45,7 +45,9 @@ impl Checker {
         );
         let restored = source_port == self.listener;
         if restored {
-            let remote_port = self.remote_ports.get(&(destination, destination_port));
+            let remote_port = self
+                .remote_ports
+                .get(&(source, destination, destination_port));
             assert!(
                 remote_port == Some(&port(after, IP_HEADER)),
                 "a restored reply does not come from the remote port of its flow"
@@ -65,7 +67,7 @@ impl Checker {
             );
             assert!(after[1] & !ECN == 0, "a reflected packet kept its DSCP");
             self.remote_ports
-                .insert((destination, source_port), destination_port);
+                .insert((source, destination, source_port), destination_port);
         }
         let rewritten_port = if restored { IP_HEADER } else { IP_HEADER + 2 };
         let mut expected = before.to_vec();

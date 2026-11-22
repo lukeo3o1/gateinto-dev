@@ -2,9 +2,12 @@ use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::io::{self, Write};
 use std::mem;
+use std::time::Duration;
 
 use super::{Counters, decimal};
 
+pub const START_TIMEOUT: Duration = Duration::from_secs(60);
+pub const START_ACK: u8 = b'S';
 pub const MAX_LINE_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

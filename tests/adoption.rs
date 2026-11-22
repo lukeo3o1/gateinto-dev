@@ -181,6 +181,39 @@ async fn an_adopted_stream_beyond_the_tunnel_limit_is_reset_without_a_reject_per
     assert_eq!(read_response(&mut lingering).await.status, 503);
 }
 
+#[tokio::test]
+async fn each_source_can_take_a_tunnel_permit_when_both_have_a_backlog() {
+    let gateway = Gateway::echoing(b"").await;
+    let mut config = gateway.config();
+    config.limits.max_tunnels = 2;
+    let proxy = Proxy::bind(config).await.unwrap();
+    let adopter = proxy.adopter();
+    let (mut first, accepted) = pair().await;
+    let (_second, also_accepted) = pair().await;
+    for accepted in [accepted, also_accepted] {
+        adopter.adopt(accepted, target()).unwrap();
+    }
+    let mut loopback = TcpStream::connect(proxy.local_addr()).await.unwrap();
+    loopback
+        .write_all(&connect_request("192.0.2.2:443"))
+        .await
+        .unwrap();
+    let _another_loopback = TcpStream::connect(proxy.local_addr()).await.unwrap();
+    tokio::spawn(proxy.run());
+
+    let response = timeout(CLOSE_WITHIN, read_response(&mut loopback))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200, "{}", response.head);
+    first.write_all(b"echo").await.unwrap();
+    let mut echo = [0; 4];
+    timeout(CLOSE_WITHIN, first.read_exact(&mut echo))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&echo, b"echo");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_adopted_stream_is_reset_when_the_gateway_fails() {
     let unreachable = agent_config(unused_port().await, TestCa::new().roots(), PROXY_NAME);

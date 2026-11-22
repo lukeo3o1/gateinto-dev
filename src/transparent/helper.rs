@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
@@ -26,7 +26,7 @@ mod windows;
 pub use windows::{Elevated, Server, Windows};
 
 pub const PREVIOUS_HELPER_TIMEOUT: Duration = Duration::from_secs(25);
-pub const START_TIMEOUT: Duration = Duration::from_secs(60);
+pub use crate::divert::protocol::START_TIMEOUT;
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 const ERROR_CANCELLED: i32 = 1223;
@@ -48,11 +48,14 @@ pub trait Platform: Send + Sync + 'static {
 pub trait Pipe: AsyncRead + Unpin + Send + 'static {
     fn connect(&mut self) -> impl Future<Output = io::Result<()>> + Send;
     fn client_pid(&self) -> io::Result<u32>;
+    fn acknowledge(&mut self) -> impl Future<Output = io::Result<()>> + Send;
 }
 
-pub trait Process: Send + 'static {
+pub trait Process: Send + Sync + 'static {
     fn id(&self) -> u32;
-    fn wait(self) -> impl Future<Output = Option<u32>> + Send + 'static;
+    fn wait(
+        self: Arc<Self>,
+    ) -> io::Result<impl Future<Output = io::Result<Option<u32>>> + Send + 'static>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +86,9 @@ impl fmt::Display for Exit {
 
 #[derive(Debug)]
 pub enum StartError {
+    ShuttingDown,
     PreviousRunning,
+    Unobserved(ObservationError),
     Random,
     Pipe(io::Error),
     Declined,
@@ -98,6 +103,8 @@ pub enum StartError {
 impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unobserved(error) => error.fmt(f),
+            Self::ShuttingDown => f.write_str("the agent is stopping"),
             Self::PreviousRunning => f.write_str("the previous transparent engine has not ended"),
             Self::Random => f.write_str("the system random number generator failed"),
             Self::Pipe(error) => {
@@ -160,6 +167,7 @@ impl Error for StartError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
+    Unobserved(ObservationError),
     Closed,
     EngineFailed,
     Protocol(ProtocolError),
@@ -169,6 +177,7 @@ pub enum Stopped {
 impl fmt::Display for Stopped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unobserved(error) => error.fmt(f),
             Self::Closed => f.write_str("the pipe of the transparent engine closed"),
             Self::EngineFailed => f.write_str("the transparent engine stopped processing packets"),
             Self::Protocol(error) => {
@@ -182,18 +191,68 @@ impl fmt::Display for Stopped {
     }
 }
 
-type Ended = watch::Receiver<Option<Exit>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservationError(io::ErrorKind);
 
-pub struct Supervisor<P> {
+impl fmt::Display for ObservationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "observing the transparent engine process failed: {}",
+            self.0
+        )
+    }
+}
+
+type Observed = Result<Exit, ObservationError>;
+type Ended = watch::Receiver<Option<Observed>>;
+
+struct Tracked<R> {
+    process: Arc<R>,
+    exited: Ended,
+}
+
+struct State<R> {
+    stopping: bool,
+    previous: Option<Tracked<R>>,
+}
+
+impl<R: Process> State<R> {
+    fn allow_start(&self) -> Result<(), StartError> {
+        if self.stopping {
+            Err(StartError::ShuttingDown)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn previous_exit(&mut self) -> Option<Ended> {
+        let tracked = self.previous.as_mut()?;
+        let retry = match *tracked.exited.borrow() {
+            Some(Err(_)) => true,
+            Some(Ok(_)) => false,
+            None => tracked.exited.has_changed().is_err(),
+        };
+        if retry {
+            tracked.exited = watch_exit(Arc::clone(&tracked.process));
+        }
+        Some(tracked.exited.clone())
+    }
+}
+
+pub struct Supervisor<P: Platform> {
     platform: P,
-    previous: Mutex<Option<Ended>>,
+    state: Mutex<State<P::Process>>,
 }
 
 impl<P: Platform> Supervisor<P> {
     pub fn new(platform: P) -> Self {
         Self {
             platform,
-            previous: Mutex::new(None),
+            state: Mutex::new(State {
+                stopping: false,
+                previous: None,
+            }),
         }
     }
 
@@ -202,11 +261,16 @@ impl<P: Platform> Supervisor<P> {
         port: ListenerPort,
         dscp: Dscp,
     ) -> Result<Running<P::Pipe>, StartError> {
-        let previous = self.previous().clone();
+        let previous = {
+            let mut state = self.state();
+            state.allow_start()?;
+            state.previous_exit()
+        };
         if let Some(mut previous) = previous {
             timeout(PREVIOUS_HELPER_TIMEOUT, ended(&mut previous))
                 .await
-                .map_err(|_| StartError::PreviousRunning)?;
+                .map_err(|_| StartError::PreviousRunning)?
+                .map_err(StartError::Unobserved)?;
         }
         let name = PipeName::from_random(random()?);
         let mut pipe = self.platform.create_pipe(&name).map_err(StartError::Pipe)?;
@@ -217,8 +281,17 @@ impl<P: Platform> Supervisor<P> {
             .map_err(launch_error)?;
         let deadline = Instant::now() + START_TIMEOUT;
         let pid = process.id();
-        let exited = watch_exit(process);
-        *self.previous() = Some(exited.clone());
+        let exited = {
+            let mut state = self.state();
+            state.allow_start()?;
+            let process = Arc::new(process);
+            let exited = watch_exit(Arc::clone(&process));
+            state.previous = Some(Tracked {
+                process,
+                exited: exited.clone(),
+            });
+            exited
+        };
         let mut reader = StatusReader::new();
         let rest = first_status(&mut pipe, &mut reader, pid, exited.clone(), deadline).await?;
         rest.iter().for_each(log);
@@ -230,15 +303,22 @@ impl<P: Platform> Supervisor<P> {
         })
     }
 
-    pub async fn wait_for_exit(&self) {
-        let previous = self.previous().clone();
+    pub async fn shutdown(&self) -> Result<(), String> {
+        let previous = {
+            let mut state = self.state();
+            state.stopping = true;
+            state.previous_exit()
+        };
         if let Some(mut previous) = previous {
-            ended(&mut previous).await;
+            ended(&mut previous)
+                .await
+                .map_err(|error| error.to_string())?;
         }
+        Ok(())
     }
 
-    fn previous(&self) -> MutexGuard<'_, Option<Ended>> {
-        self.previous.lock().unwrap_or_else(PoisonError::into_inner)
+    fn state(&self) -> MutexGuard<'_, State<P::Process>> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -257,7 +337,7 @@ impl<P: Pipe> Running<P> {
         tokio::select! {
             biased;
             stopped = counters(&mut self.pipe, &mut self.reader) => stopped,
-            exit = ended(&mut self.exited) => Stopped::Exited(exit),
+            exit = ended(&mut self.exited) => exit.map_or_else(Stopped::Unobserved, Stopped::Exited),
         }
     }
 
@@ -316,22 +396,32 @@ fn launch_error(error: io::Error) -> StartError {
     }
 }
 
-fn watch_exit<R: Process>(process: R) -> Ended {
+fn watch_exit<R: Process>(process: Arc<R>) -> Ended {
     let (sender, exited) = watch::channel(None);
-    tokio::spawn(async move {
-        let code = process.wait().await;
-        sender.send_replace(Some(Exit(code)));
-    });
+    match process.wait() {
+        Ok(wait) => {
+            tokio::spawn(async move {
+                let observed = wait
+                    .await
+                    .map(Exit)
+                    .map_err(|error| ObservationError(error.kind()));
+                sender.send_replace(Some(observed));
+            });
+        }
+        Err(error) => {
+            sender.send_replace(Some(Err(ObservationError(error.kind()))));
+        }
+    }
     exited
 }
 
-async fn ended(exited: &mut Ended) -> Exit {
-    let exit = exited
+async fn ended(exited: &mut Ended) -> Observed {
+    exited
         .wait_for(Option::is_some)
         .await
         .ok()
-        .and_then(|exit| *exit);
-    exit.unwrap_or(Exit(None))
+        .and_then(|exit| *exit)
+        .unwrap_or(Err(ObservationError(io::ErrorKind::BrokenPipe)))
 }
 
 enum Status {
@@ -342,7 +432,7 @@ enum Status {
 
 enum First {
     Status(Status),
-    Exited(Exit),
+    Exited(Observed),
     TimedOut,
 }
 
@@ -357,18 +447,20 @@ async fn first_status<P: Pipe>(
     tokio::pin!(status);
     let first = tokio::select! {
         biased;
-        status = &mut status => First::Status(status),
         exit = ended(&mut exited) => First::Exited(exit),
+        status = &mut status => First::Status(status),
         () = sleep_until(deadline) => First::TimedOut,
     };
     match first {
         First::Status(Status::Ready(rest)) => Ok(rest),
         First::Status(Status::Closed) => match timeout_at(deadline, ended(&mut exited)).await {
-            Ok(exit) => Err(StartError::Exited(exit)),
+            Ok(Ok(exit)) => Err(StartError::Exited(exit)),
+            Ok(Err(error)) => Err(StartError::Unobserved(error)),
             Err(_) => Err(StartError::TimedOut),
         },
         First::Status(Status::Refused(error)) => Err(error),
-        First::Exited(exit) => {
+        First::Exited(Err(error)) => Err(StartError::Unobserved(error)),
+        First::Exited(Ok(exit)) => {
             let drained = timeout_at(deadline.min(Instant::now() + DRAIN_TIMEOUT), status).await;
             match drained {
                 Ok(Status::Refused(error)) => Err(error),
@@ -385,6 +477,9 @@ async fn status<P: Pipe>(pipe: &mut P, reader: &mut StatusReader, pid: u32) -> S
     }
     if !pipe.client_pid().is_ok_and(|client| client == pid) {
         return Status::Refused(StartError::UnknownClient);
+    }
+    if pipe.acknowledge().await.is_err() {
+        return Status::Closed;
     }
     match events(pipe, reader).await {
         Ok(mut events) => match events.remove(0) {
@@ -504,6 +599,12 @@ mod tests {
     }
 
     impl Pipe for FakePipe {
+        async fn acknowledge(&mut self) -> io::Result<()> {
+            self.data
+                .write_all(&[crate::divert::protocol::START_ACK])
+                .await
+        }
+
         async fn connect(&mut self) -> io::Result<()> {
             if self.client.is_none() {
                 let pid = (&mut self.connected)
@@ -520,17 +621,32 @@ mod tests {
         }
     }
 
+    type FakeObservation = Option<Result<Option<u32>, io::ErrorKind>>;
+
     struct FakeProcess {
         id: u32,
-        exit: oneshot::Receiver<u32>,
+        observer_error: Option<io::ErrorKind>,
+        exit: watch::Receiver<FakeObservation>,
     }
 
     impl Process for FakeProcess {
-        async fn wait(self) -> Option<u32> {
-            match self.exit.await {
-                Ok(code) => Some(code),
-                Err(_) => std::future::pending().await,
+        fn wait(
+            self: Arc<Self>,
+        ) -> io::Result<impl Future<Output = io::Result<Option<u32>>> + Send + 'static> {
+            if let Some(error) = self.observer_error {
+                return Err(error.into());
             }
+            Ok(async move {
+                let mut exit = self.exit.clone();
+                let observed = exit
+                    .wait_for(Option::is_some)
+                    .await
+                    .map(|code| code.unwrap());
+                match observed {
+                    Ok(code) => code.map_err(io::Error::from),
+                    Err(_) => std::future::pending().await,
+                }
+            })
         }
 
         fn id(&self) -> u32 {
@@ -541,7 +657,7 @@ mod tests {
     struct Helper {
         connect: Option<oneshot::Sender<u32>>,
         writer: Option<DuplexStream>,
-        exit: Option<oneshot::Sender<u32>>,
+        exit: watch::Sender<FakeObservation>,
     }
 
     impl Helper {
@@ -561,6 +677,8 @@ mod tests {
 
         async fn report(&mut self, text: &str) {
             self.connect();
+            let ack = self.writer.as_mut().unwrap().read_u8().await.unwrap();
+            assert_eq!(ack, crate::divert::protocol::START_ACK);
             self.write(text).await.unwrap();
         }
 
@@ -569,13 +687,14 @@ mod tests {
         }
 
         fn exit(&mut self, code: u32) {
-            let _ = self.exit.take().expect("exited once").send(code);
+            self.exit.send_replace(Some(Ok(Some(code))));
         }
     }
 
     struct FakeState {
         launches: VecDeque<(Duration, io::Result<u32>)>,
         pipe_error: Option<io::Error>,
+        observer_error: Option<io::ErrorKind>,
         names: Vec<String>,
         arguments: Vec<Vec<String>>,
         launched: Vec<Instant>,
@@ -638,13 +757,17 @@ mod tests {
             let mut state = self.state();
             state.launched.push(Instant::now());
             let (connect, writer) = state.client.take().expect("the pipe exists");
-            let (exit, exited) = oneshot::channel();
+            let (exit, exited) = watch::channel(None);
             let _ = state.helpers.send(Helper {
                 connect: Some(connect),
                 writer: Some(writer),
-                exit: Some(exit),
+                exit,
             });
-            Ok(FakeProcess { id, exit: exited })
+            Ok(FakeProcess {
+                id,
+                exit: exited,
+                observer_error: state.observer_error,
+            })
         }
     }
 
@@ -662,6 +785,7 @@ mod tests {
             let fake = Fake(Arc::new(Mutex::new(FakeState {
                 launches: VecDeque::new(),
                 pipe_error: None,
+                observer_error: None,
                 names: Vec::new(),
                 arguments: Vec::new(),
                 launched: Vec::new(),
@@ -735,6 +859,56 @@ mod tests {
                 "43"
             ]]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_observer_that_cannot_start_never_authorizes_the_helper() {
+        let mut harness = Harness::new();
+        harness.fake.state().observer_error = Some(io::ErrorKind::OutOfMemory);
+        let started = harness.start();
+        let mut helper = harness.helper().await;
+        helper.connect();
+        let ack = helper.writer.as_mut().unwrap().read_u8().await;
+        assert_eq!(ack.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert!(matches!(failure(started).await, StartError::Unobserved(_)));
+        assert!(harness.supervisor.shutdown().await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_during_approval_never_authorizes_the_late_helper() {
+        let mut harness = Harness::new();
+        harness.fake.will_launch(SOON, Ok(HELPER));
+        let started = harness.start();
+        tokio::task::yield_now().await;
+        assert_eq!(harness.fake.state().arguments.len(), 1);
+        harness.supervisor.shutdown().await.unwrap();
+        let mut helper = harness.helper().await;
+        helper.connect();
+        let ack = helper.writer.as_mut().unwrap().read_u8().await;
+        assert_eq!(ack.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert!(started.await.unwrap().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn losing_the_observer_refuses_both_stop_and_restart() {
+        let mut harness = Harness::new();
+        let (running, helper) = harness.running().await;
+        drop(running);
+        helper
+            .exit
+            .send_replace(Some(Err(io::ErrorKind::PermissionDenied)));
+        assert!(matches!(
+            failure(harness.start()).await,
+            StartError::Unobserved(_)
+        ));
+        assert_eq!(harness.fake.launched().len(), 1);
+        assert!(harness.supervisor.shutdown().await.is_err());
+        helper.exit.send_replace(Some(Ok(None)));
+        assert!(harness.supervisor.shutdown().await.is_ok());
+        assert!(matches!(
+            failure(harness.start()).await,
+            StartError::ShuttingDown
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -885,11 +1059,9 @@ mod tests {
         let mut harness = Harness::new();
         let started = harness.start();
         let mut helper = harness.helper().await;
-        helper.write("error digest-mismatch\n").await.unwrap();
+        helper.report("error digest-mismatch\n").await;
         helper.close();
         helper.exit(4);
-        sleep(SOON).await;
-        helper.connect();
         let error = failure(started).await;
         assert!(
             matches!(error, StartError::Failed(ErrorCode::DigestMismatch)),
@@ -1018,6 +1190,8 @@ mod tests {
             error.to_string(),
             "the process on the pipe of the transparent engine is not the engine"
         );
+        let ack = helper.writer.as_mut().unwrap().read_u8().await;
+        assert_eq!(ack.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
         let closed = helper.write("counters\n").await.unwrap_err();
         assert_eq!(closed.kind(), io::ErrorKind::BrokenPipe);
     }

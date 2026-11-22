@@ -70,7 +70,7 @@ struct Helpers {
     check_panics: bool,
     plans: Mutex<VecDeque<Plan>>,
     stops: Mutex<Vec<oneshot::Sender<EngineStopped>>>,
-    exit: Mutex<Option<oneshot::Receiver<()>>>,
+    exit: Mutex<Option<oneshot::Receiver<Result<(), String>>>>,
     served: Served,
 }
 
@@ -154,13 +154,16 @@ impl Engine for Helpers {
         })
     }
 
-    fn wait_for_exit(&self) -> Boxed<'_, ()> {
+    fn wait_for_exit(&self) -> Boxed<'_, Result<(), String>> {
         let exit = self.exit.lock().unwrap().take();
         Box::pin(async move {
             if let Some(exit) = exit {
                 self.events.push(Event::AwaitHelperExit);
-                let _ = exit.await;
+                return exit
+                    .await
+                    .unwrap_or_else(|_| Err("the exit gate was dropped".to_owned()));
             }
+            Ok(())
         })
     }
 }
@@ -469,6 +472,21 @@ fn harness(configure: impl FnOnce(&mut Setup)) -> Harness {
 
 fn plain() -> Harness {
     harness(|_| {})
+}
+
+fn serve(harness: &Harness) -> (ipc::Endpoint, oneshot::Sender<()>, JoinHandle<()>) {
+    let endpoint = ipc::Endpoint::unix(harness.root.join("agent.sock"));
+    let server = Server::bind(&endpoint).unwrap();
+    let (shutdown, requested) = oneshot::channel();
+    let agent = harness.agent.clone();
+    let serving = tokio::spawn(async move {
+        agent
+            .serve(server, async {
+                let _ = requested.await;
+            })
+            .await;
+    });
+    (endpoint, shutdown, serving)
 }
 
 fn terminal(mode: Mode) -> Request {
@@ -862,6 +880,122 @@ async fn stopping_cancels_a_launch_waiting_for_administrator_approval() {
 }
 
 #[tokio::test]
+async fn pending_transparent_launches_leave_ipc_capacity_to_list_and_stop() {
+    let h = plain();
+    let approval = h.helpers.gated();
+    let (endpoint, _shutdown, serving) = serve(&h);
+    let mut launches = JoinSet::new();
+    for waiting in 0..MAX_PENDING_TRANSPARENT_LAUNCHES {
+        let endpoint = endpoint.clone();
+        launches.spawn(async move {
+            ipc::send_with_timeout(&endpoint, &terminal(Mode::Transparent), PATIENCE).await
+        });
+        until("the launch waits on the same approval", || async {
+            h.events.count(Event::HelperStarted(dscp())) == 1
+                && h.agent.inner.registry.joiners() >= waiting
+        })
+        .await;
+    }
+    assert!(
+        matches!(ipc::send(&endpoint, &terminal(Mode::Transparent)).await,
+        Ok(Response::Error(message)) if message == TRANSPARENT_LAUNCH_BUSY)
+    );
+    assert!(matches!(
+        ipc::send(&endpoint, &Request::List).await,
+        Ok(Response::Ok(_))
+    ));
+    assert!(matches!(
+        ipc::send(&endpoint, &Request::Stop).await,
+        Ok(Response::Ok(_))
+    ));
+    assert!(approval.send(Ok(())).is_err());
+    while let Some(launch) = launches.join_next().await {
+        assert!(
+            matches!(launch.unwrap(), Ok(Response::Error(message)) if message == AGENT_STOPPING)
+        );
+    }
+    serving.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stop_during_console_shutdown_waits_for_the_same_helper_exit() {
+    let h = plain();
+    let (exited, exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(exit);
+    let (endpoint, shutdown, serving) = serve(&h);
+    shutdown.send(()).unwrap();
+    until("console shutdown waits for the helper", || async {
+        h.events.count(Event::AwaitHelperExit) == 1
+    })
+    .await;
+    assert!(matches!(
+        ipc::send(&endpoint, &Request::List).await,
+        Ok(Response::Ok(_))
+    ));
+    let stop = ipc::send(&endpoint, &Request::Stop);
+    tokio::pin!(stop);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut stop)
+            .await
+            .is_err()
+    );
+    exited.send(Ok(())).unwrap();
+    assert!(matches!(stop.await, Ok(Response::Ok(_))));
+    serving.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_helper_wait_failure_leaves_stop_reachable_and_the_wait_can_be_retried() {
+    let h = plain();
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+    let (failed, exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(exit);
+    let (endpoint, _shutdown, serving) = serve(&h);
+    failed
+        .send(Err("could not confirm the helper exit".to_owned()))
+        .unwrap();
+    assert!(
+        matches!(ipc::send(&endpoint, &Request::Stop).await, Ok(Response::Error(message)) if message == "could not confirm the helper exit")
+    );
+    assert!(
+        matches!(ipc::send(&endpoint, &Request::List).await, Ok(Response::Ok(lines)) if lines.is_empty())
+    );
+    assert!(
+        matches!(ipc::send(&endpoint, &Request::Transparent).await, Ok(Response::Error(message)) if message == AGENT_STOPPING)
+    );
+    assert!(
+        matches!(ipc::send(&endpoint, &terminal(Mode::Transparent)).await, Ok(Response::Error(message)) if message == AGENT_STOPPING)
+    );
+
+    let (exited, exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(exit);
+    exited.send(Ok(())).unwrap();
+    assert!(
+        matches!(ipc::send(&endpoint, &Request::Stop).await, Ok(Response::Ok(lines)) if ipc::closed_terminals(&lines) == Some(1))
+    );
+    assert_eq!(h.events.count(Event::AwaitHelperExit), 2);
+    serving.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_is_not_cut_off_by_the_deadline_for_draining_requests() {
+    let h = plain();
+    let (endpoint, _shutdown, serving) = serve(&h);
+    let launching = h.agent.inner.launching.lock().await;
+    let stop = tokio::spawn(async move { ipc::send(&endpoint, &Request::Stop).await });
+    until("the agent starts shutting down", || async {
+        *h.agent.inner.stop.borrow()
+    })
+    .await;
+    tokio::time::advance(DRAIN_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(!stop.is_finished());
+    drop(launching);
+    assert!(matches!(stop.await.unwrap(), Ok(Response::Ok(_))));
+    serving.await.unwrap();
+}
+
+#[tokio::test]
 async fn stop_replies_after_closing_sessions_and_waiting_for_the_helper_to_exit() {
     let h = plain();
     answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
@@ -877,7 +1011,7 @@ async fn stop_replies_after_closing_sessions_and_waiting_for_the_helper_to_exit(
     .await;
     assert!(session_ids(&h.agent).await.is_empty());
     assert!(!stopping.is_finished());
-    exited.send(()).unwrap();
+    exited.send(Ok(())).unwrap();
     let response = stopping.await.unwrap().unwrap();
     assert_eq!(ipc::closed_terminals(&response), Some(1));
 }

@@ -19,6 +19,7 @@ pub(super) struct TestPacket {
     pub tos: u8,
     pub flags: u8,
     pub sequence: u32,
+    pub acknowledgment: u32,
     pub protocol: u8,
     pub fragment: u16,
     pub ip_options: usize,
@@ -36,6 +37,7 @@ impl TestPacket {
             tos: TAGGED,
             flags,
             sequence: 0x0102_0304,
+            acknowledgment: 0,
             protocol: TCP,
             fragment: 0x4000,
             ip_options: 0,
@@ -79,6 +81,7 @@ impl TestPacket {
         header[2..4].copy_from_slice(&self.destination_port.to_be_bytes());
         if self.protocol == TCP {
             header[4..8].copy_from_slice(&self.sequence.to_be_bytes());
+            header[8..12].copy_from_slice(&self.acknowledgment.to_be_bytes());
             header[12] = ((transport / 4) as u8) << 4;
             header[13] = self.flags;
             header[14..16].copy_from_slice(&0xFAF0u16.to_be_bytes());

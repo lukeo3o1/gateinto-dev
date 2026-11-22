@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::protocol::{Event, Snapshot, send};
-use super::{Direction, Engine, Verdict};
+use super::{Direction, Engine};
 
 pub const PACKET_BUFFER_BYTES: usize = 40 + 0xFFFF;
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -202,12 +202,11 @@ fn forward<P: DivertPort, C: Clock>(
                 "the received length exceeds the buffer",
             );
         };
-        let verdict = engine.process(packet, received.direction, clock.now());
-        if verdict == Verdict::InjectInbound
-            && port.inject_inbound(packet, &received.address).is_err()
-        {
-            snapshot.send_errors += 1;
-        }
+        engine.process_with(packet, received.direction, clock.now(), |packet| {
+            let sent = port.inject_inbound(packet, &received.address).is_ok();
+            snapshot.send_errors += u64::from(!sent);
+            sent
+        });
         snapshot.engine = engine.counters();
         shared.lock().snapshot = snapshot;
     };
@@ -284,6 +283,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::divert::Verdict;
     use crate::divert::packet::{ACK, SYN, UDP};
     use crate::divert::protocol::{Event, StatusReader};
     use crate::divert::testing::{LISTENER, TestPacket};

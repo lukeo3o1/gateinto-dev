@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, Semaphore, oneshot, watch};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -34,6 +34,8 @@ mod engine;
 use engine::{Boxed, Engine, EngineStopped, Registry, Started};
 
 const MAX_CONNECTIONS: usize = 8;
+const MAX_PENDING_TRANSPARENT_LAUNCHES: usize = 8;
+const TRANSPARENT_LAUNCH_BUSY: &str = "too many transparent launches are pending";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(25);
@@ -326,6 +328,16 @@ struct Inner {
     engine_error: std::sync::Mutex<Option<String>>,
     stop: watch::Sender<bool>,
     helper_stop: watch::Sender<bool>,
+    shutdown: std::sync::Mutex<Option<ShutdownAttempt>>,
+    shutdown_complete: watch::Sender<bool>,
+}
+
+type ShutdownAttempt = watch::Receiver<Option<ShutdownOutcome>>;
+
+#[derive(Clone)]
+struct ShutdownOutcome {
+    terminals: usize,
+    helper: Result<(), String>,
 }
 
 impl Inner {
@@ -367,6 +379,8 @@ impl Agent {
                 engine_error: std::sync::Mutex::new(None),
                 stop: watch::Sender::new(false),
                 helper_stop: watch::Sender::new(false),
+                shutdown: std::sync::Mutex::new(None),
+                shutdown_complete: watch::Sender::new(false),
             }),
         }
     }
@@ -377,8 +391,16 @@ impl Agent {
             info!("removed {removed} browser profiles left behind by an earlier agent");
         }
         let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let pending_launches = Arc::new(Semaphore::new(MAX_PENDING_TRANSPARENT_LAUNCHES));
         let mut tasks = JoinSet::new();
-        tokio::pin!(shutdown);
+        let console_stop = async {
+            shutdown.await;
+            if let Err(error) = self.stop().await {
+                warn!("{error}");
+            }
+        };
+        tokio::pin!(console_stop);
+        let mut console_pending = true;
         let mut backoff = AcceptBackoff::default();
         loop {
             let retry_at = backoff.retry_at();
@@ -389,17 +411,17 @@ impl Agent {
                 server.accept().await
             };
             tokio::select! {
-                () = &mut shutdown => break,
-                () = wait_for_stop(&self.inner.stop) => break,
+                () = wait_for_stop(&self.inner.shutdown_complete) => break,
+                () = &mut console_stop, if console_pending => console_pending = false,
                 accepted = accept => match accepted {
                     Ok(connection) => {
                         backoff.succeeded();
                         match connections.clone().try_acquire_owned() {
                             Ok(permit) => {
                                 let agent = self.clone();
+                                let pending_launches = pending_launches.clone();
                                 tasks.spawn(async move {
-                                    agent.respond(connection).await;
-                                    drop(permit);
+                                    agent.respond(connection, permit, pending_launches).await;
                                 });
                             }
                             Err(_) => warn!("too many agent requests at once; dropping one"),
@@ -413,7 +435,6 @@ impl Agent {
                 Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             }
         }
-        self.inner.stop.send_replace(true);
         drop(server);
         let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
             while tasks.join_next().await.is_some() {}
@@ -422,16 +443,25 @@ impl Agent {
         if drained.is_err() {
             tasks.abort_all();
         }
-        self.close_all().await;
-        let helper_stopping = *self.inner.helper_stop.borrow();
-        if !helper_stopping && let Err(error) = self.stop_helper().await {
-            warn!("{error}");
-        }
     }
 
-    async fn respond(&self, mut connection: Connection) {
+    async fn respond(
+        &self,
+        mut connection: Connection,
+        mut permit: OwnedSemaphorePermit,
+        pending_launches: Arc<Semaphore>,
+    ) {
         let request = tokio::time::timeout(REQUEST_TIMEOUT, ipc::read_request(&mut connection));
         let (response, rejected) = match request.await {
+            Ok(Ok(request)) if request.is_transparent() => {
+                let response = if let Ok(launch) = pending_launches.try_acquire_owned() {
+                    permit = launch;
+                    self.handle(request).await
+                } else {
+                    Response::Error(TRANSPARENT_LAUNCH_BUSY.to_owned())
+                };
+                (response, false)
+            }
             Ok(Ok(request)) => (self.handle(request).await, false),
             Ok(Err(error)) => {
                 warn!("rejected an agent request: {error}");
@@ -445,6 +475,7 @@ impl Agent {
             let drain = ipc::read_to_close(&mut connection, DRAIN_REJECTED_BYTES);
             let _ = tokio::time::timeout(DRAIN_REJECTED_TIMEOUT, drain).await;
         }
+        drop(permit);
     }
 
     pub async fn handle(&self, request: Request) -> Response {
@@ -477,10 +508,49 @@ impl Agent {
     }
 
     async fn stop(&self) -> Result<usize, String> {
+        let mut attempt = self.shutdown_attempt();
+        let outcome = attempt
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| "the agent shutdown task ended before it was complete".to_owned())?;
+        let outcome = outcome
+            .as_ref()
+            .expect("the shutdown outcome was just checked");
+        outcome.helper.clone().map(|()| outcome.terminals)
+    }
+
+    fn shutdown_attempt(&self) -> ShutdownAttempt {
+        let mut shutdown = self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let closed = if let Some(attempt) = shutdown.as_ref() {
+            match attempt.borrow().as_ref() {
+                Some(outcome) if outcome.helper.is_err() => Some(outcome.terminals),
+                None if attempt.has_changed().is_err() => None,
+                _ => return attempt.clone(),
+            }
+        } else {
+            None
+        };
         self.inner.stop.send_replace(true);
-        let terminals = self.close_all().await;
-        self.stop_helper().await?;
-        Ok(terminals)
+        let (finished, attempt) = watch::channel(None);
+        let agent = self.clone();
+        tokio::spawn(async move {
+            let terminals = match closed {
+                Some(terminals) => terminals,
+                None => agent.close_all().await,
+            };
+            let helper = agent.stop_helper().await;
+            let complete = helper.is_ok();
+            finished.send_replace(Some(ShutdownOutcome { terminals, helper }));
+            if complete {
+                agent.inner.shutdown_complete.send_replace(true);
+            }
+        });
+        *shutdown = Some(attempt.clone());
+        attempt
     }
 
     async fn stop_helper(&self) -> Result<(), String> {
@@ -492,10 +562,11 @@ impl Agent {
                     "the transparent engine did not exit within {} seconds",
                     HELPER_EXIT_TIMEOUT.as_secs()
                 )
-            })
+            })?
     }
 
     async fn launch(&self, request: LaunchRequest, mode: Mode) -> Result<Vec<String>, String> {
+        self.check_stopping()?;
         if mode == Mode::Transparent {
             return self.launch_transparent(request).await;
         }
@@ -637,12 +708,14 @@ impl Agent {
     }
 
     async fn transparent_status(&self) -> Result<TransparentStatus, String> {
+        self.check_stopping()?;
         let availability = match self.transparent_availability().await? {
             Availability::Available => TransparentAvailability::Available,
             Availability::Unavailable(reason) => {
                 TransparentAvailability::Unavailable(reason.to_string())
             }
         };
+        self.check_stopping()?;
         let EngineStatus { phase, last_error } = self.transparent_engine();
         let engine = match phase {
             Phase::Running(_) => TransparentEngine::Running,
@@ -775,6 +848,7 @@ impl Agent {
     }
 
     async fn terminal(&self, request: TerminalRequest) -> Result<Vec<String>, String> {
+        self.check_stopping()?;
         let transparent = request.mode == Mode::Transparent;
         let gateway = request.gateway;
         if transparent {
@@ -1297,15 +1371,19 @@ impl Agent {
     pub async fn close_all(&self) -> usize {
         let _launching = self.inner.launching.lock().await;
         let browsers = std::mem::take(&mut *self.inner.browsers.lock().await);
-        for (_, browser) in browsers {
-            let _ = browser.close.send(());
-            let _ = browser.task.await;
-        }
         let terminals = std::mem::take(&mut *self.inner.terminals.lock().await);
         let count = terminals.len();
+        let mut closing = Vec::with_capacity(browsers.len() + count);
+        for (_, browser) in browsers {
+            let _ = browser.close.send(());
+            closing.push(browser.task);
+        }
         for (_, terminal) in terminals {
             let _ = terminal.close.send(());
-            let _ = terminal.task.await;
+            closing.push(terminal.task);
+        }
+        for task in closing {
+            let _ = task.await;
         }
         let mut sessions = self.inner.sessions.lock().await;
         for session in sessions.sessions() {

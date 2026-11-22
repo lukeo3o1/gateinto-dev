@@ -72,7 +72,7 @@ pub fn filter(listener_port: NonZeroU16, dscp: Dscp) -> String {
     format!(
         "(outbound and !loopback and ((ip and ((ip.TOS >= {low} and ip.TOS <= {high}) \
          or (tcp and tcp.SrcPort == {port}))) or (ipv6 and ipv6.TrafficClass >= {low} \
-         and ipv6.TrafficClass <= {high}))) or (inbound and !loopback and tcp and \
+         and ipv6.TrafficClass <= {high}))) or (inbound and !loopback and ip and tcp and \
          tcp.DstPort == {port})"
     )
 }
@@ -142,7 +142,7 @@ mod tests {
             filter(NonZeroU16::new(8443).unwrap(), Dscp::DEFAULT),
             "(outbound and !loopback and ((ip and ((ip.TOS >= 172 and ip.TOS <= 175) \
              or (tcp and tcp.SrcPort == 8443))) or (ipv6 and ipv6.TrafficClass >= 172 \
-             and ipv6.TrafficClass <= 175))) or (inbound and !loopback and tcp and \
+             and ipv6.TrafficClass <= 175))) or (inbound and !loopback and ip and tcp and \
              tcp.DstPort == 8443)"
         );
     }

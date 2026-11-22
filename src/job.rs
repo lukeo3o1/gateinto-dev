@@ -3,9 +3,9 @@ use std::fmt;
 use std::io;
 
 #[cfg(windows)]
-pub(crate) use windows::wait_for;
-#[cfg(windows)]
 pub use windows::{Process, SpawnOptions};
+#[cfg(windows)]
+pub(crate) use windows::{exit_status, wait_for_signal};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -606,11 +606,20 @@ mod windows {
         }
     }
 
-    pub(crate) fn wait_for(process: &Handle) -> io::Result<ExitStatus> {
+    fn wait_for(process: &Handle) -> io::Result<ExitStatus> {
+        wait_for_signal(process)?;
+        exit_status(process)
+    }
+
+    pub(crate) fn wait_for_signal(process: &Handle) -> io::Result<()> {
         // SAFETY: process is an open process handle.
         if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
             return Err(io::Error::last_os_error());
         }
+        Ok(())
+    }
+
+    pub(crate) fn exit_status(process: &Handle) -> io::Result<ExitStatus> {
         let mut code = 0;
         // SAFETY: process is an open process handle and code is writable.
         if unsafe { GetExitCodeProcess(process.0, &mut code) } == 0 {

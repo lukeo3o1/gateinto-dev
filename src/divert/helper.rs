@@ -7,7 +7,7 @@ use std::panic::{self, AssertUnwindSafe};
 use aws_lc_rs::digest;
 
 use super::firewall::{self, NetshCommand};
-use super::protocol::{ErrorCode, Event, send};
+use super::protocol::{ErrorCode, Event, START_ACK, send};
 use super::pump::{self, DivertPort, Liveness};
 use super::{DEFAULT_CAPACITY, DEFAULT_IDLE_TIMEOUT, Dscp, Engine, decimal, filter};
 
@@ -131,7 +131,7 @@ impl From<FilesError> for ErrorCode {
 }
 
 pub trait Platform {
-    type Pipe: Write + Send;
+    type Pipe: Read + Write + Send;
     type Watch: Liveness;
     type Lock;
     type Files;
@@ -167,6 +167,10 @@ pub fn run<P: Platform>(platform: &mut P, arguments: &Arguments<'_>) -> u8 {
     let Ok((mut report, watch)) = platform.connect(&pipe, agent) else {
         return EXIT_NOT_REPORTED;
     };
+    let mut acknowledgement = [0];
+    if report.read_exact(&mut acknowledgement).is_err() || acknowledgement != [START_ACK] {
+        return EXIT_NOT_REPORTED;
+    }
     match serve(platform, arguments, &mut report, watch) {
         Ok(exit) => exit,
         Err(code) => match send(&mut report, &Event::Failed(code)) {
@@ -218,7 +222,6 @@ fn divert<P: Platform>(
     if platform.driver_version(&handle) != Some(DRIVER_VERSION) {
         return Err(ErrorCode::DriverVersion);
     }
-    // Held until the DLL and the driver are loaded, so neither can be swapped after its check.
     drop(files);
     if send(report, &Event::Ready).is_err() {
         return Ok(EXIT_NOT_REPORTED);
@@ -440,8 +443,21 @@ mod tests {
     }
 
     struct FakePipe {
+        acknowledgement: Option<u8>,
         log: Log,
         writes: bool,
+    }
+
+    impl Read for FakePipe {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            Ok(match self.acknowledgement.take() {
+                Some(byte) => {
+                    buffer[0] = byte;
+                    1
+                }
+                None => 0,
+            })
+        }
     }
 
     impl Write for FakePipe {
@@ -523,6 +539,7 @@ mod tests {
     struct Fake {
         log: Log,
         connects: bool,
+        acknowledgement: Option<u8>,
         free: bool,
         image_path: Option<String>,
         deletes: bool,
@@ -547,6 +564,7 @@ mod tests {
             Self {
                 log: Log::default(),
                 connects: true,
+                acknowledgement: Some(START_ACK),
                 free: true,
                 image_path: Some(IMAGE.to_owned()),
                 deletes: true,
@@ -606,6 +624,7 @@ mod tests {
                 FakeWatch(Some(gone))
             };
             let pipe = FakePipe {
+                acknowledgement: self.acknowledgement,
                 log: Arc::clone(&self.log),
                 writes: self.writes,
             };
@@ -723,6 +742,18 @@ mod tests {
 
     fn joined(parts: &[&[Call]]) -> Vec<Call> {
         parts.concat()
+    }
+
+    #[test]
+    fn a_missing_or_invalid_start_acknowledgement_leaves_the_machine_untouched() {
+        for acknowledgement in [None, Some(b'?')] {
+            let mut fake = Fake {
+                acknowledgement,
+                ..Fake::default()
+            };
+            assert_eq!(run_fake(&mut fake), EXIT_NOT_REPORTED);
+            assert_eq!(fake.calls(), [connect()]);
+        }
     }
 
     #[test]

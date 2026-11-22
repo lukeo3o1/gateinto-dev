@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, OsStr, OsString, c_char, c_int, c_void};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::mem;
 use std::num::NonZeroU32;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -364,6 +364,34 @@ struct Pipe {
     event: Handle,
 }
 
+impl Read for Pipe {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let handle = self.file.as_raw_handle();
+        let mut overlapped = OVERLAPPED {
+            hEvent: self.event.0,
+            ..OVERLAPPED::default()
+        };
+        let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        // SAFETY: bytes and overlapped stay in place until finish has waited for the read.
+        let started = unsafe {
+            ReadFile(
+                handle,
+                bytes.as_mut_ptr(),
+                length,
+                null_mut(),
+                &mut overlapped,
+            )
+        };
+        finish(
+            handle,
+            &overlapped,
+            started,
+            super::protocol::START_TIMEOUT.as_millis() as u32,
+        )
+        .map(|read| read as usize)
+    }
+}
+
 impl Write for Pipe {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let handle = self.file.as_raw_handle();
@@ -375,7 +403,7 @@ impl Write for Pipe {
         // SAFETY: bytes and overlapped stay in place until finish has waited for the write.
         let started =
             unsafe { WriteFile(handle, bytes.as_ptr(), length, null_mut(), &mut overlapped) };
-        finish(handle, &overlapped, started).map(|written| written as usize)
+        finish(handle, &overlapped, started, PIPE_WRITE_TIMEOUT_MS).map(|written| written as usize)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -383,15 +411,19 @@ impl Write for Pipe {
     }
 }
 
-fn finish(handle: HANDLE, overlapped: &OVERLAPPED, started: BOOL) -> io::Result<u32> {
+fn finish(
+    handle: HANDLE,
+    overlapped: &OVERLAPPED,
+    started: BOOL,
+    timeout_ms: u32,
+) -> io::Result<u32> {
     // SAFETY: GetLastError only reads the calling thread's error code.
     if started == 0 {
         if unsafe { GetLastError() } != ERROR_IO_PENDING {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: the write's event and OVERLAPPED remain live through cancellation and completion.
-        if unsafe { WaitForSingleObject(overlapped.hEvent, PIPE_WRITE_TIMEOUT_MS) } != WAIT_OBJECT_0
-        {
+        // SAFETY: the operation's event and OVERLAPPED remain live through cancellation and completion.
+        if unsafe { WaitForSingleObject(overlapped.hEvent, timeout_ms) } != WAIT_OBJECT_0 {
             let mut transferred = 0;
             unsafe {
                 CancelIoEx(handle, overlapped);
@@ -765,6 +797,13 @@ mod tests {
         let (name, mut server) = agent_pipe();
         let (mut pipe, watch) = connect_to(name, own_pid()).await.unwrap();
         server.connect().await.unwrap();
+        server
+            .write_all(&[super::super::protocol::START_ACK])
+            .await
+            .unwrap();
+        let mut ack = [0];
+        pipe.read_exact(&mut ack).unwrap();
+        assert_eq!(ack, [super::super::protocol::START_ACK]);
         let mut watched = watching(watch);
         pipe.write_all(b"ready\n").unwrap();
         let mut line = [0; 6];
@@ -780,7 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn any_byte_from_the_agent_means_it_is_gone() {
+    async fn a_byte_during_capture_means_the_agent_is_gone() {
         let (name, mut server) = agent_pipe();
         let (_pipe, watch) = connect_to(name, own_pid()).await.unwrap();
         server.connect().await.unwrap();

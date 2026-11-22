@@ -425,17 +425,21 @@ impl Proxy {
         } = self;
         let mut connections = JoinSet::new();
         let mut shutdown = std::pin::pin!(shutdown);
+        let mut loopback_first = false;
         loop {
             let accepted = tokio::select! {
                 biased;
                 () = &mut shutdown => break,
                 Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                accepted = listener.accept(), if loopback_first => accepted,
                 Some((stream, target)) = adoptions.recv() => {
+                    loopback_first = true;
                     spawn_adopted(&shared, &mut connections, stream, target);
                     continue;
                 }
-                accepted = listener.accept() => accepted,
+                accepted = listener.accept(), if !loopback_first => accepted,
             };
+            loopback_first = false;
             let (stream, peer) = match accepted {
                 Ok(accepted) => accepted,
                 Err(error) => {

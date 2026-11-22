@@ -15,8 +15,8 @@ pub(super) type Registry = State<SessionId, Job>;
 pub(super) trait Engine: Send + Sync + 'static {
     fn available(&self) -> Availability;
     fn start(&self, dscp: Dscp) -> Boxed<'_, Result<Started, String>>;
-    fn wait_for_exit(&self) -> Boxed<'_, ()> {
-        Box::pin(std::future::ready(()))
+    fn wait_for_exit(&self) -> Boxed<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
     }
 }
 
@@ -129,8 +129,8 @@ mod windows {
             })
         }
 
-        fn wait_for_exit(&self) -> Boxed<'_, ()> {
-            Box::pin(self.supervisor.wait_for_exit())
+        fn wait_for_exit(&self) -> Boxed<'_, Result<(), String>> {
+            Box::pin(self.supervisor.shutdown())
         }
     }
 

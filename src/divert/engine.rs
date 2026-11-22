@@ -52,6 +52,16 @@ impl Engine {
     }
 
     pub fn process(&mut self, packet: &mut [u8], direction: Direction, now: Instant) -> Verdict {
+        self.process_with(packet, direction, now, |_| true)
+    }
+
+    pub(super) fn process_with(
+        &mut self,
+        packet: &mut [u8],
+        direction: Direction,
+        now: Instant,
+        inject: impl FnOnce(&[u8]) -> bool,
+    ) -> Verdict {
         let counters = &mut self.counters;
         counters.captured += 1;
         if direction == Direction::Inbound {
@@ -67,14 +77,19 @@ impl Engine {
             Packet::Malformed => return dropped(&mut counters.malformed_dropped),
         };
         if segment.source_port == self.listener_port {
-            let Some(remote_port) = self.flows.reply(&segment, now) else {
+            if !self.flows.reply(&segment, now, |remote_port| {
+                packet::restore(packet, &segment, remote_port);
+                inject(packet)
+            }) {
                 return dropped(&mut counters.unknown_replies_dropped);
-            };
-            packet::restore(packet, &segment, remote_port);
+            }
             counters.replies_restored += 1;
             return Verdict::InjectInbound;
         }
-        match self.flows.client(&segment, now) {
+        match self.flows.client(&segment, now, || {
+            packet::reflect(packet, &segment, self.listener_port);
+            inject(packet)
+        }) {
             Admission::Created => counters.new_flows += 1,
             Admission::Retransmit => counters.syn_retransmits += 1,
             Admission::Continued => {}
@@ -82,7 +97,6 @@ impl Engine {
             Admission::Collision => return dropped(&mut counters.key_collisions),
             Admission::Full => return dropped(&mut counters.table_full),
         }
-        packet::reflect(packet, &segment, self.listener_port);
         counters.reflected += 1;
         Verdict::InjectInbound
     }
@@ -102,7 +116,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::divert::flows::SWEEP_INTERVAL;
+    use crate::divert::flows::{OPENING_TIMEOUT, SWEEP_INTERVAL};
     use crate::divert::fuzzing::Checker;
     use crate::divert::packet::{ACK, FIN, RST, SYN, TCP, UDP, checksums_valid};
     use crate::divert::testing::{
@@ -238,9 +252,14 @@ mod tests {
             destination: Ipv4Addr::new(192, 0, 2, 1),
             ..TestPacket::reply(SYN | ACK)
         };
-        assert_eq!(harness.verdict(other_client), DROP);
-        assert_eq!(harness.verdict(other_remote), DROP);
-        assert_eq!(harness.counters().unknown_replies_dropped, 2);
+        let other_local = TestPacket {
+            source: Ipv4Addr::new(10, 0, 1, 2),
+            ..TestPacket::reply(SYN | ACK)
+        };
+        for packet in [other_client, other_remote, other_local] {
+            assert_eq!(harness.verdict(packet), DROP);
+        }
+        assert_eq!(harness.counters().unknown_replies_dropped, 3);
         assert_eq!(harness.counters().replies_restored, 0);
     }
 
@@ -524,10 +543,18 @@ mod tests {
     }
 
     #[test]
-    fn flows_are_keyed_by_remote_address_and_local_port() {
+    fn flows_are_keyed_by_both_addresses_and_the_local_port() {
         let mut harness = Harness::new(8);
+        let other_local = Ipv4Addr::new(10, 0, 1, 2);
         let other_remote = Ipv4Addr::new(192, 0, 2, 1);
         harness.verdict(syn(7));
+        assert_eq!(
+            harness.verdict(TestPacket {
+                source: other_local,
+                ..to_port(OTHER_PORT, syn(7))
+            }),
+            INJECT
+        );
         harness.verdict(TestPacket {
             destination: other_remote,
             ..to_port(OTHER_PORT, syn(7))
@@ -536,19 +563,113 @@ mod tests {
             source_port: LOCAL_PORT + 1,
             ..to_port(OTHER_PORT, syn(7))
         });
-        assert_eq!(harness.counters().new_flows, 3);
-        for (destination, port, original) in [
-            (REMOTE, LOCAL_PORT, REMOTE_PORT),
-            (other_remote, LOCAL_PORT, OTHER_PORT),
-            (REMOTE, LOCAL_PORT + 1, OTHER_PORT),
+        assert_eq!(harness.counters().new_flows, 4);
+        for (source, destination, port, original) in [
+            (CLIENT, REMOTE, LOCAL_PORT, REMOTE_PORT),
+            (other_local, REMOTE, LOCAL_PORT, OTHER_PORT),
+            (CLIENT, other_remote, LOCAL_PORT, OTHER_PORT),
+            (CLIENT, REMOTE, LOCAL_PORT + 1, OTHER_PORT),
         ] {
             let (verdict, packet) = harness.send(TestPacket {
+                source,
                 destination,
                 destination_port: port,
                 ..TestPacket::reply(ACK)
             });
             assert_eq!(verdict, INJECT);
             assert_eq!(header(&packet).2, original);
+        }
+    }
+
+    #[test]
+    fn an_incomplete_handshake_expires_even_after_a_syn_retransmit() {
+        let mut harness = Harness::new(1);
+        assert_eq!(harness.verdict(syn(7)), INJECT);
+        harness.at(OPENING_TIMEOUT - Duration::from_secs(2));
+        assert_eq!(harness.verdict(syn(7)), INJECT);
+        assert_eq!(harness.counters().syn_retransmits, 1);
+        let reply = TestPacket::reply(SYN | ACK);
+        let ack = TestPacket {
+            acknowledgment: reply.sequence + 1,
+            ..TestPacket::client(ACK)
+        };
+        assert_eq!(harness.verdict(reply), INJECT);
+        assert_eq!(harness.verdict(ack), INJECT);
+        assert_eq!(
+            harness.verdict(TestPacket {
+                acknowledgment: 8,
+                ..reply
+            }),
+            INJECT
+        );
+        assert_eq!(harness.verdict(TestPacket::client(ACK)), INJECT);
+        harness.at(OPENING_TIMEOUT);
+        assert_eq!(harness.verdict(TestPacket::client(ACK)), DROP);
+        assert_eq!(harness.verdict(TestPacket::reply(ACK)), DROP);
+        assert_eq!(
+            harness.verdict(TestPacket {
+                source_port: LOCAL_PORT + 1,
+                ..syn(9)
+            }),
+            INJECT
+        );
+    }
+
+    #[test]
+    fn a_fast_open_handshake_can_acknowledge_data_across_sequence_wrap() {
+        let first = TestPacket {
+            payload: 5,
+            ..syn(u32::MAX - 2)
+        };
+        for client_ack in [1, 6] {
+            let mut harness = Harness::new(1);
+            assert_eq!(harness.verdict(first), INJECT);
+            let reply = TestPacket {
+                sequence: u32::MAX,
+                acknowledgment: first.sequence.wrapping_add(client_ack),
+                payload: 4,
+                ..TestPacket::reply(SYN | ACK)
+            };
+            assert_eq!(harness.verdict(reply), INJECT);
+            assert_eq!(
+                harness.verdict(TestPacket {
+                    acknowledgment: reply.sequence.wrapping_add(5),
+                    ..TestPacket::client(ACK)
+                }),
+                INJECT
+            );
+            harness.at(OPENING_TIMEOUT);
+            assert_eq!(harness.verdict(TestPacket::client(ACK)), INJECT);
+        }
+    }
+
+    #[test]
+    fn an_unsent_handshake_packet_does_not_extend_the_opening_deadline() {
+        let reply = TestPacket {
+            acknowledgment: 8,
+            ..TestPacket::reply(SYN | ACK)
+        };
+        let final_ack = TestPacket {
+            acknowledgment: reply.sequence + 1,
+            ..TestPacket::client(ACK)
+        };
+        for send_reply in [false, true] {
+            let mut harness = Harness::new(1);
+            assert_eq!(harness.verdict(syn(7)), INJECT);
+            harness.at(OPENING_TIMEOUT - Duration::from_secs(1));
+            for (packet, sent) in [(reply, send_reply), (final_ack, !send_reply)] {
+                assert_eq!(
+                    harness.engine.process_with(
+                        &mut packet.build(),
+                        Direction::Outbound,
+                        harness.start + harness.now,
+                        |_| sent,
+                    ),
+                    INJECT
+                );
+            }
+            harness.at(OPENING_TIMEOUT);
+            assert_eq!(harness.verdict(TestPacket::reply(ACK)), DROP);
         }
     }
 
@@ -637,6 +758,19 @@ mod tests {
     fn an_idle_flow_expires_and_activity_keeps_it_alive() {
         let mut harness = Harness::new(8);
         harness.verdict(syn(7));
+        let reply = TestPacket {
+            acknowledgment: 8,
+            ..TestPacket::reply(SYN | ACK)
+        };
+        harness.at(OPENING_TIMEOUT - Duration::from_secs(1));
+        assert_eq!(harness.verdict(reply), INJECT);
+        assert_eq!(
+            harness.verdict(TestPacket {
+                acknowledgment: reply.sequence + 1,
+                ..TestPacket::client(ACK)
+            }),
+            INJECT
+        );
         harness.at(IDLE - Duration::from_secs(1));
         assert_eq!(harness.verdict(TestPacket::reply(ACK)), INJECT);
         harness.at(2 * IDLE - Duration::from_secs(2));
@@ -670,7 +804,7 @@ mod tests {
         harness.at(LINGER);
         assert_eq!(harness.verdict(flow(3)), INJECT);
         assert_eq!(harness.verdict(flow(4)), DROP);
-        harness.at(IDLE);
+        harness.at(OPENING_TIMEOUT);
         assert_eq!(harness.verdict(flow(4)), INJECT);
         assert_eq!(harness.verdict(flow(5)), DROP);
         let counters = harness.counters();
@@ -687,11 +821,11 @@ mod tests {
         let half = SWEEP_INTERVAL / 2;
         let mut harness = Harness::new(1);
         harness.verdict(flow(1));
-        harness.at(IDLE - half);
+        harness.at(OPENING_TIMEOUT - half);
         assert_eq!(harness.verdict(flow(2)), DROP);
-        harness.at(IDLE);
+        harness.at(OPENING_TIMEOUT);
         assert_eq!(harness.verdict(flow(2)), DROP);
-        harness.at(IDLE + half);
+        harness.at(OPENING_TIMEOUT + half);
         assert_eq!(harness.verdict(flow(2)), INJECT);
         let counters = harness.counters();
         assert_eq!((counters.table_full, counters.new_flows), (2, 2));
@@ -701,6 +835,7 @@ mod tests {
     #[test]
     fn the_default_idle_timeout_is_two_hours_and_four_minutes() {
         assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(7_440));
+        assert_eq!(OPENING_TIMEOUT, Duration::from_secs(240));
         assert_eq!(LINGER, Duration::from_secs(120));
     }
 }

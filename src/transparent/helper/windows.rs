@@ -6,10 +6,11 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::pin::Pin;
 use std::ptr::null_mut;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::thread;
 
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::oneshot;
 use windows_sys::Win32::Foundation::{FALSE, LocalFree};
@@ -27,7 +28,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 use super::pipe_sddl;
 use crate::divert::helper::PipeName;
-use crate::job::{parameters, wait_for};
+use crate::job::{exit_status, parameters, wait_for_signal};
 use crate::token::Handle;
 
 const MASK: u32 = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
@@ -120,6 +121,12 @@ impl super::Pipe for Server {
         self.0.connect()
     }
 
+    async fn acknowledge(&mut self) -> io::Result<()> {
+        self.0
+            .write_all(&[crate::divert::protocol::START_ACK])
+            .await
+    }
+
     fn client_pid(&self) -> io::Result<u32> {
         let mut pid = 0;
         // SAFETY: the handle is an open pipe and pid is a valid out pointer.
@@ -151,14 +158,20 @@ impl super::Process for Elevated {
         self.id
     }
 
-    fn wait(self) -> impl Future<Output = Option<u32>> + Send + 'static {
+    fn wait(
+        self: Arc<Self>,
+    ) -> io::Result<impl Future<Output = io::Result<Option<u32>>> + Send + 'static> {
         let (sender, exited) = oneshot::channel();
-        let handle = self.handle;
-        let _ = thread::Builder::new().spawn(move || {
-            let code = wait_for(&handle).ok().and_then(|status| status.code());
-            let _ = sender.send(code.map(|code| code as u32));
-        });
-        async move { exited.await.ok().flatten() }
+        thread::Builder::new().spawn(move || {
+            let observed = wait_for_signal(&self.handle).map(|()| {
+                exit_status(&self.handle)
+                    .ok()
+                    .and_then(|status| status.code())
+                    .map(|code| code as u32)
+            });
+            let _ = sender.send(observed);
+        })?;
+        Ok(async move { exited.await.map_err(io::Error::other)? })
     }
 }
 
@@ -363,6 +376,6 @@ mod tests {
         let id = child.id();
         let process = Elevated::new(Handle(child.into_raw_handle())).unwrap();
         assert_eq!(process.id(), id);
-        assert_eq!(process.wait().await, Some(7));
+        assert_eq!(Arc::new(process).wait().unwrap().await.unwrap(), Some(7));
     }
 }

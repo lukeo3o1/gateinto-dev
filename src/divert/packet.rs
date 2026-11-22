@@ -31,6 +31,8 @@ pub(super) struct Segment {
     pub(super) destination_port: u16,
     pub(super) flags: u8,
     pub(super) sequence: u32,
+    pub(super) acknowledgment: u32,
+    pub(super) payload_len: u32,
 }
 
 impl Segment {
@@ -82,6 +84,8 @@ fn parse_ipv4(bytes: &[u8]) -> Option<Packet> {
         destination_port: u16::from_be_bytes([tcp[2], tcp[3]]),
         flags: tcp[13],
         sequence: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
+        acknowledgment: u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]),
+        payload_len: (total - IP_HEADER - data_offset) as u32,
     }))
 }
 

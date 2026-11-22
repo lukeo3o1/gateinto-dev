@@ -138,7 +138,7 @@ not change.
   - `Engine::new(listener_port: NonZeroU16, capacity, idle_timeout)`,
     `Engine::process(packet, Direction, now) -> Verdict` (`InjectInbound` or
     `Drop`) and `Engine::counters() -> Counters` (`src/divert/engine.rs`);
-  - the flow table with `LINGER` (120 s), `DEFAULT_IDLE_TIMEOUT`
+  - the flow table with `OPENING_TIMEOUT` (4 min), `LINGER` (120 s), `DEFAULT_IDLE_TIMEOUT`
     (2 h 4 min) and a full-table sweep at most once per `SWEEP_INTERVAL`
     (1 s) (`src/divert/flows.rs`);
   - parsing, `reflect`, `restore` and full checksum recomputation
@@ -765,7 +765,10 @@ imports (see [Needs verification](#needs-verification)). The process is
 waited for on a thread of its own, as `job::Process` does
 (`WaitForSingleObject`, then `GetExitCodeProcess`), so it holds no
 blocking-pool thread for the life of the helper and does not delay the
-runtime's shutdown.
+runtime's shutdown. A signaled process handle confirms exit, even when
+the exit code cannot be read. Failure to create the wait thread or wait
+on the handle is reported to the caller. The supervisor retains the handle
+and can retry observation on a later stop or restart.
 
 - **Arguments:** `divert --port T --dscp N --pipe <name> --agent-pid <pid>`.
   The subcommand takes each as a raw `Option<OsString>`, accepts values that
@@ -787,8 +790,10 @@ runtime's shutdown.
   device key, never connects to the agent's IPC endpoint and never calls
   `check_current_account`.
 - **Steps, in this order:**
-  1. validate the pipe name and connect to the pipe; nothing is reported
-     before that, because there is no channel yet;
+  1. validate the pipe name and agent PID, connect to the pipe, verify the
+     server PID and read the one-byte startup acknowledgement. A missing
+     or invalid acknowledgement ends the helper before it acquires the
+     mutex, changes firewall rules or opens WinDivert;
   2. validate the other arguments;
   3. create the machine-wide mutex (below);
   4. delete a stale firewall rule and add the rule for T
@@ -821,7 +826,8 @@ runtime's shutdown.
   a job tag, but packets that other software marks with the same DSCP are
   still captured and dropped while the helper runs.
 - **Exit codes** (`divert::helper`): 0 after a normal end, 3 when it could
-  not report (invalid pipe name or agent pid, no connection, or a status
+  not report (invalid pipe name or agent pid, no connection, missing or
+  invalid startup acknowledgement, or a status
   line that could not be written), 4 after writing `error <code>`, 5 after a
   fatal engine error.
 - **One helper per machine**: the helper creates the named mutex
@@ -851,6 +857,10 @@ runtime's shutdown.
   distribution](#windivert-distribution)). On a normal stop the agent
   cancels starts still waiting for UAC, closes its sessions, disconnects the
   helper pipe and waits up to 25 s for the helper to exit before answering.
+  Console shutdown and IPC stop requests share the same cleanup. The agent
+  keeps its IPC listener open until the helper exit is confirmed. If the
+  wait fails or times out, a stop request reports the failure and a later
+  stop request can retry. The 30 s IPC drain starts after this cleanup.
   The helper closes the handle before it deletes the rule, and releases the
   mutex only after that, because the next helper adds a rule of the same name.
 - **Fatal packet-loop error:** when receive fails while the agent is still
@@ -890,7 +900,8 @@ runtime's shutdown.
   `GetNamedPipeServerProcessId` against `--agent-pid` before it opens the
   agent process with `SYNCHRONIZE`. It opens the pipe with
   `FILE_FLAG_OVERLAPPED` and no sharing: the reporter's writes wait for
-  their own completion for up to 2 s, while the liveness wait keeps a one-byte overlapped
+  their own completion for up to 2 s. The startup acknowledgement read has
+  a 60 s deadline. During capture the liveness wait keeps a one-byte overlapped
   read pending and waits with `WaitForMultipleObjects` on that read's event
   and the agent process handle. It returns when the read completes (any
   byte, or an error such as a broken pipe) or the agent process ends, then
@@ -899,9 +910,12 @@ runtime's shutdown.
   pending read would block every counter line. The agent accepts
   exactly one client and checks
   `GetNamedPipeClientProcessId` against the pid of the process handle
-  `ShellExecuteExW` returned before it reads a byte; on a mismatch the start
-  fails and the pipe is closed, which makes that helper exit (the unelevated
-  agent cannot kill it).
+  `ShellExecuteExW` returned. Only after it has installed the process
+  observer and matched both PIDs does the agent write the startup
+  acknowledgement, ASCII `S`. A mismatched client receives no acknowledgement.
+  Agent shutdown closes admission to new starts under the same lock that
+  installs the observer. A late approval cannot authorize privileged setup
+  after shutdown has observed an empty supervisor.
 - An agent that sees the helper process end drains the pipe before it
   reports a generic exit: exit code 4 means the helper wrote an `error` line
   just before it ended. The drain lasts at most `DRAIN_TIMEOUT` (1 s), long
@@ -923,16 +937,17 @@ runtime's shutdown.
   1024 bytes (`MAX_LINE_BYTES`). Anything else, including a second status
   line, a line after `error` or `stopping`, counters before `ready`, an empty line or the
   end of the stream inside a line, is a protocol error (`StatusReader`) and
-  is treated as a broken pipe. The agent sends nothing; a byte from the
-  agent means to the helper that the agent is gone.
+  is treated as a broken pipe. The agent sends only the startup
+  acknowledgement. Any further byte during capture ends the liveness wait.
 - A helper that ends before it connected, or before its first line, is
   detected through the process handle from `ShellExecuteExW` and reported
   generically with its exit code. Whether the unelevated agent can wait on
   and query that handle for an elevated child needs verification.
 - `Running::wait_for_stop` completes on `stopping` (`Stopped::EngineFailed`),
   a closed or broken pipe (`Stopped::Closed`), a protocol error
-  (`Stopped::Protocol`), or helper process exit (`Stopped::Exited` with its
-  code). The agent holds `Running` until it finishes closing the generation.
+  (`Stopped::Protocol`), helper process exit (`Stopped::Exited` with its
+  code when available), or failure to observe the process
+  (`Stopped::Unobserved`). The agent holds `Running` until it finishes closing the generation.
   Dropping `Running` closes the pipe. The supervisor records process exit for
   a subsequent start or an agent stop.
 - When the agent receives `stopping`, sees the pipe break, a protocol error, or the helper process
@@ -982,20 +997,21 @@ class range `4N` to `4N+3`, so the ECN bits may be anything):
 (outbound and !loopback and
    ((ip and ((ip.TOS >= 4N and ip.TOS <= 4N+3) or (tcp and tcp.SrcPort == T)))
     or (ipv6 and ipv6.TrafficClass >= 4N and ipv6.TrafficClass <= 4N+3)))
-or (inbound and !loopback and tcp and tcp.DstPort == T)
+or (inbound and !loopback and ip and tcp and tcp.DstPort == T)
 ```
 
 Built by `divert::filter(T, Dscp)` with T a `NonZeroU16`. For N = 43 the
 range is 172 to 175. Loopback is excluded so that local traffic stays local;
 the experiment README gives as its reason that loopback replies to a tagged
-client inherit the tag, which was not measured.
+client inherit the tag, which was not measured. The inbound rule is IPv4
+only because the listener binds IPv4.
 
 Rewrite:
 
 | Packet | Action |
 | --- | --- |
 | outbound tagged IPv4 TCP `L:p -> R:port` | look up or create the flow; rewrite to `R:p -> L:T` (addresses swapped, destination port T, DSCP cleared, ECN kept), recompute IPv4 and TCP checksums in full, inject inbound |
-| outbound IPv4 TCP from port T, `L:T -> R:p` | find the flow `(R, p)`; rewrite to `R:port -> L:p`, recompute checksums, inject inbound |
+| outbound IPv4 TCP from port T, `L:T -> R:p` | find the flow `(L, R, p)`; rewrite to `R:port -> L:p`, recompute checksums, inject inbound |
 
 Checksums are recomputed over the whole packet, never adjusted
 incrementally: with checksum offload the captured outbound packets may
@@ -1009,16 +1025,23 @@ length differs from the captured length needs verification.
 
 Flow table:
 
-- Key `(R, p)` (remote address, local port); value: remote port, the SYN's
-  initial sequence number, FIN seen per direction, last activity, end time.
+- Key `(L, R, p)` (local address, remote address, local port). Each entry
+  records the remote port, the handshake, FIN seen per direction and last
+  activity.
 - A pure SYN (SYN without ACK) with no flow creates one; with the same
   sequence number it is a retransmit; with a new one, or on an ended flow, it
   replaces the flow (the local port was reused). A packet whose remote port
   differs from the flow's is a key collision, dropped and counted.
+- A handshake has four minutes from its initial SYN, using the RFC 5382
+  transitory timeout as the opening bound. Retransmissions keep the mapping
+  but do not extend its deadline. A SYN-ACK that acknowledges the client SYN
+  followed by a client ACK of the listener SYN establishes the flow once
+  both packets are injected successfully. These acknowledgments account
+  for sequence wraparound and TCP Fast Open data.
 - A flow ends on RST in either direction, or once FIN has been seen in both
   directions; it then lingers for `LINGER`, 120 s, so late ACKs and
   retransmitted FINs still match. The value is a margin of the order of
-  Windows' `TIME_WAIT`, not checked against the Windows default. Idle flows
+  Windows' `TIME_WAIT`, not checked against the Windows default. Idle established flows
   age out after `DEFAULT_IDLE_TIMEOUT` (2 h 4 min, the RFC 5382 minimum for
   established mappings) as a backstop.
 - Expired flows are removed when looked up. When the table is full, a sweep
@@ -1313,9 +1336,14 @@ verification; gateway policies keyed on host names will not match.
   absolute path after checking their SHA-256 digests. The installation
   directory is writable by the user, so the helper opens every file with
   `GENERIC_READ` and `FILE_SHARE_READ` only (no write or delete sharing),
-  hashes it through that handle and keeps the handles open until the handle
-  is open and its driver version checked, so they cannot be swapped between
-  the check and the load (needs verification). A file that cannot be opened
+  hashes it through that handle and keeps the files open until
+  `WinDivertOpen` succeeds and the helper checks the driver version.
+  These handles deny ordinary writes and deletion of the opened files.
+  Windows loads the DLL by pathname, and WinDivert uses a pathname when
+  it installs the driver. If a path component can be redirected, those
+  lookups can resolve to a different file from the one the helper hashed.
+  The per-user installation also leaves the elevated executable itself
+  writable by the installing user. A file that cannot be opened
   is `files-missing`, one whose digest differs (or that cannot be read) is
   `digest-mismatch`. `LoadLibraryExW` gets the absolute path with
   `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, never
@@ -2246,7 +2274,7 @@ tunnels are open, the agent killed while tunnels are open.
 15. **Helper lifetime.** Until the agent stops: one approval per agent run.
     After the agent's death or a pipe break it keeps dropping for 5 s.
 16. **Configuration.** `[transparent] dscp` in the configuration file.
-17. **Values.** Flow linger 120 s, 16384 flows, idle backstop 2 h 4 min,
+17. **Values.** Flow opening timeout 4 min, linger 120 s, 16384 flows, idle backstop 2 h 4 min,
     full-table sweep at most once per second, helper start timeout 60 s from
     `ShellExecuteExW` returning, grace period 5 s, listener port 49152 to
     65535.
