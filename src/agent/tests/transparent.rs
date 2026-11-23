@@ -944,6 +944,73 @@ async fn a_stop_during_console_shutdown_waits_for_the_same_helper_exit() {
     serving.await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn console_shutdown_retries_a_failed_helper_wait_without_an_ipc_stop() {
+    let h = plain();
+    answer(&h.agent, terminal(Mode::Transparent)).await.unwrap();
+    let (failed, first_exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(first_exit);
+    let (_endpoint, shutdown, serving) = serve(&h);
+    shutdown.send(()).unwrap();
+    until("the console shutdown starts waiting", || async {
+        h.events.count(Event::AwaitHelperExit) == 1
+    })
+    .await;
+
+    let (exited, second_exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(second_exit);
+    failed
+        .send(Err("could not confirm the helper exit".to_owned()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(h.events.count(Event::AwaitHelperExit), 1);
+    until("the console shutdown retries the helper wait", || async {
+        h.events.count(Event::AwaitHelperExit) == 2
+    })
+    .await;
+
+    assert!(session_ids(&h.agent).await.is_empty());
+    exited.send(Ok(())).unwrap();
+    tokio::time::timeout(PATIENCE, serving)
+        .await
+        .unwrap()
+        .unwrap();
+    let response = answer(&h.agent, Request::Stop).await.unwrap();
+    assert_eq!(ipc::closed_terminals(&response), Some(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn console_shutdown_exits_after_the_helper_outlasts_its_first_wait() {
+    let h = plain();
+    let (mut late_exit, first_exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(first_exit);
+    let (endpoint, shutdown, serving) = serve(&h);
+    shutdown.send(()).unwrap();
+    until("the console shutdown starts waiting", || async {
+        h.events.count(Event::AwaitHelperExit) == 1
+    })
+    .await;
+
+    let (exited, second_exit) = oneshot::channel();
+    *h.helpers.exit.lock().unwrap() = Some(second_exit);
+    tokio::time::advance(HELPER_EXIT_TIMEOUT).await;
+    tokio::time::timeout(PATIENCE, late_exit.closed())
+        .await
+        .unwrap();
+    assert!(matches!(
+        ipc::send(&endpoint, &Request::List).await,
+        Ok(Response::Ok(_))
+    ));
+    assert!(!serving.is_finished());
+
+    exited.send(Ok(())).unwrap();
+    tokio::time::timeout(PATIENCE, serving)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(h.events.count(Event::AwaitHelperExit), 2);
+}
+
 #[tokio::test]
 async fn a_helper_wait_failure_leaves_stop_reachable_and_the_wait_can_be_retried() {
     let h = plain();

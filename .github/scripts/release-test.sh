@@ -920,8 +920,8 @@ else
 fi
 
 expect_notes() {
-  local name=$1 channel=$2 present=$3 absent=$4 actual missing=()
-  if ! actual=$("$notes" "$channel" "$sha" '2026-10-18 09:30 UTC' 2> "$work/stderr"); then
+  local name=$1 channel=$2 present=$3 absent=$4 manifest=${5:-$windivert_manifest} actual missing=()
+  if ! actual=$("$notes" "$channel" "$sha" '2026-10-18 09:30 UTC' "$manifest" 2> "$work/stderr"); then
     fail "$name" "exited with an error: $(cat "$work/stderr")"
     return
   fi
@@ -939,10 +939,18 @@ expect_notes() {
 }
 
 common=$'`'"$sha"$'`\n2026-10-18 09:30 UTC\nnot code-signed\nhttps://github.com/lukeo3o1/gateinto-dev/issues/23\nTPM\nreal browsers\nphysical Windows machines\nWindows 7\nPre-release, not externally security reviewed.\ngateinto-x86_64-unknown-linux-gnu.tar.gz\nnot yet verified on a real Linux desktop\nno device key on Linux'
+windivert_manifest="$licenses/packaging/wix/windivert.txt"
+win_divert_source='[WinDivert 2.2.2 source](https://github.com/basil00/WinDivert/archive/refs/tags/v2.2.2.tar.gz)'
+common+=$'\n'"$win_divert_source"
 win7=$'i686-win7-windows-msvc-experimental.exe\nexperimental\nSoftware Key Storage Provider'
 expect_notes 'latest notes' latest "$common"$'\n`latest`' "$win7"$'\nstable'
 expect_notes 'beta notes' beta "$common"$'\n`beta`\n'"$win7" 'stable'
 expect_notes 'alpha notes' alpha "$common"$'\n`alpha`\n'"$win7" 'stable'
+
+sed 's/2\.2\.2/2.2.1/g' "$windivert_manifest" > "$work/older-windivert.txt"
+expect_notes 'notes for an older MSI use its WinDivert version' latest \
+  '[WinDivert 2.2.1 source](https://github.com/basil00/WinDivert/archive/refs/tags/v2.2.1.tar.gz)' \
+  "$win_divert_source" "$work/older-windivert.txt"
 
 expect_notes_fail() {
   local name=$1
@@ -954,9 +962,12 @@ expect_notes_fail() {
   fi
 }
 
-expect_notes_fail 'notes for an unknown channel' stable "$sha" '2026-10-18 09:30 UTC'
-expect_notes_fail 'notes for a short commit' alpha "$short" '2026-10-18 09:30 UTC'
-expect_notes_fail 'notes without a build date' alpha "$sha" ''
+expect_notes_fail 'notes for an unknown channel' stable "$sha" '2026-10-18 09:30 UTC' "$windivert_manifest"
+expect_notes_fail 'notes for a short commit' alpha "$short" '2026-10-18 09:30 UTC' "$windivert_manifest"
+expect_notes_fail 'notes without a build date' alpha "$sha" '' "$windivert_manifest"
+expect_notes_fail 'notes without a WinDivert manifest' alpha "$sha" '2026-10-18 09:30 UTC'
+touch "$work/empty-windivert.txt"
+expect_notes_fail 'notes with an empty WinDivert manifest' alpha "$sha" '2026-10-18 09:30 UTC' "$work/empty-windivert.txt"
 expect_notes_fail 'notes without arguments'
 
 workflow="$here/../workflows/release.yml"

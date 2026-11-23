@@ -264,7 +264,13 @@ jobs:
           path: dist
       - name: Check the files and add copies without the commit in their names
         run: .github/scripts/release-assets.sh "$CHANNEL" "$SHA" dist
-      - run: .github/scripts/release-notes.sh "$CHANNEL" "$SHA" "$BUILT" | tee "$RUNNER_TEMP/notes.md"
+      - name: Write release notes for the packaged WinDivert version
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin "$SHA"
+          manifest="$RUNNER_TEMP/windivert.txt"
+          git show "$SHA:packaging/wix/windivert.txt" > "$manifest"
+          .github/scripts/release-notes.sh "$CHANNEL" "$SHA" "$BUILT" "$manifest" | tee "$RUNNER_TEMP/notes.md"
       - name: Replace the ${{ needs.resolve.outputs.channel }} release and move its tag to the commit
         run: |
           if gh release view "$CHANNEL" > /dev/null 2>&1; then

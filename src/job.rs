@@ -5,7 +5,7 @@ use std::io;
 #[cfg(windows)]
 pub use windows::{Process, SpawnOptions};
 #[cfg(windows)]
-pub(crate) use windows::{exit_status, wait_for_signal};
+pub(crate) use windows::{current_dscp_tag, exit_status, wait_for_signal};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -175,21 +175,21 @@ mod windows {
     use tokio::sync::oneshot;
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOB_OBJECT_NET_RATE_CONTROL_DSCP_TAG, JOB_OBJECT_NET_RATE_CONTROL_ENABLE,
-        JOB_OBJECT_NET_RATE_CONTROL_FLAGS, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_NET_RATE_CONTROL_INFORMATION,
-        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-        JobObjectNetRateControlInformation, QueryInformationJobObject, SetInformationJobObject,
-        TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_NET_RATE_CONTROL_DSCP_TAG,
+        JOB_OBJECT_NET_RATE_CONTROL_ENABLE, JOB_OBJECT_NET_RATE_CONTROL_FLAGS,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOBOBJECT_NET_RATE_CONTROL_INFORMATION, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, JobObjectNetRateControlInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NEW_CONSOLE, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-        PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, ResumeThread,
-        STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, UpdateProcThreadAttribute,
-        WaitForSingleObject,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS,
+        PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW, STARTUPINFOW, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     use tracing::warn;
@@ -227,6 +227,41 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         Ok(job)
+    }
+
+    pub(crate) fn current_dscp_tag() -> io::Result<Option<u8>> {
+        let mut in_job = 0;
+        // SAFETY: the pseudo-handle is valid, and in_job is a writable BOOL.
+        if unsafe { IsProcessInJob(GetCurrentProcess(), null_mut(), &mut in_job) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if in_job == 0 {
+            return Ok(None);
+        }
+        net_rate_control(null_mut()).map(|control| dscp_tag(&control))
+    }
+
+    fn net_rate_control(job: HANDLE) -> io::Result<JOBOBJECT_NET_RATE_CONTROL_INFORMATION> {
+        let mut control = JOBOBJECT_NET_RATE_CONTROL_INFORMATION::default();
+        // SAFETY: job is a live job handle or null for the process's immediate job, and
+        // control is a JOBOBJECT_NET_RATE_CONTROL_INFORMATION of the given size.
+        if unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectNetRateControlInformation,
+                (&raw mut control).cast(),
+                size_of_val(&control) as u32,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(control)
+    }
+
+    fn dscp_tag(control: &JOBOBJECT_NET_RATE_CONTROL_INFORMATION) -> Option<u8> {
+        (control.ControlFlags & DSCP_TAGGED == DSCP_TAGGED).then_some(control.DscpTag)
     }
 
     struct Attributes(Vec<u64>);
@@ -552,32 +587,14 @@ mod windows {
             {
                 return Err(io::Error::last_os_error());
             }
-            let read = self.net_rate_control()?;
-            if read.ControlFlags & DSCP_TAGGED != DSCP_TAGGED || read.DscpTag != dscp.value() {
+            let read = net_rate_control(self.handle())?;
+            if dscp_tag(&read) != Some(dscp.value()) {
                 return Err(io::Error::other(format!(
                     "the job reports DSCP tag {} with flags {:#x} instead of DSCP tag {dscp}",
                     read.DscpTag, read.ControlFlags
                 )));
             }
             Ok(())
-        }
-
-        fn net_rate_control(&self) -> io::Result<JOBOBJECT_NET_RATE_CONTROL_INFORMATION> {
-            let mut control = JOBOBJECT_NET_RATE_CONTROL_INFORMATION::default();
-            // SAFETY: control is a JOBOBJECT_NET_RATE_CONTROL_INFORMATION of the given size.
-            if unsafe {
-                QueryInformationJobObject(
-                    self.handle(),
-                    JobObjectNetRateControlInformation,
-                    (&raw mut control).cast(),
-                    size_of_val(&control) as u32,
-                    null_mut(),
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(control)
         }
 
         pub(crate) fn terminate(&self) -> io::Result<()> {
@@ -690,6 +707,8 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        const DSCP_TEST_REPORTED: i32 = 7;
 
         #[tokio::test(flavor = "multi_thread")]
         async fn a_spawned_process_gets_the_given_environment() {
@@ -861,7 +880,7 @@ mod windows {
         fn a_dscp_tag_set_on_a_job_is_read_back_and_keeps_kill_on_close() {
             let job = Job::new().unwrap();
             job.set_dscp_tag(Dscp::DEFAULT).unwrap();
-            let control = job.net_rate_control().unwrap();
+            let control = net_rate_control(job.handle()).unwrap();
             assert_eq!(control.ControlFlags & DSCP_TAGGED, DSCP_TAGGED);
             assert_eq!(control.DscpTag, 43);
             assert_ne!(limit_flags(&job) & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
@@ -872,9 +891,44 @@ mod windows {
             let job = Job::new().unwrap();
             job.set_dscp_tag(Dscp::new(10).unwrap()).unwrap();
             job.set_dscp_tag(Dscp::new(63).unwrap()).unwrap();
-            let control = job.net_rate_control().unwrap();
+            let control = net_rate_control(job.handle()).unwrap();
             assert_eq!(control.ControlFlags & DSCP_TAGGED, DSCP_TAGGED);
             assert_eq!(control.DscpTag, 63);
+        }
+
+        #[tokio::test]
+        async fn a_child_reports_the_dscp_tag_of_its_immediate_job() {
+            let executable = std::env::current_exe().unwrap();
+            let test = format!(
+                "{}::read_own_job_dscp_tag",
+                module_path!().split_once("::").unwrap().1
+            );
+            for (tag, role) in [(None, "untagged"), (Some(Dscp::DEFAULT), "tagged")] {
+                let job = Arc::new(Job::new().unwrap());
+                if let Some(tag) = tag {
+                    job.set_dscp_tag(tag).unwrap();
+                }
+                let args =
+                    ["--exact", &test, "--ignored", "--test-threads=1", role].map(OsString::from);
+                let mut process = job.spawn(&executable, &args).unwrap();
+                let status = tokio::time::timeout(Duration::from_secs(30), process.wait())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(status.code(), Some(DSCP_TEST_REPORTED), "{role}: {status}");
+            }
+        }
+
+        #[ignore = "run inside a controlled job by a_child_reports_the_dscp_tag_of_its_immediate_job"]
+        #[test]
+        fn read_own_job_dscp_tag() {
+            let expected = match std::env::args().next_back().as_deref() {
+                Some("untagged") => None,
+                Some("tagged") => Some(Dscp::DEFAULT.value()),
+                _ => return,
+            };
+            assert_eq!(current_dscp_tag().unwrap(), expected);
+            std::process::exit(DSCP_TEST_REPORTED);
         }
     }
 }

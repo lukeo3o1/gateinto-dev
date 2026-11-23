@@ -213,8 +213,8 @@ not change.
     (`src/proxy/os_user.rs`) and the Windows lookup `Attribution`
     (`src/proxy/os_user/windows.rs`), described under [Transparent listener
     and attribution](#transparent-listener-and-attribution); `Row` carries
-    the connection's TCP state (`TcpState`: `Established`, `CloseWait` or
-    `Other`, from `dwState`), which only the listener-row rule reads;
+    the connection's TCP state (`TcpState`: `Established`, `CloseWait`,
+    `TimeWait` or `Other`, from `dwState`) for listener and client eligibility;
     `Denial::kind` names a denial without its details;
   - `transparent::listener` (`src/transparent/listener.rs`,
     `src/transparent/listener/windows.rs`): `choose` over the `Bind` seam,
@@ -421,12 +421,13 @@ opt-in per agent-hosted browser or terminal session.**
   only one job in a nested hierarchy, so the call would fail when the agent,
   or the process that starts the session, already runs in a job that holds
   it. That failure ends the request like any other.
-- Own-job check *(proposed)*, best effort: the agent refuses transparent
-  sessions when its own process carries a net rate control tag, because its
-  own upstream connections would then be tagged, reflected to its own
-  listener and loop. `QueryInformationJobObject` with a null handle sees only
-  the job the process is immediately in, so a tag on an outer job is missed;
-  the check is a diagnostic, not a guarantee.
+- Before starting the helper, the agent uses `IsProcessInJob` to check
+  whether it belongs to a job, then queries that job's network rate control
+  if it does. A matching enabled DSCP tag or a query failure aborts startup
+  before UAC. Capturing the agent's own matching upstream traffic would
+  disrupt its connections. `QueryInformationJobObject` with a null job
+  handle reads the process's immediate job, so Windows may apply an inherited
+  tag from an outer job that this check cannot see.
 - The job tag is expected to replace any DSCP the application sets; only a
   QoS policy was tested against it (experiment 2: the job tag won over a
   DSCP 46 policy).
@@ -860,7 +861,9 @@ and can retry observation on a later stop or restart.
   Console shutdown and IPC stop requests share the same cleanup. The agent
   keeps its IPC listener open until the helper exit is confirmed. If the
   wait fails or times out, a stop request reports the failure and a later
-  stop request can retry. The 30 s IPC drain starts after this cleanup.
+  stop request can retry. A console shutdown keeps retrying after a
+  one-second delay until the helper exit is confirmed. The 30 s IPC drain
+  starts after this cleanup.
   The helper closes the handle before it deletes the rule, and releases the
   mutex only after that, because the next helper adds a rule of the same name.
 - **Fatal packet-loop error:** when receive fails while the agent is still
@@ -1119,30 +1122,26 @@ agent over the pipe and into the agent's log at `debug`, one event
   client's destination. A process inside a job that dials the listener,
   through L, another local address or loopback, is refused the same way.
 - Candidate rows are those whose local end is `L:p` and whose remote
-  address is R. Rows with pid 0 (such as a `TIME_WAIT` row left by an
-  earlier use of the port) or remote port 0 are not candidates, and the
-  same socket listed in both tables (same pid, canonically equal ends)
-  counts once.
-- For each candidate the owner's process is opened, its SID must equal the
-  agent's, and `IsProcessInJob` must be true for the job of exactly one
-  live transparent session. A row whose owner is outside every transparent
-  job is discarded, so a row left by another owner does not make two. A
-  row whose owner is another user is discarded too, which is equivalent:
-  the agent starts the processes of its jobs under its own token, so
-  another user's process is in none of them. An owner in the jobs of more
-  than one session, or one that could not be opened or queried (a lookup
-  error, the deadline), ends the lookup with that denial instead, so that
-  an owner the agent could not attribute cannot let another row win.
-- Exactly one row must then remain. Its remote port is the original
-  destination port. The tables are read again while the owners' handles
-  are held (pid reuse), as `System::check` does, and both readings must
+  address is R. A row with remote port 0 has no usable destination. A
+  `TIME_WAIT` row has completed its close handshake and cannot be the peer
+  of the accepted socket in `ESTABLISHED` or `CLOSE_WAIT`. The same socket
+  listed in both tables (same pid and canonically equal ends) counts once.
+- There must be exactly one candidate before any owner is inspected. The
+  reflected stream does not carry the original remote port, so a second
+  candidate makes the match ambiguous even if it would fail admission.
+  A row with pid 0 can contribute to ambiguity. If it is the only
+  candidate, its owner is not found.
+- The unique candidate's owner must have the agent's SID and belong to
+  the job of exactly one live transparent session (`IsProcessInJob`).
+  Its remote port is the original destination port. The tables are read
+  again while the owners' handles are held (pid reuse), as `System::check`
+  does, and both readings must
   agree on the owner and the destination. The lookup retries like
   `System::find`, only when no row was found or the readings disagree, and
   runs in `spawn_blocking` under the handshake deadline.
 - No row, more than one row, a direct dial, an owner outside every
   transparent job or in several sessions' jobs, an owner of another user,
   or a lookup error closes the connection without contacting any upstream.
-  When no owner is admitted, the first refusal is the denial.
 - This one lookup gives both the session (and so its gateway and route) and
   the original destination `R:port`, so the helper needs no data channel to
   the agent. Taking the destination from the TCP tables is untested (the
@@ -1791,11 +1790,11 @@ implemented in `src/divert/`):**
 
 Implemented with step 4 (`src/proxy/os_user.rs`,
 `src/transparent/listener.rs`): `os_user::original` with exactly one row, no
-row, two rows, pid 0, a `TIME_WAIT` row of another owner next to the
+row, competing rows in both orders before admission, an unidentified
+candidate alone or alongside another row, a `TIME_WAIT` row next to the
 client's row, a wrong local address or port, mapped rows (`::ffff:L:p` to
 `::ffff:R`) found in the IPv6 table, the same socket listed in both tables,
-an owner that could not be inspected or is in two sessions' jobs next to an
-admitted row (in both row orders), the first refusal as the denial, a
+admission failures for the unique owner, a
 process in a job that dials the listener, a direct dial from a port shared
 with an in-job client, from the same port on a second local address and
 from a closed dialer row with pid 0, a dialer row in any state, a dialer
@@ -2283,8 +2282,8 @@ tunnels are open, the agent killed while tunnels are open.
     `Shared::adopt`; `os_user::original` matching the accepted socket's
     local address in both tables; no job-less browser fallback; the
     transparent mode is an IPC field a link cannot set; one helper per
-    machine (`Global\Gateinto-divert`); the agent's own-job check as a
-    best-effort diagnostic; the helper validates its arguments.
+    machine (`Global\Gateinto-divert`); the agent checks its immediate job's
+    DSCP tag before starting the helper; the helper validates its arguments.
 
 ## Alternatives rejected
 

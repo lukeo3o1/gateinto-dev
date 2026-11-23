@@ -197,10 +197,11 @@ msiexec /i gateinto.msi /qn REMOVE=Transparent     # remove them
 With the MSI of another build, which is an upgrade, upgrade first and then run that MSI again
 with `ADDLOCAL` or `REMOVE`, or uninstall and install again with or without `TRANSPARENT=1`;
 the device key and the config file are kept. An upgrade keeps the feature installed or not as it
-was, and ignores `TRANSPARENT=1`, except when the installed build has no such feature. Run
-`gateinto stop` and wait about 10 seconds before removing the feature: `REMOVE=Transparent`
-does not stop the agent, and `WinDivert.dll` stays in use while its helper runs. This follows
-Windows Installer's documentation and is not verified on Windows.
+was, and ignores `TRANSPARENT=1`, except when the installed build has no such feature.
+
+`REMOVE=Transparent` runs `StopAgent` before Windows Installer validates files for removal.
+The agent closes all its sessions and waits for its elevated helper to exit. If `StopAgent`
+fails, Windows Installer stops before removing the files.
 
 ### Why per-user
 

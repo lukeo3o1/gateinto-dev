@@ -219,15 +219,12 @@ dialer's own socket, in any state. A dialer that reset its connection
 leaves no row, and its reset also ends the listener's accepted socket, so
 every reading must also contain the listener's own row (local `L:T`, remote
 `R:p`, an owning process, and the state `ESTABLISHED` or `CLOSE_WAIT` that
-`Row` carries from the table), or the connection is not found. Rows without an owning process or
-with remote port 0 are not candidates, and the same socket listed in both
-tables counts once.
-Candidates whose owner is another user or outside every transparent job are
-discarded; any other refusal (an owner in the jobs of several sessions, a
-lookup error, the deadline) ends the whole lookup with that denial, so an
-owner that cannot be attributed cannot let another row win. Exactly one must
-remain, and its remote port is the original destination; when none is
-admitted, the first refusal is the denial. `Attribution`
+`Row` carries from the table), or the connection is not found. Rows in
+`TIME_WAIT` or with remote port 0 are excluded. The same socket listed in
+both tables counts once. Exactly one candidate must remain before the
+owner is checked, and its remote port is the original destination. An
+unidentified candidate still contributes to ambiguity. When it is the
+only candidate, the owner is not found. `Attribution`
 (`src/proxy/os_user/windows.rs`) admits an owner with the agent's user SID
 whose process is in the job of exactly one of the transparent sessions it is
 given (`IsProcessInJob`), reads the tables again while the owners' handles

@@ -39,7 +39,7 @@ impl fmt::Display for Denial {
             Self::OtherUser => f.write_str("the connection comes from another OS user"),
             Self::NotInJob => f.write_str("the connection comes from outside the session's job"),
             Self::Ambiguous => {
-                f.write_str("the connection matches more than one process or session")
+                f.write_str("the connection matches more than one socket or session")
             }
             Self::SelfTarget => {
                 f.write_str("the connection is addressed to the transparent listener itself")
@@ -64,6 +64,7 @@ const LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 pub(crate) enum TcpState {
     Established,
     CloseWait,
+    TimeWait,
     Other,
 }
 
@@ -169,36 +170,27 @@ pub(crate) fn original<K>(
         return Err(Denial::NotFound);
     }
     let client = SocketAddr::new(local.ip(), peer.port());
-    let mut seen = Vec::new();
-    let mut found = None;
-    let mut refused = None;
-    for row in rows {
-        let candidate = (row.pid, row.remote.port());
-        if row.pid == 0
-            || row.remote.port() == 0
-            || !same(row.local, client)
-            || row.remote.ip().to_canonical() != remote
-            || seen.contains(&candidate)
-        {
-            continue;
-        }
-        seen.push(candidate);
-        match admit(row.pid) {
-            Ok(_) if found.is_some() => return Err(Denial::Ambiguous),
-            Ok(session) => {
-                found = Some(Original {
-                    pid: row.pid,
-                    session,
-                    destination: SocketAddr::new(remote, row.remote.port()),
-                });
-            }
-            Err(denial @ (Denial::OtherUser | Denial::NotInJob)) => {
-                refused.get_or_insert(denial);
-            }
-            Err(denial) => return Err(denial),
-        }
+    let mut candidates = rows
+        .into_iter()
+        .filter(|row| {
+            row.state != TcpState::TimeWait
+                && row.remote.port() != 0
+                && same(row.local, client)
+                && row.remote.ip().to_canonical() == remote
+        })
+        .map(|row| (row.pid, row.remote.port()));
+    let (pid, port) = candidates.next().ok_or(Denial::NotFound)?;
+    if candidates.any(|candidate| candidate != (pid, port)) {
+        return Err(Denial::Ambiguous);
     }
-    found.ok_or_else(|| refused.unwrap_or(Denial::NotFound))
+    if pid == 0 {
+        return Err(Denial::NotFound);
+    }
+    Ok(Original {
+        pid,
+        session: admit(pid)?,
+        destination: SocketAddr::new(remote, port),
+    })
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -592,7 +584,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_original_destination_is_the_remote_port_of_the_one_admitted_client_row() {
+    fn the_original_destination_is_the_remote_port_of_the_unique_client_row() {
         let rows = [
             accepted(),
             row("192.168.1.10:50001", DESTINATION, 2),
@@ -624,92 +616,95 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn two_admitted_client_rows_are_ambiguous() {
-        let rows = [
-            accepted(),
-            row(CLIENT, DESTINATION, 7),
-            row(CLIENT, "203.0.113.7:80", 8),
-        ];
-        let mut owners = admitting(&[(7, Ok("a")), (8, Ok("b"))]);
-        assert_eq!(
-            original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
-            Err(Denial::Ambiguous)
-        );
-        let rows = [
-            accepted(),
-            row(CLIENT, DESTINATION, 7),
+    fn client_rows_with_different_owners_or_ports_are_ambiguous() {
+        for competing in [
+            row(CLIENT, DESTINATION, 8),
             row(CLIENT, "203.0.113.7:80", 7),
-        ];
-        let mut owners = admitting(&[(7, Ok("a"))]);
-        assert_eq!(
-            original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
-            Err(Denial::Ambiguous)
-        );
+        ] {
+            let rows = [accepted(), row(CLIENT, DESTINATION, 7), competing];
+            assert_eq!(
+                original::<()>(rows, addr(PEER), addr(LISTENER), |_| panic!(
+                    "ambiguous rows reached admission"
+                )),
+                Err(Denial::Ambiguous)
+            );
+        }
     }
 
     #[test]
-    fn rows_without_an_owning_process_are_never_candidates() {
-        let idle = row(CLIENT, "203.0.113.7:80", 0);
-        let mut owners = admitting(&[(0, Ok("idle")), (7, Ok("session"))]);
+    fn an_unidentified_live_candidate_cannot_be_admitted_or_ignored() {
+        let unidentified = row(CLIENT, "203.0.113.7:80", 0);
         assert_eq!(
-            original([accepted(), idle], addr(PEER), addr(LISTENER), |pid| owners
-                .admit(pid)),
+            original::<()>(
+                [accepted(), unidentified],
+                addr(PEER),
+                addr(LISTENER),
+                |_| { panic!("an unidentified client reached admission") }
+            ),
             Err(Denial::NotFound)
         );
-        assert!(owners.asked.is_empty());
-        let mut owners = admitting(&[(0, Ok("idle")), (7, Ok("session"))]);
-        let rows = [accepted(), idle, row(CLIENT, DESTINATION, 7)];
-        assert_eq!(
-            original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
-            Ok(found(7, "session", DESTINATION))
-        );
+        let rows = [accepted(), unidentified, row(CLIENT, DESTINATION, 7)];
+        for rows in [rows, [rows[0], rows[2], rows[1]]] {
+            assert_eq!(
+                original::<()>(rows, addr(PEER), addr(LISTENER), |_| {
+                    panic!("ambiguous rows reached admission")
+                }),
+                Err(Denial::Ambiguous)
+            );
+        }
     }
 
     #[test]
-    fn a_left_over_row_of_another_owner_does_not_make_two() {
+    fn a_time_wait_row_does_not_compete_for_the_accepted_connection() {
+        for pid in [0, 9] {
+            let closed = in_state(row(CLIENT, "203.0.113.7:80", pid), TcpState::TimeWait);
+            assert_eq!(
+                original::<()>([accepted(), closed], addr(PEER), addr(LISTENER), |_| {
+                    panic!("a time-wait row reached admission")
+                }),
+                Err(Denial::NotFound)
+            );
+            let rows = [accepted(), closed, row(CLIENT, DESTINATION, 7)];
+            let mut owners = admitting(&[(7, Ok("session"))]);
+            assert_eq!(
+                original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
+                Ok(found(7, "session", DESTINATION))
+            );
+            assert_eq!(owners.asked, [7]);
+        }
+    }
+
+    #[test]
+    fn competing_client_rows_are_ambiguous_before_owner_admission() {
         for refusal in [Denial::NotInJob, Denial::OtherUser] {
-            let stale = row(CLIENT, "203.0.113.7:8443", 9);
-            for rows in [
-                [accepted(), stale, row(CLIENT, DESTINATION, 7)],
-                [row(CLIENT, DESTINATION, 7), stale, accepted()],
-            ] {
-                let mut owners = admitting(&[(7, Ok("session")), (9, Err(refusal.clone()))]);
-                assert_eq!(
-                    original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
-                    Ok(found(7, "session", DESTINATION)),
-                    "{refusal}"
-                );
-                assert_eq!(owners.asked.len(), 2);
+            for state in [TcpState::Established, TcpState::Other] {
+                let competing = in_state(row(CLIENT, "203.0.113.7:8443", 9), state);
+                for rows in [
+                    [accepted(), competing, row(CLIENT, DESTINATION, 7)],
+                    [row(CLIENT, DESTINATION, 7), competing, accepted()],
+                ] {
+                    let mut owners = admitting(&[(7, Ok("session")), (9, Err(refusal.clone()))]);
+                    assert_eq!(
+                        original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
+                        Err(Denial::Ambiguous),
+                        "{rows:?}"
+                    );
+                    assert!(owners.asked.is_empty());
+                }
             }
         }
     }
 
     #[test]
-    fn an_owner_that_could_not_be_attributed_ends_the_lookup_next_to_an_admitted_row() {
-        for failure in [
+    fn the_admission_denial_for_the_only_candidate_is_preserved() {
+        for denial in [
+            Denial::NotInJob,
+            Denial::OtherUser,
             Denial::Lookup("access denied".to_owned()),
             Denial::TimedOut,
             Denial::Ambiguous,
         ] {
-            let unknown = row(CLIENT, "203.0.113.7:8443", 9);
-            for rows in [
-                [accepted(), unknown, row(CLIENT, DESTINATION, 7)],
-                [row(CLIENT, DESTINATION, 7), unknown, accepted()],
-            ] {
-                let mut owners = admitting(&[(7, Ok("session")), (9, Err(failure.clone()))]);
-                assert_eq!(
-                    original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
-                    Err(failure.clone()),
-                    "{rows:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn when_no_owner_is_admitted_the_first_refusal_is_the_denial() {
-        for refusal in [Denial::NotInJob, Denial::OtherUser] {
-            let mut owners = admitting(&[(7, Err(refusal.clone()))]);
+            let mut owners = admitting(&[(7, Err(denial.clone()))]);
             assert_eq!(
                 original(
                     [accepted(), row(CLIENT, DESTINATION, 7)],
@@ -717,19 +712,10 @@ pub(crate) mod tests {
                     addr(LISTENER),
                     |pid| owners.admit(pid)
                 ),
-                Err(refusal)
+                Err(denial)
             );
+            assert_eq!(owners.asked, [7]);
         }
-        let rows = [
-            accepted(),
-            row(CLIENT, DESTINATION, 7),
-            row(CLIENT, "203.0.113.7:80", 8),
-        ];
-        let mut owners = admitting(&[(7, Err(Denial::OtherUser)), (8, Err(Denial::NotInJob))]);
-        assert_eq!(
-            original(rows, addr(PEER), addr(LISTENER), |pid| owners.admit(pid)),
-            Err(Denial::OtherUser)
-        );
     }
 
     #[test]
@@ -889,6 +875,7 @@ pub(crate) mod tests {
         for (state, expected) in [
             (TcpState::Established, Ok(found(7, "session", DESTINATION))),
             (TcpState::CloseWait, Ok(found(7, "session", DESTINATION))),
+            (TcpState::TimeWait, Err(Denial::NotFound)),
             (TcpState::Other, Err(Denial::NotFound)),
         ] {
             let rows = [in_state(accepted(), state), row(CLIENT, DESTINATION, 7)];
@@ -905,7 +892,12 @@ pub(crate) mod tests {
     fn a_dialer_row_refuses_the_connection_in_any_state() {
         let peer = "192.168.1.11:50000";
         let in_job = row(CLIENT, "192.168.1.11:61000", 7);
-        for state in [TcpState::Established, TcpState::CloseWait, TcpState::Other] {
+        for state in [
+            TcpState::Established,
+            TcpState::CloseWait,
+            TcpState::TimeWait,
+            TcpState::Other,
+        ] {
             for pid in [0, 9] {
                 let dialer = in_state(row(peer, LISTENER, pid), state);
                 let rows = [row(LISTENER, peer, 1), in_job, dialer];

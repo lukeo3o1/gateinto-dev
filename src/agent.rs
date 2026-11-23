@@ -39,6 +39,7 @@ const TRANSPARENT_LAUNCH_BUSY: &str = "too many transparent launches are pending
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(25);
+const CONSOLE_SHUTDOWN_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DRAIN_REJECTED_BYTES: usize = 64 * 1024;
 const AGENT_STOPPING: &str = "the agent is stopping; nothing was started";
 const DRAIN_REJECTED_TIMEOUT: Duration = Duration::from_secs(1);
@@ -395,12 +396,16 @@ impl Agent {
         let mut tasks = JoinSet::new();
         let console_stop = async {
             shutdown.await;
-            if let Err(error) = self.stop().await {
-                warn!("{error}");
+            let mut warned = false;
+            while let Err(error) = self.stop().await {
+                if !warned {
+                    warn!(%error, "console shutdown will be retried");
+                    warned = true;
+                }
+                tokio::time::sleep(CONSOLE_SHUTDOWN_RETRY_DELAY).await;
             }
         };
         tokio::pin!(console_stop);
-        let mut console_pending = true;
         let mut backoff = AcceptBackoff::default();
         loop {
             let retry_at = backoff.retry_at();
@@ -412,7 +417,7 @@ impl Agent {
             };
             tokio::select! {
                 () = wait_for_stop(&self.inner.shutdown_complete) => break,
-                () = &mut console_stop, if console_pending => console_pending = false,
+                () = &mut console_stop => break,
                 accepted = accept => match accepted {
                     Ok(connection) => {
                         backoff.succeeded();
