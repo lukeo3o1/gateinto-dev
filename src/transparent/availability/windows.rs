@@ -130,17 +130,26 @@ mod tests {
         );
     }
 
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     #[test]
     fn a_stamp_names_the_file_and_changes_when_it_is_rewritten() {
-        let path = std::env::temp_dir().join(format!("gateinto-stamp-{}", std::process::id()));
-        std::fs::write(&path, b"first").unwrap();
-        let first = Probe.stamp(&File::open(&path).unwrap()).unwrap();
-        assert_eq!(Probe.stamp(&File::open(&path).unwrap()), Some(first));
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("gateinto-stamp-{}", std::process::id())));
+        let path = &scratch.0;
+        std::fs::write(path, b"first").unwrap();
+        let first = Probe.stamp(&File::open(path).unwrap()).unwrap();
+        assert_eq!(Probe.stamp(&File::open(path).unwrap()), Some(first));
         let image = File::open(std::env::current_exe().unwrap()).unwrap();
         assert_ne!(Probe.stamp(&image).unwrap().index, first.index);
-        std::fs::write(&path, b"second").unwrap();
-        let second = Probe.stamp(&File::open(&path).unwrap()).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        std::fs::write(path, b"second").unwrap();
+        let second = Probe.stamp(&File::open(path).unwrap()).unwrap();
         assert_eq!((second.volume, second.index), (first.volume, first.index));
         assert_eq!((first.size, second.size), (5, 6));
         assert!(second.modified >= first.modified);

@@ -292,8 +292,13 @@ fn the_scripts_take_every_windivert_name_and_digest_from_the_manifest() {
         ("fetch-windivert.ps1", FETCH),
         ("release.yml", RELEASE),
     ] {
+        let lower = text.to_ascii_lowercase();
         for row in rows() {
-            assert!(!text.contains(row.name), "{script} names {}", row.name);
+            assert!(
+                !lower.contains(&row.name.to_ascii_lowercase()),
+                "{script} names {}",
+                row.name
+            );
         }
         assert_eq!(hex_runs(text).count(), 0, "{script}");
     }

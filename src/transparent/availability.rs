@@ -339,6 +339,10 @@ mod tests {
             check(&mut fake, &release(), &mut verified),
             Availability::Unavailable(Reason::DigestMismatch(DRIVER))
         );
+        assert_eq!(
+            check(&mut fake, &release(), &mut verified),
+            Availability::Unavailable(Reason::DigestMismatch(DRIVER))
+        );
         fake.stamps.insert(DRIVER, stamp(2));
         assert_eq!(
             check(&mut fake, &release(), &mut verified),
