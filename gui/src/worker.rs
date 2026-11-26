@@ -1715,7 +1715,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn closing_the_window_drops_a_pending_launch_and_those_queued_behind_it() {
+    async fn quitting_drops_a_pending_launch_and_those_queued_behind_it() {
         let begun = tokio::time::Instant::now();
         let log = RefCell::new(Vec::new());
         let (_answer, reply) = oneshot::channel();

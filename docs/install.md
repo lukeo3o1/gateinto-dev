@@ -178,12 +178,12 @@ msiexec /i gateinto.msi /qn TRANSPARENT=1
 The feature installs `WinDivert.dll` and `WinDivert64.sys`, in the x86 MSI also
 `WinDivert32.sys` (an x86 `gateinto.exe` on 64-bit Windows loads the 64-bit driver), and the
 license of the release as `WinDivert-LICENSE.txt`, all in `%LOCALAPPDATA%\Programs\Gateinto`. The
-release workflow downloads them from WinDivert's GitHub release and checks their SHA-256 digests,
-the same digests the helper checks before it loads them. Installing them needs no
-administrator rights and loads no driver: WinDivert installs and starts its driver the first
-time a transparent session starts the elevated helper, after an administrator approval. Then
-`gateinto status` prints `transparent-sessions: available` on a supported Windows. An MSI built
-locally without `build.ps1 -WinDivert` has no such feature (see
+release workflow downloads them from WinDivert's GitHub release and checks their SHA-256 digests;
+for the DLL and the drivers these are the same digests the helper checks before it loads them.
+Installing them needs no administrator rights and loads no driver: WinDivert installs and starts
+its driver the first time a transparent session starts the elevated helper, after an
+administrator approval. Then `gateinto status` prints `transparent-sessions: available` on a
+supported Windows. An MSI built locally without `build.ps1 -WinDivert` has no such feature (see
 [packaging/wix](../packaging/wix/README.md#transparent-sessions-windivert)).
 
 To add or remove the feature later, run the MSI file of the installed build again (Installed
@@ -393,8 +393,9 @@ Transparent choice ask for (see
 or Windows Server 2016, Windows on ARM64, or a WinDivert file missing next to `gateinto.exe` or
 different from the pinned one; the MSI installs these files only with its
 [transparent sessions feature](#transparent-sessions)). It is printed whether
-or not the agent runs. While the agent runs, `transparent-engine` is `running`, `starting`, `stopped`
-or `stopped: <error>`, the error that stopped the transparent engine or made its last start fail;
+or not the agent runs. While the agent runs, `transparent-engine` is `running`, `starting`,
+`stopped` or `stopped: <error>`, the error that stopped the transparent engine or made its last
+start fail;
 `unknown: the agent is too old; restart it` comes from an agent older than this line. A transparent
 session's `PROGRAM` cell ends with `(transparent)`. The GUI shows the same availability and engine
 state in the **Transparent sessions** row of Settings, and marks a transparent session with

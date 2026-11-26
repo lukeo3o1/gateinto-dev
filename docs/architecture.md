@@ -544,11 +544,11 @@ The full protocol, limits and guarantees are in
   links and other commands, as it does for a link's `linking`. The window
   sends no other start while one is pending (`Launches::busy`); a launch or
   terminal that reaches the worker meanwhile all the same waits in order and
-  is sent when the one in flight is answered, and closing the window drops
-  them. A transparent
-  request answered as by an older agent
-  (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
-  transparent sessions; restart it", checked before the terminal's
+  is sent when the one in flight is answered. Quitting Gateinto drops the
+  pending start and those queued behind it; the agent still completes a
+  request it has already received. A transparent request answered as by an
+  older agent (`ipc::agent_too_old_for_transparent`) shows "the agent is too
+  old for transparent sessions; restart it", checked before the terminal's
   `invalid request` check, which proxy-mode requests keep. A transparent
   session has a Transparent pill after its number (`gui/src/sessions.rs`,
   `gui/src/board.rs`), and Settings ends the Agent card with the

@@ -41,13 +41,14 @@ the code yet; every other name refers to the code at the time of writing.
 
 ## Summary
 
-A transparent session routes every outbound IPv4 TCP connection of the
-processes in a session's job object through the session's proxy, and so
-along its gateway route, without depending on the application honouring
-proxy settings; every other packet they send (UDP and QUIC, ICMP, and all
-IPv6) is dropped, not relayed. The session keeps its proxy settings
-(`--proxy-server` for a browser, the proxy variables for a terminal);
-transparent routing catches every IPv4 TCP connection that ignores them.
+A transparent session routes every IPv4 TCP connection leaving the machine
+from the processes in a session's job object through the session's proxy,
+and so along its gateway route, without depending on the application
+honouring proxy settings; every other packet they send off the machine (UDP
+and QUIC, ICMP, and all non-loopback IPv6) is dropped, not relayed. The
+session keeps its proxy settings (`--proxy-server` for a browser, the proxy
+variables for a terminal); transparent routing catches every IPv4 TCP
+connection leaving the machine that ignores them.
 The agent tags the session's job with a DSCP value through
 `SetInformationJobObject(JobObjectNetRateControlInformation)`; Windows then
 marks every IPv4 and IPv6 packet those processes send, from the first SYN
@@ -57,8 +58,9 @@ and drops every other tagged packet. For each connection the agent accepts
 there, it finds the original connection in the system TCP tables, checks
 that its owner is in the job of a live transparent session, and hands the
 connection to that session's proxy, which opens `CONNECT <ip>:<port>`
-through the gateway as for any other tunnel. Connections to the session's
-own loopback proxy are outside the filter and work as today.
+through the gateway as for any other tunnel. Every loopback connection,
+including those to the session's own loopback proxy, is outside the filter:
+it is neither relayed nor blocked and works as today.
 
 ```text
  process in the session's job ignoring the proxy settings, DSCP tag N
@@ -963,8 +965,8 @@ and can retry observation on a later stop or restart.
   changes nothing. In the agent this is `Agent::watch_engine`, which also
   logs the cause at `warn` and keeps it as the last helper error
   (`Agent::transparent_engine`) before it stops the generation. `status`
-  then reports the engine as stopped with that error; a new transparent session starts a new helper (a new generation)
-  and asks UAC again.
+  then reports the engine as stopped with that error; a new transparent
+  session starts a new helper (a new generation) and asks UAC again.
 
 #### Engine
 
@@ -1373,7 +1375,9 @@ verification; gateway policies keyed on host names will not match.
   the GNU General Public License (GPL) Version 2". Gateinto loads the
   unmodified DLL dynamically and installs the unmodified upstream files
   with that license text next to them as `WinDivert-LICENSE.txt`; the
-  README's "Third-party software" names them. Gateinto's own license is
+  README's "Third-party software" names them and their source, the
+  upstream tag `v2.2.2` (`https://github.com/basil00/WinDivert/tree/v2.2.2`)
+  of the release the zip above comes from. Gateinto's own license is
   unchanged.
 
 ### Firewall
@@ -1513,13 +1517,13 @@ of the [Implementation plan](#implementation-plan)).
     both Start browser and Open terminal of every gateway card, the only
     place that offers both, so it needs no new menu or dialog. It is drawn
     as the segmented control of Settings and is its own arrow-key group.
-    Its tooltip says that every IPv4 TCP connection of the browser or
-    terminal follows the gateway's route, that other traffic, such as UDP
-    and IPv6, is blocked, and that starting the engine may ask for
-    administrator approval. When the choice is hidden (unavailable,
-    an older agent, an error, no agent) both buttons send proxy-mode
-    requests; the choice is kept in memory only and comes back with the
-    availability.
+    Its tooltip says that every IPv4 TCP connection leaving the machine from
+    the browser or terminal follows the gateway's route, that other traffic
+    leaving the machine, such as UDP and IPv6, is blocked, and that starting
+    the engine may ask for administrator approval. When the choice is hidden
+    (unavailable, an older agent, an error, no agent) both buttons send
+    proxy-mode requests; the choice is kept in memory only and comes back
+    with the availability.
   - `Command::Launch` and `Command::Terminal` carry the `Mode` into the IPC
     request, so `ipc::send` applies the 300 s limit; the GUI has no timeout
     of its own. `Transparent::start` gives each start its mode by where it
@@ -1536,8 +1540,9 @@ of the [Implementation plan](#implementation-plan)).
     during the wait; an approved link sends its own proxy-mode launch. The
     window sends no other start while one is pending (`Launches::busy`); a
     launch or terminal that reaches the worker meanwhile all the same waits
-    in order and is sent once the one in flight is answered; closing the
-    window drops both.
+    in order and is sent once the one in flight is answered. Quitting
+    Gateinto drops the pending start and those queued behind it; the agent
+    still completes a request it has already received.
   - A transparent request refused as sent to an older agent
     (`ipc::agent_too_old_for_transparent`) shows "the agent is too old for
     transparent sessions; restart it"; proxy-mode answers keep their
@@ -2065,8 +2070,9 @@ too old; with a paused clock and an agent that never answers a
 transparent launch, the polls go on every 2 s, a Close sent meanwhile
 reaches the agent, a link shows its prompt, a second launch waits until the
 first is answered, the answer brings its failure and the launch count in
-the next update, and closing the window drops the pending launch and those
-queued behind it (`worker.rs`); the choice is offered only for
+the next update, and quitting Gateinto drops the pending launch and those
+queued behind it (`worker.rs`; the agent still completes a request it has
+already received, which is not tested); the choice is offered only for
 `available`, never for `unavailable`, an error, an older agent or no
 agent, and only a gateway card starts in the chosen mode, the tray, the
 Sessions picker and a link always in proxy mode (`agent.rs`
@@ -2077,9 +2083,10 @@ the subtitle fits the approval notice and the older-agent message while the
 choice is shown, in both languages (`board/gateways.rs`, `pointer.rs`,
 `focus.rs`);
 a pending transparent start shows the approval notice (`gateways.rs`
-`Launches::notice`); the Transparent tooltip says that IPv4 TCP follows
-the gateway's route, that UDP and IPv6 are blocked and that the engine
-may ask for administrator approval, and does not claim every connection
+`Launches::notice`); the Transparent tooltip says that every IPv4 TCP
+connection leaving the machine follows the gateway's route, that UDP and
+IPv6 leaving the machine are blocked and that the engine may ask for
+administrator approval, and does not claim every connection
 (`board.rs`); a transparent session is marked and a proxy one is not
 (`sessions.rs`, `board.rs`); the engine row in each state
 (`settings.rs`, `board/settings.rs`); every new text exists in English and
@@ -2222,7 +2229,8 @@ different administrator account, agent with and without a foreground
 window), Chrome and Edge in a transparent browser, `ssh`, `git`, Java and
 `winget` in a transparent terminal, IPv6-capable networks, a VPN client,
 Defender with "block all incoming connections", the helper killed while
-tunnels are open, the agent killed while tunnels are open.
+tunnels are open, the agent killed while tunnels are open, and Stop or Close
+while a UAC prompt is showing.
 
 ## Decisions
 

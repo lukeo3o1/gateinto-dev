@@ -532,9 +532,11 @@ tray flyout has no terminal action.
   decision and the wording are in `gui/src/confirm.rs`, the dialog is
   `dialog::ending` with `Zone::ConfirmEnd`. Stop also asks before the next
   poll lists a new terminal: while an Open terminal request is pending
-  (`Launches::opening`), and after the agent accepted one since the last
-  list (`Update::unlisted`, reset by each poll); the question counts those
-  terminals with the listed ones. A dialog whose terminal is gone, or a
+  (`Launches::opening`), when the question says a terminal launch is
+  pending and gives no count, and after the agent accepted one since the
+  last list (`Update::unlisted`, reset by each poll, not counting a terminal
+  whose session the latest list already shows), when the question counts
+  those terminals with the listed ones. A dialog whose terminal is gone, or a
   Stop dialog after the last terminal closed or the agent stopped, is
   dropped at the next poll without sending anything. Stop from the tray
   flyout opens the main window with the dialog. Closing a browser row does

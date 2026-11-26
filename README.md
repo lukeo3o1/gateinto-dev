@@ -1062,30 +1062,31 @@ GUI asks it on every refresh whether transparent sessions are available. Only
 when it answers `available` does the Gateways page show a **Proxy |
 Transparent** choice under its subtitle, on the row of Add gateway. The
 choice applies to Start browser and Open terminal of every gateway card. Its
-tooltip says that every IPv4 TCP connection of the browser or terminal
-follows the gateway's route, that other traffic, such as UDP and IPv6, is
-blocked, and that starting the transparent engine may ask for administrator
-approval. When the agent says they are unavailable, does not know the
-request, fails to answer it or is not running, the choice is hidden and both
-buttons start proxy sessions. The Sessions page's Start browser, the tray
-flyout and `gateinto://` links always start proxy sessions.
+tooltip says that every IPv4 TCP connection leaving the machine from the
+browser or terminal follows the gateway's route, that other traffic leaving
+the machine, such as UDP and IPv6, is blocked, and that starting the
+transparent engine may ask for administrator approval. When the agent says
+they are unavailable, does not know the request, fails to answer it or is
+not running, the choice is hidden and both buttons start proxy sessions.
+The Sessions page's Start browser, the tray flyout and `gateinto://` links
+always start proxy sessions.
 
 While a transparent start is pending, the Gateways and Sessions pages say
 `Starting the transparent engine may ask for administrator approval`. The GUI
 waits for the agent's answer as `gateinto open --transparent` does, up to 300
 seconds. Meanwhile its lists keep refreshing, its other buttons keep working
 and `gateinto://` links are handled as usual; Start browser and Open terminal
-start nothing else until the pending start is answered. An agent from before transparent sessions is
-named: `the agent is too old for transparent sessions; restart it`. A
-transparent session has a **Transparent** mark after its number on the
-Sessions page. While the agent runs and answers, the Agent card in Settings
-ends with a **Transparent sessions** row: unavailable with the agent's
-reason, or available with the state of the transparent engine (running,
-starting, stopped, or stopped with its error). Without a running agent, or
-with one that does not answer the request, such as an agent from before
-transparent sessions, the row is absent. The demo offers the choice, reports
-the engine as running and shows one transparent terminal session; it starts
-nothing. This is unit-tested but has not been tried on a real Windows
+start nothing else until the pending start is answered. An agent from before
+transparent sessions is named: `the agent is too old for transparent
+sessions; restart it`. A transparent session has a **Transparent** mark after
+its number on the Sessions page. While the agent runs and answers, the Agent
+card in Settings ends with a **Transparent sessions** row: unavailable with
+the agent's reason, or available with the state of the transparent engine
+(running, starting, stopped, or stopped with its error). Without a running
+agent, or with one that does not answer the request, such as an agent from
+before transparent sessions, the row is absent. The demo offers the choice,
+reports the engine as running and shows one transparent terminal session; it
+starts nothing. This is unit-tested but has not been tried on a real Windows
 desktop.
 
 ## Verification status
@@ -1170,4 +1171,8 @@ Public License (GPL) Version 2; its license text is installed next to them as
 `WinDivert-LICENSE.txt`. The driver's Authenticode chain is a Sectigo EV
 certificate, as recorded in
 [the design](docs/design/transparent-session.md#windivert-distribution).
-Gateinto does not link WinDivert: it loads `WinDivert.dll` at run time.
+Gateinto does not link WinDivert: it loads `WinDivert.dll` at run time. The
+files are those of the `WinDivert-2.2.2-A.zip` asset of the upstream release
+`v2.2.2`, whose source is the tag
+[`v2.2.2`](https://github.com/basil00/WinDivert/tree/v2.2.2) of the WinDivert
+repository.
