@@ -15,6 +15,21 @@ failures=0
 sha=0123456789abcdef0123456789abcdef01234567
 short=0123456789ab
 
+# Ubuntu's multicall sleep cannot run after being copied under a different name.
+sleep_binary=$(command -v gnusleep || command -v sleep)
+if ! command -v timeout > /dev/null; then
+  echo 'release-test.sh: timeout is not on PATH; the tests need it to check sleep' >&2
+  exit 1
+fi
+mkdir "$work/sleep"
+cp "$sleep_binary" "$work/sleep/gateinto"
+status=0
+timeout 0.5 "$work/sleep/gateinto" 60 > /dev/null 2>&1 || status=$?
+if (( status != 124 )); then
+  echo "release-test.sh: $sleep_binary does not keep running when copied as gateinto; the tests need a standalone sleep" >&2
+  exit 1
+fi
+
 pass() { echo "ok   $1"; }
 fail() {
   echo "FAIL $1: $2"
@@ -389,9 +404,6 @@ elif ! cmp -s "$bin/gateinto" "$stub"; then
 else
   pass 'install from the package directory'
 fi
-
-# Ubuntu's multicall sleep cannot run after being copied under a different name.
-sleep_binary=$(command -v gnusleep || command -v sleep)
 
 home=$(new_home)
 bin=$home/.local/bin
