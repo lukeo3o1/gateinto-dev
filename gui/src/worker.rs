@@ -1,10 +1,11 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
 use gateinto::config::{GatewayName, Gateways};
-use gateinto::ipc::{self, Request, RequestError, Response, TerminalRequest};
+use gateinto::ipc::{self, Mode, Request, RequestError, Response, TerminalRequest};
 use gateinto::link::approval::{ApprovalError, settle};
 use gateinto::link::{Ask, Known};
 use gateinto::sessions::SessionId;
@@ -13,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use zeroize::Zeroize;
 
-use crate::agent::{AgentState, Config};
+use crate::agent::{AgentState, Config, Origin, Transparent};
 use crate::approval::{self, Answer, Desk};
 use crate::credentials::{self, Reveal};
 use crate::device::{KeyState, Probe, System};
@@ -32,8 +33,8 @@ pub enum Command {
     Close(u64),
     Stop,
     Start,
-    Launch(GatewayName),
-    Terminal(GatewayName),
+    Launch(GatewayName, Mode),
+    Terminal(GatewayName, Mode),
     Probe,
     Watch(bool),
     Credentials(u64, u64),
@@ -56,13 +57,15 @@ impl Command {
             Command::Close(id) => Request::Close(SessionId::from(*id)),
             Command::Dismiss(id, serial) => Request::Dismiss(SessionId::from(*id), *serial),
             Command::Stop => Request::Stop,
-            Command::Launch(name) => Request::Launch(
+            Command::Launch(name, mode) => Request::Launch(
                 LaunchRequest::new(name.as_str(), LaunchAuth::SessionCredentials.as_str())
                     .map_err(|error| error.to_string())?,
+                *mode,
             ),
-            Command::Terminal(gateway) => Request::Terminal(TerminalRequest {
+            Command::Terminal(gateway, mode) => Request::Terminal(TerminalRequest {
                 gateway: gateway.clone(),
                 route: None,
+                mode: *mode,
             }),
             Command::Start => return Err("starting the agent is not an agent request".to_owned()),
             Command::Probe => return Err("probing the device is not an agent request".to_owned()),
@@ -102,6 +105,7 @@ pub struct Update {
     pub log: Journal,
     pub starting: Starting,
     pub config: Config,
+    pub transparent: Transparent,
 }
 
 #[derive(Debug)]
@@ -188,6 +192,7 @@ pub fn stalled(error: String, loaded: Loaded) -> Update {
         log: Journal::default(),
         starting: Starting::Idle,
         config: Config::Unreported,
+        transparent: Transparent::Unreported,
     }
 }
 
@@ -200,7 +205,7 @@ fn wiped<E>(mut reply: Result<Response, E>) -> Result<Response, E> {
 
 pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Option<Note> {
     let answered = match (&command, &reply) {
-        (Command::Terminal(_), Ok(Response::Ok(lines))) => Note::warnings(lines),
+        (Command::Terminal(..), Ok(Response::Ok(lines))) => Note::warnings(lines),
         (Command::Stop, Ok(Response::Ok(lines))) => match ipc::closed_terminals(lines) {
             None | Some(0) => None,
             Some(1) => Some(Text::ClosedTerminal.into()),
@@ -211,7 +216,14 @@ pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Optio
     match wiped(reply) {
         Ok(Response::Ok(_)) => answered,
         Ok(Response::Error(message))
-            if matches!(command, Command::Terminal(_)) && message == ipc::INVALID_REQUEST =>
+            if command
+                .request()
+                .is_ok_and(|request| ipc::agent_too_old_for_transparent(&request, &message)) =>
+        {
+            Some(Text::TransparentTooOld.into())
+        }
+        Ok(Response::Error(message))
+            if matches!(command, Command::Terminal(..)) && message == ipc::INVALID_REQUEST =>
         {
             Some(Text::TerminalTooOld.into())
         }
@@ -221,14 +233,14 @@ pub fn failure(command: Command, reply: Result<Response, RequestError>) -> Optio
     }
 }
 
-async fn run<F, R>(command: Command, send: &F) -> (Option<Note>, bool)
+async fn run<F, R>(command: Command, send: &F) -> (Option<Note>, Option<u64>)
 where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
     let request = match command.request() {
         Ok(request) => request,
-        Err(error) => return (Some(Note::Agent(error)), false),
+        Err(error) => return (Some(Note::Agent(error)), None),
     };
     let reply = send(request).await;
     if let Ok(Response::Ok(lines)) = &reply
@@ -236,14 +248,29 @@ where
     {
         drop(wiped(reply));
         let _ = send(Request::Deny(token)).await;
-        return (Some(CONFIRMATION.into()), false);
+        return (Some(CONFIRMATION.into()), None);
     }
-    let ok = matches!(reply, Ok(Response::Ok(_)));
-    (failure(command, reply), ok)
+    let terminal = match (&command, &reply) {
+        (Command::Terminal(..), Ok(Response::Ok(lines))) => lines.iter().find_map(|line| {
+            line.strip_prefix("session: ")
+                .and_then(|id| id.parse().ok())
+        }),
+        _ => None,
+    };
+    (failure(command, reply), terminal)
 }
 
 type Answers = RefCell<Desk<oneshot::Sender<Answer>>>;
 type Linking<'a> = Pin<Box<dyn Future<Output = Option<Note>> + 'a>>;
+type Opening<'a> = Pin<Box<dyn Future<Output = (Option<Note>, Option<u64>)> + 'a>>;
+
+fn open<'a, F, R>(command: Command, send: &'a F) -> Opening<'a>
+where
+    F: Fn(Request) -> R,
+    R: Future<Output = Result<Response, RequestError>> + 'a,
+{
+    Box::pin(run(command, send))
+}
 
 fn unlinked(error: RequestError) -> Note {
     match error {
@@ -254,6 +281,7 @@ fn unlinked(error: RequestError) -> Note {
 
 async fn link<F, R>(
     launch: LaunchRequest,
+    mode: Mode,
     send: &F,
     ticket: u64,
     answered: oneshot::Receiver<Answer>,
@@ -264,7 +292,7 @@ where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
-    let reply = match send(Request::Launch(launch.clone())).await {
+    let reply = match send(Request::Launch(launch.clone(), mode)).await {
         Ok(reply) => reply,
         Err(error) => return Some(unlinked(error)),
     };
@@ -297,9 +325,9 @@ fn refused(error: ApprovalError) -> Option<Note> {
     }
 }
 
-async fn finish<T>(pending: &mut Option<Pin<Box<T>>>) -> Option<Note>
+async fn finish<T>(pending: &mut Option<Pin<Box<T>>>) -> T::Output
 where
-    T: Future<Output = Option<Note>> + ?Sized,
+    T: Future + ?Sized,
 {
     match pending {
         Some(pending) => pending.await,
@@ -312,15 +340,20 @@ async fn poll<F, R>(
     load: &mut impl FnMut(&Config) -> Loaded,
     watching: bool,
     journal: &mut Journal,
-) -> (AgentState, Config, Loaded)
+) -> (AgentState, Config, Transparent, Loaded)
 where
     F: Fn(Request) -> R,
     R: Future<Output = Result<Response, RequestError>>,
 {
     let state = AgentState::from_list(send(Request::List).await);
-    let config = match state {
-        AgentState::Running(_) => Config::from_reply(send(Request::Config).await),
-        AgentState::Stopped | AgentState::Unreachable(_) => Config::Unreported,
+    let (config, transparent) = match state {
+        AgentState::Running(_) => (
+            Config::from_reply(send(Request::Config).await),
+            Transparent::from_reply(send(Request::Transparent).await),
+        ),
+        AgentState::Stopped | AgentState::Unreachable(_) => {
+            (Config::Unreported, Transparent::Unreported)
+        }
     };
     match state {
         AgentState::Stopped => journal.stopped(),
@@ -337,7 +370,7 @@ where
         AgentState::Running(_) | AgentState::Unreachable(_) => {}
     }
     let loaded = load(&config);
-    (state, config, loaded)
+    (state, config, transparent, loaded)
 }
 
 async fn recheck<F, R>(
@@ -410,6 +443,8 @@ pub async fn serve_with<F, R, S>(
     let mut journal = Journal::default();
     let answers = Answers::default();
     let mut linking: Option<Linking<'_>> = None;
+    let mut opening: Option<Opening<'_>> = None;
+    let mut queued = VecDeque::new();
     let mut starting: Option<Pin<Box<S>>> = None;
     let mut unstarted: Option<Note> = None;
     let mut checking: Option<(u64, u64)> = None;
@@ -424,7 +459,7 @@ pub async fn serve_with<F, R, S>(
             unlisted = 0;
             next_poll = tokio::time::Instant::now() + POLL;
         }
-        let (state, config, loaded) = polled.clone();
+        let (state, config, transparent, loaded) = polled.clone();
         let stopped = state == AgentState::Stopped;
         if !stopped {
             unstarted = None;
@@ -450,6 +485,7 @@ pub async fn serve_with<F, R, S>(
                 (None, None) => Starting::Idle,
             },
             config: config.clone(),
+            transparent,
         });
         tokio::select! {
             biased;
@@ -461,7 +497,7 @@ pub async fn serve_with<F, R, S>(
                     }
                     return;
                 };
-                let launch = matches!(command, Command::Launch(_) | Command::Terminal(_));
+                let launch = matches!(command, Command::Launch(..) | Command::Terminal(..));
                 if let Some(text) = refuse(&command) {
                     failure = Some(text.into());
                     launched += u64::from(launch);
@@ -504,8 +540,9 @@ pub async fn serve_with<F, R, S>(
                         if let Some(superseded) = linking.take() {
                             failure = superseded.await;
                         }
+                        let mode = polled.2.start(Origin::Link);
                         linking = Some(Box::pin(link(
-                            launch, &send, ticket, answered, &answers, &prompt,
+                            launch, mode, &send, ticket, answered, &answers, &prompt,
                         )));
                         continue;
                     }
@@ -516,18 +553,28 @@ pub async fn serve_with<F, R, S>(
                         }
                         continue;
                     }
-                    Command::Close(_)
-                    | Command::Dismiss(..)
-                    | Command::Stop
-                    | Command::Launch(_)
-                    | Command::Terminal(_) => {}
+                    Command::Launch(..) | Command::Terminal(..) => {
+                        if opening.is_none() {
+                            opening = Some(open(command, &send));
+                        } else {
+                            queued.push_back(command);
+                        }
+                        continue;
+                    }
+                    Command::Close(_) | Command::Dismiss(..) | Command::Stop => {}
                 }
                 checking = checking.filter(|(id, _)| !verification::ends(&command, *id));
-                let terminal = matches!(command, Command::Terminal(_));
-                let (note, ok) = run(command, &send).await;
+                failure = run(command, &send).await.0;
+            }
+            (note, terminal) = finish(&mut opening) => {
+                opening = queued.pop_front().map(|command| open(command, &send));
                 failure = note;
-                launched += u64::from(launch);
-                unlisted += u64::from(terminal && ok);
+                launched += 1;
+                if let Some(id) = terminal
+                    && !polled.0.ids().contains(&id)
+                {
+                    unlisted += 1;
+                }
             }
             note = finish(&mut linking) => {
                 linking = None;
@@ -552,7 +599,9 @@ mod tests {
     use gateinto::config::ConfigFile;
     use gateinto::uri::{LaunchAuth, LaunchRequest};
 
-    use gateinto::ipc::{LogEvent, LogLevel, LogPage};
+    use gateinto::ipc::{
+        LogEvent, LogLevel, LogPage, TransparentAvailability, TransparentEngine, TransparentStatus,
+    };
     use gateinto::link::LinkError;
     use gateinto::proxy::SessionCredentials;
 
@@ -588,6 +637,7 @@ mod tests {
             log: Journal::default(),
             starting: Starting::Idle,
             config: Config::Unreported,
+            transparent: Transparent::Unreported,
         }
     }
 
@@ -654,11 +704,14 @@ mod tests {
             [
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::Credentials(SessionId::from(7)),
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::List,
-                Request::Config
+                Request::Config,
+                Request::Transparent
             ]
         );
         let reveals = reveals.borrow();
@@ -739,12 +792,15 @@ mod tests {
             [
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 verification(3),
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 verification(3),
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 verification(3),
             ]
         );
@@ -870,7 +926,7 @@ mod tests {
 
     fn polls(n: usize) -> Vec<Request> {
         (0..n)
-            .flat_map(|_| [Request::List, Request::Config])
+            .flat_map(|_| [Request::List, Request::Config, Request::Transparent])
             .collect()
     }
 
@@ -925,9 +981,11 @@ mod tests {
             [
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::Close(SessionId::from(5)),
                 Request::List,
-                Request::Config
+                Request::Config,
+                Request::Transparent
             ]
         );
     }
@@ -1107,11 +1165,106 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_agent_that_is_not_running_is_not_asked_for_its_config() {
-        for reply in [stopped as fn() -> _, || Err(RequestError::TimedOut)] {
+        for reply in [stopped as fn() -> _, timed_out] {
             let log = RefCell::new(Vec::new());
             let (loads, _, delivered) = configs_read(listing(&log, reply)).await;
             assert_eq!(loads, vec![Config::Unreported; 2]);
             assert_eq!(delivered, vec![Config::Unreported; 3]);
+            assert!(log.borrow().iter().all(|r| *r == Request::List));
+        }
+    }
+
+    fn available() -> TransparentStatus {
+        TransparentStatus {
+            availability: TransparentAvailability::Available,
+            engine: TransparentEngine::Stopped(None),
+        }
+    }
+
+    fn transparency(
+        log: &RefCell<Vec<Request>>,
+        reply: fn() -> Result<Response, RequestError>,
+    ) -> impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>> {
+        move |request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(match request {
+                Request::Config => Ok(Response::Ok(vec![
+                    ipc::config_line(&ipc::ConfigSource::Defaults).unwrap(),
+                ])),
+                Request::Transparent => reply(),
+                _ => Ok(Response::Ok(Vec::new())),
+            })
+        }
+    }
+
+    async fn transparency_read(
+        send: impl Fn(Request) -> std::future::Ready<Result<Response, RequestError>>,
+    ) -> Vec<(AgentState, Config, Transparent)> {
+        let (_tx, rx) = unbounded_channel();
+        let mut delivered = Vec::new();
+        let run = serve(
+            rx,
+            send,
+            loaded,
+            unprobed,
+            |u| delivered.push((u.state, u.config, u.transparent)),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
+        delivered
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_running_agent_is_asked_each_poll_whether_transparent_sessions_are_available() {
+        let log = RefCell::new(Vec::new());
+        let delivered = transparency_read(transparency(&log, || {
+            Ok(Response::Ok(available().to_lines()))
+        }))
+        .await;
+        let reported = (
+            AgentState::Running(Vec::new()),
+            Config::Reported(ipc::ConfigSource::Defaults),
+            Transparent::Reported(available()),
+        );
+        assert_eq!(delivered, vec![reported; 2]);
+        assert_eq!(*log.borrow(), polls(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_transparent_request_leaves_the_rest_of_the_refresh_intact() {
+        let replies: [fn() -> Result<Response, RequestError>; 5] = [
+            || Ok(Response::Error(ipc::INVALID_REQUEST.to_owned())),
+            || Ok(Response::Error("busy".to_owned())),
+            || Ok(Response::Ok(vec!["availability: maybe".to_owned()])),
+            || Err(RequestError::Closed),
+            || Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT)),
+        ];
+        for reply in replies {
+            let log = RefCell::new(Vec::new());
+            let delivered = transparency_read(transparency(&log, reply)).await;
+            let unreported = (
+                AgentState::Running(Vec::new()),
+                Config::Reported(ipc::ConfigSource::Defaults),
+                Transparent::Unreported,
+            );
+            assert_eq!(delivered, vec![unreported; 2]);
+            assert_eq!(*log.borrow(), polls(2));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_is_not_running_is_not_asked_whether_transparent_sessions_are_available()
+    {
+        for reply in [stopped as fn() -> _, timed_out] {
+            let log = RefCell::new(Vec::new());
+            let delivered = transparency_read(listing(&log, reply)).await;
+            assert_eq!(delivered.len(), 2);
+            assert!(
+                delivered
+                    .iter()
+                    .all(|(_, _, t)| *t == Transparent::Unreported)
+            );
             assert!(log.borrow().iter().all(|r| *r == Request::List));
         }
     }
@@ -1123,21 +1276,26 @@ mod tests {
         move |request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => Response::Ok(lines.clone()),
+                Request::Launch(..) => Response::Ok(lines.clone()),
+                Request::Terminal(_) => Response::Ok(vec!["session: 1".to_owned()]),
                 _ => Response::Ok(Vec::new()),
             }))
         }
     }
 
     fn launch(name: &str) -> Request {
-        Request::Launch(LaunchRequest::new(name, LaunchAuth::SessionCredentials.as_str()).unwrap())
+        Request::Launch(
+            LaunchRequest::new(name, LaunchAuth::SessionCredentials.as_str()).unwrap(),
+            Mode::Proxy,
+        )
     }
 
     #[tokio::test(start_paused = true)]
     async fn launching_a_known_gateway_asks_for_a_browser_session() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Launch("office".parse().unwrap())).unwrap();
+        tx.send(Command::Launch("office".parse().unwrap(), Mode::Proxy))
+            .unwrap();
         let lines = vec!["session 3".to_owned(), "password: secret".to_owned()];
         let mut updates = Vec::new();
         let run = serve(
@@ -1150,10 +1308,18 @@ mod tests {
             unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), launched(polled(None))]);
+        assert_eq!(
+            updates,
+            [polled(None), polled(None), launched(polled(None))]
+        );
         assert_eq!(
             *log.borrow(),
-            [Request::List, Request::Config, launch("office")]
+            [
+                Request::List,
+                Request::Config,
+                Request::Transparent,
+                launch("office")
+            ]
         );
     }
 
@@ -1161,6 +1327,7 @@ mod tests {
         Request::Terminal(gateinto::ipc::TerminalRequest {
             gateway: name.parse().unwrap(),
             route: None,
+            mode: Mode::Proxy,
         })
     }
 
@@ -1168,7 +1335,7 @@ mod tests {
     async fn opening_a_terminal_asks_the_agent_and_counts_as_a_launch() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Terminal("office".parse().unwrap()))
+        tx.send(Command::Terminal("office".parse().unwrap(), Mode::Proxy))
             .unwrap();
         let mut updates = Vec::new();
         let run = serve(
@@ -1181,10 +1348,73 @@ mod tests {
             unprompted,
         );
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
-        assert_eq!(updates, [polled(None), unlisted(launched(polled(None)))]);
+        assert_eq!(
+            updates,
+            [polled(None), polled(None), unlisted(launched(polled(None)))]
+        );
         assert_eq!(
             *log.borrow(),
-            [Request::List, Request::Config, terminal("office")]
+            [
+                Request::List,
+                Request::Config,
+                Request::Transparent,
+                terminal("office")
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transparent_launch_and_terminal_ask_the_agent_in_transparent_mode() {
+        let log = RefCell::new(Vec::new());
+        let (tx, rx) = unbounded_channel();
+        let office = || "office".parse::<GatewayName>().unwrap();
+        tx.send(Command::Launch(office(), Mode::Transparent))
+            .unwrap();
+        tx.send(Command::Terminal(office(), Mode::Transparent))
+            .unwrap();
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            launcher(&log, Vec::new()),
+            loaded,
+            unprobed,
+            |u| updates.push(u),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(500), run).await.is_err());
+        let twice = Update {
+            launched: 2,
+            ..polled(None)
+        };
+        assert_eq!(
+            updates,
+            [
+                polled(None),
+                polled(None),
+                polled(None),
+                launched(polled(None)),
+                unlisted(twice)
+            ]
+        );
+        let launch = Request::Launch(
+            LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap(),
+            Mode::Transparent,
+        );
+        let terminal = Request::Terminal(TerminalRequest {
+            gateway: office(),
+            route: None,
+            mode: Mode::Transparent,
+        });
+        assert_eq!(
+            *log.borrow(),
+            [
+                Request::List,
+                Request::Config,
+                Request::Transparent,
+                launch,
+                terminal
+            ]
         );
     }
 
@@ -1199,7 +1429,7 @@ mod tests {
     async fn an_opened_terminal_is_unlisted_until_the_next_list() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Terminal("office".parse().unwrap()))
+        tx.send(Command::Terminal("office".parse().unwrap(), Mode::Proxy))
             .unwrap();
         let mut updates = Vec::new();
         let run = serve(
@@ -1216,6 +1446,7 @@ mod tests {
             updates,
             [
                 polled(None),
+                polled(None),
                 unlisted(launched(polled(None))),
                 launched(polled(None))
             ]
@@ -1223,9 +1454,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_terminal_already_returned_by_list_is_not_unlisted_when_its_reply_arrives() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(Command::Terminal(
+            "office".parse().unwrap(),
+            Mode::Transparent,
+        ))
+        .unwrap();
+        let begun = tokio::time::Instant::now();
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            |request| async move {
+                let lines = match request {
+                    Request::Terminal(_) => {
+                        tokio::time::sleep(Duration::from_millis(2100)).await;
+                        vec!["session: 1".to_owned()]
+                    }
+                    Request::List if begun.elapsed() >= POLL => vec![
+                        r#"{"id":1,"kind":"terminal","gateway":"office","upstream":"proxy.example:443","listen":"127.0.0.1:8080","route":"all","auth":"os_user","started":1,"tunnels":0}"#.to_owned(),
+                    ],
+                    _ => Vec::new(),
+                };
+                Ok(Response::Ok(lines))
+            },
+            loaded,
+            unprobed,
+            |update| updates.push(update),
+            unrevealed,
+            unprompted,
+        );
+        assert!(timeout(Duration::from_millis(2500), run).await.is_err());
+        let latest = updates.last().unwrap();
+        assert_eq!(latest.state.ids(), [1]);
+        assert_eq!(latest.launched, 1);
+        assert_eq!(latest.unlisted, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_terminal_the_agent_refused_is_not_unlisted() {
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Terminal("office".parse().unwrap()))
+        tx.send(Command::Terminal("office".parse().unwrap(), Mode::Proxy))
             .unwrap();
         let mut updates = Vec::new();
         let run = serve(
@@ -1245,7 +1514,11 @@ mod tests {
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
             updates,
-            [polled(None), launched(polled(said("no such gateway")))]
+            [
+                polled(None),
+                polled(None),
+                launched(polled(said("no such gateway")))
+            ]
         );
     }
 
@@ -1253,11 +1526,11 @@ mod tests {
     async fn a_refused_terminal_counts_as_a_launch_and_asks_nothing() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Terminal("office".parse().unwrap()))
+        tx.send(Command::Terminal("office".parse().unwrap(), Mode::Proxy))
             .unwrap();
         let mut updates = Vec::new();
         let run = serve_with(
-            |command| matches!(command, Command::Terminal(_)).then_some(Text::DemoNotStarted),
+            |command| matches!(command, Command::Terminal(..)).then_some(Text::DemoNotStarted),
             || std::future::ready(None),
             rx,
             launcher(&log, Vec::new()),
@@ -1275,14 +1548,18 @@ mod tests {
                 launched(polled(Some(Text::DemoNotStarted.into())))
             ]
         );
-        assert_eq!(*log.borrow(), [Request::List, Request::Config]);
+        assert_eq!(
+            *log.borrow(),
+            [Request::List, Request::Config, Request::Transparent]
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_launch_that_asks_for_confirmation_is_denied_and_fails() {
         let log = RefCell::new(Vec::new());
         let (tx, rx) = unbounded_channel();
-        tx.send(Command::Launch("office".parse().unwrap())).unwrap();
+        tx.send(Command::Launch("office".parse().unwrap(), Mode::Proxy))
+            .unwrap();
         let token = "0123456789abcdef0123456789abcdef";
         let lines = vec![format!("confirm: {token}")];
         let mut updates = Vec::new();
@@ -1298,16 +1575,174 @@ mod tests {
         assert!(timeout(Duration::from_millis(500), run).await.is_err());
         assert_eq!(
             updates,
-            [polled(None), launched(polled(Some(CONFIRMATION.into())))]
+            [
+                polled(None),
+                polled(None),
+                launched(polled(Some(CONFIRMATION.into())))
+            ]
         );
         assert_eq!(
             *log.borrow(),
             [
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 launch("office"),
                 Request::Deny(token.parse().unwrap())
             ]
+        );
+    }
+
+    type Replying = Pin<Box<dyn Future<Output = Result<Response, RequestError>>>>;
+
+    fn since(begun: tokio::time::Instant) -> u64 {
+        begun.elapsed().as_millis() as u64
+    }
+
+    fn polls_at(at: u64) -> Vec<(u64, Request)> {
+        polls(1).into_iter().map(|request| (at, request)).collect()
+    }
+
+    fn transparent(name: &str) -> Request {
+        Request::Launch(
+            LaunchRequest::new(name, LaunchAuth::SessionCredentials.as_str()).unwrap(),
+            Mode::Transparent,
+        )
+    }
+
+    fn holding(
+        log: &RefCell<Vec<(u64, Request)>>,
+        begun: tokio::time::Instant,
+        reply: oneshot::Receiver<Result<Response, RequestError>>,
+    ) -> impl Fn(Request) -> Replying {
+        let reply = RefCell::new(Some(reply));
+        move |request| {
+            log.borrow_mut().push((since(begun), request.clone()));
+            match request {
+                Request::Launch(_, Mode::Transparent) => {
+                    let reply = reply.borrow_mut().take().expect("one transparent launch");
+                    Box::pin(async move {
+                        match reply.await {
+                            Ok(reply) => reply,
+                            Err(_) => std::future::pending().await,
+                        }
+                    })
+                }
+                Request::Launch(launch, Mode::Proxy) if launch == link() => {
+                    let mut lines = proposed().echo();
+                    lines.push(ipc::confirm_line(&token()));
+                    Box::pin(std::future::ready(Ok(Response::Ok(lines))))
+                }
+                _ => Box::pin(std::future::ready(Ok(Response::Ok(Vec::new())))),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn polls_links_and_other_commands_go_on_while_a_launch_waits_for_the_agent() {
+        let begun = tokio::time::Instant::now();
+        let log = RefCell::new(Vec::new());
+        let (answer, reply) = oneshot::channel();
+        let (tx, rx) = unbounded_channel();
+        let office = || "office".parse::<GatewayName>().unwrap();
+        tx.send(Command::Launch(office(), Mode::Transparent))
+            .unwrap();
+        let prompts = RefCell::new(Vec::new());
+        let mut updates = Vec::new();
+        let run = serve(
+            rx,
+            holding(&log, begun, reply),
+            loaded,
+            unprobed,
+            |u| updates.push((since(begun), u.launched, u.failure)),
+            unrevealed,
+            |prompt| prompts.borrow_mut().push((since(begun), prompt)),
+        );
+        let feed = async {
+            for (at, command) in [
+                (500, Command::Launch(office(), Mode::Proxy)),
+                (1_000, Command::Close(5)),
+                (1_500, Command::Link(link())),
+            ] {
+                tokio::time::sleep_until(begun + Duration::from_millis(at)).await;
+                tx.send(command).unwrap();
+            }
+            tokio::time::sleep_until(begun + Duration::from_secs(5)).await;
+            let refused = Response::Error(ipc::INVALID_LAUNCH_REQUEST.to_owned());
+            answer.send(Ok(refused)).unwrap();
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            timeout(Duration::from_millis(6_500), async {
+                tokio::join!(run, feed)
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            *log.borrow(),
+            [
+                polls_at(0),
+                vec![
+                    (0, transparent("office")),
+                    (1_000, Request::Close(SessionId::from(5))),
+                    (1_500, Request::Launch(link(), Mode::Proxy)),
+                ],
+                polls_at(2_000),
+                polls_at(4_000),
+                vec![(5_000, launch("office"))],
+                polls_at(6_000),
+            ]
+            .concat()
+        );
+        assert_eq!(*prompts.borrow(), [(1_500, Prompt::Ask(1, proposed()))]);
+        let too_old = Some(Note::from(Text::TransparentTooOld));
+        assert_eq!(
+            updates,
+            [
+                (0, 0, None),
+                (0, 0, None),
+                (500, 0, None),
+                (1_000, 0, None),
+                (1_500, 0, None),
+                (2_000, 0, None),
+                (4_000, 0, None),
+                (5_000, 1, too_old),
+                (5_000, 2, None),
+                (6_000, 2, None),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quitting_drops_a_pending_launch_and_those_queued_behind_it() {
+        let begun = tokio::time::Instant::now();
+        let log = RefCell::new(Vec::new());
+        let (_answer, reply) = oneshot::channel();
+        let (tx, rx) = unbounded_channel();
+        let office = || "office".parse::<GatewayName>().unwrap();
+        tx.send(Command::Launch(office(), Mode::Transparent))
+            .unwrap();
+        tx.send(Command::Terminal(office(), Mode::Proxy)).unwrap();
+        let run = serve(
+            rx,
+            holding(&log, begun, reply),
+            loaded,
+            unprobed,
+            |_| {},
+            unrevealed,
+            unprompted,
+        );
+        let close = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(tx);
+        };
+        timeout(Duration::from_secs(2), async { tokio::join!(run, close) })
+            .await
+            .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            [polls_at(0), vec![(0, transparent("office"))]].concat()
         );
     }
 
@@ -1368,11 +1803,14 @@ mod tests {
             [
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::Log { after: 0 },
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::Log { after: 2 },
             ]
         );
@@ -1408,11 +1846,14 @@ mod tests {
             [
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::List,
                 Request::Config,
+                Request::Transparent,
                 Request::Log { after: 0 },
                 Request::List,
                 Request::Config,
+                Request::Transparent,
             ]
         );
         assert_eq!(logged(updates.last().unwrap()), [1]);
@@ -1435,7 +1876,7 @@ mod tests {
             unprompted,
         );
         assert!(timeout(Duration::from_millis(2_500), run).await.is_err());
-        let asked: Vec<Request> = log.borrow()[4..].to_vec();
+        let asked: Vec<Request> = log.borrow()[6..].to_vec();
         assert_eq!(
             asked,
             [
@@ -1644,7 +2085,7 @@ mod tests {
     #[test]
     fn stopping_an_agent_that_is_not_running_is_not_a_failure() {
         assert_eq!(failure(Command::Stop, Err(RequestError::NotRunning)), None);
-        let office = || Command::Launch("office".parse().unwrap());
+        let office = || Command::Launch("office".parse().unwrap(), Mode::Proxy);
         assert_eq!(
             failure(office(), Err(RequestError::NotRunning)),
             Some(Text::AgentNotRunning.into())
@@ -1701,7 +2142,7 @@ mod tests {
         move |request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => {
+                Request::Launch(..) => {
                     let mut lines = vec![ipc::confirm_line(&token())];
                     lines.extend(loosening().echo());
                     Response::Ok(lines)
@@ -1742,7 +2183,10 @@ mod tests {
                 wait,
             )
             .await;
-            assert_eq!(settled(&log), [Request::Launch(loosening_link()), sent]);
+            assert_eq!(
+                settled(&log),
+                [Request::Launch(loosening_link(), Mode::Proxy), sent]
+            );
             assert_eq!(prompts, [Prompt::Ask(1, loosening()), Prompt::Dismiss(1)]);
             assert!(failures.iter().all(Option::is_none), "{failures:?}");
         }
@@ -1754,7 +2198,7 @@ mod tests {
         move |request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => {
+                Request::Launch(..) => {
                     let mut lines = proposed().echo();
                     lines.push(ipc::confirm_line(&token()));
                     Response::Ok(lines)
@@ -1767,7 +2211,12 @@ mod tests {
     fn settled(log: &RefCell<Vec<Request>>) -> Vec<Request> {
         log.borrow()
             .iter()
-            .filter(|request| !matches!(request, Request::List | Request::Config))
+            .filter(|request| {
+                !matches!(
+                    request,
+                    Request::List | Request::Config | Request::Transparent
+                )
+            })
             .cloned()
             .collect()
     }
@@ -1822,10 +2271,35 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Approve(token())]
+            [
+                Request::Launch(link(), Mode::Proxy),
+                Request::Approve(token())
+            ]
         );
         assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
         assert!(failures.iter().all(Option::is_none));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_asks_for_a_proxy_session_even_when_transparent_ones_are_available() {
+        let log = RefCell::new(Vec::new());
+        let send = |request: Request| {
+            log.borrow_mut().push(request.clone());
+            std::future::ready(Ok(match request {
+                Request::Transparent => Response::Ok(available().to_lines()),
+                _ => Response::Ok(Vec::new()),
+            }))
+        };
+        let (_, failures) = linked(
+            send,
+            vec![Command::Link(link())],
+            reply(Answer::Allow),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
+        assert!(failures.iter().all(Option::is_none));
+        assert!(log.borrow().iter().all(|request| !request.is_transparent()));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1840,7 +2314,7 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
         assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
         assert!(failures.iter().all(Option::is_none));
@@ -1857,7 +2331,7 @@ mod tests {
         )
         .await;
         assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert_eq!(log.borrow().len(), 1 + polls(3).len());
     }
 
@@ -1873,7 +2347,7 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
         assert_eq!(prompts, [Prompt::Ask(1, proposed()), Prompt::Dismiss(1)]);
     }
@@ -1892,7 +2366,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .await;
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert_eq!(prompts, [Prompt::Ask(1, proposed())]);
     }
 
@@ -1914,9 +2388,9 @@ mod tests {
         assert_eq!(
             settled(&log),
             [
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Deny(token()),
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Approve(token())
             ]
         );
@@ -1944,9 +2418,9 @@ mod tests {
         assert_eq!(
             settled(&log),
             [
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Deny(token()),
-                Request::Launch(link()),
+                Request::Launch(link(), Mode::Proxy),
                 Request::Approve(token())
             ]
         );
@@ -1971,7 +2445,7 @@ mod tests {
         timeout(Duration::from_millis(500), run).await.unwrap();
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
     }
 
@@ -1989,7 +2463,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .await;
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert!(prompts.is_empty());
         assert_eq!(
             failures.last(),
@@ -2003,7 +2477,7 @@ mod tests {
         let refused = |request: Request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => Response::Error("no such gateway".to_owned()),
+                Request::Launch(..) => Response::Error("no such gateway".to_owned()),
                 _ => Response::Ok(Vec::new()),
             }))
         };
@@ -2014,7 +2488,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .await;
-        assert_eq!(settled(&log), [Request::Launch(link())]);
+        assert_eq!(settled(&log), [Request::Launch(link(), Mode::Proxy)]);
         assert!(prompts.is_empty());
         assert_eq!(failures.last(), Some(&said("no such gateway")));
     }
@@ -2025,7 +2499,7 @@ mod tests {
         let other = |request: Request| {
             log.borrow_mut().push(request.clone());
             std::future::ready(Ok(match request {
-                Request::Launch(_) => {
+                Request::Launch(..) => {
                     let Ask::Add(mut elsewhere) = proposed() else {
                         unreachable!()
                     };
@@ -2046,7 +2520,7 @@ mod tests {
         .await;
         assert_eq!(
             settled(&log),
-            [Request::Launch(link()), Request::Deny(token())]
+            [Request::Launch(link(), Mode::Proxy), Request::Deny(token())]
         );
         assert!(prompts.is_empty());
         assert_eq!(failures.last(), Some(&Some(Text::LinkNotEchoed.into())));
@@ -2142,6 +2616,10 @@ mod tests {
         Err(RequestError::NotRunning)
     }
 
+    fn timed_out() -> Result<Response, RequestError> {
+        Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_stopped_agent_is_started_once_and_refreshed_at_the_next_allowed_poll() {
         let log = RefCell::new(Vec::new());
@@ -2178,7 +2656,7 @@ mod tests {
         let log = RefCell::new(Vec::new());
         let (calls, seen) = starts(
             listing(&log, stopped),
-            vec![(0, Command::Terminal("office".parse().unwrap()))],
+            vec![(0, Command::Terminal("office".parse().unwrap(), Mode::Proxy))],
             Duration::from_secs(1),
             None,
             Duration::from_millis(4_500),
@@ -2284,8 +2762,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn only_a_stopped_agent_is_started() {
         let running = || Ok(Response::Ok(Vec::new()));
-        let unreachable = || Err(RequestError::TimedOut);
-        for reply in [running as fn() -> _, unreachable] {
+        for reply in [running as fn() -> _, timed_out] {
             let log = RefCell::new(Vec::new());
             let (calls, seen) = starts(
                 listing(&log, reply),
@@ -2310,7 +2787,7 @@ mod tests {
 
     #[test]
     fn open_terminal_leaves_the_route_and_the_shell_to_the_saved_gateway() {
-        let request = Command::Terminal("office".parse().unwrap())
+        let request = Command::Terminal("office".parse().unwrap(), Mode::Proxy)
             .request()
             .unwrap();
         assert_eq!(request.to_string(), "terminal office route=saved");
@@ -2334,7 +2811,7 @@ mod tests {
 
     #[test]
     fn an_opened_terminal_shows_nothing_of_its_answer_but_the_warnings() {
-        let office = || Command::Terminal("office".parse().unwrap());
+        let office = || Command::Terminal("office".parse().unwrap(), Mode::Proxy);
         assert_eq!(failure(office(), opened(&OPENED)), None);
         let mut lines = OPENED.to_vec();
         lines.extend([
@@ -2358,7 +2835,7 @@ mod tests {
 
     #[test]
     fn an_agent_without_terminals_is_said_to_be_too_old() {
-        let office = || Command::Terminal("office".parse().unwrap());
+        let office = || Command::Terminal("office".parse().unwrap(), Mode::Proxy);
         let invalid = || Ok(Response::Error(ipc::INVALID_REQUEST.to_owned()));
         assert_eq!(
             failure(office(), invalid()),
@@ -2375,6 +2852,100 @@ mod tests {
         assert_eq!(
             Note::from(Text::TerminalTooOld).shown(),
             "the agent is too old for terminal sessions; restart it"
+        );
+    }
+
+    #[test]
+    fn an_agent_too_old_for_transparent_sessions_is_said_to_be_so_only_for_them() {
+        let office = || "office".parse::<GatewayName>().unwrap();
+        let refused = |error: &str| Ok(Response::Error(error.to_owned()));
+        let too_old = Some(Note::from(Text::TransparentTooOld));
+        assert_eq!(
+            failure(
+                Command::Launch(office(), Mode::Transparent),
+                refused(ipc::INVALID_LAUNCH_REQUEST)
+            ),
+            too_old
+        );
+        assert_eq!(
+            failure(
+                Command::Terminal(office(), Mode::Transparent),
+                refused(ipc::INVALID_TERMINAL_REQUEST)
+            ),
+            too_old
+        );
+        assert_eq!(
+            failure(
+                Command::Launch(office(), Mode::Proxy),
+                refused(ipc::INVALID_LAUNCH_REQUEST)
+            ),
+            said(ipc::INVALID_LAUNCH_REQUEST)
+        );
+        assert_eq!(
+            failure(
+                Command::Terminal(office(), Mode::Proxy),
+                refused(ipc::INVALID_TERMINAL_REQUEST)
+            ),
+            said(ipc::INVALID_TERMINAL_REQUEST)
+        );
+        assert_eq!(
+            failure(
+                Command::Launch(office(), Mode::Transparent),
+                refused("no gateway office")
+            ),
+            said("no gateway office")
+        );
+        assert_eq!(
+            failure(
+                Command::Terminal(office(), Mode::Proxy),
+                refused(ipc::INVALID_REQUEST)
+            ),
+            Some(Text::TerminalTooOld.into())
+        );
+        assert_eq!(
+            Note::from(Text::TransparentTooOld).shown(),
+            "the agent is too old for transparent sessions; restart it"
+        );
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(
+            Note::from(Text::TransparentTooOld).shown(),
+            "代理程式版本過舊，不支援透明工作階段；請重新啟動它"
+        );
+    }
+
+    #[test]
+    fn launches_and_terminals_carry_the_chosen_mode() {
+        let office = || "office".parse::<GatewayName>().unwrap();
+        for mode in [Mode::Proxy, Mode::Transparent] {
+            assert_eq!(
+                Command::Launch(office(), mode).request(),
+                Ok(Request::Launch(
+                    LaunchRequest::new("office", LaunchAuth::SessionCredentials.as_str()).unwrap(),
+                    mode
+                ))
+            );
+            assert_eq!(
+                Command::Terminal(office(), mode).request(),
+                Ok(Request::Terminal(TerminalRequest {
+                    gateway: office(),
+                    route: None,
+                    mode
+                }))
+            );
+        }
+        assert_eq!(
+            Command::Launch(office(), Mode::Transparent)
+                .request()
+                .unwrap()
+                .to_string(),
+            "launch office session_credentials route=saved mode=transparent"
+        );
+        assert_eq!(
+            Command::Terminal(office(), Mode::Transparent)
+                .request()
+                .unwrap()
+                .to_string(),
+            "terminal office route=saved mode=transparent"
         );
     }
 
@@ -2399,14 +2970,14 @@ mod tests {
 
     #[test]
     fn start_browser_leaves_the_route_to_the_saved_gateway() {
-        let request = Command::Launch("office".parse().unwrap())
+        let request = Command::Launch("office".parse().unwrap(), Mode::Proxy)
             .request()
             .unwrap();
         assert_eq!(
             request.to_string(),
             "launch office session_credentials route=saved"
         );
-        let Request::Launch(launch) = request else {
+        let Request::Launch(launch, _) = request else {
             panic!("expected a launch request");
         };
         assert_eq!(launch.route, None);

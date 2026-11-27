@@ -14,7 +14,9 @@ use crate::identity::certificates::IssueError;
 use crate::identity::client_cert::ClientCertificate;
 use crate::identity::encoding::sha256_fingerprint;
 use crate::ipc::{BrowserKind, SessionAuth, SessionInfo, SessionRoute};
-use crate::proxy::{self, LocalAuth, OpenTunnels, PendingVerifications, Proxy, Verifications};
+use crate::proxy::{
+    self, Adopter, LocalAuth, OpenTunnels, PendingVerifications, Proxy, Verifications,
+};
 
 pub use gateinto_ipc_types::SessionKind;
 
@@ -102,6 +104,7 @@ pub struct Session {
     local_auth: LocalAuth,
     credentials: Option<proxy::SessionCredentials>,
     verifications: Verifications,
+    adopter: Adopter,
     close: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -139,6 +142,10 @@ impl Session {
         &self.verifications
     }
 
+    pub fn adopter(&self) -> Adopter {
+        self.adopter.clone()
+    }
+
     pub fn info(&self, browser: Option<BrowserKind>) -> SessionInfo {
         SessionInfo {
             id: self.id.into(),
@@ -156,6 +163,7 @@ impl Session {
             browser,
             shell: None,
             verification: self.verifications.pending(),
+            transparent: false,
         }
     }
 
@@ -197,6 +205,7 @@ impl SessionManager {
         let realm = proxy.realm().map(str::to_owned);
         let credentials = proxy.credentials().cloned();
         let verifications = proxy.verifications();
+        let adopter = proxy.adopter();
         if !local_auth.is_none() {
             span.in_scope(|| {
                 info!(
@@ -223,6 +232,7 @@ impl SessionManager {
             local_auth,
             credentials,
             verifications,
+            adopter,
             close,
             task,
         };

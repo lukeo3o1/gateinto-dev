@@ -1,6 +1,6 @@
 #![no_main]
 
-use gateinto::ipc::{MAX_REQUEST_BYTES, Request, Response};
+use gateinto::ipc::{self, MAX_REQUEST_BYTES, Request, Response, TransparentStatus};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -10,6 +10,7 @@ fuzz_target!(|data: &[u8]| {
     check_request(text);
     check_decoded_response(text);
     check_encoded_response(text);
+    check_transparent_status(text);
 });
 
 fn check_request(line: &str) {
@@ -57,6 +58,20 @@ fn check_encoded_response(text: &str) {
         assert_eq!(
             Response::decode(&Response::Error(text.to_owned()).encode()),
             Ok(Response::Error(single(&text.to_owned())))
+        );
+    }
+}
+
+fn check_transparent_status(text: &str) {
+    let Ok(Ok(status)) = Response::decode(text).map(ipc::transparent_status) else {
+        return;
+    };
+    let lines = status.to_lines();
+    assert_eq!(TransparentStatus::parse(&lines).as_ref(), Some(&status));
+    if !text.contains('\r') {
+        assert_eq!(
+            Response::decode(&Response::Ok(lines).encode()).map(ipc::transparent_status),
+            Ok(Ok(status))
         );
     }
 }

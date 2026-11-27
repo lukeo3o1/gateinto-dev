@@ -302,9 +302,11 @@ jobs:
           dotnet tool install --global wix --version $env:WIX_VERSION
           if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix exited with $LASTEXITCODE" }
           Join-Path $env:USERPROFILE '.dotnet\tools' >> $env:GITHUB_PATH
+      - name: Fetch and verify WinDivert for the MSI
+        run: .github/scripts/fetch-windivert.ps1 -Arch $env:MSI_ARCH -Output (Join-Path $env:RUNNER_TEMP 'windivert')
       - name: Build the MSI
         run: |
-          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -WinDivert "$env:RUNNER_TEMP\windivert" -Output "$env:RUNNER_TEMP\msi-build\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
       - name: Check that the MSI build writes only the MSI
         run: |
@@ -312,10 +314,10 @@ jobs:
           if ($files.Count -ne 1 -or $files[0] -ne 'gateinto.msi') { throw "build.ps1 wrote $($files -join ', ')" }
       - name: Build a second MSI of the same version for the upgrade check
         run: |
-          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -Output "$env:RUNNER_TEMP\msi-upgrade\gateinto.msi"
+          pwsh packaging/wix/build.ps1 -Arch $env:MSI_ARCH -Binary $env:EXE -GuiBinary $env:GUI_EXE -WinDivert "$env:RUNNER_TEMP\windivert" -Output "$env:RUNNER_TEMP\msi-upgrade\gateinto.msi"
           if ($LASTEXITCODE -ne 0) { throw "build.ps1 exited with $LASTEXITCODE" }
       - name: Install, set up, repair, upgrade, uninstall, reinstall and purge (Software KSP)
-        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\msi-build\gateinto.msi" -UpgradeMsi "$env:RUNNER_TEMP\msi-upgrade\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi"
+        run: .github/scripts/msi-lifecycle.ps1 -Msi "$env:RUNNER_TEMP\msi-build\gateinto.msi" -UpgradeMsi "$env:RUNNER_TEMP\msi-upgrade\gateinto.msi" -Exe $env:EXE -LogDir "$env:RUNNER_TEMP\msi" -WinDivertArch $env:MSI_ARCH
       - name: Upload the x64 MSI
         if: matrix.arch == 'x64'
         uses: actions/upload-artifact@v7

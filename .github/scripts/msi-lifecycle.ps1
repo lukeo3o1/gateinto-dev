@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory)] [string] $Msi,
   [Parameter(Mandatory)] [string] $UpgradeMsi,
   [Parameter(Mandatory)] [string] $Exe,
-  [Parameter(Mandatory)] [string] $LogDir
+  [Parameter(Mandatory)] [string] $LogDir,
+  [ValidateSet('x64', 'x86')] [string] $WinDivertArch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,9 +30,12 @@ $template = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\..\packag
 $edited = "# kept by the lifecycle test`n"
 $gateintoKey = 'HKCU:\Software\Gateinto'
 $installerKey = "$gateintoKey\Installer"
+$windivert = if ($WinDivertArch) {
+  & (Join-Path $PSScriptRoot '..\..\packaging\wix\windivert.ps1') -Arch $WinDivertArch
+}
 $script:spki = $null
 $script:written = @()
-$script:guis = @()
+$script:processes = @()
 
 Add-Type -Namespace Lifecycle -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -69,6 +73,26 @@ function Assert-GuiRemoved {
   if (Test-Path $shortcut) { throw "the Start Menu shortcut $shortcut still exists after uninstall" }
 }
 
+function Assert-WinDivert([bool] $Present) {
+  if (-not $windivert) { return }
+  $files = if ($Present) { $windivert.Files }
+  $expected = $files.Name | Sort-Object
+  $found = if (Test-Path -LiteralPath $installDir) {
+    Get-ChildItem -LiteralPath $installDir -Filter 'WinDivert*' -File -Name | Sort-Object
+  }
+  if (($found -join ', ') -cne ($expected -join ', ')) {
+    throw "found WinDivert files '$($found -join ', ')', expected '$($expected -join ', ')'"
+  }
+  foreach ($file in $files) {
+    $hash = Get-FileHash -LiteralPath (Join-Path $installDir $file.Name) -Algorithm SHA256
+    if ($hash.Hash -ne $file.Sha256) { throw "the installed $($file.Name) does not have the pinned SHA-256" }
+  }
+  foreach ($marker in 'WinDivert', 'WinDivert32') {
+    $expected = if ($Present -and ($marker -eq 'WinDivert' -or $WinDivertArch -eq 'x86')) { 1 }
+    if ((Get-Value $installerKey $marker) -ne $expected) { throw "unexpected installer marker $marker" }
+  }
+}
+
 function Get-Value([string] $Key, [string] $Name) {
   $item = Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction SilentlyContinue
   if ($null -eq $item) { $null } else { $item.$Name }
@@ -90,7 +114,7 @@ function Same-Bytes($Actual, [byte[]] $Expected) {
 
 function Start-Gui {
   $gui = Start-Process $installedGui -PassThru
-  $script:guis += $gui
+  $script:processes += $gui
   $deadline = (Get-Date).AddSeconds(30)
   while ([Lifecycle.Win32]::FindWindowW('GateintoWindow', [IntPtr]::Zero) -eq [IntPtr]::Zero) {
     if ($gui.HasExited) { throw "the GUI exited with $($gui.ExitCode) before showing its window" }
@@ -103,6 +127,28 @@ function Start-Gui {
   }
   Write-Host "GUI window shown by process $($gui.Id)"
   $gui
+}
+
+function Start-Agent {
+  $agent = Start-Process $installed -ArgumentList 'agent' -PassThru -WindowStyle Hidden
+  $script:processes += $agent
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((& $installed status | Out-String) -notmatch '(?m)^agent: running\r?$') {
+    if ($agent.HasExited) { throw "the agent exited with $($agent.ExitCode) before it was ready" }
+    if ((Get-Date) -gt $deadline) { throw 'the agent did not start within 30 seconds' }
+    Start-Sleep -Milliseconds 250
+  }
+  $agent
+}
+
+function Assert-AgentStopped([System.Diagnostics.Process] $Agent, [string] $Log) {
+  $contents = Get-Content -Raw -LiteralPath $Log
+  $stop = $contents.IndexOf('Doing action: StopAgent')
+  $validate = $contents.IndexOf('Doing action: InstallValidate')
+  if ($stop -lt 0 -or $validate -lt 0 -or $stop -ge $validate) {
+    throw 'the installer did not run StopAgent before InstallValidate'
+  }
+  if (-not $Agent.WaitForExit(1000)) { throw 'the installer did not stop the agent' }
 }
 
 function Assert-ConfigIs([string] $Expected, [string] $When) {
@@ -144,6 +190,7 @@ try {
   Step 'Check the exe, the GUI and its shortcut, PATH, the gateinto:// handler, the uninstall entry, that nothing was started and that no key was created' {
     if (-not (Test-Path $installed)) { throw "$installed is missing" }
     Assert-GuiInstalled
+    Assert-WinDivert $false
     "user PATH: $((Get-ItemProperty 'HKCU:\Environment').Path)"
     if (-not (Test-UserPathHasInstallDir)) { throw "the user PATH does not contain $installDir" }
     $command = (Get-ItemProperty 'HKCU:\Software\Classes\gateinto\shell\open\command').'(default)'
@@ -183,6 +230,22 @@ try {
     if ($status -notmatch "(?m)^spki-sha256: $script:spki\r?$") { throw 'status did not report the key from setup' }
   }
 
+  if ($windivert) {
+    Step 'Add and remove the optional WinDivert files while keeping the main feature installed' {
+      $null = Invoke-Msiexec '/i' 'add-transparent.log' @('ADDLOCAL=Transparent')
+      Assert-WinDivert $true
+      $agent = Start-Agent
+      $log = Invoke-Msiexec '/i' 'remove-transparent.log' @('REMOVE=Transparent')
+      Assert-AgentStopped $agent $log
+      Assert-WinDivert $false
+      if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'removing Transparent removed gateinto.exe' }
+      Assert-GuiInstalled
+      Assert-ConfigIs $template 'after removing Transparent'
+      $null = Invoke-Msiexec '/i' 'readd-transparent.log' @('ADDLOCAL=Transparent')
+      Assert-WinDivert $true
+    }
+  }
+
   Step 'Edit the config template, then repair and upgrade the product that installed it' {
     $created = (Get-Item -LiteralPath $configFile).CreationTime
     Set-Content -NoNewline -LiteralPath $configFile -Value $edited
@@ -191,38 +254,37 @@ try {
     Assert-ConfigIs $edited 'after msiexec /fa'
     $null = Invoke-Msiexec '/f' 'repair-f.log'
     Assert-ConfigIs $edited 'after msiexec /f'
-    $null = Invoke-Msiexec '/i' 'upgrade-1.log' @() $UpgradeMsi
+    $agent = Start-Agent
+    $log = Invoke-Msiexec '/i' 'upgrade-1.log' @() $UpgradeMsi
+    Assert-AgentStopped $agent $log
     Assert-GuiInstalled
+    Assert-WinDivert $true
     if (@(Get-UninstallEntries).Count -ne 1) { throw 'the same-version upgrade left more or fewer than one Gateinto uninstall entry' }
     Assert-ConfigIs $edited 'after a same-version major upgrade'
     $null = Invoke-Msiexec '/i' 'upgrade-2.log'
     Assert-GuiInstalled
+    Assert-WinDivert $true
     if (@(Get-UninstallEntries).Count -ne 1) { throw 'the upgrade back left more or fewer than one Gateinto uninstall entry' }
     Assert-ConfigIs $edited 'after upgrading back to the first build'
   }
 
   Step 'Uninstall while the agent runs, then check what is removed and what is kept' {
-    $agent = Start-Process $installed -ArgumentList 'agent' -PassThru -WindowStyle Hidden
-    $deadline = (Get-Date).AddSeconds(30)
-    while ((& $installed status | Out-String) -notmatch '(?m)^agent: running\r?$') {
-      if ((Get-Date) -gt $deadline) { throw 'the agent did not start within 30 seconds' }
-      Start-Sleep -Milliseconds 250
-    }
+    $agent = Start-Agent
     $gui = Start-Gui
     Set-Value $runKey $guiValue "`"$installedGui`"" String
     Set-Value $approvedKey $guiValue $approvedOn Binary
     Set-Value $runKey $probe $probeData String
     $log = Invoke-Msiexec '/x' 'uninstall-1.log' @('MSIRESTARTMANAGERCONTROL=Disable')
-    if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: StopAgent')) { throw 'the uninstall log has no StopAgent action' }
+    Assert-AgentStopped $agent $log
     if (-not (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: UninstallGui')) { throw 'the uninstall log has no UninstallGui action' }
     if (Select-String -Path $log -SimpleMatch -Quiet 'Doing action: QuitGui') { throw 'a plain uninstall ran QuitGui' }
-    if (-not $agent.WaitForExit(30000)) { Stop-Process -Id $agent.Id -Force; throw 'the uninstaller did not stop the agent' }
     if ($gui -and -not $gui.WaitForExit(1000)) { Stop-Process -Id $gui.Id -Force; throw 'the uninstaller did not close the GUI' }
     if ($null -ne (Get-Value $runKey $guiValue)) { throw "the $guiValue Run value still exists after uninstall" }
     if ($null -ne (Get-Value $approvedKey $guiValue)) { throw "the $guiValue StartupApproved value still exists after uninstall" }
     if ((Get-Value $runKey $probe) -ne $probeData) { throw "the uninstaller changed the unrelated Run value $probe" }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
     Assert-GuiRemoved
+    Assert-WinDivert $false
     if (Test-Path 'HKCU:\Software\Classes\gateinto') { throw 'the gateinto:// handler still exists after uninstall' }
     if (Test-UserPathHasInstallDir) { throw "the user PATH still contains $installDir" }
     $out = & $outside key info | Out-String
@@ -233,8 +295,11 @@ try {
   }
 
   Step 'Reinstall with AUTOSTART=1 and set up again (Software KSP)' {
-    $null = Invoke-Msiexec '/i' 'install-2.log' @('AUTOSTART=1')
+    $properties = @('AUTOSTART=1')
+    if ($windivert) { $properties += 'TRANSPARENT=1' }
+    $null = Invoke-Msiexec '/i' 'install-2.log' $properties
     Assert-GuiInstalled
+    Assert-WinDivert $true
     $run = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Gateinto -ErrorAction SilentlyContinue).Gateinto
     $expected = "`"$installed`" agent --detach"
     "autostart: $run"
@@ -247,6 +312,7 @@ try {
     Assert-ConfigIs $edited 'after a reinstall'
     $null = Invoke-Msiexec '/fa' 'repair-2.log'
     Assert-ConfigIs $edited 'after a repair'
+    Assert-WinDivert $true
   }
 
   Step 'Purge the device identity, then setup creates a new one (Software KSP)' {
@@ -278,12 +344,13 @@ try {
     $script:spki = $new
   }
 
-  Step 'Uninstall the AUTOSTART install and check that the autostart entry, the GUI and its shortcut are gone and values the GUI did not write are kept' {
+  Step 'Uninstall after gateinto.exe was removed and check which files and values are kept' {
     $elsewhere = "`"$LogDir\gateinto-gui.exe`""
     Set-Value $runKey $guiValue $elsewhere String
     Set-Value $approvedKey $guiValue $approvedOn Binary
     Set-Value $approvedKey 'Gateinto' $approvedOn Binary
-    $null = Invoke-Msiexec '/x' 'uninstall-2.log'
+    Remove-Item -LiteralPath $installed
+    $null = Invoke-Msiexec '/x' 'uninstall-missing-exe.log'
     if ($null -ne (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Gateinto -ErrorAction SilentlyContinue)) {
       throw 'the autostart entry still exists after uninstall'
     }
@@ -293,11 +360,12 @@ try {
     if ((Get-Value $runKey $probe) -ne $probeData) { throw "the uninstaller changed the unrelated Run value $probe" }
     if (Test-Path $installed) { throw "$installed still exists after uninstall" }
     Assert-GuiRemoved
+    Assert-WinDivert $false
     Assert-ConfigIs $edited 'after the second uninstall'
   }
 } finally {
   Step 'Clean up the key, the test values and the installation' {
-    $script:guis | Where-Object { -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    $script:processes | Where-Object { -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
     foreach ($value in $script:written) { Remove-Value $value[0] $value[1] }
     Remove-Item -LiteralPath $configFile -Force -ErrorAction SilentlyContinue
     Remove-Value $installerKey 'ConfigTemplate'

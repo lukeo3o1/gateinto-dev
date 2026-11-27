@@ -1,0 +1,2 @@
+€ready
+counters captured=12 new_flows=3 reflected=40 replies_restored=37 syn_retransmits=1 orphans_dropped=0 key_collisions=0 unknown_replies_dropped=2 fragments_dropped=0 malformed_dropped=0 options_dropped=0 table_full=0 contained_udp=5 contained_other=0 contained_ipv6=4 inbound_dropped=0 receive_errors=0 send_errors=0

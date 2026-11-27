@@ -6,7 +6,8 @@ param(
     [string] $Output = (Join-Path $PSScriptRoot '..\..\target\wix\gateinto.msi'),
     [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $Version,
     [ValidatePattern('^[0-9A-Za-z.+-]+$')] [ValidateLength(1, 64)] [string] $DisplayVersion,
-    [ValidateSet('x64', 'x86')] [string] $Arch = 'x64'
+    [ValidateSet('x64', 'x86')] [string] $Arch = 'x64',
+    [string] $WinDivert
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,16 +28,21 @@ $name = if ($DisplayVersion) { "Gateinto $DisplayVersion" } else { 'Gateinto' }
 
 $binary = (Resolve-Path $Binary).Path
 $guiBinary = (Resolve-Path $GuiBinary).Path
+$defines = @('-d', "Version=$Version", '-d', "ProductName=$name", '-d', "BinaryPath=$binary", '-d', "GuiBinaryPath=$guiBinary")
+$transparent = 'without transparent sessions'
+if ($WinDivert) {
+    $windivertDir = (Resolve-Path -LiteralPath $WinDivert).Path
+    $null = & (Join-Path $PSScriptRoot 'windivert.ps1') -Arch $Arch -Directory $windivertDir
+    $defines += @('-d', "WinDivertDir=$windivertDir")
+    $transparent = 'with the transparent sessions feature'
+}
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Output) | Out-Null
 
 wix build (Join-Path $PSScriptRoot 'gateinto.wxs') `
     -arch $Arch `
-    -d "Version=$Version" `
-    -d "ProductName=$name" `
-    -d "BinaryPath=$binary" `
-    -d "GuiBinaryPath=$guiBinary" `
+    @defines `
     -pdbtype none `
     -o $Output
 if ($LASTEXITCODE -ne 0) { throw "wix build exited with $LASTEXITCODE" }
 
-"built $Output ($Arch, version $Version, name $name)"
+"built $Output ($Arch, version $Version, name $name, $transparent)"

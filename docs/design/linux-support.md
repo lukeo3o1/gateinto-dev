@@ -72,9 +72,9 @@ for gateways.
 
 | Area | Where |
 | --- | --- |
-| IPC directory, `0o700` with an owner check | `src/ipc.rs:795-806` |
-| Bind lock, `create_new` with mode `0o600`, stale after 10 s | `src/ipc.rs:811-848` |
-| Unix socket listener, mode `0o600`, under `XDG_RUNTIME_DIR` | `src/ipc.rs:865-883` |
+| IPC directory, `0o700` with an owner check | `src/ipc.rs` (`private_dir`) |
+| Bind lock, `create_new` with mode `0o600`, stale after 10 s | `src/ipc.rs` (`BindLock::acquire`) |
+| Unix socket listener, mode `0o600`, under `XDG_RUNTIME_DIR` | `src/ipc.rs` (the Unix `Server::bind`) |
 | SIGINT and SIGTERM through tokio | `src/main.rs:929-936` |
 | Agent started in its own process group (`process_group(0)`) | `src/main.rs:1170-1186` |
 | Browser candidates on `PATH` (Chrome, Chromium, Edge) | `src/browser.rs:89-102` |
@@ -857,23 +857,23 @@ None beyond Areas 1 and 3.
     manager before reaching that target give the agent a display; desktops
     without the target never start the unit, and the agent then starts on
     demand as without the unit.
-  - `gateinto agent` runs in the foreground and returns from
-    `Agent::serve` on `SIGTERM`, `SIGINT` (`shutdown_signal`,
-    `src/main.rs:961`) or a stop request (`src/agent.rs:330-331`), so it
-    exits with status 0 (`src/main.rs:1121`, `src/main.rs:589`), checked
-    by hand with `kill -TERM` and `gateinto stop` on a debug build.
-    `Restart=on-failure` therefore does not restart it after `systemctl
-    --user stop` or `gateinto stop`, only after a crash or an error exit.
+  - `gateinto agent` runs in the foreground and returns from `Agent::serve`
+    on `SIGTERM`, `SIGINT` (`shutdown_signal` in `src/main.rs`) or a stop
+    request (`src/agent.rs:330-331`), so it exits with status 0 (`agent`
+    and `run` in `src/main.rs`), checked by hand with `kill -TERM` and
+    `gateinto stop` on a debug build. `Restart=on-failure` therefore does
+    not restart it after `systemctl --user stop` or `gateinto stop`, only
+    after a crash or an error exit.
   - The default `KillMode=control-group` ends the browsers the agent
     started when the unit stops, as `gateinto stop` ends them.
   - Only one agent runs per user. When an agent started on demand is
     already running, the unit's agent fails in `Server::bind` with
-    `AlreadyRunning` (`src/ipc.rs:872-874`, `src/main.rs:1105`),
+    `AlreadyRunning` (`src/ipc.rs`, called from `agent` in `src/main.rs`),
     `Restart=on-failure` retries it until the start limit, and the unit
-    ends failed although `systemctl --user enable --now` reported
-    success. The documentation says to run `gateinto stop` first, which
-    ends the running agent's sessions, or to expect the unit to stay
-    failed until it is started again, for example at the next login.
+    ends failed although `systemctl --user enable --now` reported success.
+    The documentation says to run `gateinto stop` first, which ends the
+    running agent's sessions, or to expect the unit to stay failed until it
+    is started again, for example at the next login.
 - **Uninstall:** `systemctl --user disable --now gateinto-agent` when
   the unit is installed, then `gateinto stop`, a refusal while a process
   of the user still runs the installed binary, then

@@ -520,6 +520,7 @@ mod tests {
             browser: Some(BrowserKind::Chrome),
             shell: None,
             verification: flagged,
+            transparent: false,
         }
     }
 

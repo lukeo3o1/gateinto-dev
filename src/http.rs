@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use zeroize::Zeroizing;
@@ -46,6 +46,19 @@ impl fmt::Display for InvalidAuthority {
 }
 
 impl std::error::Error for InvalidAuthority {}
+
+impl From<SocketAddr> for Authority {
+    fn from(addr: SocketAddr) -> Self {
+        let host = match addr {
+            SocketAddr::V4(addr) => Host::Ipv4(*addr.ip()),
+            SocketAddr::V6(addr) => Host::Ipv6(*addr.ip()),
+        };
+        Self {
+            host,
+            port: addr.port(),
+        }
+    }
+}
 
 impl FromStr for Authority {
     type Err = InvalidAuthority;
@@ -803,6 +816,23 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn a_socket_address_becomes_an_ip_literal_authority() {
+        let v4 = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 7), 443));
+        assert_eq!(
+            Authority::from(v4),
+            Authority {
+                host: Host::Ipv4(Ipv4Addr::new(203, 0, 113, 7)),
+                port: 443
+            }
+        );
+        let v6: SocketAddr = "[2001:db8::7%3]:8443".parse().unwrap();
+        let authority = Authority::from(v6);
+        assert_eq!(authority.host, Host::Ipv6("2001:db8::7".parse().unwrap()));
+        assert_eq!(authority.to_string(), "[2001:db8::7]:8443");
+        assert_eq!(authority.to_string().parse(), Ok(authority));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, timeout_at};
 use tokio_rustls::TlsConnector;
@@ -44,6 +44,9 @@ mod verifications;
 
 pub use challenge::VerificationOrigin;
 pub use local_auth::LocalAuth;
+#[cfg(windows)]
+pub(crate) use os_user::Attribution;
+pub(crate) use os_user::{Denial, Original};
 #[cfg(target_os = "linux")]
 pub(crate) use os_user::{pidfd_probe, procfs};
 pub use routing::Route;
@@ -168,6 +171,25 @@ pub struct Proxy {
     listener: TcpListener,
     credentials: Option<SessionCredentials>,
     shared: Arc<Shared>,
+    adopter: Adopter,
+    adoptions: mpsc::Receiver<(TcpStream, Authority)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Adopter(mpsc::Sender<(TcpStream, Authority)>);
+
+impl Adopter {
+    #[cfg(test)]
+    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<(TcpStream, Authority)>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (Self(sender), receiver)
+    }
+
+    pub fn adopt(&self, stream: TcpStream, target: Authority) -> Result<(), TcpStream> {
+        self.0
+            .try_send((stream, target))
+            .map_err(|error| error.into_inner().0)
+    }
 }
 
 pub(crate) struct Endpoint {
@@ -341,6 +363,7 @@ impl Proxy {
                 .max_pending_rejects
                 .min(Semaphore::MAX_PERMITS),
         ));
+        let (adopter, adoptions) = mpsc::channel(config.limits.max_tunnels.max(1));
         let shared = Shared {
             endpoint,
             pool: pool::Pool::default(),
@@ -357,6 +380,8 @@ impl Proxy {
             listener,
             credentials,
             shared: Arc::new(shared),
+            adopter: Adopter(adopter),
+            adoptions,
         })
     }
 
@@ -382,6 +407,10 @@ impl Proxy {
         self.shared.verifications.clone()
     }
 
+    pub fn adopter(&self) -> Adopter {
+        self.adopter.clone()
+    }
+
     pub async fn run(self) {
         self.run_until(std::future::pending()).await;
     }
@@ -389,17 +418,28 @@ impl Proxy {
     pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
         info!(local_addr = %self.local_addr(), route = %self.shared.route, "listening");
         let Self {
-            listener, shared, ..
+            listener,
+            shared,
+            mut adoptions,
+            ..
         } = self;
         let mut connections = JoinSet::new();
         let mut shutdown = std::pin::pin!(shutdown);
+        let mut loopback_first = false;
         loop {
             let accepted = tokio::select! {
                 biased;
                 () = &mut shutdown => break,
                 Some(_) = connections.join_next(), if !connections.is_empty() => continue,
-                accepted = listener.accept() => accepted,
+                accepted = listener.accept(), if loopback_first => accepted,
+                Some((stream, target)) = adoptions.recv() => {
+                    loopback_first = true;
+                    spawn_adopted(&shared, &mut connections, stream, target);
+                    continue;
+                }
+                accepted = listener.accept(), if !loopback_first => accepted,
             };
+            loopback_first = false;
             let (stream, peer) = match accepted {
                 Ok(accepted) => accepted,
                 Err(error) => {
@@ -440,9 +480,33 @@ impl Proxy {
             }
         }
         drop(listener);
+        adoptions.close();
+        while let Some((stream, _)) = adoptions.recv().await {
+            reset(stream);
+        }
         let aborted = connections.len();
         connections.shutdown().await;
         info!(aborted, "closed");
+    }
+}
+
+fn spawn_adopted(
+    shared: &Arc<Shared>,
+    connections: &mut JoinSet<()>,
+    stream: TcpStream,
+    target: Authority,
+) {
+    let span = info_span!("adopted");
+    match shared.tunnels.clone().try_acquire_owned() {
+        Ok(permit) => {
+            let shared = shared.clone();
+            connections
+                .spawn(async move { shared.adopt(stream, target, permit).await }.instrument(span));
+        }
+        Err(_) => span.in_scope(|| {
+            warn!("tunnel limit reached");
+            reset(stream);
+        }),
     }
 }
 
@@ -473,40 +537,69 @@ impl Shared {
             debug!("rejecting");
             return reject_with(client, &response, limits.reject_linger).await;
         }
-        let target = request.target;
+        let (upstream, upstream_early) = match self.open_tunnel(&request.target).await {
+            Ok(opened) => opened,
+            Err(status) => return reject(client, status, limits.reject_linger).await,
+        };
+        let mut response = b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
+        response.extend_from_slice(&upstream_early);
+        self.tunnel(client, upstream, &response, &client_early)
+            .await;
+    }
+
+    async fn adopt(&self, client: TcpStream, target: Authority, _permit: OwnedSemaphorePermit) {
+        let _ = client.set_nodelay(true);
+        match self.open_tunnel(&target).await {
+            Ok((upstream, upstream_early)) => {
+                self.tunnel(client, upstream, &upstream_early, &[]).await;
+            }
+            Err(_) => reset(client),
+        }
+    }
+
+    async fn open_tunnel(&self, target: &Authority) -> Result<(pool::Tunnel, Vec<u8>), Status> {
         debug!(%target, "opening tunnel");
-        let opening = timeout(limits.handshake_timeout, self.open_upstream(&target));
-        let (mut upstream, upstream_early) = match opening.await {
+        let opening = timeout(self.limits.handshake_timeout, self.open_upstream(target));
+        match opening.await {
             Err(_) => {
                 warn!("upstream timed out");
-                return reject(client, Status::GatewayTimeout, limits.reject_linger).await;
+                Err(Status::GatewayTimeout)
             }
             Ok(Err(error)) => {
                 warn!(%target, %error, "upstream refused tunnel");
                 let status = error.local_status();
                 if let UpstreamError::Challenge(refusal) = error {
-                    let offer = self.verifications.offer(*refusal, &target);
+                    let offer = self.verifications.offer(*refusal, target);
                     debug!(?offer, "verification challenge stored");
                 }
-                return reject(client, status, limits.reject_linger).await;
+                Err(status)
             }
-            Ok(Ok(opened)) => opened,
-        };
-        debug!("tunnel established");
+            Ok(Ok(opened)) => {
+                debug!("tunnel established");
+                Ok(opened)
+            }
+        }
+    }
+
+    async fn tunnel(
+        &self,
+        mut client: TcpStream,
+        mut upstream: pool::Tunnel,
+        to_client: &[u8],
+        to_upstream: &[u8],
+    ) {
         let _open = self.open_tunnels.open();
-        let mut response = b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
-        response.extend_from_slice(&upstream_early);
         let established = async {
-            client.write_all(&response).await?;
-            upstream.write_all(&client_early).await?;
+            client.write_all(to_client).await?;
+            upstream.write_all(to_upstream).await?;
             upstream.flush().await
         };
-        match timeout(limits.idle_timeout, established).await {
+        match timeout(self.limits.idle_timeout, established).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => return debug!(%error, "tunnel closed"),
             Err(_) => return info!("tunnel idle timeout"),
         }
-        match relay::relay(client, upstream, limits.idle_timeout).await {
+        match relay::relay(client, upstream, self.limits.idle_timeout).await {
             Some(Ok((sent, received))) => debug!(sent, received, "tunnel closed"),
             Some(Err(error)) => debug!(%error, "tunnel closed"),
             None => info!("tunnel idle timeout"),
@@ -721,6 +814,10 @@ impl Status {
     }
 }
 
+pub fn reset(stream: TcpStream) {
+    let _ = stream.set_zero_linger();
+}
+
 const LINGER_BYTES: usize = 64 * 1024;
 
 async fn reject(stream: TcpStream, status: Status, linger: Duration) {
@@ -801,12 +898,21 @@ mod tests {
     }
 
     async fn start(local_auth: LocalAuth, owners: Arc<Fake>, handshake: Duration) -> Proxy {
-        assert!(local_auth.os_user);
-        let without = LocalAuth {
+        start_with(config(local_auth, handshake).await, owners).await
+    }
+
+    async fn start_with(config: Config, owners: Arc<Fake>) -> Proxy {
+        assert!(config.local_auth.os_user);
+        let local_auth = LocalAuth {
             os_user: false,
-            ..local_auth
+            ..config.local_auth
         };
-        let mut proxy = Proxy::bind(config(without, handshake).await).await.unwrap();
+        let mut proxy = Proxy::bind(Config {
+            local_auth,
+            ..config
+        })
+        .await
+        .unwrap();
         let shared = Arc::get_mut(&mut proxy.shared).unwrap();
         let auth = std::mem::replace(&mut shared.auth, Authenticator::new(None, None));
         shared.auth = auth.with_owners(owners as Arc<dyn Owners>);
@@ -931,6 +1037,101 @@ mod tests {
         let (response, _) = exchange(proxy, CONNECT).await;
         assert!(response.starts_with("HTTP/1.1 408 "), "{response}");
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    const ADOPTED: &str = "192.0.2.1:443";
+
+    async fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        (client, accepted)
+    }
+
+    async fn assert_reset(client: &mut TcpStream) {
+        let mut received = [0; 64];
+        match timeout(Duration::from_secs(5), client.read(&mut received)).await {
+            Err(_) => panic!("the adopted stream was not closed in time"),
+            Ok(Err(error)) => assert_eq!(error.kind(), io::ErrorKind::ConnectionReset, "{error}"),
+            Ok(Ok(n)) => panic!("expected a reset, got {:?}", &received[..n]),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_adopted_stream_skips_the_os_user_lookup_and_local_credentials() {
+        let gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let owners = fake(Err(Denial::OtherUser));
+        let mut config = config(BOTH, Duration::from_secs(5)).await;
+        config.upstream.port = gateway.local_addr().unwrap().port();
+        let proxy = start_with(config, owners.clone()).await;
+        let (agent, adopter) = (proxy.local_addr(), proxy.adopter());
+        tokio::spawn(proxy.run());
+
+        let (mut adopted, accepted) = pair().await;
+        adopter.adopt(accepted, ADOPTED.parse().unwrap()).unwrap();
+        let contacted = timeout(Duration::from_secs(5), gateway.accept()).await;
+        drop(contacted.unwrap().unwrap());
+        assert_reset(&mut adopted).await;
+
+        let mut proxied = TcpStream::connect(agent).await.unwrap();
+        proxied.write_all(CONNECT).await.unwrap();
+        let mut response = Vec::new();
+        proxied.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 407 "), "{response:?}");
+        assert_eq!(
+            *owners.seen.lock().unwrap(),
+            [(proxied.local_addr().unwrap(), proxied.peer_addr().unwrap())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_whose_send_completes_after_the_proxy_closed_is_reset() {
+        let (mut adopted, accepted) = pair().await;
+        let config = config(LocalAuth::NONE, Duration::from_secs(5)).await;
+        let proxy = Proxy::bind(config).await.unwrap();
+        let reserved = proxy.adopter.0.clone().try_reserve_owned().unwrap();
+        let closing = tokio::spawn(proxy.run_until(async {}));
+        tokio::task::yield_now().await;
+
+        reserved.send((accepted, ADOPTED.parse().unwrap()));
+        timeout(Duration::from_secs(5), closing)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_reset(&mut adopted).await;
+    }
+
+    #[tokio::test]
+    async fn an_adopted_tunnel_logs_its_target_and_never_its_peer() {
+        let logs = crate::test_logs::capture();
+        let config = config(LocalAuth::NONE, Duration::from_secs(5)).await;
+        let proxy = Proxy::bind(config).await.unwrap();
+        let adopter = proxy.adopter();
+        tokio::spawn(proxy.run());
+
+        let (mut adopted, accepted) = pair().await;
+        let peer = accepted.peer_addr().unwrap().to_string();
+        adopter.adopt(accepted, ADOPTED.parse().unwrap()).unwrap();
+        assert_reset(&mut adopted).await;
+
+        let target = format!("target={ADOPTED}");
+        let opening = logs.lines("opening tunnel");
+        assert_eq!(opening.len(), 1, "{:?}", logs.lines(""));
+        assert!(opening[0].contains(" DEBUG adopted: "), "{opening:?}");
+        assert!(opening[0].contains(&target), "{opening:?}");
+        let refused = logs.lines(" WARN ");
+        assert_eq!(refused.len(), 1, "{:?}", logs.lines(""));
+        assert!(
+            refused[0].contains("upstream refused tunnel"),
+            "{refused:?}"
+        );
+        assert!(refused[0].contains(&target), "{refused:?}");
+        for line in logs.lines("") {
+            assert!(!line.contains(&peer) && !line.contains("peer="), "{line}");
+        }
     }
 
     fn tunnel_response(status: u16, values: &[&str]) -> TunnelResponse {

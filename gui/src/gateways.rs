@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use gateinto::config::{ConfigFile, GatewayName, Gateways};
 use gateinto::identity::client_cert::ClientCertificateMode;
-use gateinto::ipc::SessionInfo;
+use gateinto::ipc::{Mode, SessionInfo};
 use gateinto::link::store::{LinkedStore, Loaded};
 use gateinto::link::{Known, KnownGateway, Source};
 use gateinto::proxy::Route;
@@ -37,6 +37,7 @@ pub struct Page {
     pub footnote: bool,
     pub launch: bool,
     pub terminal: bool,
+    pub mode: Option<Mode>,
 }
 
 pub fn read(config: Option<PathBuf>) -> Result<ConfigFile, String> {
@@ -56,6 +57,7 @@ pub struct Launches {
     sent: u64,
     done: u64,
     terminal: bool,
+    mode: Mode,
 }
 
 impl Launches {
@@ -67,21 +69,37 @@ impl Launches {
         self.busy() && self.terminal
     }
 
-    pub fn start(&mut self, names: &[GatewayName], row: usize) -> Option<GatewayName> {
-        self.begin(names, row, false)
+    pub fn notice(&self) -> Option<Text> {
+        (self.busy() && self.mode == Mode::Transparent).then_some(Text::TransparentStarting)
     }
 
-    pub fn terminal(&mut self, names: &[GatewayName], row: usize) -> Option<GatewayName> {
-        self.begin(names, row, true)
+    pub fn start(&mut self, names: &[GatewayName], row: usize, mode: Mode) -> Option<GatewayName> {
+        self.begin(names, row, false, mode)
     }
 
-    fn begin(&mut self, names: &[GatewayName], row: usize, terminal: bool) -> Option<GatewayName> {
+    pub fn terminal(
+        &mut self,
+        names: &[GatewayName],
+        row: usize,
+        mode: Mode,
+    ) -> Option<GatewayName> {
+        self.begin(names, row, true, mode)
+    }
+
+    fn begin(
+        &mut self,
+        names: &[GatewayName],
+        row: usize,
+        terminal: bool,
+        mode: Mode,
+    ) -> Option<GatewayName> {
         if self.busy() {
             return None;
         }
         let name = names.get(row)?.clone();
         self.sent += 1;
         self.terminal = terminal;
+        self.mode = mode;
         Some(name)
     }
 
@@ -120,6 +138,7 @@ pub fn page(
         footnote: rows.iter().any(|row: &Row| row.config),
         launch: matches!(state, AgentState::Running(_)) && !busy,
         terminal: matches!(state, AgentState::Running(_)),
+        mode: None,
         rows,
     }
 }
@@ -299,7 +318,7 @@ pub fn address(host: Option<&str>, port: Option<u16>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gateinto::ipc::{SessionAuth, SessionKind, SessionRoute};
+    use gateinto::ipc::{Mode, SessionAuth, SessionKind, SessionRoute};
     use gateinto::link::store::InvalidEntry;
 
     use super::*;
@@ -343,6 +362,7 @@ mod tests {
             browser: None,
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 
@@ -375,6 +395,7 @@ mod tests {
                 footnote: true,
                 launch: true,
                 terminal: true,
+                mode: None,
             }
         );
     }
@@ -708,15 +729,15 @@ mod tests {
         let names = [name("office"), name("home")];
         let mut launches = Launches::default();
         assert!(!launches.busy());
-        assert_eq!(launches.start(&names, 1), Some(name("home")));
+        assert_eq!(launches.start(&names, 1, Mode::Proxy), Some(name("home")));
         assert!(launches.busy());
-        assert_eq!(launches.start(&names, 0), None);
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), None);
         launches.settle(0);
         assert!(launches.busy());
-        assert_eq!(launches.start(&names, 0), None);
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), None);
         launches.settle(1);
         assert!(!launches.busy());
-        assert_eq!(launches.start(&names, 0), Some(name("office")));
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), Some(name("office")));
         assert!(launches.busy());
     }
 
@@ -725,21 +746,50 @@ mod tests {
         let names = [name("office")];
         let mut launches = Launches::default();
         assert!(!launches.opening());
-        assert_eq!(launches.terminal(&names, 0), Some(name("office")));
+        assert_eq!(
+            launches.terminal(&names, 0, Mode::Proxy),
+            Some(name("office"))
+        );
         assert!(launches.opening());
-        assert_eq!(launches.start(&names, 0), None);
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), None);
         assert!(launches.opening());
         launches.settle(1);
         assert!(!launches.opening());
-        assert_eq!(launches.start(&names, 0), Some(name("office")));
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), Some(name("office")));
         assert!(launches.busy());
         assert!(!launches.opening());
     }
 
     #[test]
+    fn a_pending_transparent_launch_warns_that_it_may_ask_for_approval() {
+        let names = [name("office")];
+        let mut launches = Launches::default();
+        assert_eq!(launches.notice(), None);
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), Some(name("office")));
+        assert_eq!(launches.notice(), None);
+        launches.settle(1);
+        assert_eq!(
+            launches.terminal(&names, 0, Mode::Transparent),
+            Some(name("office"))
+        );
+        assert_eq!(launches.notice(), Some(Text::TransparentStarting));
+        assert_eq!(launches.start(&names, 0, Mode::Proxy), None);
+        assert_eq!(launches.notice(), Some(Text::TransparentStarting));
+        launches.settle(2);
+        assert_eq!(launches.notice(), None);
+        assert_eq!(
+            launches.start(&names, 0, Mode::Transparent),
+            Some(name("office"))
+        );
+        assert_eq!(launches.notice(), Some(Text::TransparentStarting));
+        launches.settle(3);
+        assert_eq!(launches.notice(), None);
+    }
+
+    #[test]
     fn a_row_that_is_gone_starts_nothing() {
         let mut launches = Launches::default();
-        assert_eq!(launches.start(&[name("office")], 1), None);
+        assert_eq!(launches.start(&[name("office")], 1, Mode::Proxy), None);
         assert!(!launches.busy());
     }
 

@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use gateinto::browser::browser_name;
 use gateinto::config::{ConfigFile, LimitSettings};
-use gateinto::ipc::ConfigSource;
+use gateinto::ipc::{ConfigSource, TransparentAvailability, TransparentEngine};
 
-use crate::agent::Config;
+use crate::agent::{Config, Transparent};
 use crate::i18n::{Choice as Language, Text, fill, tr};
 use crate::sessions::browser_title;
 use crate::theme::Choice;
@@ -45,6 +45,7 @@ pub struct Page {
     pub agent_start: AgentStart,
     pub theme: Choice,
     pub language: Language,
+    pub transparent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +75,31 @@ pub fn page(
         agent_start,
         theme,
         language,
+        transparent: None,
     }
+}
+
+pub fn transparent(transparent: &Transparent) -> Option<String> {
+    let Transparent::Reported(status) = transparent else {
+        return None;
+    };
+    Some(match (&status.availability, &status.engine) {
+        (TransparentAvailability::Unavailable(reason), _) => {
+            fill(Text::TransparentUnavailable, &[reason])
+        }
+        (TransparentAvailability::Available, TransparentEngine::Running) => {
+            tr(Text::EngineRunning).to_owned()
+        }
+        (TransparentAvailability::Available, TransparentEngine::Starting) => {
+            tr(Text::EngineStarting).to_owned()
+        }
+        (TransparentAvailability::Available, TransparentEngine::Stopped(None)) => {
+            tr(Text::EngineStopped).to_owned()
+        }
+        (TransparentAvailability::Available, TransparentEngine::Stopped(Some(error))) => {
+            fill(Text::EngineFailed, &[error])
+        }
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -600,7 +625,58 @@ mod tests {
                 agent_start: AgentStart::On,
                 theme: Choice::Dark,
                 language: Language::Chinese,
+                transparent: None,
             }
+        );
+    }
+
+    #[test]
+    fn the_transparent_engine_is_described_only_when_the_agent_reports_it() {
+        use gateinto::ipc::{TransparentAvailability, TransparentEngine, TransparentStatus};
+        let reported = |availability, engine| {
+            transparent(&Transparent::Reported(TransparentStatus {
+                availability,
+                engine,
+            }))
+        };
+        let available = |engine| reported(TransparentAvailability::Available, engine);
+        assert_eq!(transparent(&Transparent::Unreported), None);
+        assert_eq!(
+            available(TransparentEngine::Running).as_deref(),
+            Some("Available · engine running")
+        );
+        assert_eq!(
+            available(TransparentEngine::Starting).as_deref(),
+            Some("Available · engine starting")
+        );
+        assert_eq!(
+            available(TransparentEngine::Stopped(None)).as_deref(),
+            Some("Available · engine stopped")
+        );
+        let failed = || available(TransparentEngine::Stopped(Some("exit code 3".to_owned())));
+        assert_eq!(
+            failed().as_deref(),
+            Some("Available · engine stopped: exit code 3")
+        );
+        let missing = || {
+            reported(
+                TransparentAvailability::Unavailable("the engine is not installed".to_owned()),
+                TransparentEngine::Stopped(None),
+            )
+        };
+        assert_eq!(
+            missing().as_deref(),
+            Some("Unavailable: the engine is not installed")
+        );
+        let _zh = crate::i18n::speaking(crate::i18n::Language::Chinese);
+        assert_eq!(failed().as_deref(), Some("可用 · 引擎已停止：exit code 3"));
+        assert_eq!(
+            missing().as_deref(),
+            Some("無法使用：the engine is not installed")
+        );
+        assert_eq!(
+            available(TransparentEngine::Running).as_deref(),
+            Some("可用 · 引擎執行中")
         );
     }
 

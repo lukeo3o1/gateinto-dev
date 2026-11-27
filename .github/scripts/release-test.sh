@@ -15,6 +15,21 @@ failures=0
 sha=0123456789abcdef0123456789abcdef01234567
 short=0123456789ab
 
+# Ubuntu's multicall sleep cannot run after being copied under a different name.
+sleep_binary=$(command -v gnusleep || command -v sleep)
+if ! command -v timeout > /dev/null; then
+  echo 'release-test.sh: timeout is not on PATH; the tests need it to check sleep' >&2
+  exit 1
+fi
+mkdir "$work/sleep"
+cp "$sleep_binary" "$work/sleep/gateinto"
+status=0
+timeout 0.5 "$work/sleep/gateinto" 60 > /dev/null 2>&1 || status=$?
+if (( status != 124 )); then
+  echo "release-test.sh: $sleep_binary does not keep running when copied as gateinto; the tests need a standalone sleep" >&2
+  exit 1
+fi
+
 pass() { echo "ok   $1"; }
 fail() {
   echo "FAIL $1: $2"
@@ -393,7 +408,7 @@ fi
 home=$(new_home)
 bin=$home/.local/bin
 mkdir -m 0755 "$bin"
-cp "$(command -v sleep)" "$bin/gateinto"
+cp "$sleep_binary" "$bin/gateinto"
 owned "$bin"
 if ! start_as_user "$bin/gateinto" 60; then
   fail 'install over a running gateinto' 'the copy of sleep did not start within 5 seconds'
@@ -632,7 +647,7 @@ not_started='the copy of sleep did not start within 5 seconds'
 home=$(new_home)
 bin=$home/.local/bin
 mkdir -m 0755 "$bin"
-cp "$(command -v sleep)" "$bin/gateinto"
+cp "$sleep_binary" "$bin/gateinto"
 owned "$bin"
 before=$(snapshot "$home")
 sleep_error=$(as_user env -i HOME="$home" PATH="$system_path" "$bin/gateinto" stop 2>&1 > /dev/null || true)
@@ -647,7 +662,7 @@ elif [[ "$(cat "$work/stderr")" != "$sleep_error"$'\n'"$still_running_message" ]
   fail "$name" "stderr is $(cat "$work/stderr")"
 elif [[ -s $work/stdout ]]; then
   fail "$name" "printed on stdout: $(cat "$work/stdout")"
-elif ! cmp -s "$bin/gateinto" "$(command -v sleep)" || [[ "$(snapshot "$home")" != "$before" ]]; then
+elif ! cmp -s "$bin/gateinto" "$sleep_binary" || [[ "$(snapshot "$home")" != "$before" ]]; then
   fail "$name" 'changed something'
 else
   pass "$name"
@@ -657,7 +672,7 @@ stop_running
 home=$(unit_home file)
 bin=$home/.local/bin
 mv "$bin/gateinto" "$bin/.stub"
-cp "$(command -v sleep)" "$bin/gateinto"
+cp "$sleep_binary" "$bin/gateinto"
 owned "$bin"
 : > "$area/stop-prints"
 before=$(snapshot "$home")
@@ -683,7 +698,7 @@ stop_running
 
 home=$(installed_home)
 bin=$home/.local/bin
-cp "$(command -v sleep)" "$bin/gateinto-old"
+cp "$sleep_binary" "$bin/gateinto-old"
 owned "$bin"
 name='uninstall while another copy of gateinto runs'
 if ! start_as_user "$bin/gateinto-old" 600; then
@@ -795,7 +810,7 @@ done
 
 no_analyze=$(mktemp -d "$area/no-analyze.XXXXXX")
 for tool in /usr/bin/* /bin/*; do
-  if [[ ${tool##*/} != systemd-analyze && ! -e $no_analyze/${tool##*/} ]]; then
+  if [[ ${tool##*/} != systemd-analyze && ! -e $no_analyze/${tool##*/} && ! -L $no_analyze/${tool##*/} ]]; then
     ln -s "$tool" "$no_analyze/"
   fi
 done
@@ -917,8 +932,8 @@ else
 fi
 
 expect_notes() {
-  local name=$1 channel=$2 present=$3 absent=$4 actual missing=()
-  if ! actual=$("$notes" "$channel" "$sha" '2026-10-18 09:30 UTC' 2> "$work/stderr"); then
+  local name=$1 channel=$2 present=$3 absent=$4 manifest=${5:-$windivert_manifest} actual missing=()
+  if ! actual=$("$notes" "$channel" "$sha" '2026-10-18 09:30 UTC' "$manifest" 2> "$work/stderr"); then
     fail "$name" "exited with an error: $(cat "$work/stderr")"
     return
   fi
@@ -936,10 +951,18 @@ expect_notes() {
 }
 
 common=$'`'"$sha"$'`\n2026-10-18 09:30 UTC\nnot code-signed\nhttps://github.com/lukeo3o1/gateinto-dev/issues/23\nTPM\nreal browsers\nphysical Windows machines\nWindows 7\nPre-release, not externally security reviewed.\ngateinto-x86_64-unknown-linux-gnu.tar.gz\nnot yet verified on a real Linux desktop\nno device key on Linux'
+windivert_manifest="$licenses/packaging/wix/windivert.txt"
+win_divert_source='[WinDivert 2.2.2 source](https://github.com/basil00/WinDivert/archive/refs/tags/v2.2.2.tar.gz)'
+common+=$'\n'"$win_divert_source"
 win7=$'i686-win7-windows-msvc-experimental.exe\nexperimental\nSoftware Key Storage Provider'
 expect_notes 'latest notes' latest "$common"$'\n`latest`' "$win7"$'\nstable'
 expect_notes 'beta notes' beta "$common"$'\n`beta`\n'"$win7" 'stable'
 expect_notes 'alpha notes' alpha "$common"$'\n`alpha`\n'"$win7" 'stable'
+
+sed 's/2\.2\.2/2.2.1/g' "$windivert_manifest" > "$work/older-windivert.txt"
+expect_notes 'notes for an older MSI use its WinDivert version' latest \
+  '[WinDivert 2.2.1 source](https://github.com/basil00/WinDivert/archive/refs/tags/v2.2.1.tar.gz)' \
+  "$win_divert_source" "$work/older-windivert.txt"
 
 expect_notes_fail() {
   local name=$1
@@ -951,9 +974,12 @@ expect_notes_fail() {
   fi
 }
 
-expect_notes_fail 'notes for an unknown channel' stable "$sha" '2026-10-18 09:30 UTC'
-expect_notes_fail 'notes for a short commit' alpha "$short" '2026-10-18 09:30 UTC'
-expect_notes_fail 'notes without a build date' alpha "$sha" ''
+expect_notes_fail 'notes for an unknown channel' stable "$sha" '2026-10-18 09:30 UTC' "$windivert_manifest"
+expect_notes_fail 'notes for a short commit' alpha "$short" '2026-10-18 09:30 UTC' "$windivert_manifest"
+expect_notes_fail 'notes without a build date' alpha "$sha" '' "$windivert_manifest"
+expect_notes_fail 'notes without a WinDivert manifest' alpha "$sha" '2026-10-18 09:30 UTC'
+touch "$work/empty-windivert.txt"
+expect_notes_fail 'notes with an empty WinDivert manifest' alpha "$sha" '2026-10-18 09:30 UTC' "$work/empty-windivert.txt"
 expect_notes_fail 'notes without arguments'
 
 workflow="$here/../workflows/release.yml"

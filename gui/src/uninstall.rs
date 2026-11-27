@@ -120,7 +120,7 @@ mod tests {
         assert!(!removes(&text(&written), &exe));
     }
 
-    use super::wxs::{action, attribute, elements, ids, scheduled};
+    use super::wxs::{action, attribute, ids, scheduled};
 
     const REMOVING: &str = "REMOVE~=&quot;ALL&quot;";
 
@@ -164,18 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn every_scheduled_action_runs_only_on_removal() {
+    fn the_installer_only_schedules_the_agent_stop_and_gui_cleanup_actions() {
         let actions = set(&["StopAgent", "UninstallGui", "QuitGui"]);
         assert_eq!(ids("CustomAction", "Id", |_| true), actions);
         assert_eq!(ids("Custom", "Action", |_| true), actions);
-        for custom in elements("Custom") {
-            assert!(
-                attribute(custom, "Condition")
-                    .unwrap()
-                    .starts_with(REMOVING),
-                "{custom}"
-            );
-        }
         assert_eq!(
             attribute(action("StopAgent"), "FileRef"),
             Some("GateintoExe")

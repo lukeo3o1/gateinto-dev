@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use gateinto::ipc::{self, ConfigSource, RequestError, Response, SessionInfo};
+use gateinto::ipc::{
+    self, ConfigSource, Mode, RequestError, Response, SessionInfo, TransparentAvailability,
+    TransparentStatus,
+};
 
 use crate::i18n::{Note, Text};
 
@@ -15,7 +18,7 @@ pub fn note(error: RequestError) -> Note {
     match error {
         RequestError::NotRunning => Text::AgentNotRunning.into(),
         RequestError::Closed => Text::AgentClosed.into(),
-        RequestError::TimedOut => Text::AgentTimedOut.into(),
+        RequestError::TimedOut(_) => Text::AgentTimedOut.into(),
         error => Note::Agent(error.to_string()),
     }
 }
@@ -67,10 +70,51 @@ impl Config {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Gateways(Mode),
+    Tray,
+    Sessions,
+    Link,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Transparent {
+    #[default]
+    Unreported,
+    Reported(TransparentStatus),
+}
+
+impl Transparent {
+    pub fn from_reply(reply: Result<Response, RequestError>) -> Self {
+        reply
+            .ok()
+            .and_then(|response| ipc::transparent_status(response).ok())
+            .map_or(Self::Unreported, Self::Reported)
+    }
+
+    pub fn offer(&self, chosen: Mode) -> Option<Mode> {
+        match self {
+            Self::Reported(TransparentStatus {
+                availability: TransparentAvailability::Available,
+                ..
+            }) => Some(chosen),
+            Self::Reported(_) | Self::Unreported => None,
+        }
+    }
+
+    pub fn start(&self, origin: Origin) -> Mode {
+        match origin {
+            Origin::Gateways(chosen) => self.offer(chosen).unwrap_or(Mode::Proxy),
+            Origin::Tray | Origin::Sessions | Origin::Link => Mode::Proxy,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gateinto::ipc::{ConfigSource, SessionAuth, SessionKind, SessionRoute};
+    use gateinto::ipc::{ConfigSource, SessionAuth, SessionKind, SessionRoute, TransparentEngine};
 
     fn session(id: u64) -> SessionInfo {
         SessionInfo {
@@ -86,6 +130,7 @@ mod tests {
             browser: None,
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 
@@ -127,9 +172,12 @@ mod tests {
             note(RequestError::Closed).shown(),
             "代理程式未回應就關閉了連線"
         );
-        assert_eq!(note(RequestError::TimedOut).shown(), "代理程式未及時回應");
         assert_eq!(
-            AgentState::from_list(Err(RequestError::TimedOut)),
+            note(RequestError::TimedOut(ipc::REQUEST_TIMEOUT)).shown(),
+            "代理程式未及時回應"
+        );
+        assert_eq!(
+            AgentState::from_list(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))),
             AgentState::Unreachable(Note::Gui(Text::AgentTimedOut))
         );
         let broken = || RequestError::Io(std::io::Error::other("pipe broke"));
@@ -176,7 +224,7 @@ mod tests {
             Config::Unreported
         );
         assert_eq!(
-            Config::from_reply(Err(RequestError::TimedOut)),
+            Config::from_reply(Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT))),
             Config::Unreported
         );
         assert_eq!(reported(&[]), Config::Unreported);
@@ -193,6 +241,81 @@ mod tests {
         assert_eq!(agent.path(|| panic!("read the default")), Some(file));
         let none = Config::Reported(ConfigSource::Defaults);
         assert_eq!(none.path(|| panic!("read the default")), None);
+    }
+
+    fn status(
+        availability: TransparentAvailability,
+        engine: TransparentEngine,
+    ) -> TransparentStatus {
+        TransparentStatus {
+            availability,
+            engine,
+        }
+    }
+
+    fn answered(status: &TransparentStatus) -> Transparent {
+        Transparent::from_reply(Ok(Response::Ok(status.to_lines())))
+    }
+
+    #[test]
+    fn a_reported_transparent_status_offers_the_chosen_mode_only_when_available() {
+        let ready = status(
+            TransparentAvailability::Available,
+            TransparentEngine::Stopped(None),
+        );
+        let reported = answered(&ready);
+        assert_eq!(reported, Transparent::Reported(ready));
+        assert_eq!(reported.offer(Mode::Transparent), Some(Mode::Transparent));
+        assert_eq!(reported.offer(Mode::Proxy), Some(Mode::Proxy));
+        let missing = status(
+            TransparentAvailability::Unavailable("the engine is not installed".to_owned()),
+            TransparentEngine::Stopped(None),
+        );
+        let unavailable = answered(&missing);
+        assert_eq!(unavailable, Transparent::Reported(missing));
+        assert_eq!(unavailable.offer(Mode::Transparent), None);
+        assert_eq!(unavailable.offer(Mode::Proxy), None);
+    }
+
+    #[test]
+    fn only_a_gateway_card_starts_in_the_chosen_mode_and_only_when_it_is_offered() {
+        let available = answered(&status(
+            TransparentAvailability::Available,
+            TransparentEngine::Stopped(None),
+        ));
+        let unavailable = answered(&status(
+            TransparentAvailability::Unavailable("the engine is not installed".to_owned()),
+            TransparentEngine::Stopped(None),
+        ));
+        for chosen in [Mode::Proxy, Mode::Transparent] {
+            assert_eq!(available.start(Origin::Gateways(chosen)), chosen);
+            for transparent in [&unavailable, &Transparent::Unreported] {
+                assert_eq!(transparent.start(Origin::Gateways(chosen)), Mode::Proxy);
+            }
+        }
+        for transparent in [&available, &unavailable, &Transparent::Unreported] {
+            for origin in [Origin::Tray, Origin::Sessions, Origin::Link] {
+                assert_eq!(transparent.start(origin), Mode::Proxy, "{origin:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_agent_that_cannot_report_transparent_sessions_offers_none() {
+        let unreported = [
+            Ok(Response::Error(ipc::INVALID_REQUEST.to_owned())),
+            Ok(Response::Error("busy".to_owned())),
+            Ok(Response::Ok(vec!["availability: maybe".to_owned()])),
+            Ok(Response::Ok(Vec::new())),
+            Err(RequestError::NotRunning),
+            Err(RequestError::TimedOut(ipc::REQUEST_TIMEOUT)),
+        ];
+        for reply in unreported {
+            let transparent = Transparent::from_reply(reply);
+            assert_eq!(transparent, Transparent::Unreported);
+            assert_eq!(transparent.offer(Mode::Transparent), None);
+        }
+        assert_eq!(Transparent::default(), Transparent::Unreported);
     }
 
     #[test]

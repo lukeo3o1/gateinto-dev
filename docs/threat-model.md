@@ -41,6 +41,26 @@ meant to protect, against whom, and what it does not protect.
   The credentials are shown to the user, who types them into
   the browser's proxy sign-in dialog; a program running as the user can get
   them from the agent or from memory.
+- **Remote hosts and the transparent listener.** On Windows, while the
+  elevated helper runs, the agent also listens on a non-loopback IPv4 port
+  for the connections of transparent sessions, and asks them for no
+  credentials. Remote hosts are kept out by the helper, which drops every
+  inbound packet to that port; every accepted connection must also be
+  attributed to a process of the user in exactly one of the agent's live
+  transparent session jobs. See
+  [security-model.md](security-model.md#exposure-and-logs).
+- **The elevated helper and the kernel driver.** For transparent sessions
+  the agent starts one `gateinto divert` helper, elevated after a UAC
+  prompt, from its own `gateinto.exe`; the per-user MSI installs it in
+  `%LOCALAPPDATA%\Programs\Gateinto`, which the user can write, and it is
+  not code-signed. The helper loads WinDivert, a kernel driver signed by
+  its third-party publisher. Its only input from the unelevated side is its
+  validated command line and, on the pipe, a one-byte startup
+  acknowledgement; any later byte only ends it. It reads no configuration,
+  and the agent reads only `ready`, `stopping`, a fixed `error` line and
+  integer counter lines from it. It holds no credentials, cannot open
+  tunnels and cannot use the device key. UAC is not a boundary against code
+  of the same administrator.
 - **Websites and the launch URI.** Any web page, e-mail or document can open
   a `gateinto://` link. When the handler is registered, the URI reaches
   `gateinto open` and then the agent as untrusted input. It can name a known
@@ -76,7 +96,7 @@ meant to protect, against whom, and what it does not protect.
 
 | Threat | Mitigation |
 | --- | --- |
-| Other machines on the network use the proxy and the identity behind it. | The listen address must be loopback. A non-loopback address is always refused; no flag or configuration key allows one. |
+| Other machines on the network use the proxy and the identity behind it. | A session's listen address must be loopback. A non-loopback address is always refused; no flag or configuration key allows one. The only non-loopback listener is the agent's transparent listener on Windows, open only while the elevated helper runs; see the transparent listener rows below. |
 | A configuration file with a typo silently runs with defaults. | Unknown sections and keys are errors (`deny_unknown_fields`), and there is no default upstream. |
 | Gateinto reads or alters tunnel content. | No MITM: Gateinto never terminates the client's inner TLS and does not inspect tunnel bytes. |
 | Malformed or hostile requests cause request smuggling, desynchronisation or resource exhaustion. | Strict parser: only `CONNECT host:port HTTP/1.1` with exactly one `Host` header; rejects bare LF, CR inside lines, NUL, obs-fold, control characters, `Transfer-Encoding` and a non-zero `Content-Length`. Header block size limit, request and upstream timeouts, idle timeout, and a limit on concurrent connections. |
@@ -107,6 +127,16 @@ meant to protect, against whom, and what it does not protect.
 | An uninstall, a silent uninstall or a script destroys the device identity. | Uninstall keeps the key and the config: the key is not an MSI component, and the config template the installer creates only when no config file exists is designed as a permanent component that is never reinstalled over the file (not yet verified on Windows). `reset --purge-device-identity` requires the SPKI prefix, refuses without a terminal unless `--confirm-spki` matches, and deletes only the named Gateinto key after rechecking its SPKI. |
 | Uninstall cleanup deletes the user's own browser data. | The uninstaller only runs `gateinto stop --remove-stale-profiles`, which deletes Gateinto-marked profile directories under `%LOCALAPPDATA%\Gateinto\profiles`, never the user's Chrome or Edge profiles. |
 | The device identity is silently replaced, for example by an attacker or a bug that recreates the key. | `key init` reuses an existing key in either provider and creates one only when none exists; creating a key that already exists fails instead of overwriting it; sessions, `check-upstream` and `key info` only open the key, never create it. |
+| A host on the network connects to the transparent listener port T. | The engine drops genuine inbound packets to T. The firewall rule that lets the reflected packets in allows only inbound TCP to T for `gateinto.exe`, so it opens nothing else. If the drop fails, attribution is defence in depth only (a host R using a client's local port p can match). |
+| A local process outside the job connects to the transparent listener. | Attribution requires an owner in a live transparent job. A peer with a loopback address or any other address of this host (the listener's own, or another adapter's, found as preferred or deprecated in the host's IPv4 unicast address table without binding anything) is reset before it takes an attribution permit or reads a TCP table, so direct dials from this host cannot exhaust the attributions in flight; only if the address table cannot be read, or if the address is not in use and so cannot be bound, does such a dial take a permit, and attribution then refuses it. Dials from other hosts are the row above. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
+| A local process uses a transparent session by tagging its own job with the transparent DSCP code point N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
+| The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
+| The agent dies and its session processes are still sending. | `KILL_ON_JOB_CLOSE` ends them; the helper keeps dropping for 5 s before it exits. |
+| A replaced `gateinto.exe`, a planted DLL or a replaced WinDivert file gains elevation. | The helper opens each WinDivert file with read sharing only, checks its SHA-256 digest through that handle and holds the handles until `WinDivertOpen` has succeeded and the driver version is checked, so in between the files cannot be written, renamed or deleted and Windows refuses to rename their folder or its ancestors. `WinDivert.dll` is loaded by absolute path with the search for its dependencies limited to its folder and System32. A driver already loaded by another product is refused unless it reports the pinned version. Nothing protects `gateinto.exe` or planted DLLs beyond UAC. Documented residual risk: Windows loads the DLL, and WinDivert installs the driver, by pathname, so a path component that can still be redirected (such as a junction on the path) is not ruled out; that adds no new risk, because the elevated program is the unsigned, user-writable `gateinto.exe` in the same folder. |
+| The unelevated side misuses the helper to black-hole a port. | The helper accepts only ports 49152 to 65535, DSCP 1 to 63 and the fixed pipe name pattern. |
+| A local user blocks transparent sessions. | None; local denial of service through the machine-wide mutex, documented. |
+| A link triggers UAC prompts. | No link field selects a transparent session; the IPC mode word is not part of `LaunchRequest`. |
+| The engine misparses a hostile packet. | Bounds-checked pure parser, unit and fuzz tests, drops on any malformed input or IPv4 options. |
 
 ## Residual risks
 
@@ -232,6 +262,38 @@ meant to protect, against whom, and what it does not protect.
   against malware running as the user.
 - The MSI uninstall deletes the whole `HKCU\Software\Classes\gateinto` key it
   installed, even if another program changed it afterwards.
+- Transparent sessions run an elevated helper from
+  `%LOCALAPPDATA%\Programs\Gateinto`, which the user can write, and
+  `gateinto.exe` is not code-signed, so the UAC prompt shows an unknown
+  publisher. Malware of the user can replace `gateinto.exe`, or plant a DLL
+  beside it whose name is not a KnownDLL (for example `iphlpapi.dll`), and
+  wait for the user to approve the next prompt, which transparent sessions
+  make routine. UAC is not a security boundary against code of the same
+  administrator. The WinDivert files are checked through handles held
+  across the load, but Windows loads the DLL, and WinDivert installs the
+  driver, by pathname, so a path component that can still be redirected is
+  not ruled out; beside the replaceable executable that adds no new risk.
+- WinDivert is a third-party kernel driver loaded with the user's approval:
+  a vulnerability in it is a kernel vulnerability. If another product's
+  WinDivert driver is already loaded, the helper uses it when it reports
+  the pinned version, and the pinned digests do not prove which driver
+  binary runs. Coexistence with antivirus, VPN clients and other WFP
+  callouts has not been verified.
+- If the helper dies unexpectedly or its stop acknowledgment times out,
+  tagged packets of transparent sessions can go out directly, with their
+  DSCP mark on the wire, until the agent kills the jobs.
+- Only one helper runs per machine, and any local user can deny transparent
+  sessions to every user by creating its machine-wide mutex first.
+- In a transparent session, the names that programs ignoring the proxy
+  settings look up are resolved by the system DNS client outside the job,
+  so those lookups stay local and visible even on the `gateway` route
+  (inference, untested), and the gateway sees only IP literals for those
+  connections. Processes outside the job are not covered.
+- The transparent listener asks for no credentials. If the helper's inbound
+  drop failed, a host connecting from the local port of a client in a
+  transparent job could match that client and be attributed to its
+  session; the attribution is defence in depth for that case, not a
+  guarantee.
 - The code has not had an external security review and has not been tested
   against a real upstream proxy or on physical Windows machines.
 
@@ -248,7 +310,8 @@ meant to protect, against whom, and what it does not protect.
   exists.
 - Acting as a general-purpose HTTP proxy (only `CONNECT` is supported).
 - Post-quantum authentication.
-- Forcing system-wide traffic through the proxy; only clients configured to
-  use it are proxied.
+- Forcing system-wide traffic through the proxy. Only clients configured to
+  use it are proxied, and a transparent session adds only the IPv4 TCP
+  connections of the processes in its own job.
 - Authorizing access to services on the remote Edge's behalf; that decision
   stays with the upstream.

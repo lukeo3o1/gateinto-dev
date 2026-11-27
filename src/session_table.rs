@@ -16,11 +16,7 @@ pub fn session_table(sessions: &[SessionInfo], now: u64) -> Vec<String> {
                 session.auth.to_string(),
                 session.tunnels.to_string(),
                 uptime(now.saturating_sub(session.started)),
-                match (&session.shell, session.browser) {
-                    (Some(shell), _) => shell.clone(),
-                    (None, Some(browser)) => browser.to_string(),
-                    (None, None) => "-".to_owned(),
-                },
+                program(session),
             ]
         }))
         .collect();
@@ -35,6 +31,19 @@ pub fn session_table(sessions: &[SessionInfo], now: u64) -> Vec<String> {
             line.trim_end().to_owned()
         })
         .collect()
+}
+
+fn program(session: &SessionInfo) -> String {
+    let program = match (&session.shell, session.browser) {
+        (Some(shell), _) => shell.clone(),
+        (None, Some(browser)) => browser.to_string(),
+        (None, None) => "-".to_owned(),
+    };
+    if session.transparent {
+        format!("{program} (transparent)")
+    } else {
+        program
+    }
 }
 
 pub fn verification_notes(sessions: &[SessionInfo]) -> Vec<String> {
@@ -82,6 +91,7 @@ mod tests {
             browser,
             shell: None,
             verification: false,
+            transparent: false,
         }
     }
 
@@ -129,6 +139,29 @@ mod tests {
         assert_eq!(
             session_table(&[terminal], 1_005)[1],
             "2   terminal  office   127.0.0.1:49152  all    os_user  3        5s      pwsh.exe"
+        );
+    }
+
+    #[test]
+    fn a_transparent_session_is_marked_after_its_program() {
+        let terminal = SessionInfo {
+            kind: SessionKind::Terminal,
+            auth: SessionAuth::OsUser,
+            shell: Some("pwsh.exe".to_owned()),
+            transparent: true,
+            ..session(2, "office", None)
+        };
+        let browser = SessionInfo {
+            transparent: true,
+            ..session(3, "office", Some(BrowserKind::Edge))
+        };
+        assert_eq!(
+            session_table(&[terminal, browser], 1_005),
+            [
+                "ID  KIND      GATEWAY  LISTEN           ROUTE  AUTH      TUNNELS  UPTIME  PROGRAM",
+                "2   terminal  office   127.0.0.1:49152  all    os_user   3        5s      pwsh.exe (transparent)",
+                "3   browser   office   127.0.0.1:49152  all    password  3        5s      edge (transparent)",
+            ]
         );
     }
 

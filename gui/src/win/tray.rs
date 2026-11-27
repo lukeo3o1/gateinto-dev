@@ -33,6 +33,7 @@ use super::d2d::Graphics;
 use super::icon::{self, Owned};
 use super::text::Fonts;
 use super::{App, Follow, client_size, coords, show_main, sys, track, with_app};
+use crate::agent::Origin;
 use crate::board::{self, Board};
 use crate::focus::{self, Focus, Stop};
 use crate::hit::{Zone, find};
@@ -482,7 +483,7 @@ fn act(main: HWND, action: Option<Action>) {
     match action {
         Some(Action::StartBrowser(row)) => {
             with_app(main, |app| {
-                if app.launch(row) {
+                if app.launch(row, app.mode_for(Origin::Tray)) {
                     app.panel.notice.wait();
                 }
                 app.refresh_flyout();
