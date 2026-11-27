@@ -71,6 +71,24 @@ Operators needing all traffic through the gateway must save the gateway with
 client as an enforcement boundary. Full rules
 are in [session routing](protocol/launch-uri.md#session-routing).
 
+Transparent sessions (Windows only) also route the IPv4 TCP connections of
+programs in the session's job that ignore its proxy settings, by IP address
+and along the session's route: on `mixed`, a destination that matches no
+gateway address goes direct. The names those programs look up are resolved
+by the system DNS client service, which runs outside the job, so those
+lookups are local and visible locally even on the `gateway` route (an
+inference, not tested), and the gateway sees IP literals for those
+connections. Tagged UDP (QUIC included), ICMP, IPv6 to other hosts and IPv4
+packets with options are dropped, not routed; applications must fall back
+to TCP over IPv4. There is no LAN bypass: private and LAN addresses follow
+the route like any other target. Processes outside the job, such as
+services, COM servers, children elevated through UAC and WSL 2, are not
+covered. If the helper dies unexpectedly or its stop acknowledgment times
+out, tagged packets can go out directly until the agent kills the session's
+jobs. Transparent sessions are not an enforcement boundary either. See
+[limits of the first
+version](design/transparent-session.md#limits-of-the-first-version).
+
 The following upstream TLS protections apply to the gateway route. A direct
 tunnel carries the browser's own TLS unchanged and uses no gateway client
 certificate or Gateinto outer TLS/key-exchange policy.
@@ -727,10 +745,32 @@ Non-guarantees:
 
 ### Exposure and logs
 
-- **Loopback-only.** Every session listens on an ephemeral port of
+- **Loopback-only sessions.** Every session listens on an ephemeral port of
   `127.0.0.1`. A non-loopback address is always refused; there is no flag or
   configuration key that allows one, so the Basic credentials never cross the
-  network and no other machine can reach a session.
+  network and no other machine can reach a session's own listener.
+- **The transparent listener.** On Windows the agent has one more listener,
+  which takes the connections of programs in transparent sessions' jobs
+  that ignore the proxy settings. It listens on `0.0.0.0` (IPv4 only, with
+  `SO_EXCLUSIVEADDRUSE`) on a port from 49152 to 65535, and only while the
+  elevated `divert` helper runs: it listens only after the helper reports
+  `ready` and is closed when the helper stops. It asks for no credentials.
+  Remote hosts are kept out by the helper, which drops every inbound packet
+  to that port before the network stack sees it. The firewall rule the
+  helper adds does not protect the listener: it exists so that the
+  reflected packets, whose source is a remote address, are not blocked, and
+  it allows inbound TCP only to that port and only for `gateinto.exe`. The
+  helper deletes it on exit; a rule left by a killed helper stays until the
+  next helper start. Each accepted connection is then attributed: a peer
+  with a loopback address or another address of this host is reset first,
+  and any other is accepted only when the TCP connection tables show a
+  single connection of this host to the peer's address from the peer's
+  port, owned by a process of the same user in exactly one of the agent's
+  live transparent session jobs, and a second reading agrees; anything else
+  is closed. The attribution is defence in depth, not a guarantee: if the
+  inbound drop failed, a host connecting from the local port of a client in
+  a job could match that client. See
+  [threat-model.md](threat-model.md#threats-and-mitigations).
 - **No secrets or payload in logs.** Tunnel payload, private keys and local
   proxy credentials are never logged. At `info`, logs contain each session's id, kind, gateway name and
   listen address, the client's local address and port for each tunnel,
@@ -744,6 +784,18 @@ Non-guarantees:
   the cause, never with credentials or the `Proxy-Authorization` header. `check-upstream` prints
   TLS parameters, the server certificate subject and the upstream status line,
   never upstream headers or bodies. The configuration file holds no secrets.
+- **Transparent sessions in logs.** An adopted tunnel, a connection taken by
+  the transparent listener and handed to its session, is logged at the same
+  levels as other tunnels, with its target as an IP address and port: at
+  `debug` when it opens and at `warn` with the cause when it is refused. Its
+  peer address is never logged, because it only repeats the target address
+  with a local port. The agent logs the engine's start at `info` and a
+  failed start or a stop at `warn`, with error codes, exit codes and
+  timeouts, never a pipe name, pid, port or path. A refused transparent
+  connection is logged at `debug` with the kind of refusal only (such as
+  `not-in-job`), never an address, port, pid or OS error text. The elevated
+  helper writes no log of its own; the agent logs the helper's packet
+  counters at `debug`, as aggregates only.
 - **The agent's logbook.** The agent also keeps its `info`, `warn` and
   `error` events in an in-memory logbook (`src/logbook.rs`) that the GUI
   shows. It is never written to disk and is lost when the agent exits; it

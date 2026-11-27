@@ -24,20 +24,25 @@ the CLI flags (`gateinto session terminal --agent --transparent`, `gateinto
 open --transparent`), and the GUI's mode choice, its marking of transparent
 sessions and its engine row in Settings. Step 6a, packaging, is implemented:
 the optional MSI feature with the pinned WinDivert files and their license,
-which the release workflow downloads and checks; no MSI with it has been
-built or installed yet.
-`Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution
-and listener socket, the agent side of the helper, the agent's Windows
-engine, the availability probes on Windows and the GUI's window code, and
-their tests have only been type-checked from Linux until Windows CI runs them; the helper has
-never opened a WinDivert handle and `ShellExecuteExW` has never been
-called. The design rests on premises that have
-not been verified: the evidence is two experiments on GitHub-hosted Windows
-Server images ([Evidence](#evidence)), and nothing has been tried on a
-client edition of Windows, unelevated, over IPv6, or next to a VPN or
-antivirus product. Those premises are listed under [Needs
-verification](#needs-verification). Names marked *(proposed)* do not exist in
-the code yet; every other name refers to the code at the time of writing.
+which the release workflow downloads and checks; CI's `msi` jobs build the
+x64 and x86 MSIs with it and install, add, remove and uninstall it on
+`windows-latest`, the x86 one under WOW64. Step 6b, the security model,
+threat model, security boundaries and compatibility pages, is implemented.
+On 13cf1fe (PR #118, CI run 45860119701) the Windows unit tests of
+`Job::set_dscp_tag`, the helper's Windows bindings, the Windows attribution,
+the host's address table, the listener socket, the agent side of the helper
+and the availability probes ran on `windows-latest` in CI, also as an i686
+build under WOW64. The hosted runners are elevated, so none of these tests
+has run unelevated. The agent's Windows engine and the GUI's window code
+have no tests of their own; CI builds and lints them. The helper has never
+opened a WinDivert handle and `ShellExecuteExW` has never been called. The
+design rests on premises that have not been verified: the evidence is two
+experiments on GitHub-hosted Windows Server images ([Evidence](#evidence))
+and, for one premise, a CI unit test. Nothing has been tried on a client
+edition of Windows, unelevated, over IPv6, or next to a VPN or antivirus
+product. Those premises are listed under [Needs
+verification](#needs-verification). Names marked *(proposed)* do not exist
+in the code yet; every other name refers to the code at the time of writing.
 
 ## Summary
 
@@ -132,7 +137,8 @@ not change.
   with the tag and `MaxBandwidth = 0` through
   `JobObjectNetRateControlInformation`, reads it back with
   `QueryInformationJobObject`, and fails when either flag or the tag
-  differs. Type-checked from Linux only.
+  differs. Its Windows tests ran on `windows-latest` in CI, also under
+  WOW64.
 - `crate::divert` (`src/divert.rs`, platform-independent, unit-tested on
   every platform):
   - `Dscp` (1 to 63, `Dscp::DEFAULT` 43, `InvalidDscp` otherwise) and
@@ -1694,20 +1700,23 @@ of the [Implementation plan](#implementation-plan)).
   dependencies) is possible hardening against planting; it is not part of
   this design and not verified.
 - **The helper's input from the unelevated side** is its command line,
-  validated as above, and nothing else: it reads nothing from the pipe and
-  no configuration. `netsh` runs by absolute path with fixed arguments
-  apart from the validated port and the helper's own image path.
-  Packet headers are parsed with bounds checks (fuzzed, see [Test
-  plan](#test-plan)).
+  validated as above, and, on the pipe, the one-byte startup
+  acknowledgement; any later byte only ends it. It reads no configuration.
+  `netsh` runs by absolute path with fixed arguments apart from the
+  validated port and the helper's own image path. Packet headers are parsed
+  with bounds checks (fuzzed, see [Test plan](#test-plan)).
 - **The pipe** is opened with `SECURITY_IDENTIFICATION`, so the unelevated
   pipe server can query the elevated helper's identity but cannot act as
-  it. The agent parses only
-  `ready`, a fixed `error` line, and integer counter lines from the helper.
+  it. The agent parses only `ready`, `stopping`, a fixed `error` line, and
+  integer counter lines from the helper.
 - **A kernel driver** from a third party is loaded with the user's approval.
   A vulnerability in it is a kernel vulnerability. The digest and the version
   check pin one release; updating it is a deliberate change.
 - **The non-loopback listener.** Remote hosts are kept out by the engine's
-  inbound drop and the firewall. If both failed, a host R connecting from a
+  inbound drop of every genuine inbound packet to T. The firewall rule does
+  not keep them out: it is a scoped allow, inbound TCP to T for
+  `gateinto.exe` only, so that the reflected packets are not blocked (see
+  [Firewall](#firewall)). If the drop failed, a host R connecting from a
   source port p could match the row of a client in a transparent job that
   is connected to R from local port p, and would be attributed to that
   session; the TCP-table lookup is defence in depth for that case, not a
@@ -1718,23 +1727,28 @@ of the [Implementation plan](#implementation-plan)).
   every user. Another user's job with the same tag is attributed to no
   session (different SID, not in any of our jobs) and closed. Any local
   user can deny transparent sessions to everyone by holding the mutex.
-- **Documentation changes required** with the implementation:
-  - [security model](../security-model.md#exposure-and-logs), which says
+- **Documentation changes** made with the implementation:
+  - [security model](../security-model.md#exposure-and-logs), which said
     that every session listens on loopback and that no other machine can
-    reach a session, gains the transparent listener;
-  - [Routing scope](../security-model.md#routing-scope) gains the local DNS,
-    IPv6 and UDP limits;
-  - `docs/threat-model.md` (the row "The listen address must be loopback")
-    and `docs/security-boundaries.md` item 1 ("the listener is
-    loopback-only") name the transparent listener;
-  - the threat model gains the rows below;
-  - `docs/install.md` gains the optional component and the UAC prompt.
+    reach a session, gained the transparent listener;
+  - [Routing scope](../security-model.md#routing-scope) gained the local
+    DNS, IPv6 and UDP limits;
+  - [threat model](../threat-model.md#threats-and-mitigations) (the row
+    "The listen address must be loopback") and [security
+    boundaries](../security-boundaries.md#checklist) item 1 ("the listener
+    is loopback-only") name the transparent listener;
+  - the threat model gained the rows below;
+  - [install](../install.md#transparent-sessions) gained the optional
+    component and the UAC prompt;
+  - [compatibility](../compatibility.md#transparent-sessions) gained the
+    status of transparent sessions.
 
-Threat-model additions *(to be made with the implementation)*:
+Threat-model additions, now in the [threat
+model](../threat-model.md#threats-and-mitigations):
 
 | Threat | Mitigation |
 | --- | --- |
-| A host on the network connects to the listener port. | The engine drops genuine inbound packets to T and the firewall rule is scoped to the port; if both fail, attribution is defence in depth only (a host R using a client's local port p can match). |
+| A host on the network connects to the transparent listener port T. | The engine drops genuine inbound packets to T. The firewall rule that lets the reflected packets in allows only inbound TCP to T for `gateinto.exe`, so it opens nothing else. If the drop fails, attribution is defence in depth only (a host R using a client's local port p can match). |
 | A local process outside the job connects to the listener. | Attribution requires an owner in a live transparent job. A peer with a loopback address or any other address of this host (the listener's own, or another adapter's, found as preferred or deprecated in the host's IPv4 unicast address table without binding anything) is reset before it takes an attribution permit or reads a TCP table, so direct dials from this host cannot exhaust the attributions in flight; only if the address table cannot be read, or if the address is not in use and so cannot be bound, does such a dial take a permit, and attribution then refuses it. Dials from other hosts are the row above. Any other direct dial is refused before any owner is looked at: a loopback peer, or any row (whatever its pid or state) from the peer's address to the listener's, which is the dialer's own socket while it is connected or after it closed with a FIN; a dialer that resets leaves no such row, but its reset also ends the listener's accepted socket, whose row both readings must contain in the state `ESTABLISHED` or `CLOSE_WAIT`. So a process cannot borrow the port of a client in a job (`SO_REUSEADDR`, or the same port on another local address) to take over that client's session and destination; a process in a job that dials the listener is refused the same way. |
 | A local process uses a transparent session by tagging its own job with N. | Attribution requires one of the agent's own jobs, so a foreign job is closed; code that joins or injects into the session's job is trusted, as with `os_user`. |
 | The helper dies and tagged traffic leaks. | The pipe breaks; the agent marks the engine stopped, refuses new launches and kills every transparent job; the window between is documented. `MaxBandwidth` hardening needs verification. |
@@ -1888,38 +1902,36 @@ attribution:
   the agent takes the value into `AgentOptions::dscp` (`agent_options` in
   `src/main.rs`).
 
-**(b) Windows unit tests:**
+**(b) Windows unit tests** (on 13cf1fe they ran on `windows-latest` in CI,
+also as an i686 build under WOW64, on elevated runners):
 
 - `Job::set_dscp_tag` sets 43 and reads it back, keeps
   `KILL_ON_JOB_CLOSE`, and the last tag set wins (implemented, run only on
   Windows CI); values outside 1 to 63 are refused by `Dscp`.
 - The agent's own-job check.
-- Attribution (`src/proxy/os_user/windows.rs`, implemented, unelevated,
-  type-checked from Linux only), with a child process in a job connected to
-  a server on the host's own non-loopback address: an IPv4 and a dual-stack
-  client attributed to the right one of two sessions with its pid and
-  destination; a client in no given session's job and an owner outside
-  every job refused (`NotInJob`); a client that dials the listener address
-  refused; a process outside the job that binds the client's port with
-  `SO_REUSEADDR` and dials the reserved listener refused, and not found
-  once it has reset the connection; no row and a passed deadline; the
-  tables' `dwState` values mapped to `TcpState`. Without
-  the engine no socket of the listener is connected to the peer, so the
-  cases that expect an attribution or a job refusal add the row that
-  reflection would give the listener's accepted socket to the real tables.
-  These tests listen on the host's non-loopback address, so on a desktop
-  they may make Windows Defender Firewall ask whether to allow the test
-  executable; CI is unaffected.
+- Attribution (`src/proxy/os_user/windows.rs`, implemented, needs no
+  elevation), with a child process in a job connected to a server on the
+  host's own non-loopback address: an IPv4 and a dual-stack client
+  attributed to the right one of two sessions with its pid and destination;
+  a client in no given session's job and an owner outside every job refused
+  (`NotInJob`); a client that dials the listener address refused; a process
+  outside the job that binds the client's port with `SO_REUSEADDR` and dials
+  the reserved listener refused, and not found once it has reset the
+  connection; no row and a passed deadline; the tables' `dwState` values
+  mapped to `TcpState`. Without the engine no socket of the listener is
+  connected to the peer, so the cases that expect an attribution or a job
+  refusal add the row that reflection would give the listener's accepted
+  socket to the real tables. These tests listen on the host's non-loopback
+  address, so on a desktop they may make Windows Defender Firewall ask
+  whether to allow the test executable; CI is unaffected.
 - The host's address table (`src/transparent/serve/windows.rs`,
-  implemented, type-checked from Linux only): it holds the address of the
-  host's IPv4 default route as preferred or deprecated and no
-  documentation address; like the dispatch tests above, it needs an IPv4
-  default route.
-- The listener socket (`src/transparent/listener/windows.rs`, implemented,
-  type-checked from Linux only): a reserved port in range with
-  `SO_EXCLUSIVEADDRUSE` read back, other binds of the port refused (also
-  with `SO_REUSEADDR`), and connections refused before `listen` and
-  accepted after it.
+  implemented): it holds the address of the host's IPv4 default route as
+  preferred or deprecated and no documentation address; like the dispatch
+  tests above, it needs an IPv4 default route.
+- The listener socket (`src/transparent/listener/windows.rs`,
+  implemented): a reserved port in range with `SO_EXCLUSIVEADDRUSE` read
+  back, other binds of the port refused (also with `SO_REUSEADDR`), and
+  connections refused before `listen` and accepted after it.
 
 **Agent tests (all platforms, fake `Launcher` and a fake helper seam;
 those implemented with step 5 are listed after this list):**
@@ -2153,31 +2165,32 @@ make the next check hash again, and a cached match still needs a supported
 version, no ARM64 and every file present.
 
 **Agent side of the helper on Windows** (`src/transparent/helper/windows.rs`,
-`src/transparent/availability/windows.rs`, unelevated; type-checked from
-Linux only): the pipe's DACL read back holds exactly the user and
-`BA`; a client of the same user connects, its pid is read and its line
-arrives; one instance, a second client gets `ERROR_PIPE_BUSY`; a second
-server of the same name cannot be created; the options are duplex,
-first-instance and reject remote clients; the server handle is not
-inheritable; the pid and exit code of a process handle; the version from
-`RtlGetVersion`, not ARM64 on the runners, the WinDivert files missing
-beside the test executable, and a file's stamp, equal for two opens of the
-file, different for another file, and with the same volume and index but a
-new size after a rewrite. `ShellExecuteExW` is not called by unit tests,
-since it would raise a UAC prompt on a desktop; it is left for the
-integration test.
+`src/transparent/availability/windows.rs`; they need no elevation, and ran
+on `windows-latest` in CI, also under WOW64, on elevated runners): the
+pipe's DACL read back holds exactly the user and `BA`; a client of the same
+user connects, its pid is read and its line arrives; one instance, a second
+client gets `ERROR_PIPE_BUSY`; a second server of the same name cannot be
+created; the options are duplex, first-instance and reject remote clients;
+the server handle is not inheritable; the pid and exit code of a process
+handle; the version from `RtlGetVersion`, not ARM64 on the runners, the
+WinDivert files missing beside the test executable, and a file's stamp,
+equal for two opens of the file, different for another file, and with the
+same volume and index but a new size after a rewrite. `ShellExecuteExW` is
+not called by unit tests, since it would raise a UAC prompt on a desktop; it
+is left for the integration test.
 
-**Helper tests on Windows** (`src/divert/windows.rs`, unelevated, without
-WinDivert; type-checked from Linux only): a missing file, a digest mismatch,
-held files that can be read but not written, renamed or deleted, and a
-directory of held files and its parent that cannot be renamed; a library that
-is not WinDivert refused with its Win32 error; the mutex held by a second
-lock; the pipe refused when another process serves it, lines written to the
-agent, and the liveness wait ending on a closed pipe, on a byte from the agent
-and on the end of the agent process; `netsh` taken from the system directory;
-a command killed after its timeout; the subcommand's raw arguments and its
-absence from the help. Opening WinDivert itself needs elevation and is left
-for the integration test.
+**Helper tests on Windows** (`src/divert/windows.rs`, without WinDivert;
+they need no elevation, and ran on `windows-latest` in CI, also under WOW64,
+on elevated runners): a missing file, a digest mismatch, held files that can
+be read but not written, renamed or deleted, and a directory of held files
+and its parent that cannot be renamed; a library that is not WinDivert
+refused with its Win32 error; the mutex held by a second lock; the pipe
+refused when another process serves it, lines written to the agent, and the
+liveness wait ending on a closed pipe, on a byte from the agent and on the
+end of the agent process; `netsh` taken from the system directory; a command
+killed after its timeout; the subcommand's raw arguments and its absence
+from the help. Opening WinDivert itself needs elevation and is left for the
+integration test.
 
 **Helper tests** (implemented in `src/divert/`, every platform):
 argument validation (DSCP 0 and 64, port 49151 and 0 are refused with
@@ -2325,14 +2338,16 @@ Each step is one small pull request, test first: a failing test, the minimal
 code to pass it, then a refactor.
 
 1. **Job DSCP tag with read-back.** `Dscp`, `Job::set_dscp_tag`
-   (implemented; type-checked from Linux only), the own-job check.
+   (implemented; its tests ran on `windows-latest` in CI, also under WOW64),
+   the own-job check.
 2. **Platform-independent packet core.** Parsing, rewrite, checksums, flow
    table, drop counters, `divert::filter` (implemented), the fuzz target
    `divert-engine`.
 3. **WinDivert runtime binding, engine loop, `divert` helper subcommand,
-   liveness pipe and firewall rule** (implemented; the Windows part
-   type-checked from Linux only). Argument validation, the pipe protocol
-   with `SECURITY_IDENTIFICATION`, digest check with held handles,
+   liveness pipe and firewall rule** (implemented; the Windows part's unit
+   tests ran on `windows-latest` in CI, also under WOW64, but nothing has
+   opened WinDivert). Argument validation, the pipe protocol with
+   `SECURITY_IDENTIFICATION`, digest check with held handles,
    `LoadLibraryExW`, `WinDivertOpen`, the driver version check, the
    machine-wide mutex, the grace period, counters on the pipe, and the
    `netsh` command lines with the delete, add and final delete of the rule.
@@ -2340,8 +2355,8 @@ code to pass it, then a refactor.
    `GetNamedPipeServerProcessId`, `WaitForMultipleObjects`) are in the
    Windows 7 import allow-list.
 4. **Session adoption and the transparent listener** (implemented as parts
-   that the agent wiring of step 5 uses; the Windows parts type-checked
-   from Linux only).
+   that the agent wiring of step 5 uses; the Windows parts' unit tests ran
+   on `windows-latest` in CI, also under WOW64).
    `Proxy::adopter`, `Shared::adopt`, `Adopter` and `proxy::reset`;
    `os_user::original`, which also requires the listener's own row, and
    its Windows lookup `Attribution`; the listener socket with
@@ -2349,12 +2364,14 @@ code to pass it, then a refactor.
    engine state with its generations, the registry of transparent sessions
    and the session marks (`transparent::state`); and the listener's
    dispatch loop with its in-flight bound (`transparent::serve`).
-5. **Agent wiring** (implemented; the Windows parts type-checked from
-   Linux only). On-demand helper with
-   `ShellExecuteExW`, the order of operations, fail-closed handling,
-   `[transparent]`, the CLI flags, the IPC mode, the GUI option,
-   `SessionInfo::transparent` and the `status` lines; `Win32_UI_Shell` in
-   `Cargo.toml` and `shell32.dll` in the Windows 7 import allow-list.
+5. **Agent wiring** (implemented; the Windows unit tests ran on
+   `windows-latest` in CI, also under WOW64; the agent's Windows engine and
+   the GUI's window code have no tests, and `ShellExecuteExW` has never been
+   called). On-demand helper with `ShellExecuteExW`, the order of
+   operations, fail-closed handling, `[transparent]`, the CLI flags, the IPC
+   mode, the GUI option, `SessionInfo::transparent` and the `status` lines;
+   `Win32_UI_Shell` in `Cargo.toml` and `shell32.dll` in the Windows 7
+   import allow-list.
    Implemented so far: the agent side of the helper
    (`transparent::helper`: the previous-helper wait, the pipe with its DACL,
    the launch, the first status line with the pid check, the drain and the
@@ -2369,12 +2386,13 @@ code to pass it, then a refactor.
    --transparent`), and the GUI's mode choice, approval notice, too-old
    message, marking of transparent sessions and engine row in Settings.
 6. **Packaging and user documentation**, in two parts:
-   - 6a. **Packaging** (implemented; not built or installed on Windows).
+   - 6a. **Packaging** (implemented; CI's `msi` jobs build and install it
+     for x64, and for x86 under WOW64).
      The optional MSI feature with the WinDivert files and license, the
      release workflow's download and checks, `build.ps1 -WinDivert`, the
      manifest tests, the availability cache, and the install page.
-   - 6b. **Security and compatibility pages.** The security model, threat
-     model, security boundaries and compatibility pages.
+   - 6b. **Security and compatibility pages** (implemented). The security
+     model, threat model, security boundaries and compatibility pages.
 7. **Windows CI integration test** on an elevated runner.
 
 ## Needs verification
@@ -2403,7 +2421,8 @@ would need a design change if they fail. Results go to
   listed in another state such as `CLOSED`), so that the listener-row rule
   refuses a dialer that resets. The Windows unit test
   `a_process_outside_the_job_that_dials_from_a_client_port_and_resets_is_not_found`
-  is that check; it has not run yet.
+  is that check; it passed on `windows-latest` (Windows Server 2025) in CI,
+  also under WOW64, on 13cf1fe; client editions are untested.
 - TCP-table rows are visible at accept time and taking the original
   destination from them is reliable;
   fallback: a per-flow message from the helper.

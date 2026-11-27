@@ -602,6 +602,63 @@ without a job on real Windows 7 and 8.1, and `tests/os_user_windows.rs`,
 `tests/job_windows.rs` and the Windows unit test in `src/job.rs` on Windows
 CI.
 
+## Transparent sessions
+
+Transparent sessions (Windows only) route the IPv4 TCP connections of the
+processes in a session's job through the session's route by IP address,
+with an elevated `gateinto divert` helper and the WinDivert 2.2.2 driver;
+see [design/transparent-session.md](design/transparent-session.md). Nothing
+about them has been verified on client Windows. The only runtime evidence of
+the packet path is two experiments on GitHub-hosted `windows-2022` and
+`windows-2025` images, elevated, IPv4 only, with one external destination
+and small samples, run with an experimental engine and bridge rather than
+Gateinto's helper and listener
+([Evidence](design/transparent-session.md#evidence)). On 13cf1fe their
+Windows unit tests ran on `windows-latest` in CI, also under WOW64, and the
+`msi` jobs installed and removed the WinDivert files. The hosted runners are
+elevated, so nothing has run unelevated on Windows. The agent's Windows
+engine and the GUI's window code have no tests; CI only builds and lints
+them. Gateinto's helper has never opened a WinDivert handle, and the agent
+has never started it through `ShellExecuteExW`. Test and packaging status
+is in [verification.md](verification.md).
+
+The gateway must accept `CONNECT` to IP literals. A transparently routed
+connection names its target by IPv4 address and port, never by host name,
+so gateway policy keyed on host names sees only IP literals for those
+connections; programs that honour the session's proxy settings still send
+host names. Whether the production gateway accepts IP-literal targets needs
+verification.
+
+Expected behaviour and status, from the design's [compatibility
+table](design/transparent-session.md#compatibility):
+
+- Windows Server 2022 and 2025, elevated, IPv4 TCP: routed, and untagged
+  traffic goes direct. Seen only in Experiment 2, with small samples.
+- Windows 10 1607 and later and Windows 11: as on Server. Needs
+  verification.
+- Windows before 10 1607, the experimental Windows 7 build and ARM64:
+  unavailable, and `gateinto status` says why. Expected by design.
+- The i686 build under WOW64, with the x86 DLL and the 64-bit driver: needs
+  verification.
+- In a transparent terminal, programs that honour the proxy variables, such
+  as curl, git and pip, keep using the session's loopback proxy with host
+  names; Java, Node.js, `ssh`, PowerShell 5.1 and `winget` are routed by IP
+  literal, also from dual-stack IPv6 sockets carrying IPv4. In a transparent
+  browser session, Chrome and Edge keep using `--proxy-server`; connections
+  that bypass it are routed only if the tag reaches the processes in
+  Chrome's own nested sandbox jobs. All of this needs verification.
+- QUIC, WebRTC UDP, application UDP DNS and IPv6 to other hosts are
+  dropped, so applications must fall back to TCP over IPv4. Needs
+  verification.
+- VPN clients, antivirus, anti-cheat, other WFP products and another
+  product's WinDivert: unknown; an already loaded WinDivert driver of
+  another version is refused. Needs verification.
+- QoS policies that use the transparent DSCP code point do not work while
+  the helper runs. Expected by design.
+- An older Gateinto refuses a configuration file with `[transparent]`
+  (unknown section), and an older agent refuses a transparent launch, after
+  which the CLI and the GUI ask for an agent restart. Expected.
+
 ## Unverified
 
 Not exercised:
@@ -665,6 +722,9 @@ Design-only, not exercised at all:
 - The verification dialog on a real Windows desktop: "Open verification"
   through `ShellExecuteExW` with the default browser, "Copy link", scanning
   the QR code with a phone, and the dialog on Windows 7.
+- Transparent sessions end to end: the helper with a WinDivert handle, its
+  UAC prompt and a connection routed through the transparent listener, on
+  any Windows. See [Transparent sessions](#transparent-sessions).
 
 ## Open issues
 
